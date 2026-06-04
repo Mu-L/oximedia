@@ -497,10 +497,7 @@ impl CapacityAdvisor {
         let mut tight_count = 0usize;
 
         for h in &headrooms {
-            let weight = self
-                .configs
-                .get(&h.resource)
-                .map_or(1.0, |c| c.weight);
+            let weight = self.configs.get(&h.resource).map_or(1.0, |c| c.weight);
             let score = h.margin_pct; // 0–100
             weighted_sum += score * weight;
             total_weight += weight;
@@ -632,7 +629,9 @@ mod tests {
     #[test]
     fn test_advisor_update_and_headroom() {
         let a = advisor_with_cpu(70.0);
-        let h = a.headroom(AdvisedResource::Cpu).expect("headroom should exist");
+        let h = a
+            .headroom(AdvisedResource::Cpu)
+            .expect("headroom should exist");
         assert!((h.current_utilisation - 70.0).abs() < f64::EPSILON);
         assert_eq!(h.tier, HeadroomTier::Moderate);
     }
@@ -668,7 +667,11 @@ mod tests {
     fn test_advisor_composite_score_healthy() {
         let a = advisor_with_cpu(40.0); // ~55 % margin → score ~55
         let score = a.composite_score();
-        assert!(score.overall > 40.0, "score should be > 40, got {}", score.overall);
+        assert!(
+            score.overall > 40.0,
+            "score should be > 40, got {}",
+            score.overall
+        );
         assert_eq!(score.critical_count, 0);
         assert_eq!(score.tight_count, 0);
     }
@@ -677,7 +680,11 @@ mod tests {
     fn test_advisor_composite_score_critical() {
         let a = advisor_with_cpu(89.5); // nearly at ceiling
         let score = a.composite_score();
-        assert!(score.overall < 10.0, "score should be < 10, got {}", score.overall);
+        assert!(
+            score.overall < 10.0,
+            "score should be < 10, got {}",
+            score.overall
+        );
         assert_eq!(score.critical_count, 1);
     }
 
@@ -699,7 +706,11 @@ mod tests {
 
         let score = a.composite_score();
         // weighted: (40*0.8 + 10*0.4) / (0.8+0.4) = (32+4)/1.2 = 36/1.2 = 30
-        assert!((score.overall - 30.0).abs() < 1e-6, "expected 30, got {}", score.overall);
+        assert!(
+            (score.overall - 30.0).abs() < 1e-6,
+            "expected 30, got {}",
+            score.overall
+        );
     }
 
     #[test]

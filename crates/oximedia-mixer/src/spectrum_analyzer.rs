@@ -40,9 +40,7 @@ impl WindowFunction {
         let n_m1 = (size - 1) as f64;
         match self {
             Self::Rectangular => 1.0,
-            Self::Hann => {
-                (0.5 * (1.0 - (2.0 * std::f64::consts::PI * n_f / n_m1).cos())) as f32
-            }
+            Self::Hann => (0.5 * (1.0 - (2.0 * std::f64::consts::PI * n_f / n_m1).cos())) as f32,
             Self::Blackman => {
                 let a0: f64 = 0.42;
                 let a1: f64 = 0.5;
@@ -160,9 +158,11 @@ impl SpectrumFrame {
     /// Find the bin with the highest magnitude.
     #[must_use]
     pub fn peak_bin(&self) -> Option<&SpectrumBin> {
-        self.bins
-            .iter()
-            .max_by(|a, b| a.magnitude_db.partial_cmp(&b.magnitude_db).unwrap_or(std::cmp::Ordering::Equal))
+        self.bins.iter().max_by(|a, b| {
+            a.magnitude_db
+                .partial_cmp(&b.magnitude_db)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     }
 
     /// Return the magnitude in dBFS at the given frequency, interpolating between bins.
@@ -174,9 +174,7 @@ impl SpectrumFrame {
             return None;
         }
         // Find the two bins bracketing the target frequency
-        let idx = self
-            .bins
-            .partition_point(|b| b.frequency_hz < frequency_hz);
+        let idx = self.bins.partition_point(|b| b.frequency_hz < frequency_hz);
         if idx == 0 {
             return Some(self.bins[0].magnitude_db);
         }
@@ -361,9 +359,8 @@ impl SpectrumAnalyzer {
 
         let raw_magnitudes: Vec<(f32, f32)> = (0..n_half)
             .map(|k| {
-                let mag_linear = (self.fft_re[k].powi(2) + self.fft_im[k].powi(2))
-                    .sqrt()
-                    * normalization;
+                let mag_linear =
+                    (self.fft_re[k].powi(2) + self.fft_im[k].powi(2)).sqrt() * normalization;
                 let mag_db = if mag_linear > 0.0 {
                     (20.0 * mag_linear.log10()).max(floor)
                 } else {
@@ -416,7 +413,7 @@ impl SpectrumAnalyzer {
                     2.0_f32.powf(log_min + (b as f32 + 0.5) * log_step)
                 };
                 // Map frequency range to FFT bin range.
-                let k_lo = ((f_lo / sr * n as f32) as usize).max(0).min(n_half - 1);
+                let k_lo = ((f_lo / sr * n as f32) as usize).min(n_half - 1);
                 let k_hi = ((f_hi / sr * n as f32) as usize + 1)
                     .max(k_lo + 1)
                     .min(n_half);
@@ -500,7 +497,10 @@ mod tests {
         let n = 1024;
         let table = WindowFunction::Blackman.build_table(n);
         for &w in &table {
-            assert!(w >= -0.01 && w <= 1.01, "blackman coefficient out of range: {w}");
+            assert!(
+                w >= -0.01 && w <= 1.01,
+                "blackman coefficient out of range: {w}"
+            );
         }
     }
 

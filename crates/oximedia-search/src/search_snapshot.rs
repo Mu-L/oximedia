@@ -286,11 +286,15 @@ mod tests {
     #[test]
     fn test_diff_field_added() {
         let mut s = SnapshotStore::new();
-        let id1 = s.take_snapshot(1000, 10, vec![FieldSnapshot {
-            name: "title".into(),
-            doc_count: 1,
-            term_count: 1,
-        }]);
+        let id1 = s.take_snapshot(
+            1000,
+            10,
+            vec![FieldSnapshot {
+                name: "title".into(),
+                doc_count: 1,
+                term_count: 1,
+            }],
+        );
         let mut fields = sample_fields();
         fields.push(FieldSnapshot {
             name: "tags".into(),
@@ -307,11 +311,15 @@ mod tests {
     fn test_diff_field_removed() {
         let mut s = SnapshotStore::new();
         let id1 = s.take_snapshot(1000, 10, sample_fields());
-        let id2 = s.take_snapshot(2000, 10, vec![FieldSnapshot {
-            name: "title".into(),
-            doc_count: 100,
-            term_count: 500,
-        }]);
+        let id2 = s.take_snapshot(
+            2000,
+            10,
+            vec![FieldSnapshot {
+                name: "title".into(),
+                doc_count: 100,
+                term_count: 500,
+            }],
+        );
         let diff = s.diff(id1, id2).expect("should succeed in test");
         assert!(diff.fields_removed.contains(&"body".to_string()));
     }
@@ -320,18 +328,22 @@ mod tests {
     fn test_diff_field_changed() {
         let mut s = SnapshotStore::new();
         let id1 = s.take_snapshot(1000, 10, sample_fields());
-        let id2 = s.take_snapshot(2000, 10, vec![
-            FieldSnapshot {
-                name: "title".into(),
-                doc_count: 200,
-                term_count: 500,
-            },
-            FieldSnapshot {
-                name: "body".into(),
-                doc_count: 90,
-                term_count: 3000,
-            },
-        ]);
+        let id2 = s.take_snapshot(
+            2000,
+            10,
+            vec![
+                FieldSnapshot {
+                    name: "title".into(),
+                    doc_count: 200,
+                    term_count: 500,
+                },
+                FieldSnapshot {
+                    name: "body".into(),
+                    doc_count: 90,
+                    term_count: 3000,
+                },
+            ],
+        );
         let diff = s.diff(id1, id2).expect("should succeed in test");
         assert!(diff.fields_changed.contains(&"title".to_string()));
     }

@@ -7,6 +7,7 @@
 use crate::flat_array2::{FlatArray2, FlatArray3};
 use crate::{ForensicTest, ForensicsError, ForensicsResult};
 use image::RgbImage;
+use rayon::prelude::*;
 
 /// PRNU noise pattern
 #[derive(Debug, Clone)]
@@ -392,7 +393,14 @@ fn create_noise_anomaly_map(
     Ok(anomaly_map)
 }
 
-/// Advanced PRNU-based splicing detection
+/// Advanced PRNU-based splicing detection.
+///
+/// Region PRNU strengths are computed in parallel using rayon so that
+/// multi-core systems significantly reduce wall time on large images.
+/// The result is identical to the serial computation — each region is
+/// independent and the outlier detection only depends on the completed
+/// `region_prnu_strengths` vector, which is collected before any further
+/// processing.
 pub fn detect_splicing_prnu(
     image: &RgbImage,
 ) -> ForensicsResult<Vec<(usize, usize, usize, usize)>> {
@@ -400,16 +408,34 @@ pub fn detect_splicing_prnu(
     let (height, width, _) = prnu.pattern.dim();
 
     let region_size = 64;
-    let mut spliced_regions = Vec::new();
 
-    // Analyze PRNU consistency across regions
-    let mut region_prnu_strengths = Vec::new();
+    // Guard against images too small for even a single region.
+    if height < region_size || width < region_size {
+        return Ok(Vec::new());
+    }
 
-    for y in (0..height - region_size).step_by(region_size / 2) {
-        for x in (0..width - region_size).step_by(region_size / 2) {
+    // Build the list of (x, y) anchor coordinates first so we can feed them
+    // into a parallel iterator without borrow complications.
+    let anchors: Vec<(usize, usize)> = (0..height - region_size)
+        .step_by(region_size / 2)
+        .flat_map(|y| {
+            (0..width - region_size)
+                .step_by(region_size / 2)
+                .map(move |x| (x, y))
+        })
+        .collect();
+
+    // Compute PRNU strength for each anchor in parallel.
+    let region_prnu_strengths: Vec<(usize, usize, f64)> = anchors
+        .par_iter()
+        .map(|&(x, y)| {
             let strength = compute_region_prnu_strength(&prnu.pattern, x, y, region_size);
-            region_prnu_strengths.push((x, y, strength));
-        }
+            (x, y, strength)
+        })
+        .collect();
+
+    if region_prnu_strengths.is_empty() {
+        return Ok(Vec::new());
     }
 
     // Find outliers
@@ -428,11 +454,11 @@ pub fn detect_splicing_prnu(
     let std_dev = variance.sqrt();
     let threshold = 2.0 * std_dev;
 
-    for (x, y, strength) in region_prnu_strengths {
-        if (strength - mean_strength).abs() > threshold {
-            spliced_regions.push((x, y, region_size, region_size));
-        }
-    }
+    let spliced_regions = region_prnu_strengths
+        .into_iter()
+        .filter(|(_, _, strength)| (strength - mean_strength).abs() > threshold)
+        .map(|(x, y, _)| (x, y, region_size, region_size))
+        .collect();
 
     Ok(spliced_regions)
 }

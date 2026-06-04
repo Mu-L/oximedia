@@ -100,7 +100,7 @@ impl PanoramaStitcher {
         let (kps_b, descs_b) = detector.detect_and_compute(image_b, width_b, height_b)?;
 
         if kps_a.len() < 4 || kps_b.len() < 4 {
-            return Err(CvError::computation(
+            return Err(CvError::matrix_error(
                 "insufficient features for panorama matching",
             ));
         }
@@ -110,7 +110,7 @@ impl PanoramaStitcher {
         let matches = matcher.match_descriptors(&descs_a, &descs_b);
 
         if matches.len() < 4 {
-            return Err(CvError::computation(
+            return Err(CvError::matrix_error(
                 "insufficient matches for homography estimation",
             ));
         }
@@ -148,7 +148,7 @@ impl PanoramaStitcher {
         let inlier_ratio = inlier_count as f64 / matches.len() as f64;
 
         if inlier_ratio < self.config.min_inlier_ratio {
-            return Err(CvError::computation(format!(
+            return Err(CvError::matrix_error(format!(
                 "inlier ratio {:.2} below threshold {:.2}",
                 inlier_ratio, self.config.min_inlier_ratio
             )));
@@ -218,7 +218,7 @@ impl PanoramaStitcher {
         let out_h = (max_y - min_y).ceil() as u32;
 
         if out_w == 0 || out_h == 0 || out_w > 16384 || out_h > 16384 {
-            return Err(CvError::computation("degenerate panorama dimensions"));
+            return Err(CvError::matrix_error("degenerate panorama dimensions"));
         }
 
         let offset_x = -min_x;

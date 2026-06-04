@@ -225,7 +225,7 @@ impl CheckerboardDetector {
 
         candidates
             .iter()
-            .filter_map(|p| {
+            .map(|p| {
                 let mut cx = p.x;
                 let mut cy = p.y;
 
@@ -253,9 +253,8 @@ impl CheckerboardDetector {
                     let hyy = f64::from(image[(ry as usize + 1) * width + rx as usize])
                         + f64::from(image[(ry as usize - 1) * width + rx as usize])
                         - 2.0 * f64::from(image[idx_c]);
-                    let hxy = (f64::from(
-                        image[(ry as usize + 1) * width + rx as usize + 1],
-                    ) - f64::from(image[(ry as usize + 1) * width + rx as usize - 1])
+                    let hxy = (f64::from(image[(ry as usize + 1) * width + rx as usize + 1])
+                        - f64::from(image[(ry as usize + 1) * width + rx as usize - 1])
                         - f64::from(image[(ry as usize - 1) * width + rx as usize + 1])
                         + f64::from(image[(ry as usize - 1) * width + rx as usize - 1]))
                         / 4.0;
@@ -280,7 +279,7 @@ impl CheckerboardDetector {
                     }
                 }
 
-                Some(Point2D::new(cx, cy))
+                Point2D::new(cx, cy)
             })
             .collect()
     }
@@ -306,7 +305,9 @@ impl CheckerboardDetector {
         sorted.sort_by(|a, b| {
             let ord_a = a.y * 10000.0 + a.x;
             let ord_b = b.y * 10000.0 + b.x;
-            ord_a.partial_cmp(&ord_b).unwrap_or(std::cmp::Ordering::Equal)
+            ord_a
+                .partial_cmp(&ord_b)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         // Take the top-required candidates
@@ -480,11 +481,16 @@ impl CameraCalibrator {
         let cy = pts.iter().map(|p| p.y).sum::<f64>() / n;
 
         let scale = {
-            let rms = (pts.iter().map(|p| {
-                let dx = p.x - cx;
-                let dy = p.y - cy;
-                dx * dx + dy * dy
-            }).sum::<f64>() / n).sqrt();
+            let rms = (pts
+                .iter()
+                .map(|p| {
+                    let dx = p.x - cx;
+                    let dy = p.y - cy;
+                    dx * dx + dy * dy
+                })
+                .sum::<f64>()
+                / n)
+                .sqrt();
             if rms < 1e-10 {
                 1.0
             } else {
@@ -498,7 +504,17 @@ impl CameraCalibrator {
             .collect();
 
         // T = [[s, 0, -s*cx], [0, s, -s*cy], [0, 0, 1]]
-        let t = [scale, 0.0, -scale * cx, 0.0, scale, -scale * cy, 0.0, 0.0, 1.0];
+        let t = [
+            scale,
+            0.0,
+            -scale * cx,
+            0.0,
+            scale,
+            -scale * cy,
+            0.0,
+            0.0,
+            1.0,
+        ];
 
         (normalised, t)
     }
@@ -510,11 +526,7 @@ impl CameraCalibrator {
     }
 
     /// Denormalize a homography: H = T_dst^{-1} * H_norm * T_src.
-    fn denormalize_h(
-        h: &[f64; 9],
-        t_src: &[f64; 9],
-        t_dst: &[f64; 9],
-    ) -> AlignResult<[f64; 9]> {
+    fn denormalize_h(h: &[f64; 9], t_src: &[f64; 9], t_dst: &[f64; 9]) -> AlignResult<[f64; 9]> {
         // Invert t_dst (diagonal scale + offset)
         let scale = t_dst[0];
         let tx = t_dst[2];
@@ -558,7 +570,10 @@ impl CameraCalibrator {
     /// Builds a linear system from the homography constraints:
     /// h1^T K^{-T} K^{-1} h1 = h2^T K^{-T} K^{-1} h2
     /// h1^T K^{-T} K^{-1} h2 = 0
-    fn estimate_intrinsics_zhang(&self, homographies: &[[f64; 9]]) -> AlignResult<CameraIntrinsics> {
+    fn estimate_intrinsics_zhang(
+        &self,
+        homographies: &[[f64; 9]],
+    ) -> AlignResult<CameraIntrinsics> {
         // B = K^{-T} K^{-1} is a 3×3 symmetric matrix, parameterised as [b11, b12, b22, b13, b23, b33].
         // Build V matrix from the homography constraints.
         let mut v_rows: Vec<[f64; 6]> = Vec::new();
@@ -784,7 +799,9 @@ impl CameraCalibrator {
                 }
             }
             if max_val < 1e-14 {
-                return Err(AlignError::NumericalError("Singular 9×9 matrix".to_string()));
+                return Err(AlignError::NumericalError(
+                    "Singular 9×9 matrix".to_string(),
+                ));
             }
             if max_row != col {
                 for j in 0..9 {
@@ -828,7 +845,9 @@ impl CameraCalibrator {
                 }
             }
             if max_val < 1e-14 {
-                return Err(AlignError::NumericalError("Singular 6×6 matrix".to_string()));
+                return Err(AlignError::NumericalError(
+                    "Singular 6×6 matrix".to_string(),
+                ));
             }
             if max_row != col {
                 for j in 0..6 {
@@ -950,6 +969,9 @@ mod tests {
         if w.abs() < 1e-14 {
             return (x, y);
         }
-        ((h[0] * x + h[1] * y + h[2]) / w, (h[3] * x + h[4] * y + h[5]) / w)
+        (
+            (h[0] * x + h[1] * y + h[2]) / w,
+            (h[3] * x + h[4] * y + h[5]) / w,
+        )
     }
 }

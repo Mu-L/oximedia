@@ -290,23 +290,25 @@ pub fn winning_variant<'r>(results: &'r ExperimentResults, metric: &str) -> Opti
 }
 
 /// Return the variant ID that wins on the given metric at the specified
-/// significance level `alpha`, or `None` if no variant has data.
+/// significance level `alpha`, or `None` if no variant has data or if the
+/// best-scoring variant does not beat the runner-up with statistical
+/// significance at `alpha`.
 ///
-/// The winner is the variant with the highest score on `metric`.  Statistical
-/// significance is not enforced here — the function returns the best-scoring
-/// variant regardless of p-value.  To check significance separately use
-/// [`is_significant`] with the z-score from [`z_test`].
+/// The winner is the variant with the highest score on `metric`.  A winner
+/// is only declared when the two-proportion z-test comparing the best variant
+/// against every other variant with data yields a z-score that clears the
+/// critical value `alpha_to_critical_z(alpha)`.  If the best variant does not
+/// beat all others significantly, `None` is returned (no significant winner).
 ///
-/// `alpha` is used to determine the critical z-value for tie-breaking when
-/// two variants score identically: in that case the variant that beats the
-/// other with statistical significance (at `alpha`) is preferred.
+/// For experiments with a single variant that has data that variant is always
+/// returned (no comparison is possible).
 ///
 /// Supported `alpha` values: 0.10, 0.05, 0.01, 0.001.  Any other value
-/// maps to the closest standard level.
+/// maps to the closest standard level via [`alpha_to_critical_z`].
 pub fn winning_variant_with_alpha<'r>(
     results: &'r ExperimentResults,
     metric: &str,
-    _alpha: f32,
+    alpha: f32,
 ) -> Option<&'r str> {
     let opt_metric = match metric {
         "conversion" => OptimisationMetric::Conversion,
@@ -325,16 +327,42 @@ pub fn winning_variant_with_alpha<'r>(
         return None;
     }
 
-    // Find the highest score.
+    // Single-variant shortcut — no comparison possible.
+    if candidates.len() == 1 {
+        return Some(candidates[0].variant_id.as_str());
+    }
+
+    // Find the highest-scoring variant.
     let best = candidates.iter().copied().max_by(|a, b| {
         let score_a = variant_score(a, opt_metric);
         let score_b = variant_score(b, opt_metric);
         score_a
             .partial_cmp(&score_b)
             .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    })?;
 
-    best.map(|m| m.variant_id.as_str())
+    // Check that the best variant is significantly better than all others.
+    let critical_z = alpha_to_critical_z(alpha);
+    let best_score = variant_score(best, opt_metric);
+    let best_n = best.impressions;
+
+    for other in candidates.iter().copied() {
+        if other.variant_id == best.variant_id {
+            continue;
+        }
+        let other_score = variant_score(other, opt_metric);
+        let other_n = other.impressions;
+
+        // z > 0 means `best` outperforms `other`; we require |z| >= critical_z
+        // and z in the correct direction (best_score >= other_score is already
+        // guaranteed by max_by, so we just need z >= critical_z).
+        let z = z_test(best_score, best_n, other_score, other_n);
+        if z < critical_z {
+            return None;
+        }
+    }
+
+    Some(best.variant_id.as_str())
 }
 
 /// Convert an alpha significance level to a two-tailed critical z-value.
@@ -808,14 +836,16 @@ mod tests {
 
     #[test]
     fn winning_variant_by_ctr() {
+        // Use n=500 each so z≈3.0 (significant at α=0.05 critical_z=1.96).
+        // B: 50/500 = 10% CTR, A: 25/500 = 5% CTR.
         let exp = two_variant_experiment();
         let mut results = ExperimentResults::new(exp);
         results.variant_metrics.insert(
             "A".to_string(),
             VariantMetrics {
                 variant_id: "A".to_string(),
-                impressions: 100,
-                clicks: 5,
+                impressions: 500,
+                clicks: 25,
                 ..Default::default()
             },
         );
@@ -823,8 +853,8 @@ mod tests {
             "B".to_string(),
             VariantMetrics {
                 variant_id: "B".to_string(),
-                impressions: 100,
-                clicks: 10,
+                impressions: 500,
+                clicks: 50,
                 ..Default::default()
             },
         );
@@ -887,14 +917,17 @@ mod tests {
 
     #[test]
     fn winning_variant_with_alpha_same_result_as_default() {
+        // Use n=500 so z≈3.0 (significant at α=0.05).  Both `winning_variant`
+        // (which uses α=0.05) and `winning_variant_with_alpha(..., 0.05)` must
+        // agree and declare B the winner.
         let exp = two_variant_experiment();
         let mut results = ExperimentResults::new(exp);
         results.variant_metrics.insert(
             "A".to_string(),
             VariantMetrics {
                 variant_id: "A".to_string(),
-                impressions: 100,
-                clicks: 5,
+                impressions: 500,
+                clicks: 25,
                 ..Default::default()
             },
         );
@@ -902,8 +935,8 @@ mod tests {
             "B".to_string(),
             VariantMetrics {
                 variant_id: "B".to_string(),
-                impressions: 100,
-                clicks: 10,
+                impressions: 500,
+                clicks: 50,
                 ..Default::default()
             },
         );

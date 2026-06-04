@@ -212,12 +212,7 @@ impl VideoEffect for DraftPreview {
         "Downsampled preview wrapper for Draft quality mode"
     }
 
-    fn apply(
-        &mut self,
-        input: &Frame,
-        output: &mut Frame,
-        params: &EffectParams,
-    ) -> VfxResult<()> {
+    fn apply(&mut self, input: &Frame, output: &mut Frame, params: &EffectParams) -> VfxResult<()> {
         if input.width != output.width || input.height != output.height {
             return Err(VfxError::InvalidDimensions {
                 width: output.width,
@@ -347,7 +342,10 @@ mod tests {
     #[test]
     fn test_downsample_factor_size() {
         assert_eq!(DownsampleFactor::Half.downsampled_size(100, 80), (50, 40));
-        assert_eq!(DownsampleFactor::Quarter.downsampled_size(100, 80), (25, 20));
+        assert_eq!(
+            DownsampleFactor::Quarter.downsampled_size(100, 80),
+            (25, 20)
+        );
         assert_eq!(DownsampleFactor::Eighth.downsampled_size(100, 80), (12, 10));
     }
 

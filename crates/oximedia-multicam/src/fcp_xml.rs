@@ -1,7 +1,7 @@
 //! Final Cut Pro 7 XML (`<xmeml>`) export for multi-camera timelines.
 //!
 //! Generates a Final Cut Pro 7–compatible XML interchange document from a
-//! [`MultiCamTimeline`] so the edit can be imported into FCP 7, DaVinci
+//! `MultiCamTimeline` so the edit can be imported into FCP 7, DaVinci
 //! Resolve, or any NLE that supports the `xmeml` schema.
 //!
 //! # Format overview
@@ -30,7 +30,7 @@ use crate::edit::timeline::MultiCamTimeline;
 
 // ── MultiCamXmlExporter ───────────────────────────────────────────────────────
 
-/// Exports a [`MultiCamTimeline`] as Final Cut Pro 7 XML.
+/// Exports a [`crate::edit::MultiCamTimeline`] as Final Cut Pro 7 XML.
 ///
 /// # Example
 ///

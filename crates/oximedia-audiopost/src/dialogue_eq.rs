@@ -364,10 +364,7 @@ impl DialogueEq {
     }
 
     /// Process a block and return analysis statistics.
-    pub fn process_block_with_analysis(
-        &mut self,
-        samples: &mut [f32],
-    ) -> DialogueEqAnalysis {
+    pub fn process_block_with_analysis(&mut self, samples: &mut [f32]) -> DialogueEqAnalysis {
         let input_rms = rms(samples);
         self.process_block(samples);
         let output_rms = rms(samples);
@@ -452,9 +449,7 @@ mod tests {
 
     fn sine_block(freq: f32, sample_rate: u32, n: usize) -> Vec<f32> {
         (0..n)
-            .map(|i| {
-                (2.0 * std::f32::consts::PI * freq * i as f32 / sample_rate as f32).sin()
-            })
+            .map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / sample_rate as f32).sin())
             .collect()
     }
 
@@ -491,7 +486,10 @@ mod tests {
         let out_rms = rms(steady_state);
         // 2nd-order Butterworth: 20 Hz is 2 octaves below 80 Hz → ≥ 24 dB attenuation
         // which corresponds to a linear ratio < 0.063.  Allow a generous margin of 0.25.
-        assert!(out_rms < 0.25, "20 Hz should be heavily attenuated by 80 Hz HPF, got steady-state rms={out_rms}");
+        assert!(
+            out_rms < 0.25,
+            "20 Hz should be heavily attenuated by 80 Hz HPF, got steady-state rms={out_rms}"
+        );
     }
 
     #[test]
@@ -509,7 +507,10 @@ mod tests {
         eq.process_block(&mut block);
         let after_rms = rms(&block);
         let ratio = after_rms / before_rms;
-        assert!(ratio > 0.95, "1 kHz should pass HPF with near-unity gain, ratio={ratio}");
+        assert!(
+            ratio > 0.95,
+            "1 kHz should pass HPF with near-unity gain, ratio={ratio}"
+        );
     }
 
     #[test]
@@ -569,7 +570,10 @@ mod tests {
         let mut silent = vec![0.0f32; 512];
         eq.process_block(&mut silent);
         let rms_out = rms(&silent);
-        assert!(rms_out < 1e-10, "After reset, silence should produce silence");
+        assert!(
+            rms_out < 1e-10,
+            "After reset, silence should produce silence"
+        );
     }
 
     #[test]

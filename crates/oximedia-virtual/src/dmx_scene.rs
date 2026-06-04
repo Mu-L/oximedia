@@ -57,7 +57,10 @@ impl DmxSnapshot {
     /// Get a channel value (0-based index, saturates to 511).
     #[must_use]
     pub fn get(&self, ch: usize) -> u8 {
-        self.channels.get(ch.min(DMX_CHANNELS - 1)).copied().unwrap_or(0)
+        self.channels
+            .get(ch.min(DMX_CHANNELS - 1))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Set a channel value (0-based index, silently clamps index).
@@ -76,7 +79,11 @@ impl DmxSnapshot {
     pub fn lerp(&self, target: &Self, t: f64) -> Self {
         let t = t.clamp(0.0, 1.0);
         let mut out = Self::blackout(self.universe);
-        let len = self.channels.len().min(target.channels.len()).min(DMX_CHANNELS);
+        let len = self
+            .channels
+            .len()
+            .min(target.channels.len())
+            .min(DMX_CHANNELS);
         for i in 0..len {
             let a = self.channels[i] as f64;
             let b = target.channels[i] as f64;
@@ -340,10 +347,7 @@ impl CueList {
     /// Go to the next cue.  Returns `false` if already at the last cue.
     ///
     /// The `presets` map is consulted to look up the scene preset.
-    pub fn go_next(
-        &mut self,
-        presets: &HashMap<String, ScenePreset>,
-    ) -> bool {
+    pub fn go_next(&mut self, presets: &HashMap<String, ScenePreset>) -> bool {
         let next = match self.active_index {
             None => 0,
             Some(i) => i + 1,
@@ -356,11 +360,7 @@ impl CueList {
     }
 
     /// Go to a specific cue index, starting a crossfade.
-    pub fn go_to(
-        &mut self,
-        index: usize,
-        presets: &HashMap<String, ScenePreset>,
-    ) {
+    pub fn go_to(&mut self, index: usize, presets: &HashMap<String, ScenePreset>) {
         if index >= self.entries.len() {
             return;
         }
@@ -384,11 +384,7 @@ impl CueList {
     ///
     /// Updates the live output snapshot and auto-advances on follow timing.
     /// Returns the current output snapshot.
-    pub fn advance(
-        &mut self,
-        dt: Duration,
-        presets: &HashMap<String, ScenePreset>,
-    ) -> DmxSnapshot {
+    pub fn advance(&mut self, dt: Duration, presets: &HashMap<String, ScenePreset>) -> DmxSnapshot {
         // Advance active fade
         if let Some(fade) = &mut self.active_fade {
             self.live = fade.advance(dt);
@@ -423,11 +419,7 @@ impl CueList {
     }
 
     /// Immediately snap to a preset without a fade.
-    pub fn snap_to(
-        &mut self,
-        index: usize,
-        presets: &HashMap<String, ScenePreset>,
-    ) {
+    pub fn snap_to(&mut self, index: usize, presets: &HashMap<String, ScenePreset>) {
         if index >= self.entries.len() {
             return;
         }

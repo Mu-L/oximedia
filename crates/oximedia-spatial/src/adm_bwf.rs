@@ -474,7 +474,11 @@ mod tests {
             gain: 0.8,
             position: (0.25, 0.75, 0.5),
         };
-        let meta = AdmMetadata { objects: vec![obj], packs: vec![], num_channels: 1 };
+        let meta = AdmMetadata {
+            objects: vec![obj],
+            packs: vec![],
+            num_channels: 1,
+        };
         let xml = meta.to_xml();
         assert!(xml.contains("0.250000"), "XML should contain X=0.25");
         assert!(xml.contains("0.750000"), "XML should contain Y=0.75");
@@ -489,7 +493,10 @@ mod tests {
             num_channels: 3,
         };
         let xml = meta.to_xml();
-        assert!(xml.contains("numChannels=\"3\""), "XML must encode numChannels");
+        assert!(
+            xml.contains("numChannels=\"3\""),
+            "XML must encode numChannels"
+        );
     }
 
     #[test]
@@ -500,7 +507,10 @@ mod tests {
             num_channels: 2,
         };
         let xml = meta.to_xml();
-        assert!(xml.contains("AO_1001") && xml.contains("AO_1002"), "Both objects in XML");
+        assert!(
+            xml.contains("AO_1001") && xml.contains("AO_1002"),
+            "Both objects in XML"
+        );
     }
 
     // ── from_minimal_xml ─────────────────────────────────────────────────────
@@ -535,15 +545,28 @@ mod tests {
         let xml = meta.to_xml();
         let parsed = AdmMetadata::from_minimal_xml(&xml).expect("parse ok");
         let (x, y, z) = parsed.objects[0].position;
-        assert!((x - 0.3).abs() < 1e-4, "parsed X position close to 0.3, got {x}");
-        assert!((y - 0.6).abs() < 1e-4, "parsed Y position close to 0.6, got {y}");
-        assert!((z - 0.1).abs() < 1e-4, "parsed Z position close to 0.1, got {z}");
+        assert!(
+            (x - 0.3).abs() < 1e-4,
+            "parsed X position close to 0.3, got {x}"
+        );
+        assert!(
+            (y - 0.6).abs() < 1e-4,
+            "parsed Y position close to 0.6, got {y}"
+        );
+        assert!(
+            (z - 0.1).abs() < 1e-4,
+            "parsed Z position close to 0.1, got {z}"
+        );
     }
 
     #[test]
     fn test_from_minimal_xml_multiple_objects() {
         let meta = AdmMetadata {
-            objects: vec![sample_object("AO_1"), sample_object("AO_2"), sample_object("AO_3")],
+            objects: vec![
+                sample_object("AO_1"),
+                sample_object("AO_2"),
+                sample_object("AO_3"),
+            ],
             packs: vec![],
             num_channels: 3,
         };
@@ -563,7 +586,10 @@ mod tests {
   </audioObject>
 </ebuCoreMain>"#;
         let result = AdmMetadata::from_minimal_xml(bad_xml);
-        assert!(result.is_err(), "Missing audioObjectID must produce an error");
+        assert!(
+            result.is_err(),
+            "Missing audioObjectID must produce an error"
+        );
     }
 
     #[test]
@@ -586,7 +612,10 @@ mod tests {
   </audioObject>
 </ebuCoreMain>"#;
         let parsed = AdmMetadata::from_minimal_xml(xml).expect("parse ok");
-        assert!((parsed.objects[0].gain - 0.5).abs() < 1e-5, "Gain attribute parsed correctly");
+        assert!(
+            (parsed.objects[0].gain - 0.5).abs() < 1e-5,
+            "Gain attribute parsed correctly"
+        );
     }
 
     // ── XML escaping ─────────────────────────────────────────────────────────
@@ -623,7 +652,10 @@ mod tests {
         let bytes = writer.write_header();
         assert!(!bytes.is_empty());
         let xml = std::str::from_utf8(&bytes).expect("valid UTF-8");
-        assert!(xml.contains("AO_0001"), "Header should contain generated object ID");
+        assert!(
+            xml.contains("AO_0001"),
+            "Header should contain generated object ID"
+        );
     }
 
     #[test]

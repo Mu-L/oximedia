@@ -894,13 +894,32 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    /// Per-process atomic counter for the scopes test temp input.
+    /// Per-process atomic counter for scopes test temp files.
     ///
     /// Combined with the process id, thread id and a nanosecond timestamp this
-    /// guarantees a unique filename for every `temp_input()` invocation, even
-    /// when several test processes (e.g. nextest workers) execute in parallel
-    /// on the same machine.  See issue #16.
+    /// guarantees a unique path for every `temp_input()` / `temp_out_dir()`
+    /// invocation, even when several test processes (e.g. nextest workers)
+    /// execute in parallel on the same machine.  See issue #16.
     static TEMP_INPUT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// Unique process-scoped counter for output directories / files.
+    static TEMP_OUT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// Return a unique temporary directory path for scope output.
+    ///
+    /// The directory is NOT created — callers are responsible for creating it
+    /// (e.g. via `std::fs::create_dir_all` or `run_analyze`).  This mirrors
+    /// the uniqueness guarantee of `temp_input()` so that parallel test
+    /// processes on the same machine never collide.
+    fn temp_out_dir(label: &str) -> PathBuf {
+        let pid = std::process::id();
+        let counter = TEMP_OUT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("oximedia_scopes_{}_{pid}_{counter}_{nanos}", label))
+    }
 
     fn temp_input() -> PathBuf {
         let pid = std::process::id();
@@ -1039,19 +1058,21 @@ mod tests {
     #[tokio::test]
     async fn test_analyze_all_scopes() {
         let input = temp_input();
-        let out_dir = std::env::temp_dir().join("oximedia_scopes_analyze_test");
+        let out_dir = temp_out_dir("analyze_all");
         let result = run_analyze(&input, None, "all", &out_dir, false).await;
         assert!(result.is_ok(), "unexpected error: {result:?}");
         let _ = std::fs::remove_dir_all(&out_dir);
+        let _ = std::fs::remove_file(&input);
     }
 
     #[tokio::test]
     async fn test_analyze_waveform_json() {
         let input = temp_input();
-        let out_dir = std::env::temp_dir().join("oximedia_scopes_analyze_wf_test");
+        let out_dir = temp_out_dir("analyze_wf");
         let result = run_analyze(&input, None, "waveform", &out_dir, true).await;
         assert!(result.is_ok(), "unexpected error: {result:?}");
         let _ = std::fs::remove_dir_all(&out_dir);
+        let _ = std::fs::remove_file(&input);
     }
 
     #[tokio::test]

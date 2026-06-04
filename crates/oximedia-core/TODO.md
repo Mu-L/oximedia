@@ -17,7 +17,12 @@
 - [x] Extend `codec_negotiation.rs` with automatic format negotiation between encoder and decoder
 - [x] Improve `error_context.rs` with structured error context chain (file, function, line info)
 - [x] Add `ChannelLayout` presets for Atmos and surround configurations in `channel_layout.rs`
-- [ ] Extend `buffer_pool.rs` with memory pressure callbacks and automatic pool shrinking (verified-open 2026-05-16: no memory_pressure/auto_shrink in buffer_pool.rs)
+- [x] Extend `buffer_pool.rs` with memory pressure callbacks and automatic pool shrinking (Wave 19 Slice E 2026-06-01)
+  - **Goal:** `on_pressure(Fn)` hook + `shrink_to(target)` / high-watermark policy so the pool releases idle buffers when a pressure signal fires or watermark is exceeded; track in-use vs free counts.
+  - **Design:** Add `PressureConfig { high_watermark_free: usize, shrink_to: usize }`; `BufferPool::set_pressure_callback(fn: impl Fn() + Send + Sync + 'static)`; `shrink_to(target)` drops free (not in-use) buffers down to target; `watermark_check()` auto-invokes `shrink_to` when free count exceeds high_watermark_free. Track `in_use: AtomicUsize` and `free: AtomicUsize`.
+  - **Files:** `src/alloc/buffer_pool.rs`, `TODO.md` L20
+  - **Tests:** pool shrinks to target on pressure callback; pool retains in-use buffers (never frees borrowed); watermark auto-shrink fires above threshold; no-shrink below threshold.
+  - **Risk:** shrinking must never reclaim a checked-out buffer — assert in_use accounting; all counter ops must be atomic or lock-protected consistently.
 - [x] Add `CodecId` variants for all supported codecs (currently missing some like WebP, GIF, JPEG-XL)
 
 ## Wave 3 Progress (2026-04-17)
@@ -33,27 +38,39 @@
 
 ## New Features
 - [x] Implement zero-copy frame sharing between crates using `resource_handle.rs` with ref-counted buffers (verified 2026-05-16; src/resource_handle.rs:92 ref_count field, acquire/release semantics)
-- [ ] Add media duration/bitrate estimation utilities in `media_time.rs` (verified-open 2026-05-16: no estimate_bitrate/estimate_duration found in media_time.rs)
+- [x] Add media duration/bitrate estimation utilities in `media_time.rs` (Wave 19 Slice E 2026-06-01)
+  - **Goal:** `estimate_bitrate(bytes: u64, duration: Timestamp) -> Option<u64>`, `estimate_duration(bytes: u64, bitrate: u64) -> Option<Timestamp>`, `estimate_size(bitrate: u64, duration: Timestamp) -> Option<u64>` — all overflow-safe, returning `None` on zero-denominator or overflow.
+  - **Design:** Use `checked_mul` / `checked_div` throughout; `Timestamp` internally as `Rational` with time_base; `estimate_duration` returns `Timestamp` with `time_base = 1/1_000_000_000` (nanoseconds). Include rounding.
+  - **Files:** `src/media_time.rs`, `TODO.md` L36
+  - **Tests:** bitrate from bytes+duration round-trips with duration from bytes+bitrate (within rounding); size estimate matches; estimation returns None on zero bitrate/duration; overflow-safe on u64::MAX inputs (no panic, returns None).
+  - **Risk:** integer overflow on large byte counts × high bitrates — all paths must use checked arithmetic.
 - [x] Implement typed FourCC constants for all supported codecs in `fourcc.rs`
 - [x] Add `sync.rs` inter-thread synchronization primitives optimized for media pipelines (bounded channel with backpressure) (verified 2026-05-16; src/sync.rs:508 BoundedChannel with backpressure, SpscRingBuffer:327)
 - [x] Implement frame pool with configurable pre-allocation for low-latency pipelines in `alloc/` (verified 2026-05-16; src/frame_pool.rs FramePool, FramePoolConfig pre_alloc field:25)
 - [x] Add color primaries and matrix coefficients to `PixelFormat` metadata (verified 2026-05-16; src/types/color_meta.rs:9 ColorPrimaries enum, MatrixCoefficients, src/pixel_format_color.rs)
 - [ ] Implement WASM-compatible async runtime abstraction in `wasm.rs` for cross-platform pipelines (verified-open 2026-05-16: not yet implemented)
 
+## Wave 12 Progress (2026-05-31)
+- [x] GCD Rational reduction on construction in `types/rational.rs` — already present; property-based tests (commutativity, associativity, reciprocal involution, distributivity, etc.) added — Wave 12 Slice A
+- [x] SIMD-accelerated pixel format conversion helpers in `convert/pixel.rs`: `u8_to_f32_slice`, `f32_to_u8_slice`, `yuv420_to_rgb` (BT.601 fixed-point) — Wave 12 Slice A
+- [x] Chase-Lev work-stealing queue in `work_queue_ws.rs` backed by `crossbeam-deque`; 4-worker / 10,000-task stress test — Wave 12 Slice A
+- [x] `AlignedVec<T>` cache-line-aligned allocation in `alloc/aligned_vec.rs` (64-byte alignment, pure-safe-Rust over-allocation strategy) — Wave 12 Slice A
+- [x] Timestamp conversion accuracy tests added to `types/timestamp.rs` (90kHz↔48kHz, ms↔fps, NTSC) — Wave 12 Slice A
+
 ## Performance
-- [ ] Optimize `Rational` arithmetic in `types/rational.rs` with GCD reduction on construction (verified-open 2026-05-16: not yet implemented)
-- [ ] Add SIMD-accelerated pixel format conversion helpers in `convert/pixel.rs` (verified-open 2026-05-16: not yet implemented)
+- [x] Optimize `Rational` arithmetic in `types/rational.rs` with GCD reduction on construction — Wave 12 Slice A
+- [x] Add SIMD-accelerated pixel format conversion helpers in `convert/pixel.rs` — Wave 12 Slice A
 - [x] Implement lock-free ring buffer variant in `ring_buffer.rs` for single-producer/single-consumer (verified 2026-05-16; src/ring_buffer.rs:327 SpscRingBuffer lock-free SPSC)
-- [ ] Optimize `work_queue.rs` with work-stealing scheduler for multi-threaded pipelines (verified-open 2026-05-16: not yet implemented)
-- [ ] Add cache-line-aligned buffer allocation in `alloc/mod.rs` for SIMD-friendly access (verified-open 2026-05-16: not yet implemented)
+- [x] Optimize `work_queue.rs` with work-stealing scheduler for multi-threaded pipelines — `work_queue_ws.rs` Wave 12 Slice A
+- [x] Add cache-line-aligned buffer allocation in `alloc/mod.rs` for SIMD-friendly access — `alloc/aligned_vec.rs` Wave 12 Slice A
 - [ ] Profile and optimize `event_queue.rs` for high-throughput event processing (>1M events/sec) (verified-open 2026-05-16: not yet implemented)
 
 ## Testing
-- [ ] Add property-based tests for `Rational` arithmetic (commutativity, associativity, overflow)
+- [x] Add property-based tests for `Rational` arithmetic (commutativity, associativity, overflow) — Wave 12 Slice A
 - [ ] Test all `PixelFormat` variants for correct plane count, bit depth, and chroma subsampling
 - [ ] Test patent violation detection in `error.rs` for all known patent-encumbered codec names
 - [ ] Add buffer pool stress test: allocate/deallocate across multiple threads
-- [ ] Test `Timestamp` conversion accuracy between different time bases (90kHz, 48kHz, 1/fps)
+- [x] Test `Timestamp` conversion accuracy between different time bases (90kHz, 48kHz, 1/fps) — Wave 12 Slice A
 - [ ] Test `type_registry.rs` registration and lookup with concurrent access
 - [ ] Add WASM compilation test to verify `wasm` feature compiles cleanly
 

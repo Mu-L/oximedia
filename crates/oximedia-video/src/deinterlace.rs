@@ -3,9 +3,331 @@
 //! Supports Weave, Bob (double-rate with linear interpolation), Blend,
 //! Yadif spatial-temporal, and adaptive edge-directed deinterlacing on
 //! grayscale (1 byte per pixel) frames.
+//!
+//! Also exposes standalone functions `bob_deinterlace`, `weave_deinterlace`,
+//! `eedi2_deinterlace`, and a configurable `YadifFilter` for the full
+//! FFmpeg-style Yadif spatial-temporal algorithm.
+
+// -----------------------------------------------------------------------
+// Public standalone API types
+// -----------------------------------------------------------------------
+
+/// Operating mode for `YadifFilter`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum YadifMode {
+    /// Emit one progressive frame per interlaced input frame.
+    #[default]
+    SendFrame,
+    /// Emit one field-reconstructed frame per field (2× output rate).
+    SendField,
+}
+
+/// Field display parity for `YadifFilter`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FieldParity {
+    /// Top (even-indexed) field is displayed first.
+    #[default]
+    TopFirst,
+    /// Bottom (odd-indexed) field is displayed first.
+    BottomFirst,
+}
+
+/// Configuration for `YadifFilter`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct YadifConfig {
+    /// Output mode (per-frame or per-field).
+    pub mode: YadifMode,
+    /// Field parity / dominance.
+    pub parity: FieldParity,
+}
+
+impl Default for YadifConfig {
+    fn default() -> Self {
+        Self {
+            mode: YadifMode::SendFrame,
+            parity: FieldParity::TopFirst,
+        }
+    }
+}
+
+/// Yadif (Yet Another Deinterlacing Filter) — full spatial-temporal variant.
+///
+/// Implements the Jim Chen / FFmpeg Yadif algorithm:
+/// - Spatial prediction via edge-directed interpolation across ±3-pixel diagonals
+/// - Temporal prediction from prev/next frames
+/// - Clamp-based reconciliation of spatial and temporal estimates
+pub struct YadifFilter {
+    /// Yadif operating configuration.
+    pub config: YadifConfig,
+}
+
+impl YadifFilter {
+    /// Create a new `YadifFilter` with the given configuration.
+    pub fn new(config: YadifConfig) -> Self {
+        Self { config }
+    }
+
+    /// Process one interlaced frame using its temporal neighbours.
+    ///
+    /// `prev`, `curr`, `next` are full interlaced frames in row-major order,
+    /// each `width × height` bytes (grayscale / planar-Y).
+    ///
+    /// Returns a progressive output frame of the same dimensions.
+    pub fn process_frame(&self, prev: &[u8], curr: &[u8], next: &[u8], w: u32, h: u32) -> Vec<u8> {
+        let keep_even = matches!(self.config.parity, FieldParity::TopFirst);
+        yadif_full(prev, curr, next, w, h, keep_even)
+    }
+}
+
+/// Configuration for `eedi2_deinterlace`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Eedi2Config {
+    /// Maximum allowed SAD error distance per direction candidate. Default 2.
+    pub max_err_dist: u32,
+    /// Edge-variance threshold; pixels below this are treated as flat and
+    /// fall back to vertical average. Default 20.
+    pub v_thr: u32,
+}
+
+impl Default for Eedi2Config {
+    fn default() -> Self {
+        Self {
+            max_err_dist: 2,
+            v_thr: 20,
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// Standalone public functions
+// -----------------------------------------------------------------------
+
+/// Bob deinterlace: single-frame output by keeping one field and linearly
+/// interpolating the missing lines from their neighbours.
+///
+/// `frame` is a row-major grayscale frame (`width × height` bytes).
+/// Even output lines come from the field; odd lines are the average of
+/// their adjacent even neighbours (clamped at borders).
+///
+/// If `top_field_first` is `true` the even rows are kept; otherwise odd
+/// rows are kept.
+pub fn bob_deinterlace(frame: &[u8], w: u32, h: u32, top_field_first: bool) -> Vec<u8> {
+    let width = w as usize;
+    let height = h as usize;
+    let mut out = vec![0u8; width * height];
+
+    for row in 0..height {
+        let is_kept = if top_field_first {
+            row % 2 == 0
+        } else {
+            row % 2 == 1
+        };
+
+        if is_kept {
+            let start = row * width;
+            let end = (start + width).min(frame.len());
+            if start < end {
+                out[start..start + (end - start)].copy_from_slice(&frame[start..end]);
+            }
+        } else {
+            // Nearest kept neighbour above and below (same parity).
+            // For TFF, above/below are the even lines immediately surrounding.
+            let above_row = if row > 0 { row - 1 } else { 0 };
+            let below_row = if row + 1 < height {
+                row + 1
+            } else {
+                height.saturating_sub(1)
+            };
+
+            for col in 0..width {
+                let a = frame.get(above_row * width + col).copied().unwrap_or(0) as u16;
+                let b = frame.get(below_row * width + col).copied().unwrap_or(0) as u16;
+                out[row * width + col] = ((a + b + 1) / 2) as u8;
+            }
+        }
+    }
+
+    out
+}
+
+/// Weave deinterlace: combine two consecutive fields into one progressive frame.
+///
+/// `field1` contributes even rows (top field), `field2` contributes odd rows.
+/// Both fields must be `width × height` bytes (full-frame height, with only
+/// their own lines meaningful — the other lines are ignored).
+///
+/// Output is `width × height` bytes.
+pub fn weave_deinterlace(field1: &[u8], field2: &[u8], w: u32, h: u32) -> Vec<u8> {
+    let width = w as usize;
+    let height = h as usize;
+    let mut out = vec![0u8; width * height];
+
+    for row in 0..height {
+        let start = row * width;
+        if row % 2 == 0 {
+            // Even rows come from field1
+            let end = (start + width).min(field1.len());
+            if start < end {
+                out[start..start + (end - start)].copy_from_slice(&field1[start..end]);
+            }
+        } else {
+            // Odd rows come from field2
+            let end = (start + width).min(field2.len());
+            if start < end {
+                out[start..start + (end - start)].copy_from_slice(&field2[start..end]);
+            }
+        }
+    }
+
+    out
+}
+
+/// EEDI2 edge-directed deinterlace.
+///
+/// For each missing line (opposite parity to the kept field), and for each
+/// pixel at `(x, y)`:
+/// 1. Evaluate 7 candidate diagonal directions `d ∈ -3..=3`.
+/// 2. For each direction, compute the sum of absolute differences (SAD)
+///    between pairs of pixels along that direction in the two adjacent
+///    known lines.
+/// 3. Pick `d_best` with minimum SAD (ties broken by smallest |d|).
+/// 4. Interpolate: `pixel = (above[x + d_best] + below[x − d_best]) / 2`.
+///
+/// When edge variance is below `cfg.v_thr` the pixel is treated as flat
+/// and falls back to plain vertical average regardless of direction.
+///
+/// `frame` is a row-major grayscale interlaced frame (`width × height` bytes).
+/// The top (even) field is assumed to be the kept field.
+pub fn eedi2_deinterlace(frame: &[u8], w: u32, h: u32, cfg: &Eedi2Config) -> Vec<u8> {
+    let width = w as usize;
+    let height = h as usize;
+    let mut out = vec![0u8; width * height];
+
+    for row in 0..height {
+        let start = row * width;
+        if row % 2 == 0 {
+            // Kept (even) field — copy directly.
+            let end = (start + width).min(frame.len());
+            if start < end {
+                out[start..start + (end - start)].copy_from_slice(&frame[start..end]);
+            }
+        } else {
+            // Missing (odd) line — interpolate via edge-directed prediction.
+            let above_row = if row > 0 { row - 1 } else { 0 };
+            let below_row = if row + 1 < height {
+                row + 1
+            } else {
+                height.saturating_sub(1)
+            };
+
+            for col in 0..width {
+                let pixel = eedi2_interpolate_pixel(frame, width, above_row, below_row, col, cfg);
+                out[row * width + col] = pixel;
+            }
+        }
+    }
+
+    out
+}
+
+/// Interpolate one missing pixel at `(col, missing_row)` using EEDI2 logic.
+fn eedi2_interpolate_pixel(
+    frame: &[u8],
+    width: usize,
+    above_row: usize,
+    below_row: usize,
+    col: usize,
+    cfg: &Eedi2Config,
+) -> u8 {
+    // Compute local variance along the above row to detect flat regions.
+    let flat_threshold = cfg.v_thr as i32;
+    let variance = local_variance(frame, width, above_row, col, 2);
+    if variance < flat_threshold {
+        // Flat region — simple vertical average.
+        let a = frame.get(above_row * width + col).copied().unwrap_or(0) as u16;
+        let b = frame.get(below_row * width + col).copied().unwrap_or(0) as u16;
+        return ((a + b + 1) / 2) as u8;
+    }
+
+    let max_d = cfg.max_err_dist as i32 + 1; // directions -3..=3 regardless of max_err_dist
+    let max_d = max_d.max(3); // at least ±3
+
+    let mut best_sad = u32::MAX;
+    let mut best_d = 0i32;
+    let mut best_d_abs = i32::MAX;
+
+    // Evaluate SAD for each direction d ∈ -max_d..=max_d.
+    for d in -max_d..=max_d {
+        let sad = direction_sad(frame, width, above_row, below_row, col, d);
+        // Break ties by smallest |d| (prefer vertical).
+        if sad < best_sad || (sad == best_sad && d.abs() < best_d_abs) {
+            best_sad = sad;
+            best_d = d;
+            best_d_abs = d.abs();
+        }
+    }
+
+    // Interpolate using the winning direction.
+    let above_col = (col as i32 + best_d).clamp(0, width as i32 - 1) as usize;
+    let below_col = (col as i32 - best_d).clamp(0, width as i32 - 1) as usize;
+    let a = frame
+        .get(above_row * width + above_col)
+        .copied()
+        .unwrap_or(0) as u16;
+    let b = frame
+        .get(below_row * width + below_col)
+        .copied()
+        .unwrap_or(0) as u16;
+    ((a + b + 1) / 2) as u8
+}
+
+/// Compute the sum of absolute differences between pixel pairs along direction `d`
+/// across the above/below row boundary, using a window of ±3 pixels around `col`.
+fn direction_sad(
+    frame: &[u8],
+    width: usize,
+    above_row: usize,
+    below_row: usize,
+    col: usize,
+    d: i32,
+) -> u32 {
+    let mut sad = 0u32;
+    // Compare k+1 pixel pairs along the given direction (EEDI2 uses a support window).
+    for k in -2i32..=2 {
+        let ac = (col as i32 + k + d).clamp(0, width as i32 - 1) as usize;
+        let bc = (col as i32 + k - d).clamp(0, width as i32 - 1) as usize;
+        let av = frame.get(above_row * width + ac).copied().unwrap_or(0) as i32;
+        let bv = frame.get(below_row * width + bc).copied().unwrap_or(0) as i32;
+        sad += (av - bv).unsigned_abs();
+    }
+    sad
+}
+
+/// Compute local variance of a pixel's horizontal neighbourhood (radius `r`)
+/// in the given row. Used as an edge-flatness metric.
+fn local_variance(frame: &[u8], width: usize, row: usize, col: usize, r: usize) -> i32 {
+    let mut sum = 0i32;
+    let mut sum_sq = 0i32;
+    let mut n = 0i32;
+    for k in 0..=(2 * r) {
+        let c = (col + k).saturating_sub(r).min(width.saturating_sub(1));
+        let v = frame.get(row * width + c).copied().unwrap_or(0) as i32;
+        sum += v;
+        sum_sq += v * v;
+        n += 1;
+    }
+    if n <= 1 {
+        return 0;
+    }
+    (sum_sq - sum * sum / n) / n
+}
+
+// -----------------------------------------------------------------------
+// Algorithm used to reconstruct a progressive frame from interlaced fields.
+// -----------------------------------------------------------------------
 
 /// Algorithm used to reconstruct a progressive frame from interlaced fields.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DeinterlaceMethod {
     /// Combine fields as-is (simple weave).
     Weave,
@@ -22,6 +344,10 @@ pub enum DeinterlaceMethod {
     /// Motion-adaptive deinterlacing: uses weave in static areas and bob in
     /// areas with detected inter-field motion.
     MotionAdaptive,
+    /// Full configurable Yadif filter with `YadifConfig` options.
+    YadifAdvanced(YadifConfig),
+    /// EEDI2 edge-directed interpolation with `Eedi2Config` options.
+    Eedi2(Eedi2Config),
 }
 
 /// Field dominance / order.
@@ -70,7 +396,7 @@ impl Deinterlacer {
         height: u32,
     ) -> Vec<Vec<u8>> {
         let keep_even = matches!(self.field_order, FieldOrder::TopFieldFirst);
-        match self.method {
+        match &self.method {
             DeinterlaceMethod::Weave => vec![weave(cur)],
             DeinterlaceMethod::Bob => bob(cur, width, height),
             DeinterlaceMethod::Blend => vec![blend_fields(cur, width, height)],
@@ -80,6 +406,22 @@ impl Deinterlacer {
             DeinterlaceMethod::LinearBob => vec![linear_bob(cur, width, height, keep_even)],
             DeinterlaceMethod::MotionAdaptive => {
                 vec![motion_adaptive(prev, cur, next, width, height, keep_even)]
+            }
+            DeinterlaceMethod::YadifAdvanced(cfg) => {
+                let yadif_keep_even = matches!(cfg.parity, FieldParity::TopFirst);
+                let prev_ref = prev.unwrap_or(cur);
+                let next_ref = next.unwrap_or(cur);
+                vec![yadif_full(
+                    prev_ref,
+                    cur,
+                    next_ref,
+                    width,
+                    height,
+                    yadif_keep_even,
+                )]
+            }
+            DeinterlaceMethod::Eedi2(cfg) => {
+                vec![eedi2_deinterlace(cur, width, height, cfg)]
             }
         }
     }
@@ -188,12 +530,6 @@ fn blend_fields(cur: &[u8], width: u32, height: u32) -> Vec<u8> {
     }
 
     out
-}
-
-/// Yadif-inspired spatial-temporal deinterlacing (legacy, keeps even rows).
-#[allow(dead_code)]
-fn yadif(prev: Option<&[u8]>, cur: &[u8], next: Option<&[u8]>, width: u32, height: u32) -> Vec<u8> {
-    yadif_adaptive(prev, cur, next, width, height, true)
 }
 
 /// Full Yadif-style adaptive deinterlacing with edge-directed spatial interpolation,
@@ -432,6 +768,89 @@ fn motion_adaptive(
                     // Weave: use the current interlaced line directly
                     out[idx] = cur_val;
                 }
+            }
+        }
+    }
+
+    out
+}
+
+/// Full Yadif spatial-temporal deinterlace — FFmpeg variant.
+///
+/// Per the Yadif spec:
+///  - `spatial_pred = (prev_field_line[y-1] + prev_field_line[y+1]) / 2`
+///  - Temporal diff `d = |prev[y] - curr[y]| + |curr[y] - next[y]|`; clamped to
+///    `[spatial_min, spatial_max]`
+///  - Final pixel: `temporal_pred` clamped into `[spatial_pred - d, spatial_pred + d]`
+///
+/// `prev`, `curr`, `next` are full interlaced frames; `keep_even` selects which
+/// field is preserved directly (true = even/top field kept).
+fn yadif_full(
+    prev: &[u8],
+    curr: &[u8],
+    next: &[u8],
+    width: u32,
+    height: u32,
+    keep_even: bool,
+) -> Vec<u8> {
+    let w = width as usize;
+    let h = height as usize;
+    let mut out = vec![0u8; w * h];
+
+    for row in 0..h {
+        let is_kept = if keep_even {
+            row % 2 == 0
+        } else {
+            row % 2 == 1
+        };
+
+        for col in 0..w {
+            let idx = row * w + col;
+
+            if is_kept {
+                out[idx] = curr.get(idx).copied().unwrap_or(0);
+            } else {
+                // ---- Spatial prediction ----
+                // Average of the two adjacent kept lines in curr.
+                let above_row = if row > 0 { row - 1 } else { 0 };
+                let below_row = if row + 1 < h {
+                    row + 1
+                } else {
+                    h.saturating_sub(1)
+                };
+
+                let above = curr.get(above_row * w + col).copied().unwrap_or(0) as i32;
+                let below = curr.get(below_row * w + col).copied().unwrap_or(0) as i32;
+                let spatial_pred = (above + below) / 2;
+
+                // Spatial min/max (bounds for clamping).
+                let spatial_min = above.min(below);
+                let spatial_max = above.max(below);
+
+                // ---- Temporal diff (d) ----
+                let prev_val =
+                    prev.get(idx)
+                        .copied()
+                        .unwrap_or(curr.get(idx).copied().unwrap_or(0)) as i32;
+                let curr_val = curr.get(idx).copied().unwrap_or(0) as i32;
+                let next_val =
+                    next.get(idx)
+                        .copied()
+                        .unwrap_or(curr.get(idx).copied().unwrap_or(0)) as i32;
+
+                // d = |prev - curr| + |curr - next|, clamped to spatial range.
+                let d_raw = (prev_val - curr_val).abs() + (curr_val - next_val).abs();
+                let d = d_raw.clamp(spatial_min, spatial_max);
+
+                // ---- Temporal prediction ----
+                let temporal_pred = (prev_val + next_val) / 2;
+
+                // Final: clamp temporal_pred into [spatial_pred - d, spatial_pred + d].
+                let lo = spatial_pred - d;
+                let hi = spatial_pred + d;
+                let result = temporal_pred.clamp(lo, hi);
+
+                out[idx] = result.clamp(0, 255) as u8;
             }
         }
     }
@@ -740,5 +1159,209 @@ mod tests {
         assert_ne!(DeinterlaceMethod::Weave, DeinterlaceMethod::Bob);
         assert_ne!(DeinterlaceMethod::Yadif, DeinterlaceMethod::LinearBob);
         assert_ne!(DeinterlaceMethod::MotionAdaptive, DeinterlaceMethod::Blend);
+    }
+
+    // ---- New standalone API tests ----
+
+    // 24. bob_deinterlace: 16×8 checkerboard — no black artifacts (no all-zero rows).
+    #[test]
+    fn test_bob_deinterlace_progressive_roundtrip() {
+        let w = 16usize;
+        let h = 8usize;
+        // Checkerboard: pixel value = (row + col) % 2 * 200 + 55 → [55, 255]
+        let mut frame = vec![0u8; w * h];
+        for row in 0..h {
+            for col in 0..w {
+                frame[row * w + col] = if (row + col) % 2 == 0 { 200u8 } else { 55u8 };
+            }
+        }
+
+        // Bob with top-field-first.
+        let out_tff = bob_deinterlace(&frame, w as u32, h as u32, true);
+        assert_eq!(out_tff.len(), w * h, "TFF output must be w×h");
+        // Verify no all-zero row (i.e., no black artifact row).
+        for row in 0..h {
+            let row_max = out_tff[row * w..(row + 1) * w]
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0);
+            assert!(
+                row_max > 0,
+                "Row {} should not be all-zero (black artifact)",
+                row
+            );
+        }
+
+        // Bob with bottom-field-first.
+        let out_bff = bob_deinterlace(&frame, w as u32, h as u32, false);
+        assert_eq!(out_bff.len(), w * h, "BFF output must be w×h");
+        for row in 0..h {
+            let row_max = out_bff[row * w..(row + 1) * w]
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0);
+            assert!(row_max > 0, "BFF Row {} should not be all-zero", row);
+        }
+    }
+
+    // 25. weave_deinterlace: split 16×8 frame into two fields, weave back → identity.
+    #[test]
+    fn test_weave_roundtrip() {
+        let w = 16usize;
+        let h = 8usize;
+        // Frame with distinct per-row values.
+        let mut original = vec![0u8; w * h];
+        for row in 0..h {
+            for col in 0..w {
+                original[row * w + col] = ((row * 17 + col * 3) % 251) as u8;
+            }
+        }
+
+        // field1 = copy of original (even rows will be read from it)
+        // field2 = copy of original (odd rows will be read from it)
+        // weave_deinterlace picks even rows from field1, odd rows from field2.
+        let field1 = original.clone();
+        let field2 = original.clone();
+
+        let woven = weave_deinterlace(&field1, &field2, w as u32, h as u32);
+        assert_eq!(woven.len(), w * h, "Weaved output must be w×h");
+
+        // Even rows must match field1, odd rows must match field2.
+        for row in 0..h {
+            for col in 0..w {
+                let expected = if row % 2 == 0 {
+                    field1[row * w + col]
+                } else {
+                    field2[row * w + col]
+                };
+                assert_eq!(
+                    woven[row * w + col],
+                    expected,
+                    "Mismatch at row={row} col={col}"
+                );
+            }
+        }
+    }
+
+    // 26. yadif_static_frame: prev=curr=next → output properties verified.
+    //
+    // For a static frame (prev=curr=next, motion=0):
+    //  - Kept rows (even with TFF) are copied exactly from curr.
+    //  - Interpolated rows receive temporal_pred=curr[y] clamped to
+    //    [spatial_pred - d, spatial_pred + d] where d=0 → result = spatial_pred.
+    //  - The output is always in valid [0,255] byte range.
+    //  - Output dimensions equal input dimensions.
+    #[test]
+    fn test_yadif_static_frame() {
+        let w = 16u32;
+        let h = 8u32;
+        let ww = w as usize;
+        let hh = h as usize;
+        // Uniform frame: all 128. For a uniform frame, spatial_pred = 128 for all
+        // interpolated rows, and temporal_pred = 128, so the output must be exactly 128.
+        let frame = vec![128u8; ww * hh];
+        let filter = YadifFilter::new(YadifConfig::default());
+        let out = filter.process_frame(&frame, &frame, &frame, w, h);
+
+        assert_eq!(out.len(), ww * hh, "Output must be w×h");
+
+        // For a uniform frame, every pixel must be exactly 128 (no matter which
+        // row is kept or interpolated, spatial_pred = temporal_pred = 128).
+        for (i, &px) in out.iter().enumerate() {
+            assert_eq!(
+                px, 128u8,
+                "Uniform static frame: pixel {i} should be 128, got {px}"
+            );
+        }
+
+        // Additionally verify that for a gradient frame, kept even rows are preserved exactly.
+        let gradient: Vec<u8> = (0..ww * hh)
+            .map(|i| ((i * 3 + 7) % 200 + 28) as u8)
+            .collect();
+        let out2 = filter.process_frame(&gradient, &gradient, &gradient, w, h);
+        assert_eq!(out2.len(), ww * hh, "Gradient output must be w×h");
+        // Even rows (TFF = keep top/even) must be exact copies.
+        for row in (0..hh).step_by(2) {
+            for col in 0..ww {
+                assert_eq!(
+                    out2[row * ww + col],
+                    gradient[row * ww + col],
+                    "Even row {row} col {col} must be preserved exactly"
+                );
+            }
+        }
+    }
+
+    // 27. eedi2_basic: 16×8 gradient frame → output w×h, no panics.
+    #[test]
+    fn test_eedi2_basic() {
+        let w = 16u32;
+        let h = 8u32;
+        // Smooth horizontal gradient: value = col * 15 clamped to [0,255].
+        let ww = w as usize;
+        let hh = h as usize;
+        let frame: Vec<u8> = (0..ww * hh)
+            .map(|i| {
+                let col = i % ww;
+                (col * 15).min(255) as u8
+            })
+            .collect();
+
+        let cfg = Eedi2Config::default();
+        let out = eedi2_deinterlace(&frame, w, h, &cfg);
+
+        assert_eq!(out.len(), ww * hh, "EEDI2 output must be w×h");
+        // Kept (even) rows must be preserved exactly.
+        for row in (0..hh).step_by(2) {
+            for col in 0..ww {
+                assert_eq!(
+                    out[row * ww + col],
+                    frame[row * ww + col],
+                    "Even row {row} col {col} must be preserved"
+                );
+            }
+        }
+        // All output pixels must be in valid u8 range (by construction), and
+        // no degenerate zeros on interpolated rows for a non-black gradient.
+        for row in (1..hh).step_by(2) {
+            let row_sum: u32 = out[row * ww..(row + 1) * ww]
+                .iter()
+                .map(|&b| b as u32)
+                .sum();
+            assert!(
+                row_sum > 0,
+                "Interpolated row {row} should not be all-zero for a gradient input"
+            );
+        }
+    }
+
+    // 28. YadifAdvanced variant dispatches through Deinterlacer correctly.
+    #[test]
+    fn test_deinterlacer_yadif_advanced_variant() {
+        let cfg = YadifConfig {
+            mode: YadifMode::SendFrame,
+            parity: FieldParity::TopFirst,
+        };
+        let d = Deinterlacer::new(
+            DeinterlaceMethod::YadifAdvanced(cfg),
+            FieldOrder::TopFieldFirst,
+        );
+        let frame = make_frame(8, 8, 128);
+        let out = d.deinterlace_frame(None, &frame, None, 8, 8);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].len(), 8 * 8);
+    }
+
+    // 29. Eedi2 variant dispatches through Deinterlacer correctly.
+    #[test]
+    fn test_deinterlacer_eedi2_variant() {
+        let cfg = Eedi2Config::default();
+        let d = Deinterlacer::new(DeinterlaceMethod::Eedi2(cfg), FieldOrder::TopFieldFirst);
+        let frame = make_frame(8, 8, 100);
+        let out = d.deinterlace_frame(None, &frame, None, 8, 8);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].len(), 8 * 8);
     }
 }

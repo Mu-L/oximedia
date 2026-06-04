@@ -16,9 +16,208 @@
 //! * **Entry compression** — tiers with `compress: true` store LZ4-style
 //!   run-length encoding (pure Rust, no external deps) so that L2+ tiers
 //!   occupy less memory / disk space.
+//!
+//! ## New in 0.1.8 Wave 13
+//!
+//! * **P² adaptive promotion** — the promotion threshold can be auto-tuned
+//!   using a P² quantile estimator (Jain & Chlamtac 1985) that tracks the
+//!   75th-percentile of per-key access frequencies.  Enable via
+//!   `TieredCacheBuilder::enable_adaptive_promotion(true)`.
+//! * **Arena allocation** — when `use_arena` is enabled, tier entry bytes are
+//!   stored in a `BumpArena` (bump allocator) so the `HashMap` holds cheap
+//!   `(offset, len)` handles instead of owned `Vec<u8>`.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+
+// ── P² Quantile Estimator (Jain & Chlamtac 1985) ─────────────────────────────
+
+/// Online running estimator for an arbitrary quantile using the P² algorithm.
+///
+/// Tracks 5 marker positions to estimate the `p`-quantile without storing all
+/// observations.  Only valid after `n ≥ 5` samples have been fed (warmup guard).
+#[derive(Debug, Clone)]
+pub struct P2QuantileEstimator {
+    /// Target quantile (0 < p < 1).  Default 0.75 for 75th-percentile.
+    p: f64,
+    /// Total number of observations fed so far.
+    n: u64,
+    /// Marker heights: estimated quantile values at 5 marker positions.
+    q: [f64; 5],
+    /// Desired marker positions (real-valued).
+    dn: [f64; 5],
+    /// Actual marker positions (integer counts).
+    np: [f64; 5],
+}
+
+impl P2QuantileEstimator {
+    /// Create a new estimator for quantile `p` (0 < p < 1).
+    pub fn new(p: f64) -> Self {
+        let p = p.clamp(1e-6, 1.0 - 1e-6);
+        Self {
+            p,
+            n: 0,
+            q: [0.0; 5],
+            dn: [0.0, p / 2.0, p, (1.0 + p) / 2.0, 1.0],
+            np: [1.0, 1.0 + 2.0 * p, 1.0 + 4.0 * p, 3.0 + 2.0 * p, 5.0],
+        }
+    }
+
+    /// Feed a new observation.
+    pub fn update(&mut self, x: f64) {
+        if self.n < 5 {
+            // Collect the first 5 values into q[].
+            self.q[self.n as usize] = x;
+            self.n += 1;
+            if self.n == 5 {
+                // Sort the initial 5 samples to initialise the markers.
+                self.q
+                    .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            }
+            return;
+        }
+        self.n += 1;
+
+        // Step 1: find cell k.
+        let k = if x < self.q[0] {
+            self.q[0] = x;
+            0usize
+        } else if x < self.q[1] {
+            0
+        } else if x < self.q[2] {
+            1
+        } else if x < self.q[3] {
+            2
+        } else if x <= self.q[4] {
+            3
+        } else {
+            self.q[4] = x;
+            3
+        };
+
+        // Step 2: increment positions.
+        for i in (k + 1)..5 {
+            self.np[i] += 1.0;
+        }
+
+        // Step 3: update desired positions.
+        let n_f = self.n as f64;
+        self.dn[0] = 0.0;
+        self.dn[1] = (n_f - 1.0) * self.p / 2.0 + 1.0;
+        self.dn[2] = (n_f - 1.0) * self.p + 1.0;
+        self.dn[3] = (n_f - 1.0) * (1.0 + self.p) / 2.0 + 1.0;
+        self.dn[4] = n_f as f64;
+
+        // Step 4: adjust markers 1–3 (0-indexed).
+        for i in 1..4 {
+            let d = self.dn[i] - self.np[i];
+            let sign_d: f64 = if d >= 0.0 { 1.0 } else { -1.0 };
+            if (d >= 1.0 && self.np[i + 1] - self.np[i] > 1.0)
+                || (d <= -1.0 && self.np[i - 1] - self.np[i] < -1.0)
+            {
+                // Try parabolic interpolation.
+                let qi_new = self.parabolic(i, sign_d);
+                if qi_new > self.q[i - 1] && qi_new < self.q[i + 1] {
+                    self.q[i] = qi_new;
+                } else {
+                    // Linear fallback.
+                    let idx = if d >= 0.0 { i + 1 } else { i.saturating_sub(1) };
+                    let dq = self.q[idx] - self.q[i];
+                    let dn = self.np[idx] - self.np[i];
+                    self.q[i] += sign_d * dq / dn;
+                }
+                self.np[i] += sign_d;
+            }
+        }
+    }
+
+    fn parabolic(&self, i: usize, sign: f64) -> f64 {
+        let qi = self.q[i];
+        let qi_prev = self.q[i - 1];
+        let qi_next = self.q[i + 1];
+        let ni = self.np[i];
+        let ni_prev = self.np[i - 1];
+        let ni_next = self.np[i + 1];
+        let term1 = sign / (ni_next - ni_prev);
+        let left = (ni - ni_prev + sign) * (qi_next - qi) / (ni_next - ni);
+        let right = (ni_next - ni - sign) * (qi - qi_prev) / (ni - ni_prev);
+        qi + term1 * (left + right)
+    }
+
+    /// Return the current quantile estimate.
+    ///
+    /// Returns `None` when fewer than 5 observations have been fed (warmup guard).
+    pub fn estimate(&self) -> Option<f64> {
+        if self.n < 5 {
+            None
+        } else {
+            Some(self.q[2])
+        }
+    }
+
+    /// Total number of observations seen.
+    pub fn count(&self) -> u64 {
+        self.n
+    }
+}
+
+// ── BumpArena ─────────────────────────────────────────────────────────────────
+
+/// A simple bump allocator for byte-slice entries.
+///
+/// Allocations are cheap (pointer-bump only).  Deallocation is not
+/// supported per-entry; call [`reset`] to reclaim the whole arena at once
+/// (typically called after a batch eviction sweep).
+///
+/// [`reset`]: BumpArena::reset
+#[derive(Debug, Clone)]
+pub struct BumpArena {
+    data: Vec<u8>,
+    pos: usize,
+}
+
+impl BumpArena {
+    /// Create a new `BumpArena` with `initial_capacity` bytes pre-allocated.
+    pub fn new(initial_capacity: usize) -> Self {
+        Self {
+            data: Vec::with_capacity(initial_capacity),
+            pos: 0,
+        }
+    }
+
+    /// Append `bytes` to the arena and return `(offset, len)`.
+    ///
+    /// Grows the backing vec if necessary.
+    pub fn alloc(&mut self, bytes: &[u8]) -> (usize, usize) {
+        let offset = self.pos;
+        let len = bytes.len();
+        // Extend backing storage if needed.
+        if self.pos + len > self.data.len() {
+            self.data.resize(self.pos + len, 0u8);
+        }
+        self.data[self.pos..self.pos + len].copy_from_slice(bytes);
+        self.pos += len;
+        (offset, len)
+    }
+
+    /// Retrieve a byte slice stored at `(offset, len)`.
+    pub fn get(&self, offset: usize, len: usize) -> &[u8] {
+        &self.data[offset..offset + len]
+    }
+
+    /// Reset the arena, reclaiming all memory for future allocations.
+    ///
+    /// Existing `(offset, len)` handles become invalid after this call.
+    pub fn reset(&mut self) {
+        self.pos = 0;
+        // Do not deallocate the backing vec; just reset the cursor.
+    }
+
+    /// Current number of bytes used.
+    pub fn used(&self) -> usize {
+        self.pos
+    }
+}
 
 // ── Public configuration types ───────────────────────────────────────────────
 
@@ -68,6 +267,15 @@ pub struct TierConfig {
     /// before being stored and decoded on retrieval.  Useful for L2+ tiers to
     /// reduce memory / disk footprint.
     pub compress: bool,
+    /// Whether to use a P² quantile estimator to auto-tune the promotion
+    /// threshold.  When `true`, the static `promotion_threshold` acts as a
+    /// fallback during warmup (first 5 observations); afterwards the 75th
+    /// percentile of observed per-key access frequencies is used.
+    pub adaptive_promotion: bool,
+    /// When `true`, tier entry bytes are stored in a `BumpArena` and the
+    /// `HashMap` keeps lightweight `(offset, len)` handles instead of owned
+    /// `Vec<u8>`.  Falls back to owned storage when `false` (default).
+    pub use_arena: bool,
 }
 
 impl TierConfig {
@@ -81,6 +289,8 @@ impl TierConfig {
             disk_path: None,
             promotion_threshold: 0,
             compress: false,
+            adaptive_promotion: false,
+            use_arena: false,
         }
     }
 
@@ -94,7 +304,21 @@ impl TierConfig {
             disk_path: Some(path.into()),
             promotion_threshold: 1,
             compress: true,
+            adaptive_promotion: false,
+            use_arena: false,
         }
+    }
+
+    /// Enable or disable P²-adaptive promotion threshold tuning.
+    pub fn enable_adaptive_promotion(mut self, enabled: bool) -> Self {
+        self.adaptive_promotion = enabled;
+        self
+    }
+
+    /// Enable or disable arena allocation for tier entries.
+    pub fn enable_arena(mut self, enabled: bool) -> Self {
+        self.use_arena = enabled;
+        self
     }
 }
 
@@ -175,14 +399,22 @@ fn rle_decompress(data: &[u8]) -> Vec<u8> {
 
 // ── Internal per-tier storage ────────────────────────────────────────────────
 
+/// Entry in a `CacheTier`: either owned bytes or an arena handle.
+enum TierEntry {
+    /// Standard heap-owned payload.
+    Owned(Vec<u8>),
+    /// Handle into a `BumpArena`: `(offset, len)`.
+    Arena(usize, usize),
+}
+
 struct CacheTier {
     config: TierConfig,
-    /// `key → (data, last_access_tick, frequency)`
+    /// `key → (entry, last_access_tick, frequency)`
     ///
-    /// For disk-backed tiers `data` holds compressed bytes cached in memory;
-    /// the canonical copy lives in the file.  For memory tiers `data` is the
-    /// full (possibly compressed) payload.
-    data: HashMap<String, (Vec<u8>, u64, u64)>,
+    /// For disk-backed tiers the entry bytes are stored as a sentinel (empty)
+    /// since the canonical copy lives on disk.  For memory tiers the full
+    /// (possibly compressed) payload is stored.
+    data: HashMap<String, (TierEntry, u64, u64)>,
     size_used: usize,
     /// Insertion-order queue used by the FIFO policy.
     fifo_order: VecDeque<String>,
@@ -196,6 +428,11 @@ struct CacheTier {
     tick: u64,
     /// xorshift32 state for the Random eviction policy.
     rng_state: u32,
+    /// P² quantile estimator for adaptive promotion threshold (75th percentile
+    /// of per-key access frequency).  Present when `config.adaptive_promotion`.
+    p2_estimator: Option<P2QuantileEstimator>,
+    /// Optional bump arena.  Present when `config.use_arena`.
+    arena: Option<BumpArena>,
 }
 
 impl CacheTier {
@@ -204,6 +441,16 @@ impl CacheTier {
         if let Some(ref path) = config.disk_path {
             let _ = std::fs::create_dir_all(path);
         }
+        let p2_estimator = if config.adaptive_promotion {
+            Some(P2QuantileEstimator::new(0.75))
+        } else {
+            None
+        };
+        let arena = if config.use_arena {
+            Some(BumpArena::new(config.capacity_bytes))
+        } else {
+            None
+        };
         Self {
             config,
             data: HashMap::new(),
@@ -214,6 +461,8 @@ impl CacheTier {
             compressions: 0,
             tick: 1,
             rng_state: 0xDEAD_BEEF,
+            p2_estimator,
+            arena,
         }
     }
 
@@ -280,6 +529,14 @@ impl CacheTier {
         }
     }
 
+    /// Byte length of a `TierEntry` without cloning.
+    fn entry_len(&self, entry: &TierEntry) -> usize {
+        match entry {
+            TierEntry::Owned(v) => v.len(),
+            TierEntry::Arena(_, len) => *len,
+        }
+    }
+
     fn get(&mut self, key: &str) -> Option<Vec<u8>> {
         let tick = self.tick;
         self.tick += 1;
@@ -291,6 +548,11 @@ impl CacheTier {
                 entry.1 = tick;
                 entry.2 += 1;
                 self.hits += 1;
+                // Feed frequency into P² estimator (if adaptive).
+                let freq = entry.2;
+                if let Some(ref mut est) = self.p2_estimator {
+                    est.update(freq as f64);
+                }
                 // Read canonical bytes from disk.
                 return self.read_from_disk(key).map(|stored| self.decode(&stored));
             }
@@ -301,7 +563,22 @@ impl CacheTier {
             entry.1 = tick; // update last_access
             entry.2 += 1; // increment frequency
             self.hits += 1;
-            let raw = entry.0.clone();
+            // Feed frequency into P² estimator (if adaptive).
+            let freq = entry.2;
+            if let Some(ref mut est) = self.p2_estimator {
+                est.update(freq as f64);
+            }
+            // Clone the stored bytes before immutably borrowing again.
+            let raw: Vec<u8> = match &entry.0 {
+                TierEntry::Owned(v) => v.clone(),
+                TierEntry::Arena(offset, len) => {
+                    if let Some(arena) = &self.arena {
+                        arena.get(*offset, *len).to_vec()
+                    } else {
+                        vec![]
+                    }
+                }
+            };
             let decoded = self.decode(&raw);
             Some(decoded)
         } else {
@@ -336,9 +613,22 @@ impl CacheTier {
         // small sentinel (empty vec) in the in-memory map as an index entry.
         if self.config.disk_path.is_some() {
             self.flush_to_disk(&key, &encoded);
-            self.data.insert(key, (Vec::new(), tick, 1));
+            self.data
+                .insert(key, (TierEntry::Owned(Vec::new()), tick, 1));
+        } else if self.config.use_arena {
+            // Arena path: append to bump arena.
+            let (offset, len) = if let Some(ref mut arena) = self.arena {
+                arena.alloc(&encoded)
+            } else {
+                // Shouldn't happen; fall back to owned.
+                let v = encoded;
+                self.data.insert(key, (TierEntry::Owned(v), tick, 1));
+                return;
+            };
+            self.data
+                .insert(key, (TierEntry::Arena(offset, len), tick, 1));
         } else {
-            self.data.insert(key, (encoded, tick, 1));
+            self.data.insert(key, (TierEntry::Owned(encoded), tick, 1));
         }
     }
 
@@ -347,16 +637,22 @@ impl CacheTier {
         self.data.get(key).map(|(_, _, f)| *f).unwrap_or(0)
     }
 
+    /// Return the effective promotion threshold, using the P² estimate when
+    /// available and the warmup guard has passed.
+    fn effective_promotion_threshold(&self) -> u64 {
+        if let Some(ref est) = self.p2_estimator {
+            if let Some(q75) = est.estimate() {
+                // Round up to nearest u64; at least 1.
+                return (q75.ceil() as u64).max(1);
+            }
+        }
+        self.config.promotion_threshold
+    }
+
     /// Remove `key` from this tier.  Returns `true` if it was present.
     fn remove(&mut self, key: &str) -> bool {
-        if let Some((data, _, _)) = self.data.remove(key) {
-            let stored_len = if self.config.disk_path.is_some() {
-                // Size was stored as 0 sentinel; recalculate from disk file
-                // length or just use 0 (size_used may drift slightly, ok).
-                data.len()
-            } else {
-                data.len()
-            };
+        if let Some((entry, _, _)) = self.data.remove(key) {
+            let stored_len = self.entry_len(&entry);
             self.size_used = self.size_used.saturating_sub(stored_len);
             self.fifo_order.retain(|k| k != key);
             if self.config.disk_path.is_some() {
@@ -381,21 +677,33 @@ impl CacheTier {
             EvictionPolicy::TinyLfu => self.pick_tiny_lfu(),
         }?;
 
-        let (stored, _, _) = self.data.remove(&victim_key)?;
+        let (entry, _, _) = self.data.remove(&victim_key)?;
+        let is_disk_sentinel = self.config.disk_path.is_some()
+            && matches!(&entry, TierEntry::Owned(v) if v.is_empty());
+        let stored_bytes: Vec<u8> = match &entry {
+            TierEntry::Owned(v) => v.clone(),
+            TierEntry::Arena(offset, len) => {
+                if let Some(arena) = &self.arena {
+                    arena.get(*offset, *len).to_vec()
+                } else {
+                    vec![]
+                }
+            }
+        };
         let data = if self.config.disk_path.is_some() {
             // Return decoded bytes from disk for possible demotion to lower tier.
             let from_disk = self.read_from_disk(&victim_key).unwrap_or_default();
             self.remove_from_disk(&victim_key);
             self.decode(&from_disk)
         } else {
-            self.decode(&stored)
+            self.decode(&stored_bytes)
         };
-        let size_removed = if stored.is_empty() && self.config.disk_path.is_some() {
+        let size_removed = if is_disk_sentinel {
             // For disk tiers the in-memory sentinel is empty; use data.len as
             // approximate (compression may differ, but this avoids drift).
             data.len()
         } else {
-            stored.len()
+            stored_bytes.len()
         };
         self.size_used = self.size_used.saturating_sub(size_removed);
         self.fifo_order.retain(|k| *k != victim_key);
@@ -460,8 +768,9 @@ impl Drop for CacheTier {
         // stale data. In production you would persist; here we clean up the
         // test directory.  Only do this when the base path still exists.
         if let Some(ref base) = self.config.disk_path {
-            for key in self.data.keys() {
-                if let Some(path) = self.disk_path_for(key) {
+            let keys: Vec<String> = self.data.keys().cloned().collect();
+            for key in keys {
+                if let Some(path) = self.disk_path_for(&key) {
                     let _ = std::fs::remove_file(path);
                 }
             }
@@ -503,7 +812,8 @@ impl TieredCache {
     /// Look up `key` across all tiers in order.
     ///
     /// On a hit in tier *i* > 0, the entry is promoted to tier *i-1* if the
-    /// key's frequency in that tier is ≥ `promotion_threshold`.
+    /// key's frequency in that tier meets or exceeds the effective promotion
+    /// threshold (static or P²-adaptive depending on configuration).
     pub fn get(&mut self, key: &str) -> Option<Vec<u8>> {
         for tier_idx in 0..self.tiers.len() {
             if let Some(data) = self.tiers[tier_idx].get(key) {
@@ -512,7 +822,7 @@ impl TieredCache {
                 // Adaptive promotion: only promote if frequency threshold met.
                 if tier_idx > 0 {
                     let freq = self.tiers[tier_idx].frequency(key);
-                    let threshold = self.tiers[tier_idx].config.promotion_threshold;
+                    let threshold = self.tiers[tier_idx].effective_promotion_threshold();
                     if freq >= threshold {
                         self.tiers[tier_idx].promotions += 1;
                         let key_owned = key.to_string();
@@ -586,7 +896,7 @@ impl TieredCache {
                 self.tiers[0].fifo_order.push_back(key.clone());
                 self.tiers[0]
                     .data
-                    .insert(key.clone(), (data.clone(), tick, 1));
+                    .insert(key.clone(), (TierEntry::Owned(data.clone()), tick, 1));
             }
         }
     }
@@ -607,6 +917,28 @@ impl TieredCache {
     pub fn tier_count(&self) -> usize {
         self.tiers.len()
     }
+
+    /// Return the number of promotions from tier `tier_idx` to the tier above.
+    pub fn tier_promotions(&self, tier_idx: usize) -> u64 {
+        self.tiers.get(tier_idx).map(|t| t.promotions).unwrap_or(0)
+    }
+
+    /// Return the number of hits recorded for tier `tier_idx`.
+    pub fn tier_hit_count(&self, tier_idx: usize) -> u64 {
+        self.tier_hits.get(tier_idx).copied().unwrap_or(0)
+    }
+
+    /// Reset the bump arena of tier `tier_idx` (reclaims all arena memory).
+    ///
+    /// After a reset, all previously stored arena handles for that tier are
+    /// invalid; this is intended for use after a bulk eviction sweep.
+    pub fn reset_tier_arena(&mut self, tier_idx: usize) {
+        if let Some(tier) = self.tiers.get_mut(tier_idx) {
+            if let Some(ref mut arena) = tier.arena {
+                arena.reset();
+            }
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -620,20 +952,14 @@ mod tests {
             TierConfig {
                 name: "L1".into(),
                 capacity_bytes: l1_bytes,
-                access_latency_us: 1,
                 eviction_policy: EvictionPolicy::Lru,
-                disk_path: None,
-                promotion_threshold: 0,
-                compress: false,
+                ..TierConfig::memory("L1", l1_bytes)
             },
             TierConfig {
                 name: "L2".into(),
                 capacity_bytes: l2_bytes,
-                access_latency_us: 10,
                 eviction_policy: EvictionPolicy::Lfu,
-                disk_path: None,
-                promotion_threshold: 0,
-                compress: false,
+                ..TierConfig::memory("L2", l2_bytes)
             },
         ])
     }
@@ -720,13 +1046,8 @@ mod tests {
     #[test]
     fn test_fifo_eviction() {
         let mut cache = TieredCache::new(vec![TierConfig {
-            name: "fifo".into(),
-            capacity_bytes: 3,
-            access_latency_us: 0,
             eviction_policy: EvictionPolicy::Fifo,
-            disk_path: None,
-            promotion_threshold: 0,
-            compress: false,
+            ..TierConfig::memory("fifo", 3)
         }]);
         cache.put("first", b"1".to_vec());
         cache.put("second", b"2".to_vec());
@@ -739,13 +1060,8 @@ mod tests {
     #[test]
     fn test_random_eviction_no_panic() {
         let mut cache = TieredCache::new(vec![TierConfig {
-            name: "rand".into(),
-            capacity_bytes: 5,
-            access_latency_us: 0,
             eviction_policy: EvictionPolicy::Random,
-            disk_path: None,
-            promotion_threshold: 0,
-            compress: false,
+            ..TierConfig::memory("rand", 5)
         }]);
         for i in 0..20u8 {
             cache.put(&i.to_string(), vec![i]);
@@ -757,13 +1073,8 @@ mod tests {
     #[test]
     fn test_tiny_lfu_eviction_no_panic() {
         let mut cache = TieredCache::new(vec![TierConfig {
-            name: "tiny".into(),
-            capacity_bytes: 5,
-            access_latency_us: 0,
             eviction_policy: EvictionPolicy::TinyLfu,
-            disk_path: None,
-            promotion_threshold: 0,
-            compress: false,
+            ..TierConfig::memory("tiny", 5)
         }]);
         for i in 0..20u8 {
             cache.put(&i.to_string(), vec![i]);
@@ -813,13 +1124,8 @@ mod tests {
     #[test]
     fn test_compression_roundtrip() {
         let mut cache = TieredCache::new(vec![TierConfig {
-            name: "compressed".into(),
-            capacity_bytes: 1024 * 1024,
-            access_latency_us: 10,
-            eviction_policy: EvictionPolicy::Lru,
-            disk_path: None,
-            promotion_threshold: 0,
             compress: true,
+            ..TierConfig::memory("compressed", 1024 * 1024)
         }]);
         // Highly compressible data: run of the same byte.
         let data = vec![0xABu8; 512];
@@ -835,13 +1141,8 @@ mod tests {
     #[test]
     fn test_compression_stats() {
         let mut cache = TieredCache::new(vec![TierConfig {
-            name: "c".into(),
-            capacity_bytes: 1024 * 1024,
-            access_latency_us: 0,
-            eviction_policy: EvictionPolicy::Lru,
-            disk_path: None,
-            promotion_threshold: 0,
             compress: true,
+            ..TierConfig::memory("c", 1024 * 1024)
         }]);
         cache.put("a", vec![1u8; 64]);
         cache.put("b", vec![2u8; 64]);
@@ -858,23 +1159,10 @@ mod tests {
         // L1: tiny (only fits 10 bytes), threshold 0.
         // L2: larger, threshold 3 (must access 3 times before promotion).
         let mut cache = TieredCache::new(vec![
+            TierConfig::memory("L1", 10),
             TierConfig {
-                name: "L1".into(),
-                capacity_bytes: 10,
-                access_latency_us: 1,
-                eviction_policy: EvictionPolicy::Lru,
-                disk_path: None,
-                promotion_threshold: 0,
-                compress: false,
-            },
-            TierConfig {
-                name: "L2".into(),
-                capacity_bytes: 1024,
-                access_latency_us: 10,
-                eviction_policy: EvictionPolicy::Lru,
-                disk_path: None,
                 promotion_threshold: 3,
-                compress: false,
+                ..TierConfig::memory("L2", 1024)
             },
         ]);
 

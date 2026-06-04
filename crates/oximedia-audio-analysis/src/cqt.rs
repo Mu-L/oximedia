@@ -28,9 +28,9 @@ pub struct CqtConfig {
 impl Default for CqtConfig {
     fn default() -> Self {
         Self {
-            f_min: 32.703,  // C1
+            f_min: 32.703,       // C1
             bins_per_octave: 36, // 3 bins per semitone
-            n_bins: 252,    // 7 octaves * 36 bins
+            n_bins: 252,         // 7 octaves * 36 bins
             quality_factor: 1.0,
             hop_size: 512,
         }
@@ -109,10 +109,7 @@ impl CqtAnalyzer {
     /// Complex CQT coefficients for each frequency bin.
     pub fn compute(&self, samples: &[f32]) -> Result<Vec<Complex<f64>>> {
         if samples.is_empty() {
-            return Err(AnalysisError::InsufficientSamples {
-                needed: 1,
-                got: 0,
-            });
+            return Err(AnalysisError::InsufficientSamples { needed: 1, got: 0 });
         }
 
         let mut cqt = Vec::with_capacity(self.config.n_bins);
@@ -250,7 +247,7 @@ mod tests {
     fn test_cqt_magnitude_sine_wave() {
         let config = CqtConfig {
             bins_per_octave: 12,
-            n_bins: 48, // 4 octaves
+            n_bins: 48,     // 4 octaves
             f_min: 130.813, // C3
             ..Default::default()
         };
@@ -281,7 +278,10 @@ mod tests {
         // Should be roughly uniform since input is uniform
         let max = chroma.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let min = chroma.iter().cloned().fold(f64::INFINITY, f64::min);
-        assert!((max - min).abs() < 0.5, "Uniform input should produce near-uniform chroma");
+        assert!(
+            (max - min).abs() < 0.5,
+            "Uniform input should produce near-uniform chroma"
+        );
     }
 
     #[test]

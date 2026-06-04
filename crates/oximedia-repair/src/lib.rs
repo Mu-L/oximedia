@@ -95,6 +95,7 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod audio_gap;
 pub mod audio_repair;
 pub mod audio_restore;
 pub mod bitstream_repair;
@@ -105,15 +106,19 @@ pub mod conceal;
 pub mod container_migrate;
 pub mod container_repair;
 pub mod conversion;
+pub mod corruption_heatmap;
 pub mod corruption_map;
 pub mod corruption_simulator;
 pub mod detect;
+pub mod diagnostic;
 pub mod dropout_concealment;
 pub mod error_correction;
 pub mod frame_concealment;
 pub mod frame_repair;
+pub mod frame_sub;
 pub mod gap_fill;
 pub mod header;
+pub mod header_recovery;
 pub mod index;
 pub mod integrity;
 pub mod level_repair;
@@ -124,11 +129,15 @@ pub mod packet_recovery;
 pub mod packet_repair;
 pub mod parallel_repair;
 pub mod partial;
+pub mod progressive_repair;
+pub mod recovery_plan;
 pub mod reorder;
+pub mod repair_diff;
 pub mod repair_log;
 pub mod repair_profile;
 pub mod report;
 pub mod scratch;
+pub mod segment_salvage;
 pub mod stream_recovery;
 pub mod stream_splice;
 pub mod sync;

@@ -152,7 +152,10 @@ impl RawFrame {
                 let y_plane = vec![0u8; y_stride * h];
                 let u_plane = vec![0u8; uv_stride * uv_height];
                 let v_plane = vec![0u8; uv_stride * uv_height];
-                (vec![y_plane, u_plane, v_plane], vec![y_stride, uv_stride, uv_stride])
+                (
+                    vec![y_plane, u_plane, v_plane],
+                    vec![y_stride, uv_stride, uv_stride],
+                )
             }
             ConvertPixelFormat::Yuv422p => {
                 let y_stride = w;
@@ -160,12 +163,18 @@ impl RawFrame {
                 let y_plane = vec![0u8; y_stride * h];
                 let u_plane = vec![0u8; uv_stride * h];
                 let v_plane = vec![0u8; uv_stride * h];
-                (vec![y_plane, u_plane, v_plane], vec![y_stride, uv_stride, uv_stride])
+                (
+                    vec![y_plane, u_plane, v_plane],
+                    vec![y_stride, uv_stride, uv_stride],
+                )
             }
             ConvertPixelFormat::Yuv444p => {
                 let stride = w;
                 let plane = vec![0u8; stride * h];
-                (vec![plane.clone(), plane.clone(), plane], vec![stride, stride, stride])
+                (
+                    vec![plane.clone(), plane.clone(), plane],
+                    vec![stride, stride, stride],
+                )
             }
             ConvertPixelFormat::Rgb24 | ConvertPixelFormat::Bgr24 => {
                 let stride = w * 3;
@@ -259,7 +268,9 @@ impl FrameConverter {
     /// Convert a single frame according to the active configuration.
     pub fn convert(&mut self, input: &RawFrame) -> Result<RawFrame, FrameConvertError> {
         if !input.is_valid() {
-            return Err(FrameConvertError::InvalidInput("frame has zero dimensions".into()));
+            return Err(FrameConvertError::InvalidInput(
+                "frame has zero dimensions".into(),
+            ));
         }
         if input.format != self.config.src_format {
             return Err(FrameConvertError::FormatMismatch {
@@ -387,9 +398,7 @@ impl FrameConverter {
                 let src = &input.planes[0];
                 let dst = &mut output.planes[0];
                 for (rgb, g) in src.chunks_exact(3).zip(dst.iter_mut()) {
-                    *g = (0.299 * rgb[0] as f32
-                        + 0.587 * rgb[1] as f32
-                        + 0.114 * rgb[2] as f32)
+                    *g = (0.299 * rgb[0] as f32 + 0.587 * rgb[1] as f32 + 0.114 * rgb[2] as f32)
                         .clamp(0.0, 255.0) as u8;
                 }
             }
@@ -400,9 +409,7 @@ impl FrameConverter {
                 let dst = &mut output.planes[0];
                 for (bgr, g) in src.chunks_exact(3).zip(dst.iter_mut()) {
                     // B = bgr[0], G = bgr[1], R = bgr[2]
-                    *g = (0.114 * bgr[0] as f32
-                        + 0.587 * bgr[1] as f32
-                        + 0.299 * bgr[2] as f32)
+                    *g = (0.114 * bgr[0] as f32 + 0.587 * bgr[1] as f32 + 0.299 * bgr[2] as f32)
                         .clamp(0.0, 255.0) as u8;
                 }
             }
@@ -648,7 +655,11 @@ mod tests {
     fn test_conversion_registry() {
         let mut reg = ConversionRegistry::new();
         assert_eq!(reg.count(), 0);
-        reg.register(ConvertPixelFormat::Yuv420p, ConvertPixelFormat::Rgb24, "yuv420_to_rgb");
+        reg.register(
+            ConvertPixelFormat::Yuv420p,
+            ConvertPixelFormat::Rgb24,
+            "yuv420_to_rgb",
+        );
         assert!(reg.is_supported(ConvertPixelFormat::Yuv420p, ConvertPixelFormat::Rgb24));
         assert!(!reg.is_supported(ConvertPixelFormat::Rgb24, ConvertPixelFormat::Yuv420p));
         assert_eq!(reg.count(), 1);

@@ -68,9 +68,7 @@ pub struct BroadcastReport {
 impl BroadcastReport {
     /// Return `true` if no *error*-severity violations are present.
     pub fn is_compliant(&self) -> bool {
-        self.violations
-            .iter()
-            .all(|v| v.severity < Severity::Error)
+        self.violations.iter().all(|v| v.severity < Severity::Error)
     }
 
     /// Return the number of error-severity violations.
@@ -132,7 +130,7 @@ impl Default for PlugeLevels {
     fn default() -> Self {
         Self {
             black_min: 0.0,
-            black_max: 0.02,  // 2 % of full scale
+            black_max: 0.02, // 2 % of full scale
             super_black_max: -0.07,
         }
     }
@@ -381,7 +379,10 @@ mod tests {
         p.peak_signal = 1.05;
         let report = HlgBroadcastValidator::validate(&p);
         assert!(!report.is_compliant());
-        assert!(report.violations.iter().any(|v| v.constraint == "PEAK_SIGNAL_RANGE"));
+        assert!(report
+            .violations
+            .iter()
+            .any(|v| v.constraint == "PEAK_SIGNAL_RANGE"));
     }
 
     #[test]
@@ -390,7 +391,10 @@ mod tests {
         p.peak_signal = 0.95; // above 0.92 headroom limit
         let report = HlgBroadcastValidator::validate(&p);
         assert!(report.is_compliant()); // only a warning
-        assert!(report.violations.iter().any(|v| v.constraint == "PEAK_SIGNAL_HEADROOM"));
+        assert!(report
+            .violations
+            .iter()
+            .any(|v| v.constraint == "PEAK_SIGNAL_HEADROOM"));
         assert_eq!(report.warning_count(), 1);
     }
 
@@ -418,7 +422,10 @@ mod tests {
         p.system_gamma = 1.6;
         let report = HlgBroadcastValidator::validate(&p);
         assert!(!report.is_compliant());
-        assert!(report.violations.iter().any(|v| v.constraint == "SYSTEM_GAMMA_RANGE"));
+        assert!(report
+            .violations
+            .iter()
+            .any(|v| v.constraint == "SYSTEM_GAMMA_RANGE"));
     }
 
     #[test]
@@ -435,7 +442,10 @@ mod tests {
         p.system_gamma = 1.3; // within [1.0, 1.4] but >0.05 from 1.2
         let report = HlgBroadcastValidator::validate(&p);
         assert!(report.is_compliant());
-        assert!(report.violations.iter().any(|v| v.constraint == "SYSTEM_GAMMA_NOMINAL"));
+        assert!(report
+            .violations
+            .iter()
+            .any(|v| v.constraint == "SYSTEM_GAMMA_NOMINAL"));
     }
 
     #[test]
@@ -444,7 +454,10 @@ mod tests {
         p.nominal_peak_nits = 200.0;
         let report = HlgBroadcastValidator::validate(&p);
         assert!(report.is_compliant());
-        assert!(report.violations.iter().any(|v| v.constraint == "NOMINAL_NITS_BROADCAST_RANGE"));
+        assert!(report
+            .violations
+            .iter()
+            .any(|v| v.constraint == "NOMINAL_NITS_BROADCAST_RANGE"));
     }
 
     #[test]
@@ -512,7 +525,10 @@ mod tests {
         let mut p = nominal_params();
         p.black_signal = 0.05; // above 0.02 PLUGE limit
         let report = HlgBroadcastValidator::validate(&p);
-        assert!(report.violations.iter().any(|v| v.constraint == "PLUGE_BLACK_PEDESTAL"));
+        assert!(report
+            .violations
+            .iter()
+            .any(|v| v.constraint == "PLUGE_BLACK_PEDESTAL"));
     }
 
     #[test]
@@ -521,6 +537,9 @@ mod tests {
         p.nominal_peak_nits = 0.0;
         let report = HlgBroadcastValidator::validate(&p);
         assert!(!report.is_compliant());
-        assert!(report.violations.iter().any(|v| v.constraint == "NOMINAL_NITS_ZERO"));
+        assert!(report
+            .violations
+            .iter()
+            .any(|v| v.constraint == "NOMINAL_NITS_ZERO"));
     }
 }

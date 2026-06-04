@@ -60,9 +60,7 @@ pub enum EvictionStrategy {
 /// `Option<K>` — the key that should be removed.
 ///
 /// Returns `None` when the entry list is empty.
-pub fn create_eviction_fn<K>(
-    policy: EvictionStrategy,
-) -> Box<dyn Fn(&Vec<(K, u64)>) -> Option<K>>
+pub fn create_eviction_fn<K>(policy: EvictionStrategy) -> Box<dyn Fn(&Vec<(K, u64)>) -> Option<K>>
 where
     K: Clone + Eq + 'static,
 {
@@ -73,9 +71,9 @@ where
                 .min_by_key(|(_, ts)| *ts)
                 .map(|(k, _)| k.clone())
         }),
-        EvictionStrategy::Fifo => Box::new(|entries: &Vec<(K, u64)>| {
-            entries.first().map(|(k, _)| k.clone())
-        }),
+        EvictionStrategy::Fifo => {
+            Box::new(|entries: &Vec<(K, u64)>| entries.first().map(|(k, _)| k.clone()))
+        }
     }
 }
 

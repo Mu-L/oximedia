@@ -355,7 +355,12 @@ impl MixScene {
         const EPS: f32 = 1e-6;
         let mut channels = Vec::new();
         // Union of channel indices.
-        let mut all_channels: Vec<u32> = self.channels.keys().chain(other.channels.keys()).copied().collect();
+        let mut all_channels: Vec<u32> = self
+            .channels
+            .keys()
+            .chain(other.channels.keys())
+            .copied()
+            .collect();
         all_channels.sort_unstable();
         all_channels.dedup();
 
@@ -385,7 +390,12 @@ impl MixScene {
         }
 
         let mut buses = Vec::new();
-        let mut all_buses: Vec<u32> = self.buses.keys().chain(other.buses.keys()).copied().collect();
+        let mut all_buses: Vec<u32> = self
+            .buses
+            .keys()
+            .chain(other.buses.keys())
+            .copied()
+            .collect();
         all_buses.sort_unstable();
         all_buses.dedup();
         for b in all_buses {
@@ -481,8 +491,7 @@ impl SceneTransition {
     ///
     /// Returns the interpolated [`MixScene`] at the new position.
     pub fn advance(&mut self, samples: u64) -> MixScene {
-        self.elapsed_samples =
-            (self.elapsed_samples + samples).min(self.total_samples);
+        self.elapsed_samples = (self.elapsed_samples + samples).min(self.total_samples);
         let t = self.elapsed_samples as f32 / self.total_samples as f32;
         self.source.lerp(&self.target, t)
     }
@@ -702,11 +711,7 @@ mod tests {
         scene.set_channel_fader(0, 0.7).unwrap();
         let id = lib.store(scene);
         let retrieved = lib.get(id).unwrap();
-        assert!(approx_eq(
-            retrieved.channels[&0].fader,
-            0.7,
-            1e-5
-        ));
+        assert!(approx_eq(retrieved.channels[&0].fader, 0.7, 1e-5));
     }
 
     #[test]
@@ -735,7 +740,7 @@ mod tests {
 
     #[test]
     fn test_transition_completes() {
-        let lib = SceneLibrary::new();
+        let _lib = SceneLibrary::new();
         let source = MixScene::new("Source");
         let mut target = MixScene::new("Target");
         target.master_fader = 0.5;

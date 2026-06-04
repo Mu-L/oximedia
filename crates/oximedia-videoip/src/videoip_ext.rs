@@ -174,7 +174,10 @@ impl FramePacer {
         } else {
             0.0
         };
-        Self { target_fps, frame_interval_ms }
+        Self {
+            target_fps,
+            frame_interval_ms,
+        }
     }
 
     /// Return the number of milliseconds to wait before sending the next frame.
@@ -265,7 +268,11 @@ impl SdpGenerator {
             // We need to access width — reconstruct from is_hd check
             // The StreamDescriptor doesn't expose width directly, so use metadata or rate
             // Use a reasonable default based on whether it's HD
-            if stream.is_hd() { 1920u32 } else { 720u32 }
+            if stream.is_hd() {
+                1920u32
+            } else {
+                720u32
+            }
         } else {
             0
         };
@@ -280,12 +287,8 @@ impl SdpGenerator {
         sdp.push_str("t=0 0\r\n");
         sdp.push_str(&format!("m=video 5004 RTP/AVP {pt}\r\n"));
         sdp.push_str("c=IN IP4 0.0.0.0\r\n");
-        sdp.push_str(&format!(
-            "a=rtpmap:{pt} {codec}/{rate}\r\n",
-        ));
-        sdp.push_str(&format!(
-            "a=fmtp:{pt} width={width};height={width}\r\n"
-        ));
+        sdp.push_str(&format!("a=rtpmap:{pt} {codec}/{rate}\r\n"));
+        sdp.push_str(&format!("a=fmtp:{pt} width={width};height={width}\r\n"));
         sdp
     }
 }
@@ -463,7 +466,10 @@ impl StreamBonding {
     /// return 0).
     #[must_use]
     pub fn new(streams: Vec<u32>) -> Self {
-        Self { streams, next_index: 0 }
+        Self {
+            streams,
+            next_index: 0,
+        }
     }
 
     /// Select the next stream ID for packet `seq` using round-robin.
@@ -711,7 +717,14 @@ mod tests {
 
     #[test]
     fn test_sdp_contains_required_fields() {
-        let stream = StreamDescriptor::new("stream-1", StreamType::CompressedVideo, 1920, 1080, 30.0, "av1");
+        let stream = StreamDescriptor::new(
+            "stream-1",
+            StreamType::CompressedVideo,
+            1920,
+            1080,
+            30.0,
+            "av1",
+        );
         let sdp = SdpGenerator::generate(&stream);
         assert!(sdp.contains("v=0"), "missing v=0 in SDP:\n{sdp}");
         assert!(sdp.contains("o="), "missing o= in SDP:\n{sdp}");
@@ -723,7 +736,8 @@ mod tests {
 
     #[test]
     fn test_sdp_contains_codec_name() {
-        let stream = StreamDescriptor::new("s2", StreamType::CompressedVideo, 1920, 1080, 60.0, "vp9");
+        let stream =
+            StreamDescriptor::new("s2", StreamType::CompressedVideo, 1920, 1080, 60.0, "vp9");
         let sdp = SdpGenerator::generate(&stream);
         assert!(sdp.contains("vp9"), "SDP should contain codec name: {sdp}");
     }
@@ -740,7 +754,11 @@ mod tests {
             .map(|i| ((i as f64 * frame_ms).round() as u64, 1000))
             .collect();
         let violations = Smpte2110Validator::check_packet_timing(&packets, fps);
-        assert!(violations.is_empty(), "unexpected violations: {:?}", violations);
+        assert!(
+            violations.is_empty(),
+            "unexpected violations: {:?}",
+            violations
+        );
     }
 
     #[test]
@@ -750,7 +768,9 @@ mod tests {
         packets[2].0 += 50;
         let violations = Smpte2110Validator::check_packet_timing(&packets, 30.0);
         assert!(!violations.is_empty());
-        assert!(violations.iter().any(|v| v.packet_index == 2 && v.violation == ViolationType::TooLate));
+        assert!(violations
+            .iter()
+            .any(|v| v.packet_index == 2 && v.violation == ViolationType::TooLate));
     }
 
     #[test]
@@ -759,7 +779,9 @@ mod tests {
         // Move packet 3 back by 10ms (too early)
         packets[3].0 = packets[3].0.saturating_sub(10);
         let violations = Smpte2110Validator::check_packet_timing(&packets, 30.0);
-        assert!(violations.iter().any(|v| v.packet_index == 3 && v.violation == ViolationType::TooEarly));
+        assert!(violations
+            .iter()
+            .any(|v| v.packet_index == 3 && v.violation == ViolationType::TooEarly));
     }
 
     #[test]
@@ -823,7 +845,7 @@ mod tests {
         let uyvy = vec![128u8, 128, 128, 128]; // 2 pixels, 1×2 frame
         let rgba = ColorSpaceConverter::uyvy_to_rgba(&uyvy, 2, 1);
         assert_eq!(rgba.len(), 8); // 2 pixels × 4 channels
-        // R, G, B for neutral gray should all be near 128
+                                   // R, G, B for neutral gray should all be near 128
         assert!((rgba[0] as i32 - 128).abs() <= 2, "R={}", rgba[0]);
         assert!((rgba[1] as i32 - 128).abs() <= 2, "G={}", rgba[1]);
         assert!((rgba[2] as i32 - 128).abs() <= 2, "B={}", rgba[2]);

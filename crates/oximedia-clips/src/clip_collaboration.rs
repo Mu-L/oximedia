@@ -213,11 +213,8 @@ impl SharedAnnotationBoard {
     ///
     /// Returns `Ok(applied_op)` if the op was applied cleanly, or
     /// `Ok(rebased_op)` if the op was rebased after a conflict.
-    pub fn submit(
-        &mut self,
-        mut op: AnnotationOp,
-    ) -> AnnotationOp {
-        let key = (*&op.clip_id, Self::field_key(&op.field));
+    pub fn submit(&mut self, mut op: AnnotationOp) -> AnnotationOp {
+        let key = (op.clip_id, Self::field_key(&op.field));
         let field_state = self.fields.entry(key.clone()).or_default();
 
         // Assign unique ID.
@@ -243,12 +240,11 @@ impl SharedAnnotationBoard {
 
         if let Some(winner_op) = winner {
             // Determine winner/loser by user ID (lexicographic).
-            let (winner_final, mut loser_final) =
-                if winner_op.user_id >= op.user_id {
-                    (winner_op.clone(), op.clone())
-                } else {
-                    (op.clone(), winner_op.clone())
-                };
+            let (winner_final, mut loser_final) = if winner_op.user_id >= op.user_id {
+                (winner_op.clone(), op.clone())
+            } else {
+                (op.clone(), winner_op.clone())
+            };
 
             // Rebase the loser: adjust its op position based on winner's edit.
             let rebased_text_op = rebase_op(&loser_final.op, &winner_final.op);
@@ -311,11 +307,7 @@ impl SharedAnnotationBoard {
 fn rebase_op(loser: &TextOp, winner: &TextOp) -> TextOp {
     match (loser, winner) {
         (TextOp::Insert { pos: lp, text: lt }, TextOp::Insert { pos: wp, text: wt }) => {
-            let new_pos = if *wp <= *lp {
-                lp + wt.len()
-            } else {
-                *lp
-            };
+            let new_pos = if *wp <= *lp { lp + wt.len() } else { *lp };
             TextOp::Insert {
                 pos: new_pos,
                 text: lt.clone(),
@@ -333,11 +325,7 @@ fn rebase_op(loser: &TextOp, winner: &TextOp) -> TextOp {
             }
         }
         (TextOp::Delete { pos: lp, len: ll }, TextOp::Insert { pos: wp, text: wt }) => {
-            let new_pos = if *wp <= *lp {
-                lp + wt.len()
-            } else {
-                *lp
-            };
+            let new_pos = if *wp <= *lp { lp + wt.len() } else { *lp };
             TextOp::Delete {
                 pos: new_pos,
                 len: *ll,
@@ -365,7 +353,7 @@ fn rebase_op(loser: &TextOp, winner: &TextOp) -> TextOp {
 pub struct CollaborationSession {
     /// User owning this session.
     pub user_id: UserId,
-    /// The shared board (external reference).
+    // The shared board is accessed externally via SharedAnnotationBoard.
 }
 
 impl CollaborationSession {
@@ -413,9 +401,7 @@ impl CollaborationSession {
             user_id: self.user_id.clone(),
             clip_id,
             field,
-            op: TextOp::Replace {
-                text: text.into(),
-            },
+            op: TextOp::Replace { text: text.into() },
             base_revision,
             timestamp: Utc::now(),
         }

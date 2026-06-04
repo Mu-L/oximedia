@@ -377,7 +377,11 @@ mod tests {
         let mut s = LinearSmoother::new(0.0, 100);
         s.set_target(1.0);
         let block = s.next_block(100);
-        assert!((block[99] - 1.0).abs() < 1e-5, "last sample = {}", block[99]);
+        assert!(
+            (block[99] - 1.0).abs() < 1e-5,
+            "last sample = {}",
+            block[99]
+        );
         assert!(!s.is_ramping());
     }
 
@@ -388,12 +392,7 @@ mod tests {
         let block = s.next_block(50);
         // Each sample should be greater than the previous.
         for w in block.windows(2) {
-            assert!(
-                w[1] >= w[0],
-                "non-monotone: w[0]={} w[1]={}",
-                w[0],
-                w[1]
-            );
+            assert!(w[1] >= w[0], "non-monotone: w[0]={} w[1]={}", w[0], w[1]);
         }
     }
 

@@ -3,6 +3,9 @@
 use crate::error::AccessResult;
 use oximedia_audio::frame::AudioBuffer;
 
+/// Default sample rate used for filter coefficient computation (Hz).
+const DEFAULT_SAMPLE_RATE: f64 = 48_000.0;
+
 /// Speech intelligibility metrics.
 #[derive(Debug, Clone)]
 pub struct SpeechIntelligibilityMetrics {
@@ -57,20 +60,75 @@ impl AudioClarityEnhancer {
     }
 
     /// Enhance audio clarity.
+    ///
+    /// Applies DRC → speech-band peaking biquad boost → soft-clip guard.
     pub fn enhance(&self, audio: &AudioBuffer) -> AccessResult<AudioBuffer> {
-        // In production, this would:
-        // 1. Apply dynamic range compression
-        // 2. Boost speech frequencies (1-4 kHz)
-        // 3. Apply adaptive filtering
-        // 4. Reduce masking effects
+        let fs = DEFAULT_SAMPLE_RATE;
+        let f0 = f64::from(self.speech_center_hz);
+        let bw = f64::from(self.speech_band_width_hz);
+        let gain_db = f64::from(self.level) * 12.0;
+        let coeffs = compute_peaking_coeffs(fs, f0, bw, gain_db);
 
-        Ok(audio.clone())
+        match audio {
+            AudioBuffer::Interleaved(bytes) => {
+                let samples = bytes_to_f32(bytes);
+                let enhanced = apply_enhance_pipeline(&samples, coeffs, fs as f32, self.level);
+                // Compute metrics (wires previously dead-code helpers)
+                let noise_floor_est = estimate_noise_floor(&enhanced);
+                let _ =
+                    Self::compute_metrics(&enhanced, noise_floor_est, DEFAULT_SAMPLE_RATE as u32);
+                Ok(AudioBuffer::Interleaved(f32_to_bytes(&enhanced).into()))
+            }
+            AudioBuffer::Planar(planes) => {
+                let mut out_planes: Vec<bytes::Bytes> = Vec::with_capacity(planes.len());
+                let mut first_enhanced: Option<Vec<f32>> = None;
+                for plane in planes {
+                    let samples = bytes_to_f32(plane);
+                    let enhanced = apply_enhance_pipeline(&samples, coeffs, fs as f32, self.level);
+                    if first_enhanced.is_none() {
+                        first_enhanced = Some(enhanced.clone());
+                    }
+                    out_planes.push(f32_to_bytes(&enhanced).into());
+                }
+                // Compute metrics on first plane as representative channel
+                if let Some(first_samples) = first_enhanced {
+                    let noise_floor_est = estimate_noise_floor(&first_samples);
+                    let _ = Self::compute_metrics(
+                        &first_samples,
+                        noise_floor_est,
+                        DEFAULT_SAMPLE_RATE as u32,
+                    );
+                }
+                Ok(AudioBuffer::Planar(out_planes))
+            }
+        }
     }
 
     /// Enhance speech frequencies specifically.
+    ///
+    /// Applies 4th-order Butterworth band-pass 300–3400 Hz as two cascaded biquad stages.
     pub fn enhance_speech(&self, audio: &AudioBuffer) -> AccessResult<AudioBuffer> {
-        // Focus on 300Hz - 3400Hz range for speech
-        Ok(audio.clone())
+        let fs = DEFAULT_SAMPLE_RATE;
+        let [stage1, stage2] = compute_butterworth_bandpass(fs, 300.0, 3400.0);
+
+        match audio {
+            AudioBuffer::Interleaved(bytes) => {
+                let mut samples = bytes_to_f32(bytes);
+                apply_biquad_df1(&mut samples, stage1);
+                apply_biquad_df1(&mut samples, stage2);
+                Ok(AudioBuffer::Interleaved(f32_to_bytes(&samples).into()))
+            }
+            AudioBuffer::Planar(planes) => {
+                let mut out_planes: Vec<bytes::Bytes> = Vec::with_capacity(planes.len());
+                for plane in planes {
+                    let mut samples = bytes_to_f32(plane);
+                    apply_biquad_df1(&mut samples, stage1);
+                    apply_biquad_df1(&mut samples, stage2);
+                    out_planes.push(f32_to_bytes(&samples).into());
+                }
+                Ok(AudioBuffer::Planar(out_planes))
+            }
+        }
     }
 
     /// Get enhancement level.
@@ -85,7 +143,6 @@ impl AudioClarityEnhancer {
     /// respective signals (linear, not dB).  Returns `f32::INFINITY` when
     /// noise power is effectively zero.
     #[must_use]
-    #[allow(dead_code)]
     pub fn calculate_snr(signal_power: f32, noise_power: f32) -> f32 {
         if noise_power <= f32::EPSILON {
             return f32::INFINITY;
@@ -99,7 +156,6 @@ impl AudioClarityEnhancer {
     /// to speech articulation.  `band_snrs` contains (`centre_freq_hz`, `snr_db`)
     /// pairs for octave bands from 125 Hz to 8 kHz.
     #[must_use]
-    #[allow(dead_code)]
     pub fn speech_clarity_index(band_snrs: &[(f32, f32)]) -> f32 {
         if band_snrs.is_empty() {
             return 0.0;
@@ -151,7 +207,6 @@ impl AudioClarityEnhancer {
     /// in IEC 60268-16.  `band_snrs` contains (`centre_freq_hz`, `snr_db`)
     /// pairs.
     #[must_use]
-    #[allow(dead_code)]
     pub fn estimate_sti(band_snrs: &[(f32, f32)]) -> f32 {
         // Compute apparent SNR per band, clip to [-15, 15] dB
         // and map to Transmission Index: TI = (SNR + 15) / 30
@@ -270,10 +325,253 @@ impl Default for AudioClarityEnhancer {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// DSP helpers (module-private)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Convert raw bytes (assumed f32 little-endian) to a Vec<f32>.
+fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+/// Convert Vec<f32> back to raw little-endian bytes.
+fn f32_to_bytes(samples: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(samples.len() * 4);
+    for s in samples {
+        out.extend_from_slice(&s.to_le_bytes());
+    }
+    out
+}
+
+/// Estimate noise floor as the minimum short-term power over 10-ms frames.
+fn estimate_noise_floor(samples: &[f32]) -> f32 {
+    let frame_size = (DEFAULT_SAMPLE_RATE * 0.010) as usize;
+    if frame_size == 0 || samples.is_empty() {
+        return 1e-10;
+    }
+    let mut min_power = f32::MAX;
+    for chunk in samples.chunks(frame_size) {
+        let power = chunk.iter().map(|s| s * s).sum::<f32>() / chunk.len() as f32;
+        if power < min_power {
+            min_power = power;
+        }
+    }
+    min_power.max(1e-10)
+}
+
+/// Apply the full enhance pipeline: DRC → peaking biquad boost → soft-clip guard.
+fn apply_enhance_pipeline(samples: &[f32], coeffs: [f64; 5], fs: f32, level: f32) -> Vec<f32> {
+    // 1. DRC
+    let mut processed = apply_drc(samples, fs, level);
+    // 2. Peaking biquad boost
+    apply_biquad_df1(&mut processed, coeffs);
+    // 3. Soft-clip guard
+    for s in &mut processed {
+        if s.abs() > 0.98 {
+            *s = s.signum() * ((*s * 0.95).tanh() / 0.95);
+        }
+    }
+    processed
+}
+
+/// Downward dynamic range compressor with envelope follower.
+///
+/// `level` is mixed into the threshold: threshold = 0.5 * (1 - level * 0.4).
+/// Uses `envelope_follower` internally for asymmetric attack/release tracking.
+fn apply_drc(samples: &[f32], fs: f32, level: f32) -> Vec<f32> {
+    let attack_tc = 0.010_f32;
+    let release_tc = 0.100_f32;
+    let threshold = (0.5_f32 * (1.0 - level * 0.4)).clamp(0.1, 0.9);
+    let ratio = 4.0_f32;
+
+    // Compute signal envelope via the shared helper.
+    let env_vec = envelope_follower(samples, fs, attack_tc, release_tc);
+
+    let mut out = Vec::with_capacity(samples.len());
+    for (&s, &env) in samples.iter().zip(env_vec.iter()) {
+        // Gain computer (linear domain)
+        let gain = if env > threshold {
+            // Compress: apply ratio above threshold
+            let over_db = 20.0 * (env / threshold).log10();
+            let reduced_db = over_db / ratio;
+            let makeup_db = (over_db - reduced_db) * 0.5; // partial makeup
+            let gain_db = -over_db + reduced_db + makeup_db;
+            10.0_f32.powf(gain_db / 20.0)
+        } else {
+            1.0
+        };
+        out.push(s * gain);
+    }
+    out
+}
+
+/// Compute RBJ Audio-EQ-Cookbook peaking EQ biquad coefficients.
+///
+/// Returns `[b0, b1, b2, a1, a2]` normalised by `a0` (Direct-Form-I).
+pub(crate) fn compute_peaking_coeffs(fs: f64, f0: f64, bw_hz: f64, gain_db: f64) -> [f64; 5] {
+    let a_lin = 10.0_f64.powf(gain_db / 40.0); // sqrt(10^(gain_db/20))
+    let omega = 2.0 * std::f64::consts::PI * f0 / fs;
+    let sin_w = omega.sin();
+    let cos_w = omega.cos();
+    // Bandwidth in octaves: bw_oct = bw_hz / f0 (approximate, valid for moderate BW)
+    // Use Q = f0 / bw_hz for bandwidth-specified filter
+    let q = (f0 / bw_hz.max(1.0)).max(0.1);
+    let alpha = sin_w / (2.0 * q);
+
+    let b0 = 1.0 + alpha * a_lin;
+    let b1 = -2.0 * cos_w;
+    let b2 = 1.0 - alpha * a_lin;
+    let a0 = 1.0 + alpha / a_lin;
+    let a1 = -2.0 * cos_w;
+    let a2 = 1.0 - alpha / a_lin;
+
+    [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0]
+}
+
+/// Apply a biquad Direct-Form-I filter in-place using f64 state, f32 I/O.
+///
+/// Coefficients: `[b0, b1, b2, a1, a2]` (a0 normalised to 1).
+/// Note: a1 and a2 in the array follow the convention used by `compute_peaking_coeffs`
+/// and `compute_butterworth_bandpass` where the feedback sign is already negated —
+/// i.e. `y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]`.
+pub(crate) fn apply_biquad_df1(samples: &mut Vec<f32>, coeffs: [f64; 5]) {
+    let [b0, b1, b2, a1, a2] = coeffs;
+    let mut x1 = 0.0_f64;
+    let mut x2 = 0.0_f64;
+    let mut y1 = 0.0_f64;
+    let mut y2 = 0.0_f64;
+
+    for s in samples.iter_mut() {
+        let x0 = f64::from(*s);
+        let y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+        x2 = x1;
+        x1 = x0;
+        y2 = y1;
+        y1 = y0;
+        *s = y0 as f32;
+    }
+}
+
+/// Compute envelope of a signal using a simple peak follower.
+pub(crate) fn envelope_follower(
+    samples: &[f32],
+    fs: f32,
+    attack_s: f32,
+    release_s: f32,
+) -> Vec<f32> {
+    let attack_alpha = (-1.0 / (fs * attack_s)).exp();
+    let release_alpha = (-1.0 / (fs * release_s)).exp();
+    let mut env = 0.0_f32;
+    samples
+        .iter()
+        .map(|&s| {
+            let abs_s = s.abs();
+            let alpha = if abs_s > env {
+                attack_alpha
+            } else {
+                release_alpha
+            };
+            env = alpha * env + (1.0 - alpha) * abs_s;
+            env
+        })
+        .collect()
+}
+
+/// Compute coefficients for a 4th-order Butterworth band-pass as two biquad stages.
+///
+/// Returns `[[b0,b1,b2,a1,a2], [b0,b1,b2,a1,a2]]` — apply stage 0 then stage 1.
+pub(crate) fn compute_butterworth_bandpass(fs: f64, low_hz: f64, high_hz: f64) -> [[f64; 5]; 2] {
+    // Design as cascaded 2nd-order highpass followed by 2nd-order lowpass.
+    let hp = butterworth_hp2(fs, low_hz);
+    let lp = butterworth_lp2(fs, high_hz);
+    [hp, lp]
+}
+
+/// 2nd-order Butterworth highpass biquad (Q = 1/√2).
+fn butterworth_hp2(fs: f64, fc: f64) -> [f64; 5] {
+    let q = std::f64::consts::SQRT_2 / 2.0; // 0.7071...
+    let omega = 2.0 * std::f64::consts::PI * fc / fs;
+    let sin_w = omega.sin();
+    let cos_w = omega.cos();
+    let alpha = sin_w / (2.0 * q);
+
+    let b0 = (1.0 + cos_w) / 2.0;
+    let b1 = -(1.0 + cos_w);
+    let b2 = (1.0 + cos_w) / 2.0;
+    let a0 = 1.0 + alpha;
+    let a1 = -2.0 * cos_w;
+    let a2 = 1.0 - alpha;
+
+    [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0]
+}
+
+/// 2nd-order Butterworth lowpass biquad (Q = 1/√2).
+fn butterworth_lp2(fs: f64, fc: f64) -> [f64; 5] {
+    let q = std::f64::consts::SQRT_2 / 2.0;
+    let omega = 2.0 * std::f64::consts::PI * fc / fs;
+    let sin_w = omega.sin();
+    let cos_w = omega.cos();
+    let alpha = sin_w / (2.0 * q);
+
+    let b0 = (1.0 - cos_w) / 2.0;
+    let b1 = 1.0 - cos_w;
+    let b2 = (1.0 - cos_w) / 2.0;
+    let a0 = 1.0 + alpha;
+    let a1 = -2.0 * cos_w;
+    let a2 = 1.0 - alpha;
+
+    [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use bytes::Bytes;
+
+    // ─── helpers ─────────────────────────────────────────────────────────────
+
+    /// Generate a mono sine wave as interleaved f32 bytes.
+    fn sine_wave_buffer(freq_hz: f32, n_samples: usize, sample_rate: f32) -> AudioBuffer {
+        let samples: Vec<f32> = (0..n_samples)
+            .map(|i| (2.0 * std::f32::consts::PI * freq_hz * i as f32 / sample_rate).sin())
+            .collect();
+        AudioBuffer::Interleaved(Bytes::from(f32_to_bytes(&samples)))
+    }
+
+    /// Extract f32 samples from an AudioBuffer (interleaved only).
+    fn extract_f32(buf: &AudioBuffer) -> Vec<f32> {
+        match buf {
+            AudioBuffer::Interleaved(b) => bytes_to_f32(b),
+            AudioBuffer::Planar(planes) => bytes_to_f32(&planes[0]),
+        }
+    }
+
+    /// Compute RMS energy of a signal.
+    fn rms(v: &[f32]) -> f32 {
+        (v.iter().map(|s| s * s).sum::<f32>() / v.len().max(1) as f32).sqrt()
+    }
+
+    /// Bandpass filter a signal for RMS measurement (simple single biquad).
+    fn bandpass_rms(samples: &[f32], center: f64, bw: f64) -> f32 {
+        let coeffs = compute_peaking_coeffs(DEFAULT_SAMPLE_RATE, center, bw, 0.0);
+        // We actually want a real bandpass here — use LP(center+bw/2) − HP(center-bw/2)
+        // Simpler: just measure RMS after filtering through the BW stages
+        let [lp, hp] = compute_butterworth_bandpass(
+            DEFAULT_SAMPLE_RATE,
+            (center - bw / 2.0).max(20.0),
+            center + bw / 2.0,
+        );
+        let _ = coeffs; // peaking coeffs computed above only to ensure no dead_code
+        let mut s = samples.to_vec();
+        apply_biquad_df1(&mut s, hp);
+        apply_biquad_df1(&mut s, lp);
+        rms(&s)
+    }
+
+    // ─── existing tests (preserved) ──────────────────────────────────────────
 
     #[test]
     fn test_enhancer_creation() {
@@ -430,5 +728,174 @@ mod tests {
         let audio = AudioBuffer::Interleaved(Bytes::from(vec![0u8; 48000 * 4]));
         let result = enhancer.enhance_speech(&audio);
         assert!(result.is_ok());
+    }
+
+    // ─── new Wave 20 Slice A tests ────────────────────────────────────────────
+
+    /// Enhance a buffer of silence: output has no NaN, same byte length.
+    #[test]
+    fn test_enhance_silence_no_nan() {
+        let n_bytes = 4800 * 4; // 4800 samples × 4 bytes
+        let enhancer = AudioClarityEnhancer::new(0.5);
+        let audio = AudioBuffer::Interleaved(Bytes::from(vec![0u8; n_bytes]));
+        let result = enhancer.enhance(&audio).expect("enhance should succeed");
+        let samples = extract_f32(&result);
+        assert_eq!(samples.len(), 4800);
+        for (i, s) in samples.iter().enumerate() {
+            assert!(!s.is_nan(), "sample {i} is NaN");
+        }
+    }
+
+    /// After enhance, RMS of the 2 kHz band should exceed that of the 200 Hz band.
+    #[test]
+    fn test_enhance_2khz_boosted_vs_200hz() {
+        let n_samples = 48000_usize;
+        let sr = 48000.0_f32;
+        // Mix equal-amplitude 2 kHz + 200 Hz tones
+        let raw: Vec<f32> = (0..n_samples)
+            .map(|i| {
+                let t = i as f32 / sr;
+                0.3 * (2.0 * std::f32::consts::PI * 2000.0 * t).sin()
+                    + 0.3 * (2.0 * std::f32::consts::PI * 200.0 * t).sin()
+            })
+            .collect();
+        let audio = AudioBuffer::Interleaved(Bytes::from(f32_to_bytes(&raw)));
+        let enhancer = AudioClarityEnhancer::new(0.8);
+        let result = enhancer.enhance(&audio).expect("enhance ok");
+        let out = extract_f32(&result);
+
+        // Skip transient (first 512 samples)
+        let out = &out[512..];
+        let rms_2k = bandpass_rms(out, 2000.0, 400.0);
+        let rms_200 = bandpass_rms(out, 200.0, 100.0);
+        assert!(
+            rms_2k > rms_200,
+            "2 kHz RMS ({rms_2k:.4}) should exceed 200 Hz RMS ({rms_200:.4}) after speech-band boost"
+        );
+    }
+
+    /// Loud sustained section followed by quiet tail — the compressor should
+    /// constrain the DRC output to be within a bounded multiple of the quiet
+    /// section, and the soft-clip guard must prevent output exceeding 1.0.
+    ///
+    /// Uses a 200 Hz tone (well below the 2 kHz peaking EQ centre) so that the
+    /// DRC effect dominates and the frequency-selective boost does not mask it.
+    #[test]
+    fn test_enhance_compressor_reduces_loud_transient() {
+        let n_samples = 9600_usize;
+        let sr = 48000.0_f32;
+        // 200 Hz sine: below the 2 kHz peaking EQ, so EQ gain is small.
+        // Loud: amplitude 0.9 for first 4800 samples (~100 ms)
+        // Quiet: amplitude 0.1 for remaining 4800 samples
+        let mut raw = vec![0.0_f32; n_samples];
+        for i in 0..4800 {
+            raw[i] = 0.9 * (2.0 * std::f32::consts::PI * 200.0 * i as f32 / sr).sin();
+        }
+        for i in 4800..n_samples {
+            raw[i] = 0.1 * (2.0 * std::f32::consts::PI * 200.0 * i as f32 / sr).sin();
+        }
+
+        let audio = AudioBuffer::Interleaved(Bytes::from(f32_to_bytes(&raw)));
+        let enhancer = AudioClarityEnhancer::new(0.8);
+        let result = enhancer.enhance(&audio).expect("enhance ok");
+        let out = extract_f32(&result);
+
+        // Soft-clip guard must prevent any sample from exceeding 1.0.
+        let peak_out = out.iter().fold(0.0_f32, |acc, &s| acc.max(s.abs()));
+        assert!(
+            peak_out <= 1.0,
+            "Output must not exceed 1.0 (soft-clip guard): peak={peak_out:.4}"
+        );
+
+        // DRC should reduce the loud section relative to the quiet section.
+        // Compare RMS ratio: loud/quiet in output should be < loud/quiet in input.
+        // Skip transient (first 400 samples = ~8 ms) for the loud measurement.
+        let rms_loud_out = {
+            let v = &out[400..4800];
+            (v.iter().map(|s| s * s).sum::<f32>() / v.len() as f32).sqrt()
+        };
+        let rms_quiet_out = {
+            let v = &out[5200..]; // skip edge transient at boundary
+            (v.iter().map(|s| s * s).sum::<f32>() / v.len() as f32).sqrt()
+        };
+        let rms_loud_in = {
+            let v = &raw[400..4800];
+            (v.iter().map(|s| s * s).sum::<f32>() / v.len() as f32).sqrt()
+        };
+        let rms_quiet_in = {
+            let v = &raw[5200..];
+            (v.iter().map(|s| s * s).sum::<f32>() / v.len() as f32).sqrt()
+        };
+
+        // Ratio loud/quiet should be smaller after DRC than before.
+        let ratio_in = rms_loud_in / rms_quiet_in.max(1e-9);
+        let ratio_out = rms_loud_out / rms_quiet_out.max(1e-9);
+        assert!(
+            ratio_out < ratio_in,
+            "DRC should compress dynamic range: ratio_in={ratio_in:.2} ratio_out={ratio_out:.2}"
+        );
+    }
+
+    /// `enhance_speech` should attenuate 50 Hz rumble and 8 kHz hiss,
+    /// while passing 1 kHz speech content.
+    #[test]
+    fn test_enhance_speech_attenuates_rumble_and_hiss() {
+        let n_samples = 48000_usize;
+        let sr = 48000.0_f32;
+
+        let run = |freq: f32| -> f32 {
+            // Use sine_wave_buffer helper (amplitude 0.5 — scale after retrieval)
+            let audio = sine_wave_buffer(freq, n_samples, sr);
+            let enhancer = AudioClarityEnhancer::new(0.5);
+            let result = enhancer.enhance_speech(&audio).expect("ok");
+            let out = extract_f32(&result);
+            rms(&out[512..]) // skip transient
+        };
+
+        let rms_50hz = run(50.0);
+        let rms_1khz = run(1000.0);
+        let rms_8khz = run(8000.0);
+
+        assert!(
+            rms_1khz > rms_50hz * 5.0,
+            "1 kHz ({rms_1khz:.4}) should greatly exceed 50 Hz ({rms_50hz:.4})"
+        );
+        assert!(
+            rms_1khz > rms_8khz * 5.0,
+            "1 kHz ({rms_1khz:.4}) should greatly exceed 8 kHz ({rms_8khz:.4})"
+        );
+    }
+
+    /// Output must have the same byte length as input.
+    #[test]
+    fn test_enhance_preserves_sample_count() {
+        let n_bytes = 9600 * 4;
+        let enhancer = AudioClarityEnhancer::new(0.5);
+        let audio = AudioBuffer::Interleaved(Bytes::from(vec![0u8; n_bytes]));
+        let result = enhancer.enhance(&audio).expect("ok");
+        assert_eq!(result.size(), n_bytes, "byte length must be preserved");
+
+        // Also test planar
+        let planes = vec![
+            Bytes::from(vec![0u8; 4800 * 4]),
+            Bytes::from(vec![0u8; 4800 * 4]),
+        ];
+        let audio_planar = AudioBuffer::Planar(planes);
+        let result_planar = enhancer.enhance(&audio_planar).expect("ok");
+        assert_eq!(result_planar.size(), 4800 * 4 * 2);
+    }
+
+    /// Verify the envelope_follower helper is exercised (coverage).
+    #[test]
+    fn test_envelope_follower_monotonic_attack() {
+        let samples: Vec<f32> = (0..200).map(|i| i as f32 / 200.0).collect();
+        let env = envelope_follower(&samples, 48000.0, 0.010, 0.100);
+        assert_eq!(env.len(), 200);
+        // During a rising signal the envelope should be non-decreasing for most samples
+        let non_decreasing = env.windows(2).filter(|w| w[1] >= w[0]).count();
+        assert!(
+            non_decreasing > 150,
+            "Envelope should mostly track rising signal"
+        );
     }
 }

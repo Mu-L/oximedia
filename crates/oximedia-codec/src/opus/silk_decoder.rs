@@ -340,7 +340,10 @@ fn decode_subframe_gains(
 ///
 /// Follows RFC 6716 §4.2.7.4: `log_gain` indexes a Q7 logarithmic scale; the
 /// reference computes `gain_Q16 = silk_log2lin( 0x1D1C71*idx>>16 + 2090 )`.
-fn log_gain_to_linear_q16(index: i32) -> i32 {
+///
+/// Exposed `pub(super)` so the encoder can quantise gains using the same
+/// non-linear mapping the decoder will reconstruct.
+pub(super) fn log_gain_to_linear_q16(index: i32) -> i32 {
     let log_q7 = ((0x001D_1C71_i64 * i64::from(index)) >> 16) as i32 + 2090;
     log2lin(log_q7)
 }
@@ -511,7 +514,10 @@ fn decode_nlsf(
 
 /// Stabilises NLSF coefficients so successive values respect the minimum
 /// spacing table (RFC 6716 §4.2.7.5.5).
-fn stabilise_nlsf(nlsf: &mut [i32], min_spacing: &[i16], order: usize) {
+///
+/// Exposed `pub(super)` so the encoder can apply the identical stabilisation
+/// to the NLSFs it embeds in the bitstream.
+pub(super) fn stabilise_nlsf(nlsf: &mut [i32], min_spacing: &[i16], order: usize) {
     // A bounded number of corrective passes mirrors `silk_NLSF_stabilize`.
     for _ in 0..20 {
         // Find the smallest violation of the spacing constraint.
@@ -586,7 +592,11 @@ const NLSF2A_QA: u32 = 16;
 /// build the two symmetric polynomials `P` and `Q`; the LPC coefficients are
 /// `a[k] = -(Q + P)`, `a[d-k-1] = (Q - P)`, then range-limited and shifted to
 /// Q12.
-fn nlsf_to_lpc(nlsf_q15: &[i16], order: usize) -> Vec<i32> {
+///
+/// Exposed `pub(super)` so the SILK encoder can compute reconstructed LPC
+/// coefficients — encoder and decoder must converge on the *same* LPC for
+/// closed-loop quantization (RFC 6716 §4.2.7.5).
+pub(super) fn nlsf_to_lpc(nlsf_q15: &[i16], order: usize) -> Vec<i32> {
     // --- cosine of each NLSF, placed into interleaved order ---
     let ordering: &[usize] = if order == 16 {
         &NLSF2A_ORDERING_WB
@@ -627,20 +637,30 @@ fn nlsf_to_lpc(nlsf_q15: &[i16], order: usize) -> Vec<i32> {
 }
 
 /// Builds one of the two SILK NLSF polynomials in place (libopus
-/// `silk_NLSF2A_find_poly`). `out` is the polynomial accumulator (`QA`),
-/// `cos_q12` holds the interleaved cosine values, `dd = order/2`, and `parity`
+/// `silk_NLSF2A_find_poly`). `out` is the polynomial accumulator
+/// (`QA` = Q16), `cos_q12` holds the interleaved cosine values in Q12
+/// (the table stores `2*cos(NLSF) * 4096`); `dd = order/2`; and `parity`
 /// selects the even (`0`) or odd (`1`) cosine subset.
+///
+/// libopus stores the cosine values in Q16 and shifts by `QA = 16` in
+/// the multiplication. Our cosine table is in Q12, so we promote each
+/// cosine to Q16 (`<<4`) before using it in any sum/assignment that
+/// targets a Q16 polynomial accumulator. The multiply path stays
+/// equivalent: `(cos_Q12 * out_Q16) >> (QA - 4) = (cos_Q16 * out_Q16) >> QA`.
 fn nlsf2a_find_poly(out: &mut [i64], cos_q12: &[i32], dd: usize, parity: usize) {
     out[0] = 1i64 << NLSF2A_QA;
-    out[1] = -i64::from(cos_q12[parity]);
+    // Q12 cosine → Q16 to match `out[]` scaling.
+    out[1] = -(i64::from(cos_q12[parity]) << 4);
     for k in 1..dd {
-        let ftmp = i64::from(cos_q12[2 * k + parity]);
-        // out[k+1] = (out[k-1]<<1) - round(ftmp*out[k] >> (QA-4)).
-        out[k + 1] = (out[k - 1] << 1) - rshift_round(ftmp * out[k], NLSF2A_QA - 4);
+        let ftmp_q12 = i64::from(cos_q12[2 * k + parity]);
+        let ftmp_q16 = ftmp_q12 << 4;
+        // out[k+1] = (out[k-1]<<1) - round(ftmp_q12 * out[k] >> (QA-4))
+        //          = (out[k-1]<<1) - round(ftmp_q16 * out[k] >> QA).
+        out[k + 1] = (out[k - 1] << 1) - rshift_round(ftmp_q12 * out[k], NLSF2A_QA - 4);
         for n in (2..=k).rev() {
-            out[n] += out[n - 2] - rshift_round(ftmp * out[n - 1], NLSF2A_QA - 4);
+            out[n] += out[n - 2] - rshift_round(ftmp_q12 * out[n - 1], NLSF2A_QA - 4);
         }
-        out[1] -= ftmp;
+        out[1] -= ftmp_q16;
     }
 }
 
@@ -653,46 +673,103 @@ fn rshift_round(value: i64, shift: u32) -> i64 {
     }
 }
 
-/// Range-limits the QA+1 LPC coefficients and converts them to Q12.
+/// Range-limits the QA+1 LPC coefficients, applies stability-enforcing
+/// bandwidth expansion (libopus `silk_NLSF2A` lines 132-139 +
+/// `silk_LPC_inverse_pred_gain`), and converts the result to Q12.
 ///
-/// Mirrors the stabilisation loop of libopus `silk_NLSF2A`: if the largest
-/// coefficient magnitude exceeds the representable Q12 range, a bandwidth
-/// expansion (chirp) is applied; the result is then rounded to Q12.
+/// The libopus reference does this in two passes:
+///   1. Magnitude clamp: while any Q12 coefficient saturates the int16
+///      range, chirp the polynomial down.
+///   2. Stability fix: while `silk_LPC_inverse_pred_gain` rejects the
+///      filter, apply an aggressive chirp `65536 - (2 << i)` and retry.
+///
+/// `MAX_LPC_STABILIZE_ITERATIONS` (= 16) is the libopus loop count;
+/// by the last iteration the chirp factor is zero, which forces the
+/// LPC to be all-zero (trivially stable).
 fn limit_and_quantise_lpc(a_qa1: &[i64], order: usize) -> Vec<i32> {
     let mut a = [0i64; MAX_LPC_ORDER];
     a[..order].copy_from_slice(&a_qa1[..order]);
 
-    // Up to 10 bandwidth-expansion passes (matches libopus `MaxLoops`).
+    // --- Pass 1: magnitude clamp (matches libopus `MaxLoops` = 10). ---
     for _ in 0..10 {
-        // Locate the largest-magnitude coefficient (QA+1 domain).
         let mut maxabs = 0i64;
-        let mut idx = 0usize;
-        for (i, &c) in a.iter().take(order).enumerate() {
+        for &c in a.iter().take(order) {
             if c.abs() > maxabs {
                 maxabs = c.abs();
-                idx = i;
             }
         }
-        // QA+1 -> Q12 rounding factor; limit so |a_Q12| < 32768.
         let maxabs_q12 = rshift_round(maxabs, NLSF2A_QA + 1 - 12);
         if maxabs_q12 <= 32767 {
             break;
         }
-        // Compute a chirp factor that scales the worst coefficient into range.
-        let maxabs_clamped = maxabs.max(163_838); // avoid divide instability
+        let maxabs_clamped = maxabs.max(163_838);
         let sc_q16 = 65_470 - ((65_470i64 * 32_773 / (maxabs_clamped >> 4).max(1)).min(65_470));
         let chirp = sc_q16.clamp(0, 65_536) as u32;
         bwexpander_32(&mut a[..order], chirp);
-        let _ = idx;
     }
 
-    // Convert QA+1 -> Q12 with rounding.
+    // --- Pass 2: stability check + iterative chirp until stable. ---
+    let mut lpc_q12 = qa1_to_q12(&a, order);
+    for i in 0..16 {
+        if lpc_inverse_pred_gain_stable(&lpc_q12, order) {
+            break;
+        }
+        // libopus: chirp = 65536 - (2 << i).
+        let chirp = (65_536i64 - (2i64 << i)).max(0).min(65_536) as u32;
+        bwexpander_32(&mut a[..order], chirp);
+        lpc_q12 = qa1_to_q12(&a, order);
+    }
+    lpc_q12
+}
+
+/// QA+1 → Q12 with rounding and int16 saturation.
+fn qa1_to_q12(a_qa1: &[i64], order: usize) -> Vec<i32> {
     let mut lpc_q12 = vec![0i32; order];
     for i in 0..order {
-        let v = rshift_round(a[i], NLSF2A_QA + 1 - 12);
+        let v = rshift_round(a_qa1[i], NLSF2A_QA + 1 - 12);
         lpc_q12[i] = v.clamp(-32768, 32767) as i32;
     }
     lpc_q12
+}
+
+/// Returns `true` when the LPC `H(z) = 1 / (1 + sum a_k z^-k-1)` is
+/// stable (poles inside the unit circle) with a small numerical margin.
+///
+/// Floating-point port of libopus `silk_LPC_inverse_pred_gain_c`:
+/// step-down (Schur) recursion that computes reflection coefficients.
+/// libopus uses `A_LIMIT = 0.99975` for the threshold; we match that.
+pub(super) fn lpc_inverse_pred_gain_stable(lpc_q12: &[i32], order: usize) -> bool {
+    if order == 0 {
+        return true;
+    }
+    // Quick DC reject: libopus rejects if sum(a) >= 4096 in Q12 (i.e., A(1)
+    // implies the polynomial is non-monic in the wrong direction → unstable).
+    let dc_resp: i64 = lpc_q12.iter().take(order).map(|&c| i64::from(c)).sum();
+    if dc_resp >= 4096 {
+        return false;
+    }
+    // Floating-point Schur recursion. libopus A_LIMIT = 0.99975.
+    let mut a: Vec<f64> = lpc_q12
+        .iter()
+        .take(order)
+        .map(|&c| f64::from(c) / 4096.0)
+        .collect();
+    let mut work = vec![0.0f64; order];
+    for k in (0..order).rev() {
+        let rc = -a[k];
+        if !rc.is_finite() || rc.abs() >= 0.99975 {
+            return false;
+        }
+        let denom = 1.0 - rc * rc;
+        if denom <= 1e-12 {
+            return false;
+        }
+        for n in 0..k {
+            work[n] = (a[n] + rc * a[k - 1 - n]) / denom;
+        }
+        a[..k].copy_from_slice(&work[..k]);
+    }
+    true
 }
 
 /// Applies a chirp (bandwidth expansion) to 32-bit LPC coefficients
@@ -1091,10 +1168,10 @@ fn synthesise(
 // entries.
 
 /// Pitch contour codebook, NB 10 ms (3 entries).
-const CONTOUR_NB_10MS: [[i8; 4]; 3] = [[0, 0, 0, 0], [1, 0, 0, 0], [0, 1, 0, 0]];
+pub(super) const CONTOUR_NB_10MS: [[i8; 4]; 3] = [[0, 0, 0, 0], [1, 0, 0, 0], [0, 1, 0, 0]];
 
 /// Pitch contour codebook, NB 20 ms (11 entries).
-const CONTOUR_NB_20MS: [[i8; 4]; 11] = [
+pub(super) const CONTOUR_NB_20MS: [[i8; 4]; 11] = [
     [0, 0, 0, 0],
     [2, 1, 0, -1],
     [-1, 0, 1, 2],
@@ -1109,7 +1186,7 @@ const CONTOUR_NB_20MS: [[i8; 4]; 11] = [
 ];
 
 /// Pitch contour codebook, MB/WB 10 ms (12 entries).
-const CONTOUR_MBWB_10MS: [[i8; 4]; 12] = [
+pub(super) const CONTOUR_MBWB_10MS: [[i8; 4]; 12] = [
     [0, 0, 0, 0],
     [0, 1, 0, 0],
     [1, 0, 0, 0],
@@ -1125,7 +1202,7 @@ const CONTOUR_MBWB_10MS: [[i8; 4]; 12] = [
 ];
 
 /// Pitch contour codebook, MB/WB 20 ms (34 entries).
-const CONTOUR_MBWB_20MS: [[i8; 4]; 34] = [
+pub(super) const CONTOUR_MBWB_20MS: [[i8; 4]; 34] = [
     [0, 0, 0, 0],
     [0, 0, 1, 1],
     [1, 1, 0, 0],

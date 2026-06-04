@@ -70,10 +70,7 @@ impl SceneLuminanceStats {
         let sum: f32 = sorted.iter().copied().sum();
         let avg_maxrgb_nits = sum / n as f32;
 
-        let bright_count = sorted
-            .iter()
-            .filter(|&&v| v > high_threshold_nits)
-            .count();
+        let bright_count = sorted.iter().filter(|&&v| v > high_threshold_nits).count();
         let fraction_bright = bright_count as f32 / n as f32;
 
         Ok(Self {
@@ -281,8 +278,7 @@ impl Hdr10PlusTrimPass {
         mastering_peak_nits: f32,
         target_peak_nits: f32,
     ) -> Result<Self> {
-        let tone_curve =
-            BezierToneCurve::from_stats(stats, mastering_peak_nits, target_peak_nits)?;
+        let tone_curve = BezierToneCurve::from_stats(stats, mastering_peak_nits, target_peak_nits)?;
 
         // Encode distribution values: normalise percentiles to 0–65535 using
         // the mastering peak as the reference.
@@ -293,7 +289,8 @@ impl Hdr10PlusTrimPass {
             distribution_values[i] = (norm * 65535.0).round() as u16;
         }
 
-        let fraction_bright_pixels = (stats.fraction_bright * 255.0).round().clamp(0.0, 255.0) as u8;
+        let fraction_bright_pixels =
+            (stats.fraction_bright * 255.0).round().clamp(0.0, 255.0) as u8;
 
         Ok(Self {
             shot_id: stats.shot_id,
@@ -312,9 +309,8 @@ impl Hdr10PlusTrimPass {
     /// The JSON structure matches the informal HDR10+ metadata JSON schema used
     /// by open-source HDR10+ tools.
     pub fn to_json(&self) -> Result<String> {
-        serde_json::to_string_pretty(self).map_err(|e| {
-            HdrError::MetadataParseError(format!("JSON serialisation error: {e}"))
-        })
+        serde_json::to_string_pretty(self)
+            .map_err(|e| HdrError::MetadataParseError(format!("JSON serialisation error: {e}")))
     }
 
     /// Deserialise a trim pass from a JSON string.
@@ -389,16 +385,12 @@ impl Hdr10PlusMetadataStream {
     /// `target_display_peak_nits` matches that tier.
     pub fn passes_for_tier(&self, target_nits: f32) -> Vec<&Hdr10PlusTrimPass> {
         // Find closest registered tier.
-        let Some(&closest_tier) = self
-            .target_tiers_nits
-            .iter()
-            .min_by(|&&a, &&b| {
-                (a - target_nits)
-                    .abs()
-                    .partial_cmp(&(b - target_nits).abs())
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-        else {
+        let Some(&closest_tier) = self.target_tiers_nits.iter().min_by(|&&a, &&b| {
+            (a - target_nits)
+                .abs()
+                .partial_cmp(&(b - target_nits).abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) else {
             return Vec::new();
         };
 
@@ -410,9 +402,8 @@ impl Hdr10PlusMetadataStream {
 
     /// Serialise the entire stream to a JSON string.
     pub fn to_json(&self) -> Result<String> {
-        serde_json::to_string_pretty(self).map_err(|e| {
-            HdrError::MetadataParseError(format!("JSON serialisation error: {e}"))
-        })
+        serde_json::to_string_pretty(self)
+            .map_err(|e| HdrError::MetadataParseError(format!("JSON serialisation error: {e}")))
     }
 
     /// Number of trim passes in this stream.
@@ -490,10 +481,7 @@ mod tests {
         let stats = sample_stats(1);
         let curve = BezierToneCurve::from_stats(&stats, 4000.0, 1000.0).unwrap();
         let out = curve.evaluate(0.0);
-        assert!(
-            out.abs() < 1e-5,
-            "evaluate(0) should be 0.0, got {out}"
-        );
+        assert!(out.abs() < 1e-5, "evaluate(0) should be 0.0, got {out}");
     }
 
     #[test]
@@ -504,7 +492,10 @@ mod tests {
         for i in 0..=100 {
             let t = i as f32 / 100.0;
             let v = curve.evaluate(t);
-            assert!(v >= prev - 1e-5, "curve not monotone at t={t}: {v} < prev={prev}");
+            assert!(
+                v >= prev - 1e-5,
+                "curve not monotone at t={t}: {v} < prev={prev}"
+            );
             prev = v;
         }
     }
@@ -516,10 +507,7 @@ mod tests {
         for i in 0..=50 {
             let t = i as f32 / 50.0;
             let v = curve.evaluate(t);
-            assert!(
-                (0.0..=1.0).contains(&v),
-                "evaluate({t}) = {v} out of [0,1]"
-            );
+            assert!((0.0..=1.0).contains(&v), "evaluate({t}) = {v} out of [0,1]");
         }
     }
 
@@ -542,9 +530,7 @@ mod tests {
         let json = pass.to_json().expect("serialise");
         let decoded = Hdr10PlusTrimPass::from_json(&json).expect("deserialise");
         assert_eq!(decoded.shot_id, pass.shot_id);
-        assert!(
-            (decoded.target_display_peak_nits - pass.target_display_peak_nits).abs() < 0.01
-        );
+        assert!((decoded.target_display_peak_nits - pass.target_display_peak_nits).abs() < 0.01);
     }
 
     #[test]
@@ -559,8 +545,7 @@ mod tests {
 
     #[test]
     fn test_stream_add_multiple_shots() {
-        let mut stream =
-            Hdr10PlusMetadataStream::new(4000.0, vec![1000.0, 600.0]).expect("stream");
+        let mut stream = Hdr10PlusMetadataStream::new(4000.0, vec![1000.0, 600.0]).expect("stream");
         for shot_id in 0..3 {
             let stats = sample_stats(shot_id);
             stream.add_shot(&stats).expect("add shot");
@@ -571,8 +556,7 @@ mod tests {
 
     #[test]
     fn test_stream_passes_for_shot() {
-        let mut stream =
-            Hdr10PlusMetadataStream::new(4000.0, vec![1000.0, 600.0]).expect("stream");
+        let mut stream = Hdr10PlusMetadataStream::new(4000.0, vec![1000.0, 600.0]).expect("stream");
         stream.add_shot(&sample_stats(10)).expect("shot 10");
         stream.add_shot(&sample_stats(20)).expect("shot 20");
         let passes = stream.passes_for_shot(10);

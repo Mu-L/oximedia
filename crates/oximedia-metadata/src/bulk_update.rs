@@ -3,6 +3,9 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use crate::{Metadata, MetadataFormat, MetadataValue};
 
 /// A single field update operation.
 #[derive(Debug, Clone)]
@@ -312,12 +315,227 @@ impl BulkUpdateEngine {
     pub fn history_depth(&self) -> usize {
         self.history.len()
     }
+
+    /// Persist the engine's current metadata to disk for all provided file paths.
+    ///
+    /// Returns one [`BulkWriteResult`] per path, even on individual failures.
+    /// For [`BulkWriteMode::Sidecar`] a `.meta` file is written alongside each target.
+    /// For [`BulkWriteMode::Embed`] the metadata is embedded into the file bytes in place
+    /// using an atomic rename via a temp file; only formats detectable by magic bytes are
+    /// supported (unsupported files receive `success: false`).
+    pub fn write_batch(&self, paths: &[&Path], mode: BulkWriteMode) -> Vec<BulkWriteResult> {
+        paths
+            .iter()
+            .map(|&p| match mode {
+                BulkWriteMode::Sidecar => self.write_sidecar(p),
+                BulkWriteMode::Embed => self.write_embed(p),
+            })
+            .collect()
+    }
+
+    /// Write a `.meta` sidecar file alongside `path`.
+    fn write_sidecar(&self, path: &Path) -> BulkWriteResult {
+        use crate::sidecar::{SidecarFile, SidecarFormat};
+
+        // Build sidecar from current data map
+        let sidecar_path = sidecar_path_for(path);
+        let mut sidecar = SidecarFile::new(
+            sidecar_path.to_string_lossy().as_ref(),
+            SidecarFormat::JsonSidecar,
+        );
+        for (k, v) in &self.data {
+            sidecar.set(k, v);
+        }
+        let content = sidecar.serialize();
+        let bytes = content.len();
+        match std::fs::write(&sidecar_path, &content) {
+            Ok(()) => BulkWriteResult {
+                path: sidecar_path,
+                success: true,
+                bytes_written: bytes,
+                error: None,
+            },
+            Err(e) => BulkWriteResult {
+                path: sidecar_path,
+                success: false,
+                bytes_written: 0,
+                error: Some(e.to_string()),
+            },
+        }
+    }
+
+    /// Embed metadata into `path` using an atomic temp-file rename.
+    fn write_embed(&self, path: &Path) -> BulkWriteResult {
+        // Determine format from magic bytes — only attempt supported ones
+        let file_data = match std::fs::read(path) {
+            Ok(d) => d,
+            Err(e) => {
+                return BulkWriteResult {
+                    path: path.to_path_buf(),
+                    success: false,
+                    bytes_written: 0,
+                    error: Some(format!("read error: {e}")),
+                };
+            }
+        };
+
+        let format = match detect_embeddable_format(&file_data) {
+            Some(f) => f,
+            None => {
+                return BulkWriteResult {
+                    path: path.to_path_buf(),
+                    success: false,
+                    bytes_written: 0,
+                    error: Some("unsupported format".to_string()),
+                };
+            }
+        };
+
+        let metadata = data_to_metadata(&self.data, format);
+        let patched = match crate::embed::embed(&file_data, &metadata) {
+            Ok(b) => b,
+            Err(e) => {
+                return BulkWriteResult {
+                    path: path.to_path_buf(),
+                    success: false,
+                    bytes_written: 0,
+                    error: Some(format!("embed error: {e}")),
+                };
+            }
+        };
+
+        // Write atomically via a sibling temp file
+        let tmp_path = path.with_extension("oximedia_tmp");
+        if let Err(e) = std::fs::write(&tmp_path, &patched) {
+            return BulkWriteResult {
+                path: path.to_path_buf(),
+                success: false,
+                bytes_written: 0,
+                error: Some(format!("temp write error: {e}")),
+            };
+        }
+        match std::fs::rename(&tmp_path, path) {
+            Ok(()) => BulkWriteResult {
+                path: path.to_path_buf(),
+                success: true,
+                bytes_written: patched.len(),
+                error: None,
+            },
+            Err(e) => {
+                // Best-effort cleanup of temp file on rename failure
+                let _ = std::fs::remove_file(&tmp_path);
+                BulkWriteResult {
+                    path: path.to_path_buf(),
+                    success: false,
+                    bytes_written: 0,
+                    error: Some(format!("rename error: {e}")),
+                }
+            }
+        }
+    }
 }
 
 impl Default for BulkUpdateEngine {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ── Public types for batched I/O ────────────────────────────────────────────
+
+/// How to persist the bulk update to disk.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BulkWriteMode {
+    /// Write a sidecar file (`.meta` / JSON) alongside each target file.
+    Sidecar,
+    /// Embed metadata directly into the file bytes (for supported formats).
+    Embed,
+}
+
+/// Result of writing one file in a batch.
+#[derive(Debug)]
+pub struct BulkWriteResult {
+    /// Destination path that was written (sidecar path for Sidecar mode).
+    pub path: PathBuf,
+    /// `true` when the write succeeded without error.
+    pub success: bool,
+    /// Number of bytes written to disk; `0` on failure.
+    pub bytes_written: usize,
+    /// Error message if `success` is `false`.
+    pub error: Option<String>,
+}
+
+// ── Private helpers ──────────────────────────────────────────────────────────
+
+/// Return the conventional `.meta` sidecar path alongside `media_path`.
+fn sidecar_path_for(media_path: &Path) -> PathBuf {
+    let mut p = media_path.to_path_buf();
+    let ext = p
+        .extension()
+        .map(|e| format!("{}.meta", e.to_string_lossy()))
+        .unwrap_or_else(|| "meta".to_string());
+    p.set_extension(&ext);
+    p
+}
+
+/// Detect which [`MetadataFormat`] can be embedded from magic bytes.
+/// Returns `None` for formats that are not supported by the embed path.
+fn detect_embeddable_format(data: &[u8]) -> Option<MetadataFormat> {
+    if data.len() >= 3 && &data[0..3] == b"ID3" {
+        return Some(MetadataFormat::Id3v2);
+    }
+    if data.len() >= 8 && &data[0..8] == b"APETAGEX" {
+        return Some(MetadataFormat::Apev2);
+    }
+    None
+}
+
+/// Build a [`Metadata`] container from the engine's `HashMap<String, String>`.
+///
+/// Every value is stored as [`MetadataValue::Text`].  For [`MetadataFormat::Id3v2`]
+/// common human-readable field names (e.g. `"title"`) are mapped to their canonical
+/// four-character ID3v2 frame IDs (e.g. `"TIT2"`) so that the ID3v2 writer — which
+/// requires exactly 4-char frame IDs — does not reject them.  Keys that already look
+/// like 4-char uppercase frame IDs are passed through unchanged.  Unknown keys are
+/// skipped for the ID3v2 format to avoid hard-to-diagnose write errors.
+fn data_to_metadata(data: &HashMap<String, String>, format: MetadataFormat) -> Metadata {
+    let mut metadata = Metadata::new(format);
+    for (k, v) in data {
+        let key = if format == MetadataFormat::Id3v2 {
+            match k.to_lowercase().as_str() {
+                "title" => "TIT2".to_string(),
+                "artist" => "TPE1".to_string(),
+                "album" => "TALB".to_string(),
+                "year" | "date" => "TDRC".to_string(),
+                "genre" => "TCON".to_string(),
+                "comment" => "COMM".to_string(),
+                "tracknumber" | "track" => "TRCK".to_string(),
+                "albumartist" => "TPE2".to_string(),
+                "composer" => "TCOM".to_string(),
+                "discnumber" | "disc" => "TPOS".to_string(),
+                "lyrics" => "USLT".to_string(),
+                "copyright" => "TCOP".to_string(),
+                "encoder" => "TSSE".to_string(),
+                "language" => "TLAN".to_string(),
+                "bpm" => "TBPM".to_string(),
+                // A key that is already exactly 4 uppercase ASCII chars is
+                // assumed to be a native frame ID and passed through directly.
+                _ if k.len() == 4
+                    && k.chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) =>
+                {
+                    k.clone()
+                }
+                // All other arbitrary keys are skipped for ID3v2 because the
+                // writer enforces the 4-char frame ID constraint.
+                _ => continue,
+            }
+        } else {
+            k.clone()
+        };
+        metadata.insert(key, MetadataValue::Text(v.clone()));
+    }
+    metadata
 }
 
 #[cfg(test)]
@@ -489,5 +707,83 @@ mod tests {
         };
         assert_eq!(result.total_applied(), 5);
         assert!(result.is_clean());
+    }
+
+    /// Verify that `write_batch` in Sidecar mode creates `.meta` sidecar files
+    /// and that the serialised content contains the expected key-value pairs.
+    #[test]
+    fn test_bulk_write_sidecar_roundtrip() {
+        use std::fs;
+
+        let tmp = std::env::temp_dir().join("oximedia_bulk_write_sidecar_roundtrip");
+        fs::create_dir_all(&tmp).expect("create temp dir");
+
+        // Create 3 dummy media files so the parent path exists
+        let names = ["clip_a.mp4", "clip_b.mkv", "clip_c.mov"];
+        let mut paths: Vec<std::path::PathBuf> = Vec::new();
+        for name in &names {
+            let p = tmp.join(name);
+            fs::write(&p, b"dummy media content").expect("write dummy file");
+            paths.push(p);
+        }
+
+        // Build engine with known fields
+        let mut data = HashMap::new();
+        data.insert("title".to_string(), "Test Title".to_string());
+        data.insert("artist".to_string(), "Test Artist".to_string());
+        let engine = BulkUpdateEngine::with_data(data);
+
+        let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_path()).collect();
+        let results = engine.write_batch(&path_refs, BulkWriteMode::Sidecar);
+
+        assert_eq!(results.len(), 3, "should have one result per path");
+
+        for result in &results {
+            assert!(
+                result.success,
+                "sidecar write should succeed: {:?}",
+                result.error
+            );
+            assert!(result.bytes_written > 0, "should have written bytes");
+            // Sidecar file must exist and contain expected content
+            let content =
+                fs::read_to_string(&result.path).expect("sidecar file should be readable");
+            assert!(
+                content.contains("title") || content.contains("artist"),
+                "sidecar content should contain field names, got: {content}"
+            );
+        }
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Verify that `write_batch` in Embed mode returns `success: false` with a
+    /// non-empty error string for files whose format is not embeddable (e.g. `.txt`).
+    #[test]
+    fn test_bulk_write_embed_unsupported() {
+        use std::fs;
+
+        let tmp = std::env::temp_dir().join("oximedia_bulk_write_embed_unsupported");
+        fs::create_dir_all(&tmp).expect("create temp dir");
+
+        // A plain-text file has no embeddable magic bytes
+        let txt_path = tmp.join("readme.txt");
+        fs::write(&txt_path, b"hello world").expect("write txt file");
+
+        let mut data = HashMap::new();
+        data.insert("title".to_string(), "Should Fail".to_string());
+        let engine = BulkUpdateEngine::with_data(data);
+
+        let results = engine.write_batch(&[txt_path.as_path()], BulkWriteMode::Embed);
+
+        assert_eq!(results.len(), 1);
+        let r = &results[0];
+        assert!(!r.success, "embed of .txt should fail");
+        assert_eq!(r.bytes_written, 0);
+        assert!(r.error.is_some(), "error field should be populated");
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

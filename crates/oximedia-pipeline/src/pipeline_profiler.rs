@@ -143,9 +143,7 @@ impl PipelineExecutionProfile {
     ///
     /// Returns `None` if no node timings have been recorded.
     pub fn slowest_node(&self) -> Option<&NodeTiming> {
-        self.node_timings
-            .iter()
-            .max_by_key(|t| t.duration_ms())
+        self.node_timings.iter().max_by_key(|t| t.duration_ms())
     }
 
     /// Return a reference to the [`NodeTiming`] for `node_id`, if present.
@@ -259,8 +257,11 @@ impl PipelineProfiler {
         if self.profiles.is_empty() {
             return None;
         }
-        let mut durations: Vec<u64> =
-            self.profiles.iter().map(|p| p.total_duration_ms()).collect();
+        let mut durations: Vec<u64> = self
+            .profiles
+            .iter()
+            .map(|p| p.total_duration_ms())
+            .collect();
         durations.sort_unstable();
         let idx = ((95 * (durations.len().saturating_sub(1))) + 50) / 100;
         let clamped = idx.min(durations.len().saturating_sub(1));
@@ -350,7 +351,10 @@ mod tests {
         let json = profile.to_json();
         assert!(json.contains("my-run-42"), "JSON should contain run_id");
         assert!(json.contains("decoder"), "JSON should contain node id");
-        assert!(json.contains("\"start_ms\":100"), "JSON should have start_ms");
+        assert!(
+            json.contains("\"start_ms\":100"),
+            "JSON should have start_ms"
+        );
     }
 
     #[test]

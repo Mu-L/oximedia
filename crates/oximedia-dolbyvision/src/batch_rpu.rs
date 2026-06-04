@@ -235,11 +235,7 @@ impl BatchRpuProcessor {
     ///
     /// Returns an error only when `config.error_policy == ErrorPolicy::Abort`
     /// and `frame` is `Err`, or when the error limit (`max_errors`) is reached.
-    pub fn process_frame(
-        &mut self,
-        frame_index: u64,
-        frame: Result<DolbyVisionRpu>,
-    ) -> Result<()> {
+    pub fn process_frame(&mut self, frame_index: u64, frame: Result<DolbyVisionRpu>) -> Result<()> {
         self.stats.total_frames += 1;
 
         match frame {
@@ -265,11 +261,9 @@ impl BatchRpuProcessor {
                 }
 
                 match self.config.error_policy {
-                    ErrorPolicy::Abort => {
-                        Err(DolbyVisionError::Generic(format!(
-                            "Frame {frame_index} failed: {msg}"
-                        )))
-                    }
+                    ErrorPolicy::Abort => Err(DolbyVisionError::Generic(format!(
+                        "Frame {frame_index} failed: {msg}"
+                    ))),
                     ErrorPolicy::Skip => {
                         self.errors.push(FrameError {
                             frame_index,
@@ -371,8 +365,7 @@ mod tests {
 
     #[test]
     fn test_batch_use_default_substitution() {
-        let config =
-            BatchConfig::new(Profile::Profile8).with_error_policy(ErrorPolicy::UseDefault);
+        let config = BatchConfig::new(Profile::Profile8).with_error_policy(ErrorPolicy::UseDefault);
         let mut proc = BatchRpuProcessor::new(config);
         proc.process_frame(0, make_error()).unwrap();
         let result = proc.finish();

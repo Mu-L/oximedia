@@ -201,7 +201,7 @@ impl MixMatrix {
         m.coeffs[0][0] = 1.0; // L
         m.coeffs[0][2] = INV_SQRT2; // C
         m.coeffs[0][4] = INV_SQRT2; // Ls
-        // Ro = R  + C/√2 + Rs/√2
+                                    // Ro = R  + C/√2 + Rs/√2
         m.coeffs[1][1] = 1.0; // R
         m.coeffs[1][2] = INV_SQRT2; // C
         m.coeffs[1][5] = INV_SQRT2; // Rs
@@ -469,7 +469,11 @@ mod tests {
         let input = vec![1.0_f32, 0.0_f32];
         let output = mixer.process_interleaved(&input);
         assert_eq!(output.len(), 1);
-        assert!((output[0] - 0.5).abs() < 1e-6, "Expected 0.5, got {}", output[0]);
+        assert!(
+            (output[0] - 0.5).abs() < 1e-6,
+            "Expected 0.5, got {}",
+            output[0]
+        );
     }
 
     // ── Mono → Stereo ─────────────────────────────────────────────────────────
@@ -512,7 +516,10 @@ mod tests {
         let output = mixer.process_interleaved(&input);
         assert_eq!(output.len(), 6);
         for &v in &output[0..4] {
-            assert!((v - 1.0).abs() < 1e-6, "pass-through channel should be 1.0, got {v}");
+            assert!(
+                (v - 1.0).abs() < 1e-6,
+                "pass-through channel should be 1.0, got {v}"
+            );
         }
     }
 

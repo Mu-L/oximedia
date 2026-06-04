@@ -249,7 +249,11 @@ impl ClipCounter {
     /// Percentage of samples that were clipped (across all channels).
     #[allow(clippy::cast_precision_loss)]
     pub fn clip_percentage(&self) -> f64 {
-        let total_samples: u64 = self.channel_states.iter().map(|s| s.samples_processed).sum();
+        let total_samples: u64 = self
+            .channel_states
+            .iter()
+            .map(|s| s.samples_processed)
+            .sum();
         if total_samples == 0 {
             return 0.0;
         }
@@ -386,11 +390,11 @@ mod tests {
         let mut counter = ClipCounter::new(2, 48000.0, ClipThreshold::DigitalFullScale, true);
         // Interleaved: [L, R, L, R, ...]
         let mut samples = vec![0.5; 20]; // 10 frames
-        // Clip on left channel at frame 3
+                                         // Clip on left channel at frame 3
         samples[6] = 1.0; // frame 3, ch 0
-        // Clip on right channel at frame 5
+                          // Clip on right channel at frame 5
         samples[11] = 1.0; // frame 5, ch 1
-        // Non-clipped tail
+                           // Non-clipped tail
         samples.extend_from_slice(&[0.1, 0.1]);
         counter.process_interleaved(&samples);
         assert_eq!(counter.channel_clip_events(0), 1);

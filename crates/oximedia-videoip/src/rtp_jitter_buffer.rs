@@ -482,7 +482,7 @@ mod tests {
         let mut buf = buf_zero_delay();
         buf.insert(make_packet(0, 0));
         buf.pop_force(); // releases seq 0
-        // Now insert seq 0 again — should be "late"
+                         // Now insert seq 0 again — should be "late"
         let outcome = buf.insert(make_packet(0, 0));
         assert_eq!(outcome, InsertOutcome::Late);
         assert_eq!(buf.stats().late_dropped, 1);

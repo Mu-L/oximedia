@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! HDR-aware compositing that operates in linear light.
 //!
 //! This module implements a multi-layer HDR compositor that supports all 16
@@ -689,5 +688,36 @@ mod tests {
         // R should be ~191 via extended Reinhard (1*(1+1)/(1+1) = 0.5 => ~127 wrong; let's not
         // hardcode the exact value, just verify it's in range).
         assert!(sdr[0] > 100, "R in valid range: {}", sdr[0]);
+    }
+
+    /// For a mid-range input (200 nits against a 1000 nit peak), Reinhard
+    /// tone-mapping must produce an SDR value strictly between 0 and 255.
+    #[test]
+    fn test_hdr_composite_reinhard_midrange() {
+        let peak_nits = 1000.0_f32;
+        let mid_nits = 200.0_f32;
+
+        // Normalise: mid_nits / peak_nits = 0.2 in linear light.
+        let linear = mid_nits / peak_nits;
+        let pixels = vec![linear, linear, linear, 1.0_f32];
+        let comp = HdrCompositor::new(1, 1, peak_nits);
+        let sdr = comp.to_sdr(&pixels, 1.0);
+
+        // The Reinhard-mapped channel value must be strictly between 0 and 255.
+        let r = sdr[0];
+        let g = sdr[1];
+        let b = sdr[2];
+        assert!(
+            r > 0 && r < 255,
+            "mid-range Reinhard R should be in (0, 255), got {r}"
+        );
+        assert!(
+            g > 0 && g < 255,
+            "mid-range Reinhard G should be in (0, 255), got {g}"
+        );
+        assert!(
+            b > 0 && b < 255,
+            "mid-range Reinhard B should be in (0, 255), got {b}"
+        );
     }
 }

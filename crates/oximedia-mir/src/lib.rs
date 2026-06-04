@@ -139,6 +139,72 @@ pub mod tempo_map;
 pub mod tuning_detect;
 pub mod vocal_detect;
 
+/// 12-bin chroma vector computation (pitch-class profiling, chord/key analysis).
+pub mod chromagram;
+
+/// Cached chromagram that amortises FFT cost across multiple consumers.
+pub mod chroma_cache;
+
+/// Audio watermark embedding (spread-spectrum LSB steganography).
+pub mod watermark;
+
+/// Audio watermark detection and extraction.
+pub mod watermark_detect;
+
+/// Cosine, Earth-mover, and multi-modal audio similarity measures.
+pub mod audio_similarity;
+
+/// Visual cover-art feature extraction (dominant colours, edge histograms).
+pub mod cover_art_features;
+
+/// DJ workflow features: Camelot wheel, beat-matching, compatibility scoring.
+pub mod dj_features;
+
+/// Neural-network-free rule-based genre classification (spectral features).
+pub mod genre_classify_new;
+
+/// Harmonic-percussive source separation (median-filter HPSS).
+pub mod harmonic_percussive;
+
+/// Inharmonicity, HNR, and THD from the harmonic series.
+pub mod harmonic_spectral;
+
+/// Instrument family and voice classification.
+pub mod instrument_classifier;
+
+/// Locality-sensitive hashing for fast approximate audio nearest-neighbour.
+pub mod lsh_similarity;
+
+/// Forced alignment of lyrics text to detected onset timestamps.
+pub mod lyrics_align;
+
+/// Energy/zero-crossing melody extraction and contour shape analysis.
+pub mod melody_extract;
+
+/// Harmonic-salience Viterbi melody extractor with vibrato detection.
+pub mod melody_extractor;
+
+/// Multi-stem analysis with per-stem feature extraction.
+pub mod multitrack;
+
+/// Onset peak picking with configurable threshold and minimum interval.
+pub mod onset_peak;
+
+/// Structural section segmentation via novelty-curve self-similarity.
+pub mod section_segmenter;
+
+/// Brute-force and LSH similarity search over fingerprint indices.
+pub mod similarity_search;
+
+/// Sub-genre tagging within broad genre families.
+pub mod subgenre;
+
+/// Tempo stability analysis (variance, drift, class).
+pub mod tempo_stability;
+
+/// Waveform thumbnail generation for audio browsers.
+pub mod thumbnail;
+
 #[cfg(feature = "onnx")]
 pub mod ml;
 

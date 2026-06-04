@@ -390,10 +390,7 @@ mod tests {
         let mut sched = CalibrationSchedule::new();
         sched.register(calibrated_entry(30, 10).into_id("current"));
         sched.register(calibrated_entry(30, 35).into_id("overdue"));
-        sched.register({
-            let mut e = DeviceEntry::new("never", "Never", DeviceKind::Camera, 30);
-            e
-        });
+        sched.register(DeviceEntry::new("never", "Never", DeviceKind::Camera, 30));
         let overdue = sched.overdue_devices(fixed_now());
         assert_eq!(overdue.len(), 2); // overdue + never
     }
@@ -456,7 +453,10 @@ mod tests {
     fn test_calibration_status_display() {
         assert_eq!(CalibrationStatus::Current.to_string(), "Current");
         assert_eq!(CalibrationStatus::Overdue.to_string(), "Overdue");
-        assert_eq!(CalibrationStatus::NeverCalibrated.to_string(), "NeverCalibrated");
+        assert_eq!(
+            CalibrationStatus::NeverCalibrated.to_string(),
+            "NeverCalibrated"
+        );
     }
 }
 

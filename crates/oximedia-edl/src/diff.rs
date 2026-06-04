@@ -293,7 +293,12 @@ impl EdlDiff {
 /// classified as removed, and new event numbers are classified as added.
 #[must_use]
 pub fn diff_edls(old: &Edl, new: &Edl) -> EdlDiff {
-    diff_event_lists(&old.events, &new.events, old.title.clone(), new.title.clone())
+    diff_event_lists(
+        &old.events,
+        &new.events,
+        old.title.clone(),
+        new.title.clone(),
+    )
 }
 
 /// Compare two event lists and produce a diff.
@@ -540,7 +545,9 @@ mod tests {
         assert_eq!(diff.modified_count(), 1);
         if let EdlChange::Modified { field_changes, .. } = &diff.changes[0] {
             assert_eq!(field_changes.len(), 1);
-            assert!(matches!(&field_changes[0], FieldChange::Reel { old, new } if old == "A001" && new == "B001"));
+            assert!(
+                matches!(&field_changes[0], FieldChange::Reel { old, new } if old == "A001" && new == "B001")
+            );
         } else {
             panic!("Expected Modified change");
         }
@@ -629,9 +636,7 @@ mod tests {
     #[test]
     fn test_change_summary_text() {
         let ev = make_event(1, "A001");
-        let change = EdlChange::Added {
-            event: ev.clone(),
-        };
+        let change = EdlChange::Added { event: ev.clone() };
         let summary = change.summary();
         assert!(summary.contains("Added"));
         assert!(summary.contains("A001"));

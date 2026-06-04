@@ -135,7 +135,10 @@ impl DisplayDb {
     /// Return all HDR10-capable profiles.
     #[must_use]
     pub fn hdr10_capable(&self) -> Vec<&HdrDisplayCapability> {
-        self.profiles.iter().filter(|p| p.is_hdr10_capable()).collect()
+        self.profiles
+            .iter()
+            .filter(|p| p.is_hdr10_capable())
+            .collect()
     }
 
     /// Return the number of profiles in the database.

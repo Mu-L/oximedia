@@ -177,10 +177,7 @@ pub fn export_to_dot(nodes: &[DotNode], edges: &[DotEdge], config: &DotConfig) -
         };
 
         let id = dot_escape(&node.id);
-        let _ = writeln!(
-            out,
-            "  \"{id}\" [label=\"{label}\"{shape_str}{color_str}];"
-        );
+        let _ = writeln!(out, "  \"{id}\" [label=\"{label}\"{shape_str}{color_str}];");
     }
 
     // Edge declarations.
@@ -339,6 +336,9 @@ mod tests {
         edge.label = Some("my_label".to_string());
         let config = DotConfig::new("g").with_edge_labels();
         let dot = export_to_dot(&nodes, &[edge], &config);
-        assert!(dot.contains("my_label"), "edge label should appear in output");
+        assert!(
+            dot.contains("my_label"),
+            "edge label should appear in output"
+        );
     }
 }

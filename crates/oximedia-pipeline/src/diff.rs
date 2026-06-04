@@ -204,14 +204,18 @@ impl PipelineDiff {
         // Edges in `b` but not in `a` → added.
         for edge_b in &b.edges {
             if !a.edges.iter().any(|e| edges_equal(e, edge_b)) {
-                changes.push(PipelineChange::EdgeAdded { edge: edge_b.clone() });
+                changes.push(PipelineChange::EdgeAdded {
+                    edge: edge_b.clone(),
+                });
             }
         }
 
         // Edges in `a` but not in `b` → removed.
         for edge_a in &a.edges {
             if !b.edges.iter().any(|e| edges_equal(e, edge_a)) {
-                changes.push(PipelineChange::EdgeRemoved { edge: edge_a.clone() });
+                changes.push(PipelineChange::EdgeRemoved {
+                    edge: edge_a.clone(),
+                });
             }
         }
 
@@ -297,7 +301,9 @@ mod tests {
     use super::*;
     use crate::builder::PipelineBuilder;
     use crate::graph::PipelineGraph;
-    use crate::node::{NodeId, NodeSpec, NodeType, SinkConfig, SourceConfig, StreamKind, StreamSpec};
+    use crate::node::{
+        NodeId, NodeSpec, NodeType, SinkConfig, SourceConfig, StreamKind, StreamSpec,
+    };
 
     fn video_spec() -> StreamSpec {
         StreamSpec {
@@ -331,10 +337,8 @@ mod tests {
         let mut b = PipelineGraph::new();
 
         let id = NodeId::new();
-        b.nodes.insert(
-            id,
-            NodeSpec::new("extra", NodeType::Null, vec![], vec![]),
-        );
+        b.nodes
+            .insert(id, NodeSpec::new("extra", NodeType::Null, vec![], vec![]));
 
         let changes = PipelineDiff::compute(&a, &b);
         assert_eq!(changes.len(), 1);
@@ -347,10 +351,8 @@ mod tests {
         let b = PipelineGraph::new();
 
         let id = NodeId::new();
-        a.nodes.insert(
-            id,
-            NodeSpec::new("gone", NodeType::Null, vec![], vec![]),
-        );
+        a.nodes
+            .insert(id, NodeSpec::new("gone", NodeType::Null, vec![], vec![]));
 
         let changes = PipelineDiff::compute(&a, &b);
         assert_eq!(changes.len(), 1);
@@ -389,7 +391,10 @@ mod tests {
     fn test_node_changes_filter() {
         let mut a = PipelineGraph::new();
         let b = PipelineGraph::new();
-        a.nodes.insert(NodeId::new(), NodeSpec::new("x", NodeType::Null, vec![], vec![]));
+        a.nodes.insert(
+            NodeId::new(),
+            NodeSpec::new("x", NodeType::Null, vec![], vec![]),
+        );
         let node_ch = PipelineDiff::node_changes(&a, &b);
         let edge_ch = PipelineDiff::edge_changes(&a, &b);
         assert_eq!(node_ch.len(), 1);
@@ -405,8 +410,24 @@ mod tests {
         let mut b = PipelineGraph::new();
 
         for g in [&mut a, &mut b] {
-            g.nodes.insert(id_a, NodeSpec::new("n1", NodeType::Null, vec![], vec![("out".into(), video_spec())]));
-            g.nodes.insert(id_b, NodeSpec::new("n2", NodeType::Null, vec![("in".into(), video_spec())], vec![]));
+            g.nodes.insert(
+                id_a,
+                NodeSpec::new(
+                    "n1",
+                    NodeType::Null,
+                    vec![],
+                    vec![("out".into(), video_spec())],
+                ),
+            );
+            g.nodes.insert(
+                id_b,
+                NodeSpec::new(
+                    "n2",
+                    NodeType::Null,
+                    vec![("in".into(), video_spec())],
+                    vec![],
+                ),
+            );
         }
 
         // Add an edge only to `b`.

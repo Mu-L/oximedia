@@ -74,6 +74,8 @@ impl PitchShifter {
 }
 
 impl AudioEffect for PitchShifter {
+    const EFFECT_ID: &'static str = "pitch_shifter";
+
     fn process_sample(&mut self, input: f32) -> f32 {
         let ratio = self.pitch_ratio();
 
@@ -437,5 +439,105 @@ mod tests {
         let fp = FormantPreserver::new(100.0);
         let output = fp.apply(&[], 48000);
         assert!(output.is_empty());
+    }
+
+    /// Find the dominant frequency bin in a real-valued signal using oxifft.
+    ///
+    /// Returns `(peak_hz, peak_bin)`.
+    fn dominant_frequency(samples: &[f32], sample_rate: f32) -> (f32, usize) {
+        let n = samples.len();
+        let spectrum: Vec<oxifft::Complex<f32>> = samples
+            .iter()
+            .map(|&x| oxifft::Complex::new(x, 0.0))
+            .collect();
+        let freq_domain = oxifft::fft(&spectrum);
+        // Only look at the first half (positive frequencies).
+        let peak_bin = freq_domain
+            .iter()
+            .take(n / 2)
+            .enumerate()
+            .max_by(|a, b| {
+                a.1.norm()
+                    .partial_cmp(&b.1.norm())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let peak_hz = peak_bin as f32 * sample_rate / n as f32;
+        (peak_hz, peak_bin)
+    }
+
+    /// Test that pitch-shifting a 440 Hz sine up by 12 semitones yields a
+    /// dominant frequency near 880 Hz (one octave up).
+    ///
+    /// Uses `AdvancedPitchShifter::shift_resample` for a clean offline shift
+    /// and `oxifft::fft` for spectral analysis.
+    #[test]
+    fn test_pitch_shifter_octave_up_frequency() {
+        let sample_rate = 44100.0_f32;
+        let f0 = 440.0_f32;
+        let n = 4096_usize;
+
+        // Generate a 440 Hz sine wave.
+        let input: Vec<f32> = (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * f0 * i as f32 / sample_rate).sin())
+            .collect();
+
+        // Pitch shift by +12 semitones (one octave up → 880 Hz).
+        // shift_resample changes playback speed (and therefore frequency) by 2^(semitones/12).
+        let shifted = AdvancedPitchShifter::shift_resample(&input, 12.0);
+        assert!(!shifted.is_empty(), "shifted output must not be empty");
+        assert!(
+            shifted.iter().all(|s| s.is_finite()),
+            "all shifted samples must be finite"
+        );
+
+        // Pad (or trim) to n samples for FFT analysis.
+        let mut padded = shifted;
+        padded.resize(n, 0.0);
+
+        let (peak_hz, _peak_bin) = dominant_frequency(&padded, sample_rate);
+        let expected_hz = 880.0_f32;
+        // Allow ±2 bin tolerance (bin width = sample_rate / n ≈ 10.8 Hz).
+        let bin_width = sample_rate / n as f32;
+        assert!(
+            (peak_hz - expected_hz).abs() <= bin_width * 2.0,
+            "octave-up peak at {peak_hz:.1} Hz, expected ~{expected_hz} Hz (±{:.1} Hz tolerance)",
+            bin_width * 2.0
+        );
+    }
+
+    /// Test that pitch-shifting a 440 Hz sine down by 7 semitones yields a
+    /// dominant frequency near 440 × 2^(−7/12) ≈ 293.7 Hz.
+    #[test]
+    fn test_pitch_shifter_down_seven_semitones_frequency() {
+        let sample_rate = 44100.0_f32;
+        let f0 = 440.0_f32;
+        let n = 4096_usize;
+
+        let input: Vec<f32> = (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * f0 * i as f32 / sample_rate).sin())
+            .collect();
+
+        // −7 semitones: ratio = 2^(−7/12) ≈ 0.6674
+        let shifted = AdvancedPitchShifter::shift_resample(&input, -7.0);
+        assert!(!shifted.is_empty(), "shifted output must not be empty");
+        assert!(
+            shifted.iter().all(|s| s.is_finite()),
+            "all shifted samples must be finite"
+        );
+
+        // Pad or trim to n samples for FFT analysis.
+        let mut padded = shifted;
+        padded.resize(n, 0.0);
+
+        let (peak_hz, _peak_bin) = dominant_frequency(&padded, sample_rate);
+        let expected_hz = f0 * 2.0_f32.powf(-7.0 / 12.0); // ≈ 293.7 Hz
+        let bin_width = sample_rate / n as f32;
+        assert!(
+            (peak_hz - expected_hz).abs() <= bin_width * 2.0,
+            "down-7-semitone peak at {peak_hz:.1} Hz, expected ~{expected_hz:.1} Hz (±{:.1} Hz tolerance)",
+            bin_width * 2.0
+        );
     }
 }

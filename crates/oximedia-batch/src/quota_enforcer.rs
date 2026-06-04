@@ -614,7 +614,7 @@ mod tests {
             QuotaLimits {
                 max_concurrent_jobs: Some(2),
                 max_daily_jobs: Some(5),
-                max_storage_bytes: Some(1024 * 1024),   // 1 MiB
+                max_storage_bytes: Some(1024 * 1024), // 1 MiB
                 max_cpu_hours: Some(10.0),
             },
         );
@@ -634,7 +634,7 @@ mod tests {
         e.charge_concurrent_job("alice");
         let result = e.check_can_admit("alice");
         assert!(result.is_err());
-        let err = result.err().expect("should be err");
+        let err = result.expect_err("should be err");
         assert!(err.to_string().contains("concurrent"));
     }
 
@@ -664,7 +664,7 @@ mod tests {
         e.charge_storage("alice", 900_000);
         let result = e.check_storage("alice", 200_000); // 900k + 200k > 1 MiB
         assert!(result.is_err());
-        let err = result.err().expect("should be err");
+        let err = result.expect_err("should be err");
         assert!(err.to_string().contains("storage"));
     }
 
@@ -682,7 +682,7 @@ mod tests {
         e.charge_cpu_hours("alice", 9.5);
         let result = e.check_cpu_hours("alice", 1.0); // 9.5 + 1.0 > 10.0
         assert!(result.is_err());
-        let err = result.err().expect("should be err");
+        let err = result.expect_err("should be err");
         assert!(err.to_string().contains("CPU"));
     }
 

@@ -576,6 +576,8 @@ impl OversampledDistortion {
 }
 
 impl crate::AudioEffect for OversampledDistortion {
+    const EFFECT_ID: &'static str = "oversampled_distortion";
+
     fn process_sample(&mut self, input: f32) -> f32 {
         let kind = self.config.kind;
         let drive = self.config.drive;

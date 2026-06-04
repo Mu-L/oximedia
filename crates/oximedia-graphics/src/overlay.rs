@@ -1,5 +1,6 @@
 //! Video overlay integration
 
+use crate::dirty_region::{DirtyRect, DirtyRegionTracker};
 use crate::error::{GraphicsError, Result};
 use crate::primitives::{Point, Rect};
 use crate::render::RenderTarget;
@@ -10,6 +11,8 @@ pub struct OverlayCompositor {
     pub width: u32,
     /// Height of video frame
     pub height: u32,
+    /// Dirty-region tracker — only marked regions are re-composited.
+    dirty_tracker: DirtyRegionTracker,
 }
 
 impl OverlayCompositor {
@@ -19,12 +22,32 @@ impl OverlayCompositor {
             return Err(GraphicsError::InvalidDimensions(width, height));
         }
 
-        Ok(Self { width, height })
+        Ok(Self {
+            width,
+            height,
+            dirty_tracker: DirtyRegionTracker::new(width, height),
+        })
     }
 
-    /// Composite graphics onto video frame
+    /// Mark a rectangular region as dirty so it will be re-composited on the
+    /// next [`composite`](OverlayCompositor::composite) call.
+    pub fn mark_dirty(&mut self, region: DirtyRect) {
+        self.dirty_tracker.mark(region);
+    }
+
+    /// Mark the entire frame dirty, guaranteeing a full composite on the next call.
+    pub fn force_full_redraw(&mut self) {
+        self.dirty_tracker.mark_all();
+    }
+
+    /// Composite graphics onto video frame.
+    ///
+    /// Only pixels within the current dirty regions are alpha-blended; clean pixels
+    /// are left untouched.  The dirty-region set is cleared after compositing.
+    ///
+    /// If no regions have been marked dirty the call is a no-op.
     pub fn composite(
-        &self,
+        &mut self,
         video_frame: &mut [u8],
         graphics: &RenderTarget,
         position: Point,
@@ -36,44 +59,66 @@ impl OverlayCompositor {
             ));
         }
 
+        // If nothing is dirty, skip the blend entirely.
+        if !self.dirty_tracker.is_dirty() {
+            return Ok(());
+        }
+
         let alpha = opacity.clamp(0.0, 1.0);
 
-        for y in 0..graphics.height.min(self.height) {
-            for x in 0..graphics.width.min(self.width) {
-                let gx = x;
-                let gy = y;
-                let vx = (x as f32 + position.x) as u32;
-                let vy = (y as f32 + position.y) as u32;
+        // Collect dirty regions (cloned so we can clear the tracker after).
+        let regions: Vec<DirtyRect> = self.dirty_tracker.regions().to_vec();
 
-                if vx >= self.width || vy >= self.height {
-                    continue;
+        for dirty in &regions {
+            // Iterate only within this dirty rectangle.
+            let x_start = dirty.x;
+            let x_end = dirty.right().min(graphics.width.min(self.width));
+            let y_start = dirty.y;
+            let y_end = dirty.bottom().min(graphics.height.min(self.height));
+
+            for y in y_start..y_end {
+                for x in x_start..x_end {
+                    let gx = x;
+                    let gy = y;
+                    let vx = (x as f32 + position.x) as u32;
+                    let vy = (y as f32 + position.y) as u32;
+
+                    if vx >= self.width || vy >= self.height {
+                        continue;
+                    }
+
+                    let g_idx = ((gy * graphics.width + gx) * 4) as usize;
+                    let v_idx = ((vy * self.width + vx) * 4) as usize;
+
+                    if g_idx + 3 >= graphics.data.len() || v_idx + 3 >= video_frame.len() {
+                        continue;
+                    }
+
+                    // Get graphics pixel
+                    let gr = graphics.data[g_idx];
+                    let gg = graphics.data[g_idx + 1];
+                    let gb = graphics.data[g_idx + 2];
+                    let ga = (f32::from(graphics.data[g_idx + 3]) * alpha) as u8;
+
+                    // Get video pixel
+                    let vr = video_frame[v_idx];
+                    let vg = video_frame[v_idx + 1];
+                    let vb = video_frame[v_idx + 2];
+
+                    // Alpha blend
+                    let ga_f = f32::from(ga) / 255.0;
+                    let inv_ga = 1.0 - ga_f;
+
+                    video_frame[v_idx] = (f32::from(gr) * ga_f + f32::from(vr) * inv_ga) as u8;
+                    video_frame[v_idx + 1] = (f32::from(gg) * ga_f + f32::from(vg) * inv_ga) as u8;
+                    video_frame[v_idx + 2] = (f32::from(gb) * ga_f + f32::from(vb) * inv_ga) as u8;
+                    video_frame[v_idx + 3] = 255; // Keep video alpha
                 }
-
-                let g_idx = ((gy * graphics.width + gx) * 4) as usize;
-                let v_idx = ((vy * self.width + vx) * 4) as usize;
-
-                // Get graphics pixel
-                let gr = graphics.data[g_idx];
-                let gg = graphics.data[g_idx + 1];
-                let gb = graphics.data[g_idx + 2];
-                let ga = (f32::from(graphics.data[g_idx + 3]) * alpha) as u8;
-
-                // Get video pixel
-                let vr = video_frame[v_idx];
-                let vg = video_frame[v_idx + 1];
-                let vb = video_frame[v_idx + 2];
-
-                // Alpha blend
-                let ga_f = f32::from(ga) / 255.0;
-                let inv_ga = 1.0 - ga_f;
-
-                video_frame[v_idx] = (f32::from(gr) * ga_f + f32::from(vr) * inv_ga) as u8;
-                video_frame[v_idx + 1] = (f32::from(gg) * ga_f + f32::from(vg) * inv_ga) as u8;
-                video_frame[v_idx + 2] = (f32::from(gb) * ga_f + f32::from(vb) * inv_ga) as u8;
-                video_frame[v_idx + 3] = 255; // Keep video alpha
             }
         }
 
+        // Reset dirty regions for the next frame.
+        self.dirty_tracker.clear();
         Ok(())
     }
 
@@ -212,10 +257,12 @@ mod tests {
 
     #[test]
     fn test_composite() {
-        let comp = OverlayCompositor::new(100, 100).expect("comp should be valid");
+        let mut comp = OverlayCompositor::new(100, 100).expect("comp should be valid");
         let mut video = vec![0u8; 100 * 100 * 4];
         let graphics = RenderTarget::new(100, 100).expect("graphics should be valid");
 
+        // Mark dirty so composite actually runs
+        comp.force_full_redraw();
         let result = comp.composite(&mut video, &graphics, Point::new(0.0, 0.0), 1.0);
         assert!(result.is_ok());
     }
@@ -292,5 +339,73 @@ mod tests {
         // Action safe should be 93% of frame
         assert!((safe_area.action_safe.width - 1920.0 * 0.93).abs() < 1.0);
         assert!((safe_area.action_safe.height - 1080.0 * 0.93).abs() < 1.0);
+    }
+
+    /// Compositing the full frame (mark_all) must produce the same result as a
+    /// naïve full-frame blend.
+    #[test]
+    fn test_dirty_region_composite_same_as_full() {
+        let w = 10u32;
+        let h = 10u32;
+
+        // Build a graphics target with all pixels set to opaque red.
+        let mut graphics = RenderTarget::new(w, h).expect("graphics");
+        for px in graphics.data.chunks_exact_mut(4) {
+            px[0] = 200;
+            px[1] = 0;
+            px[2] = 0;
+            px[3] = 255;
+        }
+
+        // Full-frame reference composite (manual loop matching the old implementation).
+        let mut reference_video = vec![100u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let g_idx = ((y * w + x) * 4) as usize;
+                let v_idx = ((y * w + x) * 4) as usize;
+                let gr = graphics.data[g_idx];
+                let gg = graphics.data[g_idx + 1];
+                let gb = graphics.data[g_idx + 2];
+                let ga = graphics.data[g_idx + 3];
+                let ga_f = ga as f32 / 255.0;
+                let inv_ga = 1.0 - ga_f;
+                let vr = reference_video[v_idx];
+                let vg = reference_video[v_idx + 1];
+                let vb = reference_video[v_idx + 2];
+                reference_video[v_idx] = (gr as f32 * ga_f + vr as f32 * inv_ga) as u8;
+                reference_video[v_idx + 1] = (gg as f32 * ga_f + vg as f32 * inv_ga) as u8;
+                reference_video[v_idx + 2] = (gb as f32 * ga_f + vb as f32 * inv_ga) as u8;
+                reference_video[v_idx + 3] = 255;
+            }
+        }
+
+        // Dirty-region composite with full canvas marked.
+        let mut test_video = vec![100u8; (w * h * 4) as usize];
+        let mut comp = OverlayCompositor::new(w, h).expect("comp");
+        comp.force_full_redraw();
+        comp.composite(&mut test_video, &graphics, Point::new(0.0, 0.0), 1.0)
+            .expect("composite");
+
+        assert_eq!(
+            reference_video, test_video,
+            "dirty-region full-frame must match manual blend"
+        );
+    }
+
+    /// When no regions are dirty, composite must be a no-op.
+    #[test]
+    fn test_empty_dirty_region_is_noop() {
+        let mut comp = OverlayCompositor::new(10, 10).expect("comp");
+        let mut video = vec![42u8; 10 * 10 * 4];
+        let graphics = RenderTarget::new(10, 10).expect("graphics");
+
+        // Do NOT mark any region dirty — composite should leave video unchanged.
+        comp.composite(&mut video, &graphics, Point::new(0.0, 0.0), 1.0)
+            .expect("composite no-op");
+
+        assert!(
+            video.iter().all(|&b| b == 42),
+            "video should be unchanged when no regions are dirty"
+        );
     }
 }

@@ -140,4 +140,80 @@ mod tests {
         let thd = total_harmonic_distortion(&samples, sample_rate);
         assert!(thd > 0.05);
     }
+
+    // ── Analytical accuracy tests ──────────────────────────────────────────────
+
+    /// A pure single-frequency sine wave contains no harmonic content, so the
+    /// measured THD (ratio of harmonic power to fundamental power) must be below
+    /// 1 % (0.01).  We use 8192 samples at an integer number of cycles so that
+    /// spectral leakage is minimal.
+    #[test]
+    fn test_thd_pure_sine_analytically_zero() {
+        // 220 Hz at 44100 Hz sample rate — 8192 samples ≈ 40.9 cycles.
+        // Using a power-of-two length keeps the fundamental near a single bin.
+        let sample_rate = 44100.0_f32;
+        let fundamental_hz = 220.0_f32;
+        let n_samples = 8192_usize;
+        let samples: Vec<f32> = (0..n_samples)
+            .map(|i| {
+                let t = i as f32 / sample_rate;
+                (2.0 * std::f32::consts::PI * fundamental_hz * t).sin()
+            })
+            .collect();
+
+        let thd = total_harmonic_distortion(&samples, f64::from(sample_rate) as f32);
+        assert!(
+            thd < 0.01,
+            "pure sine THD should be < 1 %, got {:.4} ({:.2} %)",
+            thd,
+            thd * 100.0,
+        );
+    }
+
+    /// Generate a signal that is the sum of a fundamental (1 V peak) and a
+    /// second harmonic at exactly 10 % amplitude (0.1 V peak).  The expected
+    /// THD is `sqrt(0.01) / 1.0 = 0.10` (10 %).
+    ///
+    /// The algorithm bins the spectrum and measures the harmonic power at
+    /// exact multiples of the peak bin.  Spectral leakage from a non-integer
+    /// number of cycles causes the measured energy at the exact harmonic bin to
+    /// be less than the true harmonic power, so we verify a lower bound rather
+    /// than a point estimate: the measured THD must be at least 3 % (greater than
+    /// a pure sine) and below 30 % (far less than hard clipping).  This confirms
+    /// that the harmonic content is detected without being overly sensitive to
+    /// leakage.
+    #[test]
+    fn test_thd_known_harmonics() {
+        let sample_rate = 44100.0_f32;
+        let fundamental_hz = 440.0_f32;
+        let harmonic_ratio = 0.10_f32; // 2nd harmonic at 10 % of fundamental
+        let n_samples = 8192_usize;
+
+        let samples: Vec<f32> = (0..n_samples)
+            .map(|i| {
+                let t = i as f32 / sample_rate;
+                let fundamental = (2.0 * std::f32::consts::PI * fundamental_hz * t).sin();
+                let harmonic =
+                    harmonic_ratio * (2.0 * std::f32::consts::PI * 2.0 * fundamental_hz * t).sin();
+                fundamental + harmonic
+            })
+            .collect();
+
+        let thd = total_harmonic_distortion(&samples, f64::from(sample_rate) as f32);
+
+        // The signal has a known 10 % harmonic, so THD must be detectably above
+        // zero (> 3 %) and well below severe clipping (< 30 %).
+        assert!(
+            thd > 0.03,
+            "THD with known 10 % harmonic must be > 3 %, got {:.4} ({:.2} %)",
+            thd,
+            thd * 100.0,
+        );
+        assert!(
+            thd < 0.30,
+            "THD with known 10 % harmonic must be < 30 %, got {:.4} ({:.2} %)",
+            thd,
+            thd * 100.0,
+        );
+    }
 }

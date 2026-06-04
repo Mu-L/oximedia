@@ -298,9 +298,8 @@ mod tests {
 
     #[test]
     fn test_combined_sample_rate_and_tags() {
-        let m =
-            parse_statsd_line("api.latency:250|ms|@0.1|#env:staging,version:2")
-                .expect("valid combined line");
+        let m = parse_statsd_line("api.latency:250|ms|@0.1|#env:staging,version:2")
+            .expect("valid combined line");
         assert_eq!(m.metric_type, StatsdMetricType::Timer);
         assert_eq!(m.sample_rate, Some(0.1));
         assert_eq!(m.tags.len(), 2);
@@ -313,7 +312,10 @@ mod tests {
         let result = parse_statsd_line(":42|g");
         assert!(result.is_err(), "empty name should produce an error");
         let msg = result.unwrap_err();
-        assert!(msg.contains("empty"), "error message should mention empty name");
+        assert!(
+            msg.contains("empty"),
+            "error message should mention empty name"
+        );
     }
 
     #[test]
@@ -321,7 +323,10 @@ mod tests {
         let result = parse_statsd_line("no_colon_here");
         assert!(result.is_err(), "missing ':' should produce an error");
         let msg = result.unwrap_err();
-        assert!(msg.contains("':'"), "error should mention missing separator");
+        assert!(
+            msg.contains("':'"),
+            "error should mention missing separator"
+        );
     }
 
     #[test]

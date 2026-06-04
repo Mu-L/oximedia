@@ -11,14 +11,16 @@
 pub mod cabinet;
 pub mod convolution;
 pub mod freeverb;
+pub mod overlap_add;
 pub mod plate;
 pub mod schroeder;
 pub mod spring;
 
 // Re-exports
 pub use cabinet::{CabinetSimulator, CabinetType};
-pub use convolution::ConvolutionReverb;
+pub use convolution::{ConvolutionReverb, DoubleBufferConvolver};
 pub use freeverb::{Freeverb, StereoMode};
+pub use overlap_add::OverlapAddConvolver;
 pub use plate::PlateReverb;
 pub use schroeder::{SchroederReverb, SimpleConvolutionReverb};
 pub use spring::{SpringReverb, SpringReverbConfig};

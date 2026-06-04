@@ -204,11 +204,8 @@ impl HdrGradeParams {
         ];
 
         // Step 2: log-domain contrast around pivot
-        let contrasted = apply_log_contrast(
-            shifted,
-            self.contrast_log_centre,
-            self.contrast_factor,
-        );
+        let contrasted =
+            apply_log_contrast(shifted, self.contrast_log_centre, self.contrast_factor);
 
         // Step 3: saturation
         let luma = rec709_luma(contrasted);
@@ -433,11 +430,10 @@ mod tests {
         params.saturation = 0.0;
         let out = params.apply_pq([0.8, 0.1, 0.3]);
         let luma = 0.2126 * 0.8 + 0.7152 * 0.1 + 0.0722 * 0.3;
-        for i in 0..3 {
+        for (i, &val) in out.iter().enumerate() {
             assert!(
-                (out[i] - luma).abs() < 1e-4,
-                "ch{i}: expected luma {luma}, got {}",
-                out[i]
+                (val - luma).abs() < 1e-4,
+                "ch{i}: expected luma {luma}, got {val}"
             );
         }
     }
@@ -455,7 +451,7 @@ mod tests {
         };
         let out = params.apply_pq([1.0, 1.0, 1.0]);
         for &ch in &out {
-            assert!(ch <= 1.0 && ch >= 0.0, "out-of-range: {ch}");
+            assert!((0.0..=1.0).contains(&ch), "out-of-range: {ch}");
         }
     }
 

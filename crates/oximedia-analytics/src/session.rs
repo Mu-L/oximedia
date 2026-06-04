@@ -1,6 +1,8 @@
 //! Viewer session analytics — playback events, session metrics, playback maps,
 //! and attention heatmaps.
 
+use rayon::prelude::*;
+
 /// A discrete event emitted during media playback.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlaybackEvent {
@@ -203,12 +205,15 @@ impl PlaybackMap {
 }
 
 /// Analyze multiple sessions in batch, returning one `SessionMetrics` per session.
+///
+/// Uses Rayon parallel iterators for throughput on large batches.  Results are
+/// returned in the same order as the input `sessions` slice.
 pub fn analyze_sessions_batch(
     sessions: &[ViewerSession],
     content_duration_ms: u64,
 ) -> Vec<SessionMetrics> {
     sessions
-        .iter()
+        .par_iter()
         .map(|s| analyze_session(s, content_duration_ms))
         .collect()
 }

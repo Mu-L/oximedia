@@ -290,6 +290,135 @@ impl ChannelStrip {
     pub fn disable_hpf(&mut self) {
         self.hpf_freq = None;
     }
+
+    // ── SIMD gain/pan application ─────────────────────────────────────────
+
+    /// Compute the combined linear gain scalar from `input_gain` (dB) and `fader`.
+    #[inline]
+    fn linear_gain(&self) -> f32 {
+        10.0_f32.powf(self.input_gain / 20.0) * self.fader
+    }
+
+    /// Apply `input_gain` + `fader` + `pan` to a stereo buffer, dispatching to
+    /// the fastest available SIMD backend.
+    ///
+    /// `left` and `right` must have the same length.
+    #[allow(unsafe_code)]
+    pub fn apply_simd(&self, left: &mut [f32], right: &mut [f32]) {
+        debug_assert_eq!(
+            left.len(),
+            right.len(),
+            "left and right must be equal length"
+        );
+
+        #[cfg(target_arch = "x86_64")]
+        if is_x86_feature_detected!("avx2") {
+            // SAFETY: we just confirmed AVX2 is available at runtime.
+            unsafe {
+                self.apply_avx2(left, right);
+            }
+            return;
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            self.apply_neon(left, right);
+            return;
+        }
+
+        #[allow(unreachable_code)]
+        self.apply_scalar(left, right);
+    }
+
+    /// Scalar fallback implementation of gain/pan.
+    pub fn apply_scalar(&self, left: &mut [f32], right: &mut [f32]) {
+        let gain = self.linear_gain();
+        let pan = self.pan;
+        // Linear pan law: pan=-1 → full left, pan=+1 → full right.
+        let gain_l = gain * (1.0 - pan.max(0.0));
+        let gain_r = gain * (1.0 + pan.min(0.0));
+        for (l, r) in left.iter_mut().zip(right.iter_mut()) {
+            *l *= gain_l;
+            *r *= gain_r;
+        }
+    }
+
+    /// AVX2-accelerated gain/pan (8 f32 lanes per iteration).
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure AVX2 is available (checked via `is_x86_feature_detected!`).
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    #[allow(unsafe_code)]
+    unsafe fn apply_avx2(&self, left: &mut [f32], right: &mut [f32]) {
+        use std::arch::x86_64::*;
+
+        let gain = self.linear_gain();
+        let pan = self.pan;
+        let gain_l = gain * (1.0 - pan.max(0.0));
+        let gain_r = gain * (1.0 + pan.min(0.0));
+
+        let vgl = _mm256_set1_ps(gain_l);
+        let vgr = _mm256_set1_ps(gain_r);
+
+        // Use min to guard against mismatched lengths in the SIMD paths where
+        // raw pointer arithmetic is used.
+        let n = left.len().min(right.len());
+        let chunks = n / 8;
+
+        for i in 0..chunks {
+            let vl = _mm256_loadu_ps(left.as_ptr().add(i * 8));
+            let vr = _mm256_loadu_ps(right.as_ptr().add(i * 8));
+            _mm256_storeu_ps(left.as_mut_ptr().add(i * 8), _mm256_mul_ps(vl, vgl));
+            _mm256_storeu_ps(right.as_mut_ptr().add(i * 8), _mm256_mul_ps(vr, vgr));
+        }
+
+        // Scalar tail for samples not covered by full 8-lane chunks.
+        let start = chunks * 8;
+        for i in start..n {
+            left[i] *= gain_l;
+            right[i] *= gain_r;
+        }
+    }
+
+    /// NEON-accelerated gain/pan (4 f32 lanes per iteration).
+    ///
+    /// NEON is always available on AArch64; no runtime detection needed.
+    #[cfg(target_arch = "aarch64")]
+    #[allow(unsafe_code)]
+    fn apply_neon(&self, left: &mut [f32], right: &mut [f32]) {
+        use std::arch::aarch64::*;
+
+        let gain = self.linear_gain();
+        let pan = self.pan;
+        let gain_l = gain * (1.0 - pan.max(0.0));
+        let gain_r = gain * (1.0 + pan.min(0.0));
+
+        // Use min to guard against mismatched lengths in the SIMD paths where
+        // raw pointer arithmetic is used.
+        let n = left.len().min(right.len());
+        let chunks = n / 4;
+
+        // SAFETY: AArch64 always has NEON; pointer arithmetic is bounded by chunks*4 ≤ n.
+        unsafe {
+            let vgl = vdupq_n_f32(gain_l);
+            let vgr = vdupq_n_f32(gain_r);
+            for i in 0..chunks {
+                let vl = vld1q_f32(left.as_ptr().add(i * 4));
+                let vr = vld1q_f32(right.as_ptr().add(i * 4));
+                vst1q_f32(left.as_mut_ptr().add(i * 4), vmulq_f32(vl, vgl));
+                vst1q_f32(right.as_mut_ptr().add(i * 4), vmulq_f32(vr, vgr));
+            }
+        }
+
+        // Scalar tail.
+        let start = chunks * 4;
+        for i in start..n {
+            left[i] *= gain_l;
+            right[i] *= gain_r;
+        }
+    }
 }
 
 /// 4-band parametric EQ
@@ -629,5 +758,182 @@ mod tests {
         channel.enable_hpf(80.0).expect("enable_hpf should succeed");
         channel.disable_hpf();
         assert_eq!(channel.hpf_freq, None);
+    }
+
+    // ── SIMD apply_simd tests ─────────────────────────────────────────────────
+
+    /// Build a ChannelStrip with the given gain (dB), fader, and pan.
+    fn make_strip(input_gain_db: f32, fader: f32, pan: f32) -> ChannelStrip {
+        let mut strip = ChannelStrip::new("simd_test", 48000).expect("create");
+        strip.set_gain(input_gain_db).expect("set_gain");
+        strip.set_pan(pan).expect("set_pan");
+        strip.set_fader(fader);
+        strip
+    }
+
+    #[test]
+    fn test_channel_strip_simd_matches_scalar_center_pan() {
+        let strip = make_strip(0.0, 0.75, 0.0);
+        let n = 4096;
+        let left_orig: Vec<f32> = (0..n).map(|i| (i as f32 * 0.001).sin()).collect();
+        let right_orig: Vec<f32> = (0..n).map(|i| (i as f32 * 0.002).cos()).collect();
+
+        let mut left_scalar = left_orig.clone();
+        let mut right_scalar = right_orig.clone();
+        strip.apply_scalar(&mut left_scalar, &mut right_scalar);
+
+        let mut left_simd = left_orig.clone();
+        let mut right_simd = right_orig.clone();
+        strip.apply_simd(&mut left_simd, &mut right_simd);
+
+        for (a, b) in left_scalar.iter().zip(left_simd.iter()) {
+            assert!((a - b).abs() < 1e-6, "left mismatch: {a} vs {b}");
+        }
+        for (a, b) in right_scalar.iter().zip(right_simd.iter()) {
+            assert!((a - b).abs() < 1e-6, "right mismatch: {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn test_channel_strip_simd_matches_scalar_pan_right() {
+        let strip = make_strip(6.0, 1.0, 0.5);
+        let n = 1024;
+        let left_orig: Vec<f32> = (0..n).map(|i| i as f32 / n as f32).collect();
+        let right_orig: Vec<f32> = (0..n).map(|i| -(i as f32 / n as f32)).collect();
+
+        let mut left_scalar = left_orig.clone();
+        let mut right_scalar = right_orig.clone();
+        strip.apply_scalar(&mut left_scalar, &mut right_scalar);
+
+        let mut left_simd = left_orig.clone();
+        let mut right_simd = right_orig.clone();
+        strip.apply_simd(&mut left_simd, &mut right_simd);
+
+        for (a, b) in left_scalar.iter().zip(left_simd.iter()) {
+            assert!((a - b).abs() < 1e-6, "left mismatch: {a} vs {b}");
+        }
+        for (a, b) in right_scalar.iter().zip(right_simd.iter()) {
+            assert!((a - b).abs() < 1e-6, "right mismatch: {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn test_channel_strip_simd_pan_left_mutes_right() {
+        // Pan fully left: right channel gain → 0.
+        let strip = make_strip(0.0, 1.0, -1.0);
+        let mut left = vec![1.0_f32; 16];
+        let mut right = vec![1.0_f32; 16];
+        strip.apply_simd(&mut left, &mut right);
+        // Left channel should be unchanged (gain_l = 1*1 = 1).
+        assert!(
+            (left[0] - 1.0).abs() < 1e-6,
+            "left should be 1.0, got {}",
+            left[0]
+        );
+        // Right channel should be zero (gain_r = gain*(1+(-1)) = 0).
+        assert!(
+            right[0].abs() < 1e-6,
+            "right should be 0.0, got {}",
+            right[0]
+        );
+    }
+
+    #[test]
+    fn test_channel_strip_apply_scalar_zero_gain() {
+        let strip = make_strip(-60.0, 0.0, 0.0);
+        let mut left = vec![1.0_f32; 32];
+        let mut right = vec![1.0_f32; 32];
+        strip.apply_scalar(&mut left, &mut right);
+        // fader=0 → gain_l = gain_r = 0.
+        assert!(left.iter().all(|&v| v.abs() < 1e-6));
+        assert!(right.iter().all(|&v| v.abs() < 1e-6));
+    }
+
+    #[test]
+    fn test_channel_strip_simd_odd_length() {
+        // Test that scalar tail handling works for buffers not aligned to 8.
+        let strip = make_strip(0.0, 1.0, 0.0);
+        let n = 13; // Not a multiple of 8 (AVX2) or 4 (NEON).
+        let left_orig: Vec<f32> = (0..n).map(|i| i as f32).collect();
+        let right_orig = left_orig.clone();
+
+        let mut left_scalar = left_orig.clone();
+        let mut right_scalar = right_orig.clone();
+        strip.apply_scalar(&mut left_scalar, &mut right_scalar);
+
+        let mut left_simd = left_orig.clone();
+        let mut right_simd = right_orig.clone();
+        strip.apply_simd(&mut left_simd, &mut right_simd);
+
+        for (a, b) in left_scalar.iter().zip(left_simd.iter()) {
+            assert!((a - b).abs() < 1e-6, "left tail mismatch: {a} vs {b}");
+        }
+    }
+
+    // ── 128-channel MixingConsole stress test ─────────────────────────────────
+
+    /// Stress test: feed 128 channels of audio through the mixing console and
+    /// verify the output has no NaN/Inf values, correct length, and bounded
+    /// energy.  Also checks that the mix completes within a reasonable time
+    /// even in debug builds.
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn test_mixing_console_128_channels_stress() {
+        use std::time::Instant;
+
+        const CHANNELS: usize = 128;
+        const SR: u32 = 48_000;
+        const BUFFER_SIZE: usize = 512;
+        const FRAMES: usize = 4_800; // 100 ms of audio per channel
+
+        let mut console = MixingConsole::new(SR, BUFFER_SIZE).expect("create console");
+
+        // Add 128 channels and build input buffers (each a sine at a distinct freq).
+        let mut inputs: Vec<Vec<f32>> = Vec::with_capacity(CHANNELS);
+        for ch in 0..CHANNELS {
+            console
+                .add_channel(&format!("ch{ch}"))
+                .expect("add_channel");
+            let freq = 100.0 + ch as f32 * 50.0; // 100 Hz … 6450 Hz
+            let buf: Vec<f32> = (0..FRAMES)
+                .map(|i| (i as f32 * 2.0 * std::f32::consts::PI * freq / SR as f32).sin() * 0.01)
+                .collect();
+            inputs.push(buf);
+        }
+
+        // Stereo output buffer: FRAMES × 2 interleaved samples.
+        let mut output = vec![0.0_f32; FRAMES * 2];
+
+        let start = Instant::now();
+        console.process(&inputs, &mut output);
+        let elapsed = start.elapsed();
+
+        // 1. No NaN or Inf.
+        for (i, &s) in output.iter().enumerate() {
+            assert!(s.is_finite(), "output[{i}] is not finite: {s}");
+        }
+
+        // 2. Correct output length.
+        assert_eq!(output.len(), FRAMES * 2);
+
+        // 3. Energy is bounded: sum of squares < CHANNELS * max_channel_energy * 2.
+        let max_channel_energy: f32 = inputs
+            .iter()
+            .map(|buf| buf.iter().map(|&x| x * x).sum::<f32>())
+            .fold(0.0_f32, f32::max);
+        let output_energy: f32 = output.iter().map(|&x| x * x).sum();
+        let energy_bound = (CHANNELS as f32) * max_channel_energy * 4.0;
+        assert!(
+            output_energy <= energy_bound,
+            "output energy {output_energy:.4} exceeds bound {energy_bound:.4}"
+        );
+
+        // 4. Timing bound: must complete within 5 s in debug / 500 ms in release.
+        let budget_ms = if cfg!(debug_assertions) { 5_000 } else { 500 };
+        let elapsed_ms = elapsed.as_millis();
+        assert!(
+            elapsed_ms < budget_ms,
+            "128-channel mix took {elapsed_ms} ms; budget is {budget_ms} ms"
+        );
     }
 }

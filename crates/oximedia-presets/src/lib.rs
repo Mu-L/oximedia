@@ -61,14 +61,18 @@ pub mod color_preset;
 pub mod custom;
 pub mod delivery_preset;
 pub mod export;
+pub mod film_grain;
 pub mod import;
 pub mod ingest_preset;
 pub mod library;
 pub mod mobile;
 pub mod optimal_preset;
 pub mod platform;
+pub mod preset_api;
 pub mod preset_benchmark;
 pub mod preset_chain;
+pub mod preset_compatibility;
+pub mod preset_derived;
 pub mod preset_diff;
 pub mod preset_export;
 pub mod preset_import;
@@ -76,6 +80,7 @@ pub mod preset_inheritance;
 pub mod preset_manager;
 pub mod preset_metadata;
 pub mod preset_override;
+pub mod preset_recommendation;
 pub mod preset_resolver;
 pub mod preset_scoring;
 pub mod preset_tags;
@@ -486,6 +491,11 @@ impl PresetLibrary {
         // Audio-only presets
         self.load_flac_podcast_presets();
         self.load_opus_podcast_presets();
+
+        // Film grain synthesis presets (AV1)
+        for preset in film_grain::all_presets() {
+            self.add(preset);
+        }
     }
 
     /// Add a preset to the library.

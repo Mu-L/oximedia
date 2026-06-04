@@ -100,9 +100,10 @@ fn assoc_legendre_sn3d(l: i32, x: f32) -> Vec<f32> {
         for li in (m + 2)..=l {
             let lf = li as f32;
             let mf = m as f32;
-            buf[li as usize][m as usize] = (x * (2.0 * lf - 1.0) * buf[(li - 1) as usize][m as usize]
-                - (lf + mf - 1.0) * buf[(li - 2) as usize][m as usize])
-                / (lf - mf);
+            buf[li as usize][m as usize] =
+                (x * (2.0 * lf - 1.0) * buf[(li - 1) as usize][m as usize]
+                    - (lf + mf - 1.0) * buf[(li - 2) as usize][m as usize])
+                    / (lf - mf);
         }
     }
 
@@ -238,12 +239,18 @@ pub struct GridResolution {
 impl GridResolution {
     /// A reasonable default: 360 × 181 (1° grid).
     pub fn one_degree() -> Self {
-        Self { azimuth_steps: 360, elevation_steps: 181 }
+        Self {
+            azimuth_steps: 360,
+            elevation_steps: 181,
+        }
     }
 
     /// Coarser 5° grid for quick analysis.
     pub fn five_degree() -> Self {
-        Self { azimuth_steps: 72, elevation_steps: 37 }
+        Self {
+            azimuth_steps: 72,
+            elevation_steps: 37,
+        }
     }
 }
 
@@ -275,8 +282,7 @@ impl LoudnessMap {
     pub fn elevation_rad(&self, el_idx: usize) -> f32 {
         use std::f32::consts::PI;
         -PI / 2.0
-            + el_idx as f32 / (self.resolution.elevation_steps.saturating_sub(1).max(1)) as f32
-                * PI
+            + el_idx as f32 / (self.resolution.elevation_steps.saturating_sub(1).max(1)) as f32 * PI
     }
 
     /// Direction of peak energy `(azimuth_rad, elevation_rad)`.
@@ -301,10 +307,8 @@ impl LoudnessMap {
         let above_count = self.energy.iter().filter(|&&e| e >= half_power).count();
         let total_cells = az_steps * el_steps;
         // Solid angle fraction → convert to steradians (≈ 4π × fraction)
-        let spread_rad = (above_count as f32 / total_cells as f32
-            * 4.0
-            * std::f32::consts::PI)
-            .sqrt();
+        let spread_rad =
+            (above_count as f32 / total_cells as f32 * 4.0 * std::f32::consts::PI).sqrt();
 
         SweetSpot {
             azimuth_rad: self.azimuth_rad(peak_az),
@@ -392,8 +396,7 @@ pub fn build_map_from_covariance(
     for az_idx in 0..az_steps {
         let az = az_idx as f32 / az_steps as f32 * TAU;
         for el_idx in 0..el_steps {
-            let el = -PI / 2.0
-                + el_idx as f32 / (el_steps.saturating_sub(1).max(1)) as f32 * PI;
+            let el = -PI / 2.0 + el_idx as f32 / (el_steps.saturating_sub(1).max(1)) as f32 * PI;
             let d = eval_sh(max_order, az, el);
             // E = d^T * B * d
             let mut e = 0.0_f32;
@@ -408,7 +411,11 @@ pub fn build_map_from_covariance(
         }
     }
 
-    Ok(LoudnessMap { resolution, max_order, energy })
+    Ok(LoudnessMap {
+        resolution,
+        max_order,
+        energy,
+    })
 }
 
 /// Build a [`LoudnessMap`] directly from a single HOA frame (instantaneous
@@ -434,8 +441,7 @@ pub fn build_map_from_frame(
     for az_idx in 0..az_steps {
         let az = az_idx as f32 / az_steps as f32 * TAU;
         for el_idx in 0..el_steps {
-            let el = -PI / 2.0
-                + el_idx as f32 / (el_steps.saturating_sub(1).max(1)) as f32 * PI;
+            let el = -PI / 2.0 + el_idx as f32 / (el_steps.saturating_sub(1).max(1)) as f32 * PI;
             let d = eval_sh(max_order, az, el);
             let mut p = 0.0_f32;
             for i in 0..n_ch {
@@ -445,7 +451,11 @@ pub fn build_map_from_frame(
         }
     }
 
-    Ok(LoudnessMap { resolution, max_order, energy })
+    Ok(LoudnessMap {
+        resolution,
+        max_order,
+        energy,
+    })
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -493,19 +503,28 @@ mod tests {
     #[test]
     fn test_build_map_from_frame_omnidirectional() {
         // Pure W channel (omnidirectional) should produce a uniform map.
-        let res = GridResolution { azimuth_steps: 36, elevation_steps: 19 };
+        let res = GridResolution {
+            azimuth_steps: 36,
+            elevation_steps: 19,
+        };
         let frame = vec![1.0_f32, 0.0, 0.0, 0.0]; // W=1, YZX=0
         let map = build_map_from_frame(&frame, 1, res).unwrap();
         // All energies should be equal (W decodes uniformly).
         let first = map.energy[0];
         for &e in &map.energy {
-            assert!((e - first).abs() < 1e-4, "omnidirectional should be uniform: {e} vs {first}");
+            assert!(
+                (e - first).abs() < 1e-4,
+                "omnidirectional should be uniform: {e} vs {first}"
+            );
         }
     }
 
     #[test]
     fn test_build_map_energy_nonnegative() {
-        let res = GridResolution { azimuth_steps: 36, elevation_steps: 19 };
+        let res = GridResolution {
+            azimuth_steps: 36,
+            elevation_steps: 19,
+        };
         let frame: Vec<f32> = (0..4).map(|i| i as f32 * 0.25).collect();
         let map = build_map_from_frame(&frame, 1, res).unwrap();
         for &e in &map.energy {
@@ -515,21 +534,33 @@ mod tests {
 
     #[test]
     fn test_sweet_spot_returns_valid_direction() {
-        let res = GridResolution { azimuth_steps: 36, elevation_steps: 19 };
+        let res = GridResolution {
+            azimuth_steps: 36,
+            elevation_steps: 19,
+        };
         // Source pointing to azimuth ≈ 0, elevation ≈ 0: encode it.
         let d = eval_sh(1, 0.0, 0.0);
         let map = build_map_from_frame(&d, 1, res).unwrap();
         let ss = map.sweet_spot();
         // Peak should be near (0, 0)
-        assert!(ss.azimuth_rad.abs() < 0.2 || (ss.azimuth_rad - 2.0 * PI).abs() < 0.2,
-            "sweet spot azimuth should be near 0: {}", ss.azimuth_rad);
-        assert!(ss.elevation_rad.abs() < 0.3,
-            "sweet spot elevation should be near 0: {}", ss.elevation_rad);
+        assert!(
+            ss.azimuth_rad.abs() < 0.2 || (ss.azimuth_rad - 2.0 * PI).abs() < 0.2,
+            "sweet spot azimuth should be near 0: {}",
+            ss.azimuth_rad
+        );
+        assert!(
+            ss.elevation_rad.abs() < 0.3,
+            "sweet spot elevation should be near 0: {}",
+            ss.elevation_rad
+        );
     }
 
     #[test]
     fn test_horizontal_polar_length() {
-        let res = GridResolution { azimuth_steps: 36, elevation_steps: 19 };
+        let res = GridResolution {
+            azimuth_steps: 36,
+            elevation_steps: 19,
+        };
         let frame = vec![1.0_f32, 0.0, 0.0, 0.0];
         let map = build_map_from_frame(&frame, 1, res).unwrap();
         let polar = map.horizontal_polar();
@@ -538,12 +569,18 @@ mod tests {
 
     #[test]
     fn test_normalise_sets_max_to_one() {
-        let res = GridResolution { azimuth_steps: 36, elevation_steps: 19 };
+        let res = GridResolution {
+            azimuth_steps: 36,
+            elevation_steps: 19,
+        };
         let frame: Vec<f32> = (0..4).map(|i| i as f32).collect();
         let mut map = build_map_from_frame(&frame, 1, res).unwrap();
         map.normalise();
         let max_e = map.energy.iter().cloned().fold(0.0_f32, f32::max);
-        assert!((max_e - 1.0).abs() < 1e-5, "max energy after normalise should be 1.0");
+        assert!(
+            (max_e - 1.0).abs() < 1e-5,
+            "max energy after normalise should be 1.0"
+        );
     }
 
     #[test]
@@ -556,7 +593,10 @@ mod tests {
 
     #[test]
     fn test_build_map_wrong_covariance_size() {
-        let res = GridResolution { azimuth_steps: 10, elevation_steps: 10 };
+        let res = GridResolution {
+            azimuth_steps: 10,
+            elevation_steps: 10,
+        };
         let cov = vec![0.0_f32; 9]; // wrong: should be 16 for order-1
         let result = build_map_from_covariance(&cov, 1, res);
         assert!(result.is_err());

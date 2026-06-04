@@ -106,11 +106,7 @@ pub struct ParticipantInfo {
 
 impl ParticipantInfo {
     /// Create a new connected participant record.
-    pub fn new(
-        user_id: impl Into<String>,
-        display_name: impl Into<String>,
-        now_ms: u64,
-    ) -> Self {
+    pub fn new(user_id: impl Into<String>, display_name: impl Into<String>, now_ms: u64) -> Self {
         Self {
             user_id: user_id.into(),
             display_name: display_name.into(),
@@ -337,8 +333,7 @@ impl SessionLifecycle {
         self.log(now_ms, format!("participant {user_id} left"));
 
         // Revoke any tokens held by this user.
-        self.reconnect_tokens
-            .retain(|_, t| t.user_id != user_id);
+        self.reconnect_tokens.retain(|_, t| t.user_id != user_id);
 
         // Transition to Idle if no connected participants remain.
         if self.connected_count() == 0 && matches!(self.state, SessionState::Active) {
@@ -372,17 +367,15 @@ impl SessionLifecycle {
 
         // Mint a token.
         self.token_counter += 1;
-        let token_str = format!(
-            "tok-{}-{}-{}",
-            self.session_id, user_id, self.token_counter
-        );
+        let token_str = format!("tok-{}-{}-{}", self.session_id, user_id, self.token_counter);
         let token = ReconnectToken::new(
             &token_str,
             user_id,
             &self.session_id,
             now_ms + self.token_ttl_ms,
         );
-        self.reconnect_tokens.insert(token_str.clone(), token.clone());
+        self.reconnect_tokens
+            .insert(token_str.clone(), token.clone());
         self.log(now_ms, format!("participant {user_id} disconnected"));
 
         // Transition to Idle if no connected participants remain.
@@ -662,11 +655,9 @@ mod tests {
         let mut s = make_session();
         s.add_participant("alice", "Alice", 0)
             .expect("should succeed");
-        s.add_participant("bob", "Bob", 0)
-            .expect("should succeed");
+        s.add_participant("bob", "Bob", 0).expect("should succeed");
         assert_eq!(s.connected_count(), 2);
-        s.remove_participant("alice", 100)
-            .expect("should succeed");
+        s.remove_participant("alice", 100).expect("should succeed");
         assert_eq!(s.connected_count(), 1);
     }
 
@@ -730,8 +721,7 @@ mod tests {
         let mut s = make_session();
         s.add_participant("alice", "Alice", 100)
             .expect("should succeed");
-        s.remove_participant("alice", 200)
-            .expect("should succeed");
+        s.remove_participant("alice", 200).expect("should succeed");
         let log = s.event_log();
         // Should have at least: join + Created→Active + leave + Active→Idle
         assert!(log.len() >= 2);

@@ -25,9 +25,11 @@ pub mod percentile;
 pub mod quantile;
 pub mod realtime;
 pub mod recommendation;
+pub mod replay;
 pub mod retention;
 pub mod segment_retention;
 pub mod session;
+pub mod uniformity;
 pub mod weighted_retention;
 
 // ── Re-exports of key public types ─────────────────────────────────────────

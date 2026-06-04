@@ -138,7 +138,7 @@ impl ActiveOverlay {
 
 /// Scheduler for automated CG/lower-third overlay insertion.
 ///
-/// Call [`schedule`] to register overlays and [`due_now`] on every playout
+/// Call [`Self::schedule`] to register overlays and [`Self::due_now`] on every playout
 /// tick to drain overlays that have reached their trigger time.
 #[derive(Debug, Default)]
 pub struct GraphicsOverlayScheduler {
@@ -175,11 +175,7 @@ impl GraphicsOverlayScheduler {
 
     /// Remove a pending overlay by ID before it fires.
     pub fn cancel(&mut self, id: &str) -> bool {
-        let key_to_remove = self
-            .pending
-            .keys()
-            .find(|(_, k)| k == id)
-            .cloned();
+        let key_to_remove = self.pending.keys().find(|(_, k)| k == id).cloned();
         if let Some(key) = key_to_remove {
             self.pending.remove(&key);
             debug!("Cancelled overlay '{}'", id);

@@ -30,9 +30,24 @@
 - [x] Optimize `spread_spectrum` FFT-based embedding with in-place transforms to halve memory allocation (implemented 2026-05-15: `InPlaceFftEmbedder` pre-allocates `Plan<f32>` + two `Vec<Complex<f32>>` scratch buffers; reuses across `embed_in_place()` calls)
 - [x] Add batch FFT processing in `phase` embedder to amortize FFT setup across multiple frames (implemented 2026-05-15: `PhaseEmbedder::embed_batch()` pre-allocates shared `freq_buf` + `ifft_buf` and reuses for every frame in the batch)
 - [x] Implement SIMD-optimized correlation computation in `spread_spectrum` detector for faster extraction (implemented 2026-05-15: `correlate_simd()` uses `scirs2_core::simd_aligned::simd_dot_aligned_f32()` (AVX2/NEON runtime dispatch via safe API); `correlate_scalar()` fallback)
-- [ ] Cache PN sequence generation in `spread_spectrum` (currently regenerated per embed/detect call) (verified-open 2026-05-16: not yet implemented)
-- [ ] Optimize `echo` embedder overlap-add convolution with FFT-based fast convolution for long kernels (verified-open 2026-05-16: not yet implemented)
-- [ ] Profile `qim` quantizer and eliminate unnecessary f32<->i32 conversions in inner loop (verified-open 2026-05-16: not yet implemented)
+- [x] Cache PN sequence generation in `spread_spectrum` (currently regenerated per embed/detect call) (planned 2026-06-01)
+  - **Goal:** Eliminate redundant `generate_pn_sequence` calls by caching per-bit sequences up front.
+  - **Design:** `src/spread_spectrum.rs` regenerates `generate_pn_sequence(chip_rate, key+bit_idx)` inside every loop iteration at :105/:178/:289/:342/:490. Sequences depend only on `chip_rate`+`key`+`bit_idx` (all known before the loop). Precompute a `Vec<Vec<f32>>` table keyed by `bit_idx` once per embed/detect invocation (or cache on the embedder/detector struct via `OnceCell`/`HashMap` keyed on the config). Pure-Rust, std only.
+  - **Files:** `src/spread_spectrum.rs`, `TODO.md`.
+  - **Tests:** cached-PN embed/detect bit-identical to per-call regeneration; embed→detect round-trip recovers the full payload; speed improvement on a large payload (assert it completes in < N ms as a smoke test).
+  - **Risk:** cache must be invalidated if `chip_rate`/`key` changes between calls — scope to per-invocation table (simplest) or add config-keyed invalidation.
+- [x] Optimize `echo` embedder overlap-add convolution with FFT-based fast convolution for long kernels (planned 2026-06-01)
+  - **Goal:** Replace the O(n·k) direct time-domain echo convolution with an O(n log n) overlap-add using `oxifft`.
+  - **Design:** `src/echo.rs:60` `EchoEmbedder::embed` does direct time-domain delay-and-add per sample over 512-sample blocks at :90-103. Build the echo impulse response (unit + decayed taps at delay_0/delay_1) and convolve via overlap-add using `oxifft::fft`/`ifft` (already a dep) for long kernels; keep the direct path for short kernels below a length threshold. `oxifft` is already in `Cargo.toml`.
+  - **Files:** `src/echo.rs`, `TODO.md`.
+  - **Tests:** FFT-conv output ≈ direct (within floating-point tolerance) on a long kernel; embed→detect round-trip recovers the payload after FFT path; short-kernel direct path still exercised.
+  - **Risk:** Overlap-add block sizing and zero-padding correctness — assert bit-close vs direct conv on reference data; boundary blocks must handle remainder.
+- [x] Profile `qim` quantizer and eliminate unnecessary f32<->i32 conversions in inner loop (planned 2026-06-01)
+  - **Goal:** Reduce per-sample work in the QIM hot path by computing the quantizer index once per sample.
+  - **Design:** `src/qim.rs:187` `quantize`, :208 `detect_bit`, :360/:395 each recompute `(value/delta).round()*delta` (and a second offset variant for dist_1) per sample. The TODO's "f32<->i32" wording is imprecise — the real optimization is eliminating the redundant divide+round: compute `k = (value/delta).round()` once, reuse for reconstruction (`k*delta`) and both `dist_0`/`dist_1` comparisons instead of recomputing the division+round twice. Pure-Rust.
+  - **Files:** `src/qim.rs`, `TODO.md`.
+  - **Tests:** optimized path bit-identical to current for a sweep of `value`/`delta` combinations, including at exact half-`delta` boundaries (tie-breaking must match); embed→detect round-trip unchanged.
+  - **Risk:** tie-breaking at exact half-`delta` — assert output identity vs original on exhaustive value sweep.
 
 ## Testing
 - [ ] Add round-trip embed/detect tests for all 6 algorithms with various payload sizes (1 byte, 32 bytes, 256 bytes)

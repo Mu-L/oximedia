@@ -3,6 +3,9 @@
 //! Provides gap detection, interpolation, spectral subtraction, and harmonic inpainting
 //! for damaged or noisy audio spectra.
 
+use oxifft::Complex;
+use std::collections::HashMap;
+
 /// A gap (missing or corrupted region) in a frequency spectrum.
 #[derive(Debug, Clone)]
 pub struct SpectralGap {
@@ -116,6 +119,9 @@ pub fn interpolate_spectral_gap(spectrum: &mut [f32], gap: &SpectralGap) {
 }
 
 /// Spectral subtraction noise reducer.
+///
+/// Maintains a per-block-size FFT scratch buffer cache to avoid per-call
+/// heap allocation when the same block size is used across consecutive calls.
 #[derive(Debug, Clone)]
 pub struct SpectralSubtractor {
     /// Estimated noise magnitude spectrum.
@@ -124,6 +130,15 @@ pub struct SpectralSubtractor {
     pub alpha: f32,
     /// Spectral floor (beta ≥ 0.0).
     pub beta: f32,
+    /// Per-block-size scratch buffers (complex): keyed by block length.
+    ///
+    /// Each entry is a `Vec<Complex<f32>>` pre-allocated to the given size so
+    /// that repeated calls with the same block size reuse the allocation via
+    /// `.resize()` rather than allocating fresh on every invocation.
+    fft_scratch: HashMap<usize, Vec<Complex<f32>>>,
+    /// Most-recently used block size — fast path avoids a HashMap lookup on
+    /// the common case where the caller always passes the same size.
+    block_size_cache: usize,
 }
 
 impl SpectralSubtractor {
@@ -134,7 +149,70 @@ impl SpectralSubtractor {
             noise_profile,
             alpha,
             beta,
+            fft_scratch: HashMap::new(),
+            block_size_cache: 0,
         }
+    }
+
+    /// Obtain a mutable reference to the scratch buffer for `block_size`.
+    ///
+    /// If the buffer doesn't exist yet it is allocated and inserted; if it
+    /// exists but is too small it is grown via `resize` (no-copy extension).
+    /// This avoids per-call `Vec::new()` / `Vec::with_capacity` allocation
+    /// for callers that repeatedly pass the same block size.
+    fn scratch_for_size(&mut self, block_size: usize) -> &mut Vec<Complex<f32>> {
+        // Fast path: last-used size matches → entry already guaranteed present.
+        if self.block_size_cache != block_size {
+            self.fft_scratch
+                .entry(block_size)
+                .or_insert_with(|| vec![Complex::new(0.0, 0.0); block_size]);
+            self.block_size_cache = block_size;
+        }
+        // SAFETY: entry was inserted just above if missing.
+        self.fft_scratch
+            .get_mut(&block_size)
+            .expect("scratch entry guaranteed by entry().or_insert_with above")
+    }
+
+    /// Apply spectral subtraction on a real input block.
+    ///
+    /// The intermediate complex buffer is drawn from the per-size scratch cache
+    /// so no heap allocation occurs on the hot path when the caller consistently
+    /// passes the same `block` length.
+    ///
+    /// # Returns
+    ///
+    /// Enhanced magnitude spectrum (`block.len()` floats).
+    pub fn process_block(&mut self, block: &[f32]) -> Vec<f32> {
+        let n = block.len();
+        // Ensure scratch buffer is the right size (possibly a no-op).
+        let scratch = self.scratch_for_size(n);
+        scratch.resize(n, Complex::new(0.0, 0.0));
+        // Fill scratch with real-valued complex input (re-use allocation).
+        for (c, &s) in scratch.iter_mut().zip(block.iter()) {
+            c.re = s;
+            c.im = 0.0;
+        }
+
+        // Forward FFT — oxifft::fft allocates its output; we can't avoid that
+        // allocation inside oxifft itself, but we avoid the *input* allocation.
+        let spectrum = oxifft::fft(scratch);
+
+        // Spectral subtraction on the magnitude spectrum.
+        spectrum
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let mag = c.norm();
+                let noise = if i < self.noise_profile.len() {
+                    self.noise_profile[i]
+                } else {
+                    0.0
+                };
+                let subtracted = mag - self.alpha * noise;
+                subtracted.max(self.beta * noise)
+            })
+            .collect()
     }
 
     /// Estimate a noise profile as the average magnitude of the first `max_frames` frames.
@@ -465,5 +543,72 @@ mod tests {
         }
         let holes = detect_spectral_holes(&spec, -40.0);
         assert!(!holes.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // FFT plan cache tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_spectral_repair_cached_plan_idempotent() {
+        use rand::RngExt;
+
+        let mut rng = rand::rng();
+
+        // Build a noise profile from the average magnitude of white noise frames.
+        let noise_level = 0.05;
+        let block_size = 1024usize;
+        let noise_profile = vec![noise_level; block_size];
+
+        let mut subtractor = SpectralSubtractor::new(noise_profile, 1.0, 0.01);
+
+        // Generate two identical 1024-sample white-noise blocks.
+        let block_a: Vec<f32> = (0..block_size)
+            .map(|_| rng.random_range(-0.5..0.5_f32))
+            .collect();
+        let block_b = block_a.clone();
+
+        // First call — populates the scratch cache.
+        let out_a = subtractor.process_block(&block_a);
+        // Second call — reuses the cached scratch buffer.
+        let out_b = subtractor.process_block(&block_b);
+
+        // Determinism: identical input must produce identical output.
+        assert_eq!(
+            out_a.len(),
+            block_size,
+            "output length must match block size"
+        );
+        assert_eq!(
+            out_a, out_b,
+            "consecutive calls with identical input must return identical output"
+        );
+
+        // All output values must be finite (no NaN/Inf from corrupted scratch).
+        for (i, &v) in out_a.iter().enumerate() {
+            assert!(v.is_finite(), "output sample {i} is not finite: {v}");
+        }
+    }
+
+    #[test]
+    fn test_spectral_repair_cached_plan_different_sizes() {
+        // Verify the cache handles multiple distinct block sizes without panic.
+        let mut subtractor = SpectralSubtractor::new(vec![0.02; 2048], 1.0, 0.01);
+
+        let block_512: Vec<f32> = vec![0.1; 512];
+        let block_1024: Vec<f32> = vec![0.1; 1024];
+        let block_2048: Vec<f32> = vec![0.1; 2048];
+
+        let o1 = subtractor.process_block(&block_512);
+        let o2 = subtractor.process_block(&block_1024);
+        let o3 = subtractor.process_block(&block_2048);
+
+        assert_eq!(o1.len(), 512);
+        assert_eq!(o2.len(), 1024);
+        assert_eq!(o3.len(), 2048);
+
+        // Calling with the first size again should reuse the old scratch entry.
+        let o4 = subtractor.process_block(&block_512);
+        assert_eq!(o4, o1, "re-using cached scratch must give same result");
     }
 }

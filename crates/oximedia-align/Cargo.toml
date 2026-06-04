@@ -23,6 +23,8 @@ thiserror.workspace = true
 nalgebra = "0.34"
 rayon.workspace = true
 serde.workspace = true
+oxifft.workspace = true
+rand.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

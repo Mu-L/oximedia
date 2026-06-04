@@ -41,25 +41,59 @@
 #![warn(missing_docs)]
 #![allow(clippy::module_name_repetitions)]
 
+/// Per-client and per-origin bandwidth throttle with token-bucket shaping.
+pub mod bandwidth_throttle;
 pub mod cache_invalidation;
+/// Cache warming pipeline: crawl URL lists and populate edge nodes.
+pub mod cache_warming;
+/// CDN access-log ingestion, parsing, and aggregated analytics.
+pub mod cdn_log_analysis;
 pub mod cdn_metrics;
+/// CDN cost model: per-request/per-byte billing estimation by provider.
+pub mod cost;
 pub mod edge_manager;
+/// Edge-node optimisation: content replication scoring and eviction hints.
+pub mod edge_opt;
+/// Origin-level failover state machine with health-based promotion/demotion.
+pub mod failover;
+/// Geographic access restrictions: deny/allow rules per country/region.
+pub mod geo_restrict;
 pub mod geo_routing;
+/// HLS/DASH manifest rewriting for CDN URL signing and domain substitution.
+pub mod manifest_rewrite;
+/// Multi-CDN orchestration: provider registry, traffic splitting, failover.
+pub mod multi_cdn;
 pub mod origin_failover;
+/// Origin shield: designate a single PoP as the sole origin-facing proxy.
+pub mod origin_shield;
+/// Prefetch scheduler: time-based and popularity-driven prefetch queues.
+pub mod prefetch_scheduler;
+/// Request coalescing: collapse identical in-flight origin fetches into one.
+pub mod request_coalescing;
+/// Request routing engine: rule-based dispatch to edge nodes or origins.
+pub mod request_router;
+/// TLS/SSL certificate lifecycle management: provisioning, rotation, expiry.
+pub mod ssl_cert_manager;
 pub mod token_auth;
+/// Proactive cache warming: schedule pre-fetches before anticipated demand.
+pub mod warming;
 
 // ─── Convenience re-exports ───────────────────────────────────────────────────
 
 pub use cache_invalidation::{
     CacheEntry, CacheState, InvalidationError, InvalidationManager, InvalidationPriority,
     InvalidationQueue, InvalidationRequest, InvalidationResult, InvalidationScope,
-    ManagedInvalidationRequest, ManagedInvalidationResult, SoftPurgePolicy, TagIndex,
-    TagInvalidationStore,
+    ManagedInvalidationRequest, ManagedInvalidationResult, SoftPurge, SoftPurgePolicy,
+    StaleCacheEntry, TagIndex, TagInvalidationStore,
 };
-pub use cdn_metrics::{CdnMetrics, EdgeMetrics, EdgeSnapshot, MetricSnapshot, MetricsRegistry};
+pub use cdn_metrics::{
+    CdnMetrics, ContentCategory, ContentTypeMetrics, ContentTypeMetricsStore, EdgeMetrics,
+    EdgeSnapshot, MetricSnapshot, MetricsRegistry,
+};
 pub use edge_manager::{EdgeFeature, EdgeManager, EdgeNode};
 pub use geo_routing::{
-    haversine_km, latency_from_km, EdgeNodeGeo, EdgeNodeId, GeoLocation, GeoRouter, Region,
+    haversine_km, latency_from_km, EdgeNodeGeo, EdgeNodeId, EdgePoint, GeoLocation, GeoRouter,
+    HaversineCache, Region, RtreeEdgeIndex,
 };
 pub use origin_failover::{
     CircuitBreaker, CircuitBreakerState, HealthCheckConfig, HealthCheckProbe, HealthCheckProtocol,
@@ -191,10 +225,13 @@ impl CdnManager {
     }
 
     /// Assign the geographically closest edge node to `location`.
+    ///
+    /// Requires a write lock because [`GeoRouter::assign_edge`] lazily builds
+    /// the R-tree index and populates the Haversine cache on first use.
     pub fn route(&self, location: &GeoLocation) -> Result<Option<EdgeNodeId>, CdnError> {
-        let router = self
+        let mut router = self
             .geo
-            .read()
+            .write()
             .map_err(|e| CdnError::LockPoisoned(e.to_string()))?;
         Ok(router.assign_edge(location).cloned())
     }
@@ -405,8 +442,137 @@ mod tests {
         let london = GeoLocation::new(51.5074, -0.1278, "GB");
         let dist = haversine_km(ny.latitude, ny.longitude, london.latitude, london.longitude);
         let lat = latency_from_km(dist);
-        let router = GeoRouter::new();
+        let mut router = GeoRouter::new();
         let lat2 = router.latency_estimate_ms(&ny, &london);
         assert!((lat - lat2).abs() < 1e-9, "lat={lat} lat2={lat2}");
+    }
+
+    // 16. Concurrent invalidation stress test: 16 threads × 100 requests each
+    #[test]
+    fn test_concurrent_invalidation_stress() {
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let queue = Arc::new(Mutex::new(InvalidationQueue::new(100_000, 100_000)));
+        let submitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let threads: Vec<_> = (0..16)
+            .map(|_| {
+                let q = Arc::clone(&queue);
+                let counter = Arc::clone(&submitted);
+                thread::spawn(move || {
+                    for _ in 0..100 {
+                        let req = InvalidationRequest::new(InvalidationScope::All, 1);
+                        if q.lock().expect("lock ok").submit(req).is_ok() {
+                            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for t in threads {
+            t.join().expect("thread did not panic");
+        }
+
+        // All 1600 requests should have been submitted (queue capacity 100k)
+        let total = submitted.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(total, 1600, "expected 1600 submissions, got {total}");
+
+        // Process all and verify no panic
+        let results = queue
+            .lock()
+            .expect("lock ok")
+            .process_batch(&["stress-node"], 2000);
+        assert_eq!(results.len(), 1600, "expected 1600 results processed");
+    }
+
+    // 17. CdnManager lifecycle integration test
+    #[test]
+    fn test_cdn_manager_lifecycle() {
+        use crate::edge_manager::EdgeNode;
+
+        let mgr = CdnManager::new(CdnConfig::default());
+
+        // Add 3 edge nodes
+        {
+            let mut edge = mgr.edge.write().expect("edge lock ok");
+            edge.add_node(EdgeNode::new(
+                "node-1",
+                "cf",
+                "us-east-1",
+                "n1.cdn.example.com",
+            ));
+            edge.add_node(EdgeNode::new(
+                "node-2",
+                "aws",
+                "eu-west-1",
+                "n2.cdn.example.com",
+            ));
+            edge.add_node(EdgeNode::new(
+                "node-3",
+                "gcp",
+                "ap-east-1",
+                "n3.cdn.example.com",
+            ));
+        }
+        assert_eq!(mgr.edge.read().expect("read ok").nodes().len(), 3);
+
+        // Configure 2 origins
+        {
+            let mut pool = mgr.origins.lock().expect("origins lock ok");
+            pool.add_server(Arc::new(OriginServer::new(
+                "o1",
+                "http://origin1.example.com",
+                1,
+                0,
+            )));
+            pool.add_server(Arc::new(OriginServer::new(
+                "o2",
+                "http://origin2.example.com",
+                1,
+                1,
+            )));
+        }
+
+        // Route 10 requests (geo routing)
+        {
+            let client = GeoLocation::new(40.7128, -74.0060, "US");
+            mgr.geo
+                .write()
+                .expect("geo lock ok")
+                .add_node(EdgeNodeGeo::new(
+                    "us-pop",
+                    GeoLocation::new(40.0, -74.0, "US"),
+                ));
+            mgr.geo
+                .write()
+                .expect("geo lock ok")
+                .add_node(EdgeNodeGeo::new(
+                    "eu-pop",
+                    GeoLocation::new(51.5, 0.1, "GB"),
+                ));
+            for _ in 0..10 {
+                let id = mgr.route(&client).expect("route ok");
+                assert!(id.is_some(), "should route to an edge");
+            }
+        }
+
+        // Invalidate 1 key
+        let req =
+            InvalidationRequest::new(InvalidationScope::Url("/media/hero.mp4".to_string()), 100);
+        mgr.submit_invalidation(req).expect("submit ok");
+
+        // Process the invalidation
+        let results = mgr
+            .process_invalidations(&["node-1", "node-2"], 10)
+            .expect("process ok");
+        assert_eq!(results.len(), 1, "one request should be processed");
+        assert!(results[0].success, "invalidation should succeed");
+
+        // Remaining requests should still route correctly
+        let client2 = GeoLocation::new(51.5074, -0.1278, "GB");
+        let id2 = mgr.route(&client2).expect("route ok");
+        assert!(id2.is_some(), "should still route after invalidation");
     }
 }

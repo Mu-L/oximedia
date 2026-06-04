@@ -126,10 +126,7 @@ impl SyncPointManager {
     /// Return the sync point immediately before `ts_ms`, if any.
     #[must_use]
     pub fn preceding(&self, ts_ms: u64) -> Option<&SyncPoint> {
-        self.points
-            .iter()
-            .rev()
-            .find(|p| p.ts_ms < ts_ms)
+        self.points.iter().rev().find(|p| p.ts_ms < ts_ms)
     }
 
     /// Return the sync point immediately at or after `ts_ms`, if any.

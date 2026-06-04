@@ -35,8 +35,8 @@
 - [x] Add configurable scope resolution independent of output resolution for faster rendering (implemented 2026-05-15; src/lib.rs: `ScopeResolution { width, height }` added to `ScopeConfig`, `VideoScopes::generate_scopes()`)
 
 ## Testing
-- [ ] Add tests for `waveform` with known test patterns (color bars, ramp, flat field)
-- [ ] Test `vectorscope` with SMPTE color bar input and verify target dot positions
+- [x] Add tests for `waveform` with known test patterns (color bars, ramp, flat field) (implemented 2026-05-31; src/waveform.rs: test_waveform_color_bars_dimensions_and_non_empty, test_waveform_color_bars_rgb_parade_has_data, test_waveform_luma_ramp_shape, test_waveform_flat_black_field_pixels_near_bottom, test_waveform_flat_white_field_pixels_near_top, test_waveform_10bit_ramp_via_hd_api, test_waveform_stats_10bit_flat_grey — 7 tests)
+- [x] Test `vectorscope` with SMPTE color bar input and verify target dot positions (implemented 2026-05-31; src/vectorscope.rs: test_vectorscope_smpte_75_produces_valid_output, test_vectorscope_smpte_75_target_positions_in_bounds, test_vectorscope_pure_red_in_red_quadrant, test_vectorscope_pure_cyan_opposite_red, test_vectorscope_gray_near_center, test_smpte_target_list_contract — 6 tests)
 - [ ] Add tests for `false_color` mapping consistency across Rec.709 and HLG inputs
 - [ ] Test `histogram` with uniform-distribution input and verify flat histogram output
 - [ ] Add roundtrip tests for `ScopeConfig` serialization/deserialization

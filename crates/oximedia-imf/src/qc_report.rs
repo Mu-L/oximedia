@@ -44,11 +44,7 @@ pub struct QcFinding {
 
 impl QcFinding {
     #[must_use]
-    pub fn new(
-        severity: Severity,
-        code: impl Into<String>,
-        message: impl Into<String>,
-    ) -> Self {
+    pub fn new(severity: Severity, code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             severity,
             code: code.into(),
@@ -67,7 +63,11 @@ impl QcFinding {
 impl std::fmt::Display for QcFinding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(ref ctx) = self.context {
-            write!(f, "[{}] {} — {} ({})", self.severity, self.code, self.message, ctx)
+            write!(
+                f,
+                "[{}] {} — {} ({})",
+                self.severity, self.code, self.message, ctx
+            )
         } else {
             write!(f, "[{}] {} — {}", self.severity, self.code, self.message)
         }
@@ -84,7 +84,10 @@ pub struct QcReport {
 impl QcReport {
     #[must_use]
     pub fn new(package_path: impl Into<String>) -> Self {
-        Self { package_path: package_path.into(), findings: Vec::new() }
+        Self {
+            package_path: package_path.into(),
+            findings: Vec::new(),
+        }
     }
 
     pub fn add(&mut self, finding: QcFinding) {
@@ -110,21 +113,34 @@ impl QcReport {
 
     #[must_use]
     pub fn errors(&self) -> Vec<&QcFinding> {
-        self.findings.iter().filter(|f| f.severity == Severity::Error).collect()
+        self.findings
+            .iter()
+            .filter(|f| f.severity == Severity::Error)
+            .collect()
     }
 
     #[must_use]
     pub fn warnings(&self) -> Vec<&QcFinding> {
-        self.findings.iter().filter(|f| f.severity == Severity::Warning).collect()
+        self.findings
+            .iter()
+            .filter(|f| f.severity == Severity::Warning)
+            .collect()
     }
 
     #[must_use]
     pub fn summary(&self) -> String {
         let errors = self.errors().len();
         let warnings = self.warnings().len();
-        let infos = self.findings.iter().filter(|f| f.severity == Severity::Info).count();
+        let infos = self
+            .findings
+            .iter()
+            .filter(|f| f.severity == Severity::Info)
+            .count();
         let status = if errors == 0 { "PASS" } else { "FAIL" };
-        format!("QC {status}: {errors} error(s), {warnings} warning(s), {infos} info(s) — {}", self.package_path)
+        format!(
+            "QC {status}: {errors} error(s), {warnings} warning(s), {infos} info(s) — {}",
+            self.package_path
+        )
     }
 
     #[must_use]
@@ -149,11 +165,17 @@ impl QcReporter {
         let mut report = QcReport::new(&path_str);
 
         if !pkg_path.exists() {
-            report.error("PKG-001", format!("Package directory not found: '{path_str}'"));
+            report.error(
+                "PKG-001",
+                format!("Package directory not found: '{path_str}'"),
+            );
             return report;
         }
         if !pkg_path.is_dir() {
-            report.error("PKG-001", format!("Package path is not a directory: '{path_str}'"));
+            report.error(
+                "PKG-001",
+                format!("Package path is not a directory: '{path_str}'"),
+            );
             return report;
         }
         report.info("PKG-001", "Package directory exists");
@@ -175,7 +197,10 @@ impl QcReporter {
 
         let cpl_count = count_xml_prefix(pkg_path, "CPL");
         if cpl_count == 0 {
-            report.error("PKG-004", "No CPL*.xml found — composition playlist required");
+            report.error(
+                "PKG-004",
+                "No CPL*.xml found — composition playlist required",
+            );
         } else {
             report.info("PKG-004", format!("{cpl_count} CPL file(s) found"));
         }
@@ -210,7 +235,9 @@ impl QcReporter {
 }
 
 fn count_xml_prefix(dir: &Path, prefix: &str) -> usize {
-    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
     entries
         .flatten()
         .filter(|e| {
@@ -288,7 +315,11 @@ pub struct QcCheck {
 
 impl QcCheck {
     /// Create a new [`QcCheck`].
-    pub fn new(id: impl Into<String>, description: impl Into<String>, category: QcCategory) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        description: impl Into<String>,
+        category: QcCategory,
+    ) -> Self {
         Self {
             id: id.into(),
             description: description.into(),
@@ -313,12 +344,22 @@ pub struct QcResult {
 impl QcResult {
     /// Create a passing result.
     pub fn pass(check: QcCheck) -> Self {
-        Self { check, passed: true, severity: QcSeverity::Info, details: None }
+        Self {
+            check,
+            passed: true,
+            severity: QcSeverity::Info,
+            details: None,
+        }
     }
 
     /// Create a failing result with the given severity.
     pub fn fail(check: QcCheck, severity: QcSeverity, details: impl Into<String>) -> Self {
-        Self { check, passed: false, severity, details: Some(details.into()) }
+        Self {
+            check,
+            passed: false,
+            severity,
+            details: Some(details.into()),
+        }
     }
 }
 
@@ -341,7 +382,11 @@ impl ImfQcReport {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        Self { package_id: package_id.into(), checks: Vec::new(), generated_at_secs }
+        Self {
+            package_id: package_id.into(),
+            checks: Vec::new(),
+            generated_at_secs,
+        }
     }
 
     /// All critical failures.
@@ -399,39 +444,70 @@ impl ImfQcRunner {
 
         // QC-001: CPL has at least one video sequence
         {
-            let check = QcCheck::new("QC-001", "CPL must contain at least one video sequence", QcCategory::Structure);
+            let check = QcCheck::new(
+                "QC-001",
+                "CPL must contain at least one video sequence",
+                QcCategory::Structure,
+            );
             if cpl_present {
                 report.checks.push(QcResult::pass(check));
             } else {
-                report.checks.push(QcResult::fail(check, QcSeverity::Critical, "No MainImageSequence found in CPL"));
+                report.checks.push(QcResult::fail(
+                    check,
+                    QcSeverity::Critical,
+                    "No MainImageSequence found in CPL",
+                ));
             }
         }
 
         // QC-002: PKL hash entries present
         {
-            let check = QcCheck::new("QC-002", "PKL must have hash entries for all assets", QcCategory::Metadata);
+            let check = QcCheck::new(
+                "QC-002",
+                "PKL must have hash entries for all assets",
+                QcCategory::Metadata,
+            );
             if pkl_has_hashes {
                 report.checks.push(QcResult::pass(check));
             } else {
-                report.checks.push(QcResult::fail(check, QcSeverity::Major, "PKL is missing hash entries"));
+                report.checks.push(QcResult::fail(
+                    check,
+                    QcSeverity::Major,
+                    "PKL is missing hash entries",
+                ));
             }
         }
 
         // QC-003: Asset map references at least one asset
         {
-            let check = QcCheck::new("QC-003", "Asset map must reference at least one package file", QcCategory::Structure);
+            let check = QcCheck::new(
+                "QC-003",
+                "Asset map must reference at least one package file",
+                QcCategory::Structure,
+            );
             if asset_count > 0 {
                 report.checks.push(QcResult::pass(check));
             } else {
-                report.checks.push(QcResult::fail(check, QcSeverity::Critical, "Asset map is empty"));
+                report.checks.push(QcResult::fail(
+                    check,
+                    QcSeverity::Critical,
+                    "Asset map is empty",
+                ));
             }
         }
 
         // QC-004: Edit rate is a recognised broadcast/streaming standard
         {
             const STANDARD_RATES: &[(u32, u32)] = &[
-                (24, 1), (25, 1), (30, 1), (48, 1), (50, 1), (60, 1),
-                (24000, 1001), (30000, 1001), (60000, 1001),
+                (24, 1),
+                (25, 1),
+                (30, 1),
+                (48, 1),
+                (50, 1),
+                (60, 1),
+                (24000, 1001),
+                (30000, 1001),
+                (60000, 1001),
             ];
             let check = QcCheck::new(
                 "QC-004",
@@ -451,11 +527,19 @@ impl ImfQcRunner {
 
         // QC-005: Duration must be > 0
         {
-            let check = QcCheck::new("QC-005", "Composition duration must be greater than zero", QcCategory::Timing);
+            let check = QcCheck::new(
+                "QC-005",
+                "Composition duration must be greater than zero",
+                QcCategory::Timing,
+            );
             if duration_frames > 0 {
                 report.checks.push(QcResult::pass(check));
             } else {
-                report.checks.push(QcResult::fail(check, QcSeverity::Critical, "Duration is zero"));
+                report.checks.push(QcResult::fail(
+                    check,
+                    QcSeverity::Critical,
+                    "Duration is zero",
+                ));
             }
         }
 
@@ -526,11 +610,11 @@ mod tests {
     fn good_report() -> ImfQcReport {
         ImfQcRunner::run_basic_checks(
             "urn:uuid:test-pkg-0000-0000-000000000001",
-            true,   // cpl_present
-            true,   // pkl_has_hashes
-            5,      // asset_count
+            true,    // cpl_present
+            true,    // pkl_has_hashes
+            5,       // asset_count
             (24, 1), // edit_rate
-            2400,   // duration_frames
+            2400,    // duration_frames
         )
     }
 
@@ -549,7 +633,8 @@ mod tests {
             false, // cpl_present — no video sequence
             true,  // pkl_has_hashes
             3,     // asset_count
-            (25, 1), 1000,
+            (25, 1),
+            1000,
         );
         let criticals = report.critical_failures();
         assert!(!criticals.is_empty());
@@ -560,14 +645,21 @@ mod tests {
     fn test_imf_qc_minor_non_standard_rate() {
         let report = ImfQcRunner::run_basic_checks(
             "pkg-nonstandard",
-            true, true, 3,
+            true,
+            true,
+            3,
             (15, 1), // non-standard
             300,
         );
-        let minor_fails: Vec<_> = report.checks.iter()
+        let minor_fails: Vec<_> = report
+            .checks
+            .iter()
             .filter(|r| !r.passed && r.severity == QcSeverity::Minor)
             .collect();
-        assert!(!minor_fails.is_empty(), "expected minor failure for non-standard rate");
+        assert!(
+            !minor_fails.is_empty(),
+            "expected minor failure for non-standard rate"
+        );
         // No criticals expected
         assert_eq!(report.critical_failures().len(), 0);
     }
@@ -577,8 +669,10 @@ mod tests {
         let report = ImfQcRunner::run_basic_checks(
             "pkg-partial",
             false, // QC-001 fails (critical)
-            true, 2,
-            (24, 1), 100,
+            true,
+            2,
+            (24, 1),
+            100,
         );
         let total = report.checks.len();
         let passed = report.checks.iter().filter(|r| r.passed).count();
@@ -590,8 +684,11 @@ mod tests {
     fn test_imf_qc_duration_zero_is_critical() {
         let report = ImfQcRunner::run_basic_checks(
             "pkg-zero-dur",
-            true, true, 5,
-            (24, 1), 0, // zero duration
+            true,
+            true,
+            5,
+            (24, 1),
+            0, // zero duration
         );
         let criticals = report.critical_failures();
         assert!(criticals.iter().any(|r| r.check.id == "QC-005"));
@@ -601,9 +698,11 @@ mod tests {
     fn test_imf_qc_empty_asset_map_critical() {
         let report = ImfQcRunner::run_basic_checks(
             "pkg-no-assets",
-            true, true,
+            true,
+            true,
             0, // asset_count = 0
-            (24, 1), 1000,
+            (24, 1),
+            1000,
         );
         let criticals = report.critical_failures();
         assert!(criticals.iter().any(|r| r.check.id == "QC-003"));

@@ -217,11 +217,7 @@ impl ConversionMatrix3x3 {
     /// Identity matrix (no conversion).
     pub fn identity() -> Self {
         Self {
-            m: [
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-            ],
+            m: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
         }
     }
 
@@ -646,11 +642,7 @@ mod tests {
     #[test]
     fn test_matrix_transpose() {
         let m = ConversionMatrix3x3 {
-            m: [
-                [1.0, 2.0, 3.0],
-                [4.0, 5.0, 6.0],
-                [7.0, 8.0, 9.0],
-            ],
+            m: [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
         };
         let t = m.transpose();
         assert!((t.m[0][1] - 4.0).abs() < 1e-10);

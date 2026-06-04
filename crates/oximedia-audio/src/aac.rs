@@ -16,7 +16,6 @@
 //! The Fraunhofer/Via Licensing AAC patents expired in April 2023.
 //! All implementations are now patent-free.
 
-#![allow(dead_code)]
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_possible_truncation)]
 
@@ -153,7 +152,11 @@ impl AdtsHeader {
     /// Header size in bytes (7 without CRC, 9 with CRC).
     #[must_use]
     pub fn header_size(&self) -> usize {
-        if self.has_crc { 9 } else { 7 }
+        if self.has_crc {
+            9
+        } else {
+            7
+        }
     }
 }
 
@@ -250,10 +253,7 @@ impl AacChannel {
             let mut val = 0.0f32;
             for k in 0..half_n {
                 val += self.coeffs[k]
-                    * (pi_over_n
-                        * (nn as f32 + 0.5 + (n / 4) as f32)
-                        * (k as f32 + 0.5))
-                    .cos();
+                    * (pi_over_n * (nn as f32 + 0.5 + (n / 4) as f32) * (k as f32 + 0.5)).cos();
             }
             output[nn] = val * two_over_n;
         }
@@ -391,7 +391,11 @@ impl AacDecoder {
             None => {
                 // Keep up to 1 byte (partial sync word)
                 if self.buffer.len() > 1 {
-                    let keep = if self.buffer.last() == Some(&0xFF) { 1 } else { 0 };
+                    let keep = if self.buffer.last() == Some(&0xFF) {
+                        1
+                    } else {
+                        0
+                    };
                     self.buffer.drain(..self.buffer.len() - keep);
                 }
                 return Ok(None);
@@ -480,11 +484,7 @@ impl AacDecoder {
     /// - Section data / scale factor parsing (simplified)
     /// - Inverse quantization
     /// - IMDCT
-    fn decode_raw_data_block(
-        &mut self,
-        payload: &[u8],
-        channels: u8,
-    ) -> AudioResult<Vec<f32>> {
+    fn decode_raw_data_block(&mut self, payload: &[u8], channels: u8) -> AudioResult<Vec<f32>> {
         let frame_size = self.frame_size;
         let mut all_samples = vec![0.0f32; frame_size * channels as usize];
 
@@ -672,7 +672,8 @@ mod tests {
     fn test_aac_decoder_garbage_data() {
         let mut dec = AacDecoder::new();
         let garbage = vec![0x55u8; 100];
-        dec.send_packet(&garbage, 0).expect("should not error on garbage");
+        dec.send_packet(&garbage, 0)
+            .expect("should not error on garbage");
         // No valid frames should be produced
         assert!(dec.receive_frame().expect("no error").is_none());
     }

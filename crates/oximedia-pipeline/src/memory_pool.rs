@@ -75,11 +75,7 @@ impl PoolConfig {
     pub fn from_estimate(estimate: &ResourceEstimate, pre_alloc_count: usize) -> Self {
         let raw = estimate.memory_bytes as usize;
         // Round up to 64-byte cache-line multiple.
-        let aligned = if raw == 0 {
-            64
-        } else {
-            (raw + 63) & !63
-        };
+        let aligned = if raw == 0 { 64 } else { (raw + 63) & !63 };
         Self {
             buffer_size: aligned,
             pool_size: pre_alloc_count.max(1),
@@ -175,9 +171,9 @@ impl MemoryPool {
         let total = config
             .buffer_size
             .checked_mul(config.pool_size)
-            .ok_or_else(|| PipelineError::BuildError(
-                "PoolConfig total_bytes overflows usize".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                PipelineError::BuildError("PoolConfig total_bytes overflows usize".to_string())
+            })?;
 
         // Refuse obviously unreasonable sizes (> 4 GiB on 64-bit).
         if total > (1usize << 32) {
@@ -219,18 +215,12 @@ impl MemoryPool {
 
     /// Number of free slots currently in the pool.
     pub fn available(&self) -> usize {
-        self.inner
-            .lock()
-            .map(|g| g.available())
-            .unwrap_or(0)
+        self.inner.lock().map(|g| g.available()).unwrap_or(0)
     }
 
     /// Total number of slots (free + in-use) in the pool.
     pub fn total_slots(&self) -> usize {
-        self.inner
-            .lock()
-            .map(|g| g.total)
-            .unwrap_or(0)
+        self.inner.lock().map(|g| g.total).unwrap_or(0)
     }
 
     /// Number of slots currently checked out.
@@ -242,10 +232,7 @@ impl MemoryPool {
 
     /// Size in bytes of each pooled buffer.
     pub fn buffer_size(&self) -> usize {
-        self.inner
-            .lock()
-            .map(|g| g.config.buffer_size)
-            .unwrap_or(0)
+        self.inner.lock().map(|g| g.config.buffer_size).unwrap_or(0)
     }
 
     /// Return lifetime statistics: `(total_acquires, recycled_acquires, exhausted_count)`.
@@ -307,10 +294,9 @@ impl PooledBuffer {
     /// Returns [`PipelineError::ValidationError`] when `src` is longer than
     /// the pool's buffer size.
     pub fn write_from(&mut self, src: &[u8]) -> Result<(), PipelineError> {
-        let buf = self
-            .data
-            .as_mut()
-            .ok_or_else(|| PipelineError::ValidationError("PooledBuffer already released".into()))?;
+        let buf = self.data.as_mut().ok_or_else(|| {
+            PipelineError::ValidationError("PooledBuffer already released".into())
+        })?;
         if src.len() > buf.len() {
             return Err(PipelineError::ValidationError(format!(
                 "source data ({} bytes) exceeds pool buffer size ({} bytes)",
@@ -525,7 +511,8 @@ mod tests {
     fn pool_manager_create_and_lookup() {
         let mut mgr = PoolManager::new();
         let est = ResourceEstimate::new(512, 5.0, false);
-        mgr.create_from_estimate("scale", &est, 4).expect("create ok");
+        mgr.create_from_estimate("scale", &est, 4)
+            .expect("create ok");
         let pool = mgr.get("scale").expect("should exist");
         assert_eq!(pool.available(), 4);
     }

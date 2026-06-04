@@ -437,4 +437,62 @@ mod tests {
         assert_eq!(ladder.rungs[1].profile_name, "720p");
         assert_eq!(ladder.rungs[2].profile_name, "1080p");
     }
+
+    // ── ABR ladder validation — HLS 720p source ───────────────────────────────
+
+    /// A 720p-capped HLS ladder must contain 360p and 720p rungs, and every rung
+    /// must be at or below 720p (the simulated source resolution).
+    #[test]
+    fn test_hls_abr_ladder_720p_has_correct_rungs() {
+        let ladder = AbrLadder::hls_standard().filter_by_source(1280, 720);
+
+        let heights: Vec<u32> = ladder.rungs.iter().map(|r| r.height).collect();
+        assert!(
+            heights.contains(&360),
+            "HLS 720p ladder must include 360p rung; got {heights:?}"
+        );
+        assert!(
+            heights.contains(&720),
+            "HLS 720p ladder must include 720p rung; got {heights:?}"
+        );
+        assert!(
+            heights.iter().all(|&h| h <= 720),
+            "All rungs must be at or below 720p for a 720p source; got {heights:?}"
+        );
+        // Bitrates must be sorted ascending (lowest first — AbrLadder ordering).
+        let bitrates: Vec<u64> = ladder.rungs.iter().map(|r| r.video_bitrate).collect();
+        let mut sorted = bitrates.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            bitrates, sorted,
+            "Rungs must be ordered by ascending video_bitrate; got {bitrates:?}"
+        );
+    }
+
+    /// A DASH-like aggressive ladder must contain a 4K rung (height >= 2160) and
+    /// a rung with video bitrate >= 15 Mbps, matching real-world DASH UHD profiles.
+    #[test]
+    fn test_dash_abr_ladder_4k_has_uhd_rung() {
+        // `aggressive()` is the highest-density ladder and includes a 2160p rung.
+        let ladder = AbrLadder::aggressive();
+
+        assert!(
+            ladder.rungs.iter().any(|r| r.height >= 2160),
+            "DASH aggressive ladder must contain a UHD (2160p) rung"
+        );
+        assert!(
+            ladder.rungs.iter().any(|r| r.video_bitrate >= 15_000_000),
+            "DASH aggressive ladder must have a rung with video_bitrate >= 15 Mbps for UHD"
+        );
+
+        // Sanity: highest-quality rung is UHD.
+        let top = ladder
+            .highest_quality()
+            .expect("aggressive ladder must be non-empty");
+        assert!(
+            top.is_4k(),
+            "Highest rung in aggressive ladder must be 4K; height={}",
+            top.height
+        );
+    }
 }

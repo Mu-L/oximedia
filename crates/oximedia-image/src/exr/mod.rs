@@ -50,6 +50,13 @@ pub use convert::{convert_f16_to_f32, convert_f32_to_f16};
 pub use multilayer::{read_exr_layers, write_multi_layer_exr, ExrLayer, MultiLayerExr};
 pub use types::{AttributeValue, Channel, ChannelType, ExrCompression, ExrHeader, LineOrder};
 
+// Re-export compression primitives for exr_multipart sibling module
+pub(crate) use compress::{
+    compress_b44, compress_b44a, compress_dwaa, compress_dwab, compress_piz, compress_pxr24,
+    compress_rle, compress_zip, decompress_b44, decompress_b44a, decompress_dwaa, decompress_dwab,
+    decompress_piz, decompress_pxr24, decompress_rle, decompress_zip,
+};
+
 use crate::error::ImageResult;
 use crate::{ImageData, ImageFrame};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};

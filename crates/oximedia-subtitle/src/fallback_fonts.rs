@@ -451,11 +451,7 @@ mod tests {
         let mut chain = FontChain::new();
         chain.add(FontEntry::new("Latin", vec![ScriptRange::Latin]));
 
-        let required = vec![
-            ScriptRange::Latin,
-            ScriptRange::Cjk,
-            ScriptRange::Arabic,
-        ];
+        let required = vec![ScriptRange::Latin, ScriptRange::Cjk, ScriptRange::Arabic];
         let uncovered = chain.uncovered_scripts(&required);
         assert_eq!(uncovered.len(), 2);
         assert!(uncovered.contains(&ScriptRange::Cjk));
@@ -471,10 +467,7 @@ mod tests {
 
         chain.remove("A");
         assert_eq!(chain.len(), 1);
-        assert_eq!(
-            chain.iter().next().map(|f| f.name.as_str()),
-            Some("B")
-        );
+        assert_eq!(chain.iter().next().map(|f| f.name.as_str()), Some("B"));
     }
 
     #[test]

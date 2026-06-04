@@ -349,6 +349,8 @@ impl DistortionEffectState {
 }
 
 impl crate::AudioEffect for DistortionEffect {
+    const EFFECT_ID: &'static str = "distortion_effect";
+
     fn process_sample(&mut self, input: f32) -> f32 {
         self.process_sample(input)
     }

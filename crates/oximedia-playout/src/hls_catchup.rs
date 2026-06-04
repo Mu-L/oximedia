@@ -356,9 +356,7 @@ impl VodAsset {
 
     /// Return the primary (highest-bandwidth) rendition, if any.
     pub fn primary_rendition(&self) -> Option<&HlsRendition> {
-        self.renditions
-            .iter()
-            .max_by_key(|r| r.bandwidth_bps)
+        self.renditions.iter().max_by_key(|r| r.bandwidth_bps)
     }
 }
 
@@ -608,7 +606,7 @@ mod tests {
     #[test]
     fn test_retention_policy_within_window() {
         let policy = RetentionPolicy {
-            max_age: Duration::from_secs(3600),
+            max_age: Duration::from_hours(1),
             respect_pin: true,
         };
         // Just created → within window
@@ -622,7 +620,7 @@ mod tests {
             respect_pin: true,
         };
         // 2 hours ago → expired
-        let old = SystemTime::now() - Duration::from_secs(7200);
+        let old = SystemTime::now() - Duration::from_hours(2);
         assert!(!policy.is_within_window(old));
     }
 
@@ -657,7 +655,7 @@ mod tests {
 
         // Create an asset with a timestamp 2 hours in the past.
         let mut old_asset = VodAsset::new("old", "Old Show");
-        old_asset.created_at = SystemTime::now() - Duration::from_secs(7200);
+        old_asset.created_at = SystemTime::now() - Duration::from_hours(2);
         cat.register(old_asset);
 
         let fresh_asset = VodAsset::new("fresh", "Live News");
@@ -679,7 +677,7 @@ mod tests {
         let mut cat = VodCatalogue::with_policy(policy);
 
         let mut pinned = VodAsset::new("pinned", "Award Show");
-        pinned.created_at = SystemTime::now() - Duration::from_secs(7200);
+        pinned.created_at = SystemTime::now() - Duration::from_hours(2);
         pinned.pinned = true;
         cat.register(pinned);
 
@@ -702,11 +700,9 @@ mod tests {
     fn test_segments_to_hls_invalid_duration() {
         let result = segments_to_hls(&["seg.ts"], 0.0);
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .contains("segment_duration_secs must be positive"),
-        );
+        assert!(result
+            .unwrap_err()
+            .contains("segment_duration_secs must be positive"),);
     }
 
     // ── VodAsset ──────────────────────────────────────────────────────────────

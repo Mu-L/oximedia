@@ -75,6 +75,8 @@ impl StereoVibrato {
 }
 
 impl AudioEffect for StereoVibrato {
+    const EFFECT_ID: &'static str = "stereo_vibrato";
+
     fn process_sample(&mut self, input: f32) -> f32 {
         let (left, _) = self.process_sample_internal(input, input);
         left

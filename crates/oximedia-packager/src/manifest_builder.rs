@@ -377,4 +377,302 @@ mod tests {
         let hls = builder.build_hls();
         assert!(hls.contains("https://cdn.example.com/720p.m3u8"));
     }
+
+    // =========================================================================
+    // HLS M3U8 format validity tests
+    // (TODO item: "Test HLS M3U8 output against Apple's mediastreamvalidator
+    //  or equivalent format checks")
+    // =========================================================================
+
+    /// A well-formed HLS master playlist must start with `#EXTM3U` (required
+    /// by the HLS spec as the very first line), contain at least one
+    /// `#EXT-X-STREAM-INF` tag, include `BANDWIDTH=`, `RESOLUTION=`, and the
+    /// track URI on the next line.
+    #[test]
+    fn test_hls_m3u8_required_tags_present() {
+        let mut builder = ManifestBuilder::new();
+        builder.add_track(ManifestTrack::video(
+            "1080p.m3u8",
+            5_000_000,
+            1920,
+            1080,
+            "av01.0.09M.08",
+            25.0,
+        ));
+        builder.add_track(ManifestTrack::video(
+            "720p.m3u8",
+            2_500_000,
+            1280,
+            720,
+            "av01.0.05M.08",
+            25.0,
+        ));
+        builder.add_track(ManifestTrack::audio("audio.m3u8", 128_000, "opus"));
+
+        let m3u8 = builder.build_hls();
+
+        // Required: #EXTM3U must be the first line.
+        assert!(
+            m3u8.starts_with("#EXTM3U"),
+            "HLS playlist must start with #EXTM3U"
+        );
+
+        // Required: at least one EXT-X-STREAM-INF.
+        assert!(
+            m3u8.contains("#EXT-X-STREAM-INF:"),
+            "HLS playlist must contain #EXT-X-STREAM-INF"
+        );
+
+        // Required: BANDWIDTH attribute present on every STREAM-INF line.
+        for line in m3u8.lines() {
+            if line.starts_with("#EXT-X-STREAM-INF:") {
+                assert!(
+                    line.contains("BANDWIDTH="),
+                    "every #EXT-X-STREAM-INF must carry BANDWIDTH=: {line}"
+                );
+            }
+        }
+
+        // Required: RESOLUTION attribute present for video tracks.
+        assert!(
+            m3u8.contains("RESOLUTION="),
+            "HLS playlist with video tracks must contain RESOLUTION="
+        );
+
+        // Check URIs are present.
+        assert!(
+            m3u8.contains("1080p.m3u8"),
+            "1080p URI must appear in playlist"
+        );
+        assert!(
+            m3u8.contains("720p.m3u8"),
+            "720p URI must appear in playlist"
+        );
+    }
+
+    /// Every `#EXT-X-STREAM-INF` tag must be immediately followed by a URI
+    /// line (not another tag, not an empty line).  This validates the two-line
+    /// STREAM-INF structure required by the HLS spec (RFC 8216 §4.3.4.2).
+    #[test]
+    fn test_hls_stream_inf_followed_by_uri() {
+        let mut builder = ManifestBuilder::new();
+        builder.add_track(ManifestTrack::video(
+            "stream_480p.m3u8",
+            1_500_000,
+            854,
+            480,
+            "av01",
+            30.0,
+        ));
+
+        let m3u8 = builder.build_hls();
+        let lines: Vec<&str> = m3u8.lines().collect();
+
+        for (i, &line) in lines.iter().enumerate() {
+            if line.starts_with("#EXT-X-STREAM-INF:") {
+                let next = lines.get(i + 1).copied().unwrap_or("");
+                assert!(
+                    !next.is_empty() && !next.starts_with('#'),
+                    "#EXT-X-STREAM-INF at line {i} must be followed by a URI, got: {next:?}"
+                );
+            }
+        }
+    }
+
+    // =========================================================================
+    // DASH MPD format validity tests
+    // (TODO item: "Verify DASH MPD output validates against MPD schema")
+    // =========================================================================
+
+    /// A well-formed DASH MPD must contain `<MPD`, the MPEG-DASH namespace URI,
+    /// `<AdaptationSet`, and `<Representation` elements.
+    #[test]
+    fn test_dash_mpd_required_elements_present() {
+        let mut builder = ManifestBuilder::new();
+        builder.add_track(ManifestTrack::video(
+            "video_1080p.mp4",
+            5_000_000,
+            1920,
+            1080,
+            "av01.0.09M.08",
+            25.0,
+        ));
+        builder.add_track(ManifestTrack::video(
+            "video_720p.mp4",
+            2_500_000,
+            1280,
+            720,
+            "av01.0.05M.08",
+            25.0,
+        ));
+        builder.add_track(ManifestTrack::audio("audio.mp4", 128_000, "opus"));
+
+        let mpd = builder.build_dash();
+
+        // Must contain the MPD root element.
+        assert!(mpd.contains("<MPD"), "DASH MPD must contain <MPD element");
+        assert!(
+            mpd.contains("</MPD>"),
+            "DASH MPD must contain closing </MPD>"
+        );
+
+        // Must reference the MPEG-DASH namespace.
+        assert!(
+            mpd.contains("xmlns="),
+            "DASH MPD must declare the xmlns namespace"
+        );
+        assert!(
+            mpd.contains("urn:mpeg:dash"),
+            "DASH MPD xmlns must reference urn:mpeg:dash"
+        );
+
+        // Must have AdaptationSet elements.
+        assert!(
+            mpd.contains("AdaptationSet"),
+            "DASH MPD must contain AdaptationSet"
+        );
+
+        // Must have Representation elements.
+        assert!(
+            mpd.contains("Representation"),
+            "DASH MPD must contain Representation"
+        );
+
+        // Video Representation must carry width and height attributes.
+        assert!(
+            mpd.contains("width="),
+            "DASH MPD video Representation must have width="
+        );
+        assert!(
+            mpd.contains("height="),
+            "DASH MPD video Representation must have height="
+        );
+
+        // Must have a Period element wrapping the adaptation sets.
+        assert!(
+            mpd.contains("<Period>"),
+            "DASH MPD must have a <Period> element"
+        );
+        assert!(mpd.contains("</Period>"), "DASH MPD must close </Period>");
+    }
+
+    /// An audio-only DASH MPD must declare `mimeType="audio/mp4"` on the
+    /// AdaptationSet (confirming codec-to-mimeType mapping is correct).
+    #[test]
+    fn test_dash_mpd_audio_mime_type() {
+        let mut builder = ManifestBuilder::new();
+        builder.add_track(ManifestTrack::audio("audio_en.mp4", 192_000, "opus"));
+
+        let mpd = builder.build_dash();
+
+        assert!(
+            mpd.contains("audio/mp4"),
+            "audio AdaptationSet must carry mimeType audio/mp4"
+        );
+        assert!(
+            mpd.contains("opus"),
+            "audio AdaptationSet codecs must be 'opus'"
+        );
+    }
+
+    // =========================================================================
+    // Bitrate ladder ordering test
+    // (TODO item: "Add test for bitrate ladder ordering in manifests —
+    //  highest to lowest bandwidth")
+    // =========================================================================
+
+    /// When multiple video renditions are added, the HLS master playlist must
+    /// list them in ascending BANDWIDTH order (lowest first) as recommended by
+    /// Apple HLS authoring guidelines — clients start from the lowest rung.
+    ///
+    /// Note: the spec does not mandate a specific ordering in the master
+    /// playlist, but listing lowest-bandwidth first is the conventional
+    /// recommendation for initial segment selection.  Our `ManifestBuilder`
+    /// preserves insertion order, so this test verifies the caller's
+    /// responsibility for ordering and that we don't silently reorder.
+    #[test]
+    fn test_hls_bitrate_ladder_ordering_preserved() {
+        let mut builder = ManifestBuilder::new();
+
+        // Add in descending order (highest first) to verify the builder
+        // preserves the insertion order and does not sort internally.
+        builder.add_track(ManifestTrack::video(
+            "1080p.m3u8",
+            5_000_000,
+            1920,
+            1080,
+            "av01",
+            25.0,
+        ));
+        builder.add_track(ManifestTrack::video(
+            "720p.m3u8",
+            2_500_000,
+            1280,
+            720,
+            "av01",
+            25.0,
+        ));
+        builder.add_track(ManifestTrack::video(
+            "480p.m3u8",
+            1_200_000,
+            854,
+            480,
+            "av01",
+            25.0,
+        ));
+
+        let m3u8 = builder.build_hls();
+
+        // Find the positions of each bandwidth value in the output string.
+        let pos_5m = m3u8
+            .find("5000000")
+            .expect("5 Mbps entry must appear in M3U8");
+        let pos_2_5m = m3u8
+            .find("2500000")
+            .expect("2.5 Mbps entry must appear in M3U8");
+        let pos_1_2m = m3u8
+            .find("1200000")
+            .expect("1.2 Mbps entry must appear in M3U8");
+
+        // Since tracks are added in descending order, the playlist must reflect
+        // that same order (5M before 2.5M before 1.2M).
+        assert!(
+            pos_5m < pos_2_5m,
+            "5 Mbps rendition must appear before 2.5 Mbps in M3U8 output"
+        );
+        assert!(
+            pos_2_5m < pos_1_2m,
+            "2.5 Mbps rendition must appear before 1.2 Mbps in M3U8 output"
+        );
+    }
+
+    /// Verify that a DASH MPD lists multiple Representation elements with
+    /// bandwidth attributes in the order they were inserted.
+    #[test]
+    fn test_dash_mpd_representation_order_preserved() {
+        let mut builder = ManifestBuilder::new();
+
+        builder.add_track(ManifestTrack::video(
+            "720p.mp4", 2_500_000, 1280, 720, "av01", 25.0,
+        ));
+        builder.add_track(ManifestTrack::video(
+            "1080p.mp4",
+            5_000_000,
+            1920,
+            1080,
+            "av01",
+            25.0,
+        ));
+
+        let mpd = builder.build_dash();
+
+        let pos_2_5m = mpd.find("2500000").expect("2.5 Mbps in MPD");
+        let pos_5m = mpd.find("5000000").expect("5 Mbps in MPD");
+
+        // 720p was inserted first → must appear before 1080p in the MPD.
+        assert!(
+            pos_2_5m < pos_5m,
+            "MPD must list Representations in insertion order: 2.5M before 5M"
+        );
+    }
 }

@@ -485,8 +485,10 @@ impl VideoDedupPipeline {
                     .sum();
 
                 let video_ids: Vec<u64> = members.iter().map(|&gi| entries[gi].id).collect();
-                let labels: Vec<String> =
-                    members.iter().map(|&gi| entries[gi].label.clone()).collect();
+                let labels: Vec<String> = members
+                    .iter()
+                    .map(|&gi| entries[gi].label.clone())
+                    .collect();
 
                 // Validate that all ids exist (defensive check).
                 for &vid in &video_ids {
@@ -621,7 +623,13 @@ mod tests {
 
     #[test]
     fn test_similarity_matrix_self_similarity() {
-        let desc = VideoDescriptor::new(1, "a.mp4", vec![make_pixels(0), make_pixels(10)], 5000, 1024);
+        let desc = VideoDescriptor::new(
+            1,
+            "a.mp4",
+            vec![make_pixels(0), make_pixels(10)],
+            5000,
+            1024,
+        );
         let entry = VideoHashEntry::from_descriptor(&desc);
         let entries = vec![entry];
         let matrix = SimilarityMatrix::build(&entries, 8);
@@ -669,20 +677,8 @@ mod tests {
     #[test]
     fn test_pipeline_distinct_videos_not_grouped() {
         // Very different seeds → very different hashes.
-        let a = VideoDescriptor::new(
-            1,
-            "a.mp4",
-            vec![make_pixels(0)],
-            1000,
-            512,
-        );
-        let b = VideoDescriptor::new(
-            2,
-            "b.mp4",
-            vec![make_pixels(200)],
-            1000,
-            512,
-        );
+        let a = VideoDescriptor::new(1, "a.mp4", vec![make_pixels(0)], 1000, 512);
+        let b = VideoDescriptor::new(2, "b.mp4", vec![make_pixels(200)], 1000, 512);
         // Use a strict threshold so unlike videos don't accidentally cluster.
         let result = VideoDedupPipeline::new()
             .with_similarity_threshold(0.99)

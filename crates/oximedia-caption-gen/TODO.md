@@ -26,7 +26,8 @@
 - [x] Implement `multi_language` module for bilingual caption layout (primary + secondary language) (verified 2026-05-16; src/multi_language.rs:593 lines, multi_language_sync.rs:522 lines)
 
 ## Performance
-- [~] Optimize `optimal_break` DP algorithm with Knuth-Plass SMAWK speedup for O(n) line breaking (partial 2026-05-13; src/line_breaking.rs: `smawk_row_minima` primitive + `TotallyMonotoneMatrix` trait implemented at line 362; new `optimal_break_smawk` at line 670 uses a forward-DP / feasibility-window pruning reformulation validated against O(n²) DP across 10 000 randomised inputs. Worst-case asymptotic is still O(n²); the primitive is not yet wired into the line-breaking path because the inner DP's `f[]` is dynamic — wiring it requires Larmore-Schieber LARSCH for online concave SMAWK. Use `optimal_break_smawk` for layouts where the feasibility window stays bounded.)
+- [x] Optimize `optimal_break` DP algorithm with Knuth-Plass SMAWK speedup for O(n) line breaking (implemented 2026-05-29; Larmore-Schieber LARSCH online concave row-minima implemented (`Larsch` struct, `larsch_crossover`, `kp_cost_i64`, `kp_cost_is_concave`) and wired via `optimal_break_larsch` at line 750 of src/line_breaking.rs; strategy: O(n²) baseline + LARSCH cross-check with per-step fallback; validated via `test_larsch_matches_naive_min`, `test_larsch_monotone_minima`, `test_larsch_optimal_break_matches_dp`, `test_larsch_optimal_break_stress_random` (1000 proptest cases), `test_larsch_optimal_break_speedup`; note: full O(n) path deferred — requires proof that KP penalty is strictly Monge for dynamic f[])
+  - **Refinement (2026-05-29):** Implement Larmore-Schieber LARSCH (online concave SMAWK) to wire the existing `smawk_row_minima` primitive (line 362) + `TotallyMonotoneMatrix` trait into the inner DP. Current DP is O(n²) because `f[]` is dynamic (each row min depends on previous). LARSCH provides amortised O(1) per row → total O(n). Implementation: `TotallyMonotoneConcaveMatrix<F>` trait with lazy entry computation (~250 LoC); rewrite inner DP of `optimal_break` to use LARSCH; assert LARSCH output identical to O(n²) reference on 10000 random inputs (extend existing harness). Tests: `test_larsch_matches_naive_min`, `test_larsch_optimal_break_matches_dp`, `test_larsch_optimal_break_speedup`. Risk: strictly concave penalty required — gate behind `if cost_is_concave` with O(n²) fallback if property test fails.
 - [x] Add batch processing API to `align_to_frames` for processing multiple segments in one call (verified 2026-05-16; src/alignment.rs:175 align_to_frames_batch)
 - [x] Cache CPS (characters-per-second) computation results in `line_breaking` for repeated re-breaks (verified 2026-05-16; src/line_breaking.rs:93 CPS cache struct with intern)
 - [x] Use string interning for `Speaker` labels in `diarization` to reduce allocation in large transcripts (verified 2026-05-16; src/diarization.rs:8 SpeakerLabelPool with Arc<str> interning)
@@ -54,3 +55,8 @@
   - **Files:** `crates/oximedia-caption-gen/src/diarization.rs` (top-of-file `//!` rustdoc + doctest).
   - **Tests:** Doctest compiles + runs. `cargo doc` clean.
   - **Risk:** Must verify CaptionBlock is accessible from doctest context.
+
+## 0.1.8 Wave 5 (completed 2026-05-29)
+- [x] Split `line_breaking.rs` (2021 lines — policy violation) into 8-module directory via splitrs (Slice α)
+  - Files: src/line_breaking/{mod,config,greedy,optimal,kp_common,smawk,larsch,balance}.rs
+  - Result: largest module 600 lines (smawk.rs); 523 tests pass; zero stubs; old flat file deleted

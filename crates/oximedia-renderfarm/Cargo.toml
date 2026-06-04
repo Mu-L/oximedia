@@ -66,11 +66,18 @@ crossbeam-channel = { workspace = true }
 crossbeam = "0.8"
 num_cpus = "1.17"
 sysinfo = { workspace = true }
+rayon = { workspace = true }
+memmap2 = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true
 criterion = { workspace = true }
+proptest = { workspace = true }
 
 [[bench]]
 name = "scheduler"
+harness = false
+
+[[bench]]
+name = "tile_merge"
 harness = false

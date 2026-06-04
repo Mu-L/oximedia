@@ -109,7 +109,7 @@ impl UdpScatterGather {
                 sa_in.sin_port = v4.port().to_be();
                 sa_in.sin_addr.s_addr = u32::from_ne_bytes(v4.ip().octets());
                 (
-                    &sa_in as *const _ as *const libc::sockaddr,
+                    (&sa_in as *const sockaddr_in).cast::<libc::sockaddr>(),
                     mem::size_of::<sockaddr_in>() as libc::socklen_t,
                 )
             }
@@ -118,7 +118,7 @@ impl UdpScatterGather {
                 sa_in6.sin6_port = v6.port().to_be();
                 sa_in6.sin6_addr.s6_addr = v6.ip().octets();
                 (
-                    &sa_in6 as *const _ as *const libc::sockaddr,
+                    (&sa_in6 as *const sockaddr_in6).cast::<libc::sockaddr>(),
                     mem::size_of::<sockaddr_in6>() as libc::socklen_t,
                 )
             }

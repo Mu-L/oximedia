@@ -191,10 +191,7 @@ mod tests {
             let t = step as f32 / 10.0;
             let encoded = apply_lut_1d(&gamma_fwd, t);
             let decoded = apply_lut_1d(&gamma_inv, encoded);
-            assert!(
-                (decoded - t).abs() < 0.02,
-                "t={t}: decoded={decoded}"
-            );
+            assert!((decoded - t).abs() < 0.02, "t={t}: decoded={decoded}");
         }
     }
 

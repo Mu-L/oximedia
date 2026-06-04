@@ -297,7 +297,12 @@ mod tests {
         // cos(π/4) == sin(π/4) == 1/√2 ≈ 0.7071
         for i in 0..100 {
             let diff = (l[i] - r[i]).abs();
-            assert!(diff < 1e-5, "L/R should be equal at sample {i}: L={} R={}", l[i], r[i]);
+            assert!(
+                diff < 1e-5,
+                "L/R should be equal at sample {i}: L={} R={}",
+                l[i],
+                r[i]
+            );
         }
     }
 
@@ -346,7 +351,11 @@ mod tests {
             let diff = (l[i] - expected).abs();
             assert!(diff < 1e-3, "sample {i}: expected ~{expected} got {}", l[i]);
             let diff_r = (r[i] - expected).abs();
-            assert!(diff_r < 1e-3, "sample {i}: R expected ~{expected} got {}", r[i]);
+            assert!(
+                diff_r < 1e-3,
+                "sample {i}: R expected ~{expected} got {}",
+                r[i]
+            );
         }
     }
 
@@ -381,7 +390,11 @@ mod tests {
         let expected_l = 1.0_f32 * std::f32::consts::FRAC_PI_4.cos();
         for i in 0..64 {
             let diff = (l[i] - expected_l).abs();
-            assert!(diff < 1e-4, "solo: sample {i} L={} expected ~{expected_l}", l[i]);
+            assert!(
+                diff < 1e-4,
+                "solo: sample {i} L={} expected ~{expected_l}",
+                l[i]
+            );
             let _ = r[i]; // just ensure no panic
         }
     }

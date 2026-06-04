@@ -258,11 +258,7 @@ impl TranscodeStatusStore {
     pub fn jobs_for_clip(&self, clip_id: &str) -> Vec<&TranscodeJob> {
         self.clip_index
             .get(clip_id)
-            .map(|ids| {
-                ids.iter()
-                    .filter_map(|id| self.jobs.get(id))
-                    .collect()
-            })
+            .map(|ids| ids.iter().filter_map(|id| self.jobs.get(id)).collect())
             .unwrap_or_default()
     }
 
@@ -463,10 +459,7 @@ mod tests {
         let mut store = TranscodeStatusStore::new();
         let id = store.create_job("c".to_string(), "p".to_string());
         store.update_progress(&id, 0.1);
-        assert_eq!(
-            store.job(&id).expect("job").state,
-            TranscodeState::Running
-        );
+        assert_eq!(store.job(&id).expect("job").state, TranscodeState::Running);
     }
 
     #[test]

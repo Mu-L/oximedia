@@ -57,6 +57,7 @@
 )]
 
 pub mod aaf_export;
+pub mod avid_bin;
 pub mod composition;
 pub mod composition_mob;
 pub mod convert;
@@ -64,6 +65,7 @@ pub mod davinci_edl;
 pub mod descriptor;
 pub mod dict_cache;
 pub mod dictionary;
+pub mod edit_session;
 pub mod edl_export;
 pub mod effect_def;
 pub mod effects;
@@ -71,7 +73,10 @@ pub mod essence;
 pub mod flatten;
 pub mod inspector;
 pub mod interchange;
+pub mod klv;
 pub mod lazy_essence;
+pub mod local_set_decode;
+pub mod local_set_encode;
 pub mod media_data;
 pub mod media_file_ref;
 pub mod merge;
@@ -82,6 +87,7 @@ pub mod object_model;
 pub mod operation_group;
 pub mod parameter;
 pub mod property_value;
+pub mod relink;
 pub mod scope;
 pub mod search;
 pub mod selector;
@@ -260,10 +266,39 @@ impl AafFile {
     }
 }
 
+impl AafFile {
+    /// Get a mutable reference to the content storage.
+    ///
+    /// Convenience helper used by tests and edit-session builders.
+    pub fn content_storage_mut(&mut self) -> &mut ContentStorage {
+        &mut self.content_storage
+    }
+
+    /// Get a mutable reference to the essence-data list.
+    pub fn essence_data_mut(&mut self) -> &mut Vec<EssenceData> {
+        &mut self.essence_data
+    }
+
+    /// Get a mutable reference to the file header.
+    pub fn header_mut(&mut self) -> &mut Header {
+        &mut self.header
+    }
+}
+
 impl Default for AafFile {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Test/integration helper: mutable access to content storage of an `AafFile`.
+pub fn aaf_file_content_storage_mut(file: &mut AafFile) -> &mut ContentStorage {
+    file.content_storage_mut()
+}
+
+/// Test/integration helper: mutable access to essence-data list of an `AafFile`.
+pub fn aaf_file_essence_data_mut(file: &mut AafFile) -> &mut Vec<EssenceData> {
+    file.essence_data_mut()
 }
 
 /// Content storage containing all mobs
@@ -752,5 +787,36 @@ mod tests {
         let bogus_id = Uuid::new_v4();
         let result = storage.clone_mob(bogus_id);
         assert!(result.is_err());
+    }
+
+    // --- Smoke tests for newly-registered orphan modules ---
+
+    #[test]
+    fn smoke_avid_bin_relink() {
+        // avid_bin: verify basic types are accessible and functional
+        let mut bin = avid_bin::AvidBin::new("SmokeBin");
+        let id = Uuid::new_v4();
+        bin.add_item(avid_bin::BinItem::new(
+            id,
+            "SmokeClip",
+            avid_bin::BinItemType::MasterClip,
+        ));
+        assert_eq!(bin.item_count(), 1);
+
+        // relink: verify relinking updates source path
+        use object_model::{Mob, MobLocator, MobType};
+        let mut mob = Mob::new(Uuid::new_v4(), "smoke_mob".to_string(), MobType::Source);
+        mob.set_source_path("old/path.mxf");
+        mob.add_locator(MobLocator {
+            path: "old/path.mxf".to_string(),
+        });
+        let relinker = relink::AafEssenceRelinker::new();
+        let changed = relinker
+            .relink(&mut mob, "old/path.mxf", "new/path.mxf")
+            .expect("relink must succeed");
+        assert_eq!(changed, 2);
+        assert_eq!(mob.source_path(), Some("new/path.mxf"));
+
+        let _ = std::hint::black_box(0u8);
     }
 }

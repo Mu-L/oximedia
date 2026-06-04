@@ -22,7 +22,7 @@
 - [x] Add AAC decoder (patent-free since 2023) as feature-gated module (verified 2026-05-16; src/aac.rs:734 lines AacDecoder)
 - [x] Implement ALAC (Apple Lossless) decoder for Apple ecosystem compatibility (verified 2026-05-16; src/alac.rs:612 lines AlacDecoder)
 - [x] Add WAV file reader/writer with full RIFF chunk handling (verified 2026-05-16; src/wav.rs:790 lines WavReader/WavWriter)
-- [ ] Implement audio watermarking module (embed/detect inaudible watermarks) (verified-open 2026-05-16: oximedia-watermark has this but not in oximedia-audio crate itself)
+- [x] Implement audio watermarking module (embed/detect inaudible watermarks) (AudioWatermarker + AudioDetector done)
 - [x] Add noise reduction module (spectral subtraction, Wiener filter) (verified 2026-05-16; src/noise_reduce.rs:638 lines NoiseReducer)
 - [x] Implement click/pop removal for vinyl restoration workflows (verified 2026-05-16; src/click_remove.rs:506 lines ClickRemover)
 - [x] Add convolution reverb using impulse response loading (verified 2026-05-16; src/convolution_reverb.rs:567 lines ConvolutionReverb)
@@ -52,3 +52,19 @@
 - [x] Document codec feature gates and their compile-time implications (implemented 2026-05-15; lib.rs feature gate table)
 - [x] Add DSP signal flow diagrams for compressor, reverb, and EQ chains (implemented 2026-05-15; dsp/compressor.rs, dsp/reverb.rs, dsp/eq.rs signal flow ASCII art)
 - [x] Document `AudioFrame` memory layout and channel ordering conventions (implemented 2026-05-15; frame.rs module + struct doc)
+
+## 0.1.8 Wave 4 follow-up (added 2026-05-29 by /ultra)
+
+- [x] Implement FLAC decoder full orchestration — wire `FlacDecoder::receive_frame/send_packet` through existing flac/ primitives (planned 2026-05-29)
+  - **Goal:** `FlacDecoder::receive_frame()` currently returns `Ok(None)` stub. All bitstream primitives exist (`frame.rs:339 FrameHeader::parse`, `subframe.rs: decode_fixed/lpc/verbatim/constant`, `rice.rs: RiceDecoder`, `crc.rs: crc8/crc16`). Wire them into a streaming decoder that emits `AudioFrame` per FLAC frame. Lossless round-trip through `FlacEncoder`.
+  - **Design:** Add `FlacStream { stream_info: Option<StreamInfo>, buffer: Vec<u8>, pending_frames: VecDeque<AudioFrame>, last_pts: i64 }`. `send_packet` appends bytes, parses STREAMINFO metadata block on first call (detect "fLaC" marker, BLOCK_TYPE==0). `receive_frame` pumps `try_decode_one_frame`: locate 14-bit sync code `11111111 111110xx`, parse FrameHeader, decode per-channel subframes (constant/verbatim/fixed/LPC), apply channel decorrelation (Independent/LeftSide/RightSide/MidSide), verify CRC16, convert int samples to AudioFrame PlanarF32. PTS from frame_or_sample_number × sample_rate. Optional MD5 stream verification (build `flac/md5.rs` ~80 LoC if not present).
+  - **Files:** `crates/oximedia-audio/src/flac/mod.rs` (replace stub lines 178–180), `crates/oximedia-audio/src/flac/decoder.rs` (new, ~500–800 LoC orchestration), `crates/oximedia-audio/src/flac/md5.rs` (new if needed, ~80 LoC)
+  - **Tests:** `test_flac_decode_synth_16bit_stereo` (round-trip via FlacEncoder), `test_flac_decode_synth_24bit_mono`, `test_flac_decode_left_side_decorrelation`, `test_flac_decode_mid_side_decorrelation`, `test_flac_decode_lpc_subframe`, `test_flac_decode_rice_partitions`, `test_flac_decode_crc_mismatch_rejects`, `test_flac_decode_md5_match`, `test_flac_decode_send_partial_packets`, `test_flac_decoder_audio_decoder_trait`
+  - **Risk:** Variable-blocksize block-size codes; wasted-bits unary off-by-one (cross-check with FlacEncoder mirror). MD5 if not present: standalone Pure-Rust impl ~80 LoC.
+
+- [x] Implement Vorbis decoder full orchestration — three-header state machine + per-packet floor1/residue/IMDCT/overlap-add pipeline (planned 2026-05-29)
+  - **Goal:** `VorbisDecoder::receive_frame()` returns `Ok(None)` stub. All primitives present (`codebook.rs: decode/decode_vq`, `floor.rs: Floor::synthesize`, `mdct.rs: Mdct::inverse`, `bitpack.rs`, `header.rs: parse`). Wire them into a Vorbis I compliant decoder. ≤ -50 dBFS RMS error round-trip through VorbisEncoder.
+  - **Design:** State machine `WaitingForIdentification → Comment → Setup → Ready`. Identification: stash sample_rate/channels/blocksize_0/1. Comment: skip. Setup: parse codebooks/floors/residues/mappings/modes. Audio packet: read mode number → window_size; per submap: decode floor1 curve, decode residue (types 0/1/2), apply residue to spectrum; undo channel coupling (mag/ang → L/R per Vorbis I §6.3.2 sign rules); apply floor multiplicatively; IMDCT via Mdct::inverse; window + overlap-add with self.overlap[ch]; emit AudioFrame. Add `decode_residue1/2` + `apply_residue` to `vorbis/residue.rs`. Overlap stored as `Vec<Vec<f32>>` per channel.
+  - **Files:** `crates/oximedia-audio/src/vorbis/mod.rs` (replace stub lines 127–129), `crates/oximedia-audio/src/vorbis/decoder.rs` (new, ~600–800 LoC state machine + orchestration), `crates/oximedia-audio/src/vorbis/residue.rs` (add decode_residue1/2 + apply_residue)
+  - **Tests:** `test_vorbis_decode_synth_440hz_stereo`, `test_vorbis_decode_mono_short_block`, `test_vorbis_decode_mono_long_block`, `test_vorbis_decode_long_then_short` (overlap-add seam), `test_vorbis_decode_residue_type1`, `test_vorbis_decode_residue_type2_coupled_stereo`, `test_vorbis_decode_state_machine_rejects_audio_before_setup`, `test_vorbis_decoder_audio_decoder_trait`
+  - **Risk:** Residue type 2 + channel coupling is densest path — silent corruption risk; ground-truth from VorbisEncoder round-trip. IMDCT window alignment must match encoder's Vorbis I §1.3.2 "vorbis_window".

@@ -155,10 +155,7 @@ impl BridgeRouteTable {
     pub fn register_source(&mut self, entry: BridgeSourceEntry) {
         let entries = self.sources.entry(entry.name.clone()).or_default();
         // Update existing entry from same subnet or add new
-        if let Some(existing) = entries
-            .iter_mut()
-            .find(|e| e.subnet == entry.subnet)
-        {
+        if let Some(existing) = entries.iter_mut().find(|e| e.subnet == entry.subnet) {
             existing.endpoint = entry.endpoint;
             existing.rtt_ms = entry.rtt_ms;
             existing.touch();
@@ -394,7 +391,10 @@ mod tests {
         let results = table.lookup("CAM1");
         assert_eq!(results.len(), 2);
         // Sorted by RTT: 5ms first
-        assert!(results[0].rtt_ms.expect("first result should have RTT") < results[1].rtt_ms.expect("second result should have RTT"));
+        assert!(
+            results[0].rtt_ms.expect("first result should have RTT")
+                < results[1].rtt_ms.expect("second result should have RTT")
+        );
     }
 
     #[test]
@@ -408,18 +408,17 @@ mod tests {
     #[test]
     fn test_register_relay() {
         let mut table = BridgeRouteTable::new(Duration::from_secs(60));
-        let relay = RelayEndpoint::new(
-            "relay1",
-            make_addr(6000),
-            vec![subnet("10.1.0.0/24")],
-            15.0,
-        );
+        let relay =
+            RelayEndpoint::new("relay1", make_addr(6000), vec![subnet("10.1.0.0/24")], 15.0);
         table.register_relay(relay);
         assert_eq!(table.relay_count(), 1);
 
         let best = table.best_relay_for(&subnet("10.1.0.0/24"));
         assert!(best.is_some());
-        assert_eq!(best.expect("should find relay for matching subnet").id, "relay1");
+        assert_eq!(
+            best.expect("should find relay for matching subnet").id,
+            "relay1"
+        );
     }
 
     #[test]
@@ -464,8 +463,8 @@ mod tests {
         let mut table = BridgeRouteTable::new(Duration::from_secs(60));
         table.register_source(make_source("CAM", 5960, "10.0.0.0/24"));
 
-        let path = resolve_path(&table, "CAM", &subnet("10.0.0.0/24"))
-            .expect("should resolve directly");
+        let path =
+            resolve_path(&table, "CAM", &subnet("10.0.0.0/24")).expect("should resolve directly");
         assert!(!path.uses_relay());
         assert_eq!(path.source_name, "CAM");
     }
@@ -474,18 +473,18 @@ mod tests {
     fn test_resolve_path_via_relay() {
         let mut table = BridgeRouteTable::new(Duration::from_secs(60));
         table.register_source(make_source("REMOTE", 5960, "192.168.2.0/24"));
-        let relay = RelayEndpoint::new(
-            "r1",
-            make_addr(7000),
-            vec![subnet("192.168.2.0/24")],
-            8.0,
-        );
+        let relay = RelayEndpoint::new("r1", make_addr(7000), vec![subnet("192.168.2.0/24")], 8.0);
         table.register_relay(relay);
 
         let path = resolve_path(&table, "REMOTE", &subnet("10.0.0.0/24"))
             .expect("path via relay should resolve");
         assert!(path.uses_relay());
-        assert_eq!(path.relay.expect("relay path should have relay address").port(), 7000);
+        assert_eq!(
+            path.relay
+                .expect("relay path should have relay address")
+                .port(),
+            7000
+        );
     }
 
     #[test]
@@ -496,12 +495,7 @@ mod tests {
 
     #[test]
     fn test_relay_endpoint_can_reach() {
-        let relay = RelayEndpoint::new(
-            "r",
-            make_addr(9000),
-            vec![subnet("172.16.0.0/16")],
-            5.0,
-        );
+        let relay = RelayEndpoint::new("r", make_addr(9000), vec![subnet("172.16.0.0/16")], 5.0);
         assert!(relay.can_reach(&subnet("172.16.0.0/16")));
         assert!(!relay.can_reach(&subnet("10.0.0.0/8")));
     }

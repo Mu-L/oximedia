@@ -17,8 +17,6 @@
 //! | Metal | Heavy Metal, Death Metal, Black Metal, Doom, Nu-Metal |
 //! | Folk | Singer-Songwriter, Celtic, Bluegrass, Indie Folk, Americana |
 
-use std::collections::HashMap;
-
 // ---------------------------------------------------------------------------
 // Sub-genre enum
 // ---------------------------------------------------------------------------

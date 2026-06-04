@@ -193,4 +193,33 @@ mod tests {
         let result = segmenter.segment(&[0u8; 10], 100, 100);
         assert!(result.is_err());
     }
+
+    /// Canonical test name from the task specification.
+    /// Verifies that the rayon parallel path and the sequential edge-detection
+    /// path produce bit-identical masks for a non-uniform image.
+    #[test]
+    fn test_segmenter_parallel_matches_sequential() {
+        let fg = ForegroundSegmenter::new();
+        let segmenter = Segmenter::new();
+        let w = 256;
+        let h = 256;
+        let mut rgb_data = vec![30u8; w * h * 3];
+        // A bright rectangle to create edges
+        for y in 64..192 {
+            for x in 64..192 {
+                let idx = (y * w + x) * 3;
+                rgb_data[idx] = 220;
+                rgb_data[idx + 1] = 180;
+                rgb_data[idx + 2] = 90;
+            }
+        }
+        let seq = fg.segment(&rgb_data, w, h).expect("sequential ok");
+        let par = segmenter
+            .segment_foreground_parallel(&rgb_data, w, h)
+            .expect("parallel ok");
+        assert_eq!(
+            seq.data, par.data,
+            "parallel and sequential segmentation must produce identical masks"
+        );
+    }
 }

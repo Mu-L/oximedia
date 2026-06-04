@@ -505,7 +505,10 @@ impl HarmonicSpectralAnalyzer {
         let b_estimate = if sum_wx2.abs() < 1e-30 {
             0.0
         } else {
-            (sum_wxy / sum_wx2).clamp(-self.config.max_inharmonicity, self.config.max_inharmonicity)
+            (sum_wxy / sum_wx2).clamp(
+                -self.config.max_inharmonicity,
+                self.config.max_inharmonicity,
+            )
         };
 
         // Compute residual in Hz
@@ -630,10 +633,7 @@ impl HarmonicSpectralAnalyzer {
             };
         }
 
-        let harmonic_power: f64 = partial_amps[1..]
-            .iter()
-            .map(|&a| a * a)
-            .sum::<f64>();
+        let harmonic_power: f64 = partial_amps[1..].iter().map(|&a| a * a).sum::<f64>();
 
         let thd_fraction = (harmonic_power / p_fundamental).sqrt();
         let thd_db = if thd_fraction < 1e-15 {

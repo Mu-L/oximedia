@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Fader grouping and linking for mixer channels.
 //!
 //! Provides the ability to group faders so they move together,
@@ -48,7 +47,6 @@ impl FaderMember {
     /// Computes the effective gain for this member given the master value
     /// and the link mode.
     #[must_use]
-    #[allow(clippy::cast_precision_loss)]
     pub fn effective_gain(&self, master_value: f32, mode: LinkMode) -> f32 {
         if self.suspended {
             return master_value; // suspended members keep their current value
@@ -108,7 +106,11 @@ impl FaderGroup {
     ///
     /// Returns `false` if the channel is already a member.
     pub fn add_member(&mut self, channel_index: u32) -> bool {
-        if self.members.iter().any(|m| m.channel_index == channel_index) {
+        if self
+            .members
+            .iter()
+            .any(|m| m.channel_index == channel_index)
+        {
             return false;
         }
         self.members.push(FaderMember::new(channel_index));
@@ -127,7 +129,9 @@ impl FaderGroup {
     /// Returns whether the given channel is a member.
     #[must_use]
     pub fn contains(&self, channel_index: u32) -> bool {
-        self.members.iter().any(|m| m.channel_index == channel_index)
+        self.members
+            .iter()
+            .any(|m| m.channel_index == channel_index)
     }
 
     /// Sets the master fader value and returns the computed gain for each member.
@@ -139,7 +143,12 @@ impl FaderGroup {
         self.members
             .iter()
             .filter(|m| !m.suspended)
-            .map(|m| (m.channel_index, m.effective_gain(self.master_value, self.mode)))
+            .map(|m| {
+                (
+                    m.channel_index,
+                    m.effective_gain(self.master_value, self.mode),
+                )
+            })
             .collect()
     }
 
@@ -147,7 +156,11 @@ impl FaderGroup {
     ///
     /// Returns `false` if the channel is not a member.
     pub fn set_member_offset(&mut self, channel_index: u32, offset: f32) -> bool {
-        if let Some(member) = self.members.iter_mut().find(|m| m.channel_index == channel_index) {
+        if let Some(member) = self
+            .members
+            .iter_mut()
+            .find(|m| m.channel_index == channel_index)
+        {
             member.offset = offset;
             true
         } else {
@@ -159,7 +172,11 @@ impl FaderGroup {
     ///
     /// Returns `false` if the channel is not a member.
     pub fn suspend_member(&mut self, channel_index: u32) -> bool {
-        if let Some(member) = self.members.iter_mut().find(|m| m.channel_index == channel_index) {
+        if let Some(member) = self
+            .members
+            .iter_mut()
+            .find(|m| m.channel_index == channel_index)
+        {
             member.suspended = true;
             true
         } else {
@@ -171,7 +188,11 @@ impl FaderGroup {
     ///
     /// Returns `false` if the channel is not a member.
     pub fn resume_member(&mut self, channel_index: u32) -> bool {
-        if let Some(member) = self.members.iter_mut().find(|m| m.channel_index == channel_index) {
+        if let Some(member) = self
+            .members
+            .iter_mut()
+            .find(|m| m.channel_index == channel_index)
+        {
             member.suspended = false;
             true
         } else {
@@ -392,8 +413,12 @@ mod tests {
         let mut mgr = FaderGroupManager::new();
         let id1 = mgr.create_group("G1".into(), LinkMode::Absolute);
         let id2 = mgr.create_group("G2".into(), LinkMode::Relative);
-        mgr.group_mut(id1).expect("group_mut should succeed").add_member(5);
-        mgr.group_mut(id2).expect("group_mut should succeed").add_member(5);
+        mgr.group_mut(id1)
+            .expect("group_mut should succeed")
+            .add_member(5);
+        mgr.group_mut(id2)
+            .expect("group_mut should succeed")
+            .add_member(5);
         let groups = mgr.groups_for_channel(5);
         assert_eq!(groups.len(), 2);
     }
@@ -411,7 +436,14 @@ mod tests {
         let mut group = FaderGroup::new(FaderGroupId(1), "G".into(), LinkMode::Absolute);
         group.add_member(0);
         group.master_value = 0.7;
-        assert!((group.gain_for_member(0).expect("gain_for_member should succeed") - 0.7).abs() < f32::EPSILON);
+        assert!(
+            (group
+                .gain_for_member(0)
+                .expect("gain_for_member should succeed")
+                - 0.7)
+                .abs()
+                < f32::EPSILON
+        );
         assert!(group.gain_for_member(99).is_none());
     }
 }

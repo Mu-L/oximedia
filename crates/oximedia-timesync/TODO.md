@@ -15,11 +15,11 @@
 ## Enhancements
 - [x] Add PTP Announce message timeout handling in `ptp::bmca` for detecting master clock loss and triggering re-election (verified 2026-05-16; src/ptp/bmca.rs:280 AnnounceTimeoutTracker)
 - [x] Extend `ntp::client` to support NTS (Network Time Security, RFC 8915) for authenticated time synchronization (verified 2026-05-16; src/ntp/nts.rs:1 NTS RFC 8915, NtsCookie:81, NtsKeyMaterial:115)
-- [ ] Improve `clock::drift::DriftEstimator` with Allan variance computation for oscillator characterization (verified-open 2026-05-16: no allan_variance in clock_discipline.rs)
+- [x] Improve `clock::drift::DriftEstimator` with Allan variance computation for oscillator characterization (implemented 2026-05-31: AllanVarianceEstimator in src/clock/drift.rs; allan_variance, overlapping_allan_variance, add_sample; 6 tests covering white phase/freq noise + capacity + constant phase)
 - [x] Add `clock_ensemble` support for weighted averaging of multiple clock sources using Bayesian estimation (verified 2026-05-16; src/clock_ensemble.rs:596 BayesianEnsemble Gaussian conjugate updates)
-- [ ] Extend `aes67` module with PTP profile compliance checking per AES67-2013 specification (verified-open 2026-05-16: no profile compliance checker in aes67.rs)
+- [x] Extend `aes67` module with PTP profile compliance checking per AES67-2013 specification (implemented 2026-05-31: Aes67ProfileChecker + Aes67ComplianceReport + PtpConfig + PtpDelayMechanism in src/aes67.rs; §7.2/§7.3 checks; 6 tests)
 - [x] Improve `jitter_buffer` with adaptive depth adjustment based on measured network jitter statistics (verified 2026-05-16; src/jitter_buffer.rs:123 adaptive_depth field, JitterStats:118)
-- [ ] Add `sync_audit` persistent logging to file with rotation for post-production timing analysis (verified-open 2026-05-16: SyncAuditLog in-memory only, no file I/O in sync_audit.rs)
+- [x] Add `sync_audit` persistent logging to file with rotation for post-production timing analysis (implemented 2026-05-31: FileAuditLogger + AuditEntry in src/sync_audit.rs; JSON-lines format, size-triggered auto-rotate, manual rotate, BufWriter flush; 4 tests)
 - [x] Extend `gptp` (gPTP/802.1AS) with neighbor rate ratio measurement for improved accuracy (verified 2026-05-16; src/gptp.rs:184 neighbor_rate_ratio field)
 
 ## New Features
@@ -33,16 +33,16 @@
 - [x] Add `clock_quality_monitor` that tracks and reports MTIE (Maximum Time Interval Error) and TDEV (verified 2026-05-16; src/clock_quality_monitor.rs:101 ClockQualityMonitor, 418 lines)
 
 ## Performance
-- [ ] Use lock-free shared memory updates in `ipc::shmem` for microsecond-level timestamp distribution
-- [ ] Implement batched PTP message processing in `ptp::port` to handle burst arrival of sync/follow-up messages
+- [x] Use lock-free shared memory updates in `ipc::shmem` for microsecond-level timestamp distribution (done — seqlock at src/ipc/shmem.rs:52)
+- [x] Implement batched PTP message processing in `ptp::port` to handle burst arrival of sync/follow-up messages (done — PtpBatchProcessor at src/ptp/port.rs:204)
 - [ ] Add hardware timestamping support detection in `ptp::clock` for sub-microsecond PTP accuracy
 - [ ] Use SIMD-accelerated CRC computation in PTP message validation
-- [ ] Implement zero-allocation PTP message parsing in `ptp::message` using nom or manual byte parsing
+- [x] Implement zero-allocation PTP message parsing in `ptp::message` using nom or manual byte parsing (implemented 2026-05-31: SyncMessageView<'a>, parse_sync_message_zerocopy, parse_sync_batch + PtpError in src/ptp/message.rs; 5 tests incl. roundtrip vs allocating parse)
 
 ## Testing
-- [ ] Add PTP BMCA election test with multiple clock candidates at different priorities and verify correct grandmaster selection
+- [x] Add PTP BMCA election test with multiple clock candidates at different priorities and verify correct grandmaster selection (implemented 2026-05-31: BmcaSelector + PtpClockIdentity in src/ptp/bmca.rs; full IEEE 1588 ordering; 6 tests covering all 5 tiebreak levels + empty + single)
 - [ ] Test `clock::holdover` accuracy degradation over time with known oscillator drift model
-- [ ] Add NTP client test with simulated server responses at various stratum levels and verify correct server selection
+- [x] Add NTP client test with simulated server responses at various stratum levels and verify correct server selection (implemented 2026-05-31: NtpServerSelector + NtpServerInfo in src/ntp/stratum.rs; stratum-first then RTT selection; 6 tests)
 - [ ] Test `timecode::jam_sync` lock acquisition and holdover behavior with intermittent LTC signal
 - [ ] Add `genlock` test verifying frame-edge alignment within +/-1 sample at 48kHz for genlock output
 - [ ] Test `leap_second` handling at UTC midnight boundary with PTP and NTP sources

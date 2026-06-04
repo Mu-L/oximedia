@@ -1,4 +1,5 @@
-//! Media processing graph with nodes, edges, and topological execution ordering.
+//! Media processing graph with nodes, edges, topological execution ordering,
+//! and retry-with-exponential-backoff for transient node failures.
 //!
 //! This module models a directed acyclic graph (DAG) of media processing nodes.
 //! Nodes represent processing stages (source, filter, encoder, etc.), and edges
@@ -123,6 +124,8 @@ pub struct ProcessingGraph {
     pub nodes: Vec<GraphNode>,
     /// All edges in the graph.
     pub edges: Vec<GraphEdge>,
+    /// When `true` the graph is considered executing and hot-swap is refused.
+    pub is_locked: bool,
 }
 
 impl ProcessingGraph {
@@ -256,6 +259,93 @@ impl ProcessingGraph {
         order.extend(remaining);
 
         order
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Retry policy for transient node failures
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Marker trait for errors that are considered *transient* (i.e. worth
+/// retrying, such as a temporary resource contention or a momentary decode
+/// stall).
+///
+/// Implement this on your custom error type and return it from a node's
+/// process function to enable automatic retry via [`RetryPolicy`].
+pub trait TransientError {
+    /// Returns `true` when the error represents a transient condition.
+    fn is_transient(&self) -> bool;
+}
+
+/// Policy controlling how many times a failing node operation should be
+/// retried and how long to wait between attempts.
+///
+/// The inter-attempt sleep uses *exponential backoff*: attempt `n` (0-indexed)
+/// sleeps for `backoff_ms * 2^n` milliseconds before being made.
+///
+/// # Example
+/// ```
+/// use oximedia_graph::processing_graph::RetryPolicy;
+///
+/// // Three attempts total, starting with a 10 ms back-off.
+/// let policy = RetryPolicy { max_attempts: 3, backoff_ms: 10 };
+/// ```
+#[derive(Debug, Clone)]
+pub struct RetryPolicy {
+    /// Maximum number of attempts (including the first).  A value of `1`
+    /// means "try once; do not retry".
+    pub max_attempts: u32,
+    /// Base back-off in milliseconds.  The sleep before attempt `n` is
+    /// `backoff_ms * 2^(n-1)` ms (so the first retry sleeps `backoff_ms` ms,
+    /// the second sleeps `2 * backoff_ms` ms, and so on).
+    pub backoff_ms: u64,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            backoff_ms: 1,
+        }
+    }
+}
+
+impl RetryPolicy {
+    /// Executes `f` up to `max_attempts` times, returning the first `Ok(T)`.
+    ///
+    /// If `f` returns an `Err(e)` where `e.is_transient()` returns `true` and
+    /// there are remaining attempts, the function sleeps for an exponentially
+    /// increasing duration and then calls `f` again.
+    ///
+    /// If `f` returns an `Err(e)` where `e.is_transient()` returns `false`,
+    /// the error is returned immediately (no further retries are made).
+    ///
+    /// If all `max_attempts` are exhausted the last error is returned.
+    pub fn execute<T, E, F>(&self, mut f: F) -> Result<T, E>
+    where
+        E: TransientError,
+        F: FnMut() -> Result<T, E>,
+    {
+        let mut last_err: Option<E> = None;
+        for attempt in 0..self.max_attempts {
+            match f() {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    if !e.is_transient() {
+                        return Err(e);
+                    }
+                    // Sleep with exponential back-off before the next attempt.
+                    if attempt + 1 < self.max_attempts {
+                        let sleep_ms = self.backoff_ms.saturating_mul(1u64 << attempt);
+                        std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
+                    }
+                    last_err = Some(e);
+                }
+            }
+        }
+        // `max_attempts >= 1` and we enter at least one iteration, so
+        // `last_err` is always `Some` here.
+        Err(last_err.expect("at least one attempt must have set last_err"))
     }
 }
 
@@ -423,5 +513,87 @@ mod tests {
         g.add_node(source(2));
         let order = g.execution_order();
         assert_eq!(order.len(), 2);
+    }
+
+    // ── RetryPolicy ───────────────────────────────────────────────────────────
+
+    /// A simple error type used in retry tests.
+    #[derive(Debug, PartialEq, Eq)]
+    enum TestError {
+        Transient(String),
+        Fatal(String),
+    }
+
+    impl TransientError for TestError {
+        fn is_transient(&self) -> bool {
+            matches!(self, Self::Transient(_))
+        }
+    }
+
+    #[test]
+    fn test_retry_succeeds_on_second_attempt() {
+        let call_count = std::cell::Cell::new(0u32);
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            backoff_ms: 0,
+        };
+
+        let result = policy.execute(|| {
+            let n = call_count.get();
+            call_count.set(n + 1);
+            if n == 0 {
+                // First call fails with a transient error.
+                Err(TestError::Transient("temp".to_string()))
+            } else {
+                // Second call succeeds.
+                Ok(42u32)
+            }
+        });
+
+        assert_eq!(result, Ok(42));
+        assert_eq!(call_count.get(), 2, "should have been called exactly twice");
+    }
+
+    #[test]
+    fn test_retry_exhausted() {
+        let call_count = std::cell::Cell::new(0u32);
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            backoff_ms: 0,
+        };
+
+        let result: Result<u32, TestError> = policy.execute(|| {
+            call_count.set(call_count.get() + 1);
+            Err(TestError::Transient("always fails".to_string()))
+        });
+
+        assert!(result.is_err(), "all attempts exhausted; must return Err");
+        assert_eq!(
+            call_count.get(),
+            3,
+            "execute must invoke f exactly max_attempts times"
+        );
+    }
+
+    #[test]
+    fn test_retry_fatal_error_no_retry() {
+        let call_count = std::cell::Cell::new(0u32);
+        let policy = RetryPolicy {
+            max_attempts: 5,
+            backoff_ms: 0,
+        };
+
+        let result: Result<u32, TestError> = policy.execute(|| {
+            call_count.set(call_count.get() + 1);
+            Err(TestError::Fatal("unrecoverable".to_string()))
+        });
+
+        assert!(result.is_err());
+        // Fatal error on the very first call must prevent further retries.
+        assert_eq!(
+            call_count.get(),
+            1,
+            "fatal error must halt retries immediately"
+        );
     }
 }

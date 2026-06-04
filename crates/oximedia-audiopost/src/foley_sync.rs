@@ -260,15 +260,12 @@ impl FoleySynchronizer {
         self.sync_points
             .iter()
             .map(|sp| {
-                let sp_secs =
-                    self.program_start_secs + sp.timecode.to_seconds();
+                let sp_secs = self.program_start_secs + sp.timecode.to_seconds();
 
                 // Find the closest onset within tolerance
                 let best = onsets
                     .iter()
-                    .filter(|o| {
-                        (o.position_secs - sp_secs).abs() <= sp.tolerance_secs
-                    })
+                    .filter(|o| (o.position_secs - sp_secs).abs() <= sp.tolerance_secs)
                     .min_by(|a, b| {
                         let da = (a.position_secs - sp_secs).abs();
                         let db = (b.position_secs - sp_secs).abs();
@@ -371,7 +368,8 @@ mod tests {
         for i in 0..duration_samples {
             let idx = start + i;
             if idx < buf.len() {
-                buf[idx] = amplitude * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sr as f32).sin();
+                buf[idx] =
+                    amplitude * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sr as f32).sin();
             }
         }
         buf
@@ -531,8 +529,16 @@ mod tests {
     #[test]
     fn test_apply_offset_to_onsets() {
         let onsets = vec![
-            OnsetEvent { position_secs: 1.0, energy: 0.5, matched: false },
-            OnsetEvent { position_secs: 2.0, energy: 0.3, matched: false },
+            OnsetEvent {
+                position_secs: 1.0,
+                energy: 0.5,
+                matched: false,
+            },
+            OnsetEvent {
+                position_secs: 2.0,
+                energy: 0.3,
+                matched: false,
+            },
         ];
         let shifted = apply_offset_to_onsets(&onsets, -0.5);
         assert!((shifted[0].position_secs - 0.5).abs() < 1e-9);
@@ -541,7 +547,11 @@ mod tests {
 
     #[test]
     fn test_apply_offset_clamps_to_zero() {
-        let onsets = vec![OnsetEvent { position_secs: 0.1, energy: 0.5, matched: false }];
+        let onsets = vec![OnsetEvent {
+            position_secs: 0.1,
+            energy: 0.5,
+            matched: false,
+        }];
         let shifted = apply_offset_to_onsets(&onsets, -1.0);
         assert_eq!(shifted[0].position_secs, 0.0);
     }

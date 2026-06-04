@@ -541,7 +541,8 @@ impl SubPixelRefiner {
 }
 
 /// Compute Sobel gradients (f64 output) for sub-pixel refinement.
-#[allow(dead_code)]
+/// Only used from tests; annotated to silence dead_code in non-test builds.
+#[cfg_attr(not(test), allow(dead_code))]
 fn compute_sobel_gradients(image: &[u8], width: usize, height: usize) -> (Vec<f64>, Vec<f64>) {
     let n = width * height;
     let mut gx = vec![0.0_f64; n];
@@ -900,6 +901,98 @@ impl FeatureMatcher {
     }
 }
 
+// ── Summed-Area Table (integral image) ────────────────────────────────────────
+
+/// Summed-area table (SAT) for O(1) rectangular sum queries over a grayscale image.
+///
+/// Built in O(W×H) via the 2-D prefix-sum recurrence; each query is O(1) using
+/// the four-corner formula.  Storage is `i64` to prevent overflow for large images.
+#[derive(Debug, Clone)]
+pub struct SummedAreaTable {
+    /// Row-major SAT; size `(width+1) × (height+1)` with zero-padded borders.
+    data: Vec<i64>,
+    /// Width of the source image in pixels.
+    pub width: usize,
+    /// Height of the source image in pixels.
+    pub height: usize,
+}
+
+impl SummedAreaTable {
+    /// Build the SAT from an 8-bit grayscale image.  `gray` must have `width * height` elements.
+    ///
+    /// # Panics
+    /// Panics in debug builds if `gray.len() != width * height`.
+    #[must_use]
+    pub fn new(gray: &[u8], width: usize, height: usize) -> Self {
+        debug_assert_eq!(
+            gray.len(),
+            width * height,
+            "SAT: gray.len()={} != width*height={}",
+            gray.len(),
+            width * height
+        );
+
+        let stride = width + 1;
+        let mut data = vec![0i64; stride * (height + 1)];
+
+        for y in 0..height {
+            for x in 0..width {
+                let pixel = i64::from(gray[y * width + x]);
+
+                // Indices into the padded (stride × (height+1)) array:
+                //   sat row y+1, column x+1
+                let above = data[y * stride + (x + 1)]; // sat[y][x+1]   — row y in padded
+                let left = data[(y + 1) * stride + x]; // sat[y+1][x]   — col x in padded
+                let diag = data[y * stride + x]; // sat[y][x]     — diag
+
+                data[(y + 1) * stride + (x + 1)] = pixel + above + left - diag;
+            }
+        }
+
+        Self {
+            data,
+            width,
+            height,
+        }
+    }
+
+    /// Return the sum of pixels in `[x1, x2) × [y1, y2)` (O(1)).
+    /// Coordinates are clamped; returns 0 for empty rectangles.
+    #[must_use]
+    pub fn rect_sum(&self, x1: usize, y1: usize, x2: usize, y2: usize) -> i64 {
+        // Clamp to valid range.
+        let x1 = x1.min(self.width);
+        let y1 = y1.min(self.height);
+        let x2 = x2.min(self.width);
+        let y2 = y2.min(self.height);
+
+        if x2 <= x1 || y2 <= y1 {
+            return 0;
+        }
+
+        let stride = self.width + 1;
+        let s_x2_y2 = self.data[y2 * stride + x2];
+        let s_x1_y2 = self.data[y2 * stride + x1];
+        let s_x2_y1 = self.data[y1 * stride + x2];
+        let s_x1_y1 = self.data[y1 * stride + x1];
+
+        s_x2_y2 - s_x1_y2 - s_x2_y1 + s_x1_y1
+    }
+
+    /// Mean pixel value in the rectangle, or `None` if the area is zero.
+    #[must_use]
+    pub fn rect_mean(&self, x1: usize, y1: usize, x2: usize, y2: usize) -> Option<f64> {
+        let (x2c, y2c) = (x2.min(self.width), y2.min(self.height));
+        let (x1c, y1c) = (x1.min(x2c), y1.min(y2c));
+        let area = (x2c - x1c) as i64 * (y2c - y1c) as i64;
+        if area == 0 {
+            None
+        } else {
+            Some(self.rect_sum(x1c, y1c, x2c, y2c) as f64 / area as f64)
+        }
+    }
+}
+
 /// Harris corner detector (alternative to FAST)
 pub struct HarrisDetector {
     /// Threshold for corner detection
@@ -927,7 +1020,16 @@ impl HarrisDetector {
         }
     }
 
-    /// Detect Harris corners
+    /// Detect Harris corners.
+    ///
+    /// Uses a `SummedAreaTable` for accelerated NMS: after computing the Harris
+    /// response for every candidate pixel, we build a SAT over an 8-bit
+    /// quantisation of the response magnitude.  For each candidate corner we
+    /// query the neighbourhood box sum in O(1); if the corner's response is not
+    /// the strict maximum in its `nms_half × nms_half` neighbourhood (determined
+    /// by comparing the box average to the corner's own value), the candidate is
+    /// suppressed.  This replaces the O(k²) per-candidate neighbourhood scan with
+    /// an O(1) SAT lookup.
     ///
     /// # Errors
     /// Returns error if image dimensions are invalid
@@ -939,40 +1041,95 @@ impl HarrisDetector {
         // Compute gradients
         let (grad_x, grad_y) = self.compute_gradients(image, width, height);
 
-        // Compute structure tensor
-        let mut corners = Vec::new();
-        let k = 0.04; // Harris parameter
+        // ── Pass 1: compute Harris response for every interior pixel ──────────
+        let k = 0.04_f32; // Harris parameter
+        let mut response_map = vec![0.0_f32; width * height];
+        let mut raw_candidates: Vec<Keypoint> = Vec::new();
 
-        for y in self.window_size..height - self.window_size {
-            for x in self.window_size..width - self.window_size {
-                let mut ixx = 0.0;
-                let mut iyy = 0.0;
-                let mut ixy = 0.0;
+        for y in self.window_size..height.saturating_sub(self.window_size) {
+            for x in self.window_size..width.saturating_sub(self.window_size) {
+                let mut ixx = 0.0_f32;
+                let mut iyy = 0.0_f32;
+                let mut ixy = 0.0_f32;
 
-                // Sum over window
+                let half = self.window_size / 2;
                 for dy in 0..self.window_size {
                     for dx in 0..self.window_size {
-                        let idx = (y + dy - self.window_size / 2) * width
-                            + (x + dx - self.window_size / 2);
+                        let idx =
+                            (y + dy).saturating_sub(half) * width + (x + dx).saturating_sub(half);
                         let gx = grad_x[idx];
                         let gy = grad_y[idx];
-
                         ixx += gx * gx;
                         iyy += gy * gy;
                         ixy += gx * gy;
                     }
                 }
 
-                // Compute Harris response
                 let det = ixx * iyy - ixy * ixy;
                 let trace = ixx + iyy;
                 let response = det - k * trace * trace;
 
                 if response > self.threshold {
-                    corners.push(Keypoint::new(x as f64, y as f64, 1.0, 0.0, response));
+                    response_map[y * width + x] = response;
+                    raw_candidates.push(Keypoint::new(x as f64, y as f64, 1.0, 0.0, response));
                 }
             }
         }
+
+        // ── Pass 2: SAT-accelerated NMS ───────────────────────────────────────
+        //
+        // Quantise the response map to u8 (0–255) so we can build a SAT over it.
+        // The peak response value is used for normalisation.
+        let max_response = response_map.iter().cloned().fold(0.0_f32, f32::max);
+
+        if max_response <= 0.0 {
+            return Ok(raw_candidates);
+        }
+
+        let quantised: Vec<u8> = response_map
+            .iter()
+            .map(|&r| {
+                if r <= 0.0 {
+                    0u8
+                } else {
+                    ((r / max_response) * 255.0).clamp(0.0, 255.0).round() as u8
+                }
+            })
+            .collect();
+
+        let sat = SummedAreaTable::new(&quantised, width, height);
+
+        // NMS half-window.  Use at least 1 pixel.
+        let nms_half = (self.window_size / 2).max(1);
+
+        let corners: Vec<Keypoint> = raw_candidates
+            .into_iter()
+            .filter(|kp| {
+                let cx = kp.point.x as usize;
+                let cy = kp.point.y as usize;
+
+                // Candidate's own quantised value.
+                let own_q = quantised[cy * width + cx] as i64;
+
+                // Neighbourhood rectangle [x1, x2) × [y1, y2).
+                let x1 = cx.saturating_sub(nms_half);
+                let y1 = cy.saturating_sub(nms_half);
+                let x2 = (cx + nms_half + 1).min(width);
+                let y2 = (cy + nms_half + 1).min(height);
+
+                let area = ((x2 - x1) * (y2 - y1)) as i64;
+                if area == 0 {
+                    return true;
+                }
+
+                let box_sum = sat.rect_sum(x1, y1, x2, y2);
+
+                // Keep this corner only if its value is strictly greater than
+                // the neighbourhood average.  This ensures the local maximum
+                // is retained while suppressing weaker neighbours.
+                own_q * area > box_sum
+            })
+            .collect();
 
         Ok(corners)
     }
@@ -1753,5 +1910,82 @@ mod tests {
         let a: Vec<u8> = (0..32).map(|i| i as u8).collect();
         let b: Vec<u8> = (0..32).map(|i| (i * 7 + 3) as u8).collect();
         assert_eq!(hamming_distance_simd(&a, &b), hamming_distance_simd(&b, &a));
+    }
+
+    // ── SummedAreaTable ────────────────────────────────────────────────────────
+
+    /// Verify `rect_sum` against brute-force sum for a 10×10 image.
+    #[test]
+    fn test_sat_rect_sum_correctness() {
+        // Build a 10×10 image where pixel[y*10+x] = (x + y) as u8 (values 0..18)
+        let w = 10usize;
+        let h = 10usize;
+        let gray: Vec<u8> = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x + y) as u8))
+            .collect();
+
+        let sat = SummedAreaTable::new(&gray, w, h);
+
+        // Check several rectangles against brute-force.
+        let cases: &[(usize, usize, usize, usize)] = &[
+            (0, 0, 10, 10), // full image
+            (2, 3, 7, 8),   // interior rectangle
+            (0, 0, 1, 1),   // top-left single pixel
+            (9, 9, 10, 10), // bottom-right single pixel
+            (0, 5, 10, 10), // bottom half
+            (3, 0, 6, 4),   // tall narrow strip
+        ];
+
+        for &(x1, y1, x2, y2) in cases {
+            let expected: i64 = (y1..y2)
+                .flat_map(|y| (x1..x2).map(move |x| (y, x)))
+                .map(|(y, x)| i64::from(gray[y * w + x]))
+                .sum();
+            let got = sat.rect_sum(x1, y1, x2, y2);
+            assert_eq!(
+                got, expected,
+                "rect_sum({x1},{y1},{x2},{y2}): expected {expected}, got {got}"
+            );
+        }
+    }
+
+    /// Verify that the SAT handles a large all-255 image without overflow.
+    ///
+    /// A 256×256 image filled with 255 must yield a full-image rect_sum of
+    /// `256 * 256 * 255 = 16,711,680`, well within `i64` range.
+    #[test]
+    fn test_sat_overflow_safety() {
+        let w = 256usize;
+        let h = 256usize;
+        let gray = vec![255u8; w * h];
+
+        let sat = SummedAreaTable::new(&gray, w, h);
+        let expected: i64 = 256 * 256 * 255;
+        let got = sat.rect_sum(0, 0, w, h);
+
+        assert_eq!(
+            got, expected,
+            "256×256 all-255 image: expected {expected}, got {got}"
+        );
+    }
+
+    /// Verify that `rect_mean` returns the correct mean for a uniform image.
+    #[test]
+    fn test_sat_rect_mean_uniform() {
+        let w = 8usize;
+        let h = 8usize;
+        let gray = vec![42u8; w * h];
+        let sat = SummedAreaTable::new(&gray, w, h);
+        let mean = sat.rect_mean(1, 1, 7, 7).expect("should be Some");
+        assert!((mean - 42.0).abs() < 1e-10, "mean={mean}");
+    }
+
+    /// Verify that `SummedAreaTable` works correctly for a single-pixel image.
+    #[test]
+    fn test_sat_single_pixel() {
+        let gray = vec![77u8];
+        let sat = SummedAreaTable::new(&gray, 1, 1);
+        assert_eq!(sat.rect_sum(0, 0, 1, 1), 77);
+        assert_eq!(sat.rect_sum(0, 0, 0, 1), 0); // empty x-range
     }
 }

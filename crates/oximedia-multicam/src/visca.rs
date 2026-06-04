@@ -9,16 +9,16 @@
 //! - VISCA command encoding and decoding.
 //! - PTZ position, zoom, focus, iris control.
 //! - Simulated socket transport (for unit testing without hardware).
-//! - A [`ViscaController`] that manages multiple cameras.
+//! - A `ViscaController` that manages multiple cameras.
 
+use crate::{AngleId, MultiCamError, Result};
 use std::collections::HashMap;
-use crate::{AngleId, Result, MultiCamError};
 
 // ── VISCA command bytes ───────────────────────────────────────────────────────
 
 /// VISCA command categories.
-const VISCA_COMMAND:  u8 = 0x01;
-const VISCA_INQUIRY:  u8 = 0x09;
+const VISCA_COMMAND: u8 = 0x01;
+const VISCA_INQUIRY: u8 = 0x09;
 
 // ── ViscaCommand ──────────────────────────────────────────────────────────────
 
@@ -57,9 +57,9 @@ impl ViscaCommand {
     pub fn zoom(direction: u8, speed: u8) -> Self {
         let spd = speed.clamp(0, 7);
         let byte = match direction {
-            0 => 0x20 | spd,   // tele
-            1 => 0x30 | spd,   // wide
-            _ => 0x00,         // stop
+            0 => 0x20 | spd, // tele
+            1 => 0x30 | spd, // wide
+            _ => 0x00,       // stop
         };
         Self {
             bytes: vec![VISCA_COMMAND, 0x04, 0x07, byte, 0xFF],
@@ -77,10 +77,19 @@ impl ViscaCommand {
         let tp = encode_signed_visca(tilt_pos);
         Self {
             bytes: vec![
-                VISCA_COMMAND, 0x06, 0x02,
-                0x18, 0x14,   // pan_speed=24, tilt_speed=20 (max)
-                pp[0], pp[1], pp[2], pp[3],
-                tp[0], tp[1], tp[2], tp[3],
+                VISCA_COMMAND,
+                0x06,
+                0x02,
+                0x18,
+                0x14, // pan_speed=24, tilt_speed=20 (max)
+                pp[0],
+                pp[1],
+                pp[2],
+                pp[3],
+                tp[0],
+                tp[1],
+                tp[2],
+                tp[3],
                 0xFF,
             ],
             description: format!("PanTilt absolute pan={pan_pos} tilt={tilt_pos}"),
@@ -136,19 +145,10 @@ fn encode_signed_visca(value: i32) -> [u8; 4] {
     let v = value as u16;
     [
         ((v >> 12) & 0x0F) as u8,
-        ((v >>  8) & 0x0F) as u8,
-        ((v >>  4) & 0x0F) as u8,
-        (v         & 0x0F) as u8,
+        ((v >> 8) & 0x0F) as u8,
+        ((v >> 4) & 0x0F) as u8,
+        (v & 0x0F) as u8,
     ]
-}
-
-/// Decode four VISCA nibble bytes into a signed 32-bit integer.
-fn decode_signed_visca(nibbles: [u8; 4]) -> i32 {
-    let v: u16 = (u16::from(nibbles[0]) << 12)
-               | (u16::from(nibbles[1]) <<  8)
-               | (u16::from(nibbles[2]) <<  4)
-               |  u16::from(nibbles[3]);
-    v as i16 as i32
 }
 
 // ── Camera PTZ state ──────────────────────────────────────────────────────────
@@ -361,6 +361,15 @@ impl<T: ViscaTransport> ViscaController<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Decode four VISCA nibble bytes into a signed 32-bit integer (test helper).
+    fn decode_signed_visca(nibbles: [u8; 4]) -> i32 {
+        let v: u16 = (u16::from(nibbles[0]) << 12)
+            | (u16::from(nibbles[1]) << 8)
+            | (u16::from(nibbles[2]) << 4)
+            | u16::from(nibbles[3]);
+        v as i16 as i32
+    }
 
     #[test]
     fn test_visca_command_pan_tilt_drive() {

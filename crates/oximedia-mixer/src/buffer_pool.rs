@@ -128,19 +128,13 @@ impl AudioBufferPool {
     /// The number of samples in every buffer managed by this pool.
     #[must_use]
     pub fn block_size(&self) -> usize {
-        self.inner
-            .lock()
-            .map(|g| g.block_size)
-            .unwrap_or(0)
+        self.inner.lock().map(|g| g.block_size).unwrap_or(0)
     }
 
     /// Number of buffers currently available in the pool (not checked out).
     #[must_use]
     pub fn available(&self) -> usize {
-        self.inner
-            .lock()
-            .map(|g| g.free.len())
-            .unwrap_or(0)
+        self.inner.lock().map(|g| g.free.len()).unwrap_or(0)
     }
 
     /// Pre-warm the pool to hold at least `count` free buffers.
@@ -407,7 +401,11 @@ mod tests {
         let pool = AudioBufferPool::new(64, 1);
         let _buf1 = pool.checkout(); // takes the one pre-allocated
         let buf2 = pool.checkout(); // overflow allocation
-        assert_eq!(buf2.len(), 64, "overflow buffer should still have correct size");
+        assert_eq!(
+            buf2.len(),
+            64,
+            "overflow buffer should still have correct size"
+        );
         let stats = pool.stats();
         assert_eq!(
             stats.overflow_allocations, 1,
@@ -421,7 +419,7 @@ mod tests {
         let _b1 = pool.checkout(); // takes last pooled buffer
         {
             let _overflow = pool.checkout(); // overflow — not from pool
-            // after drop, pool should still have 0 (the original was taken)
+                                             // after drop, pool should still have 0 (the original was taken)
         }
         // The overflow buffer was freed, not returned.
         assert_eq!(

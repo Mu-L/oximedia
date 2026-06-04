@@ -208,7 +208,10 @@ pub struct GapDetector {
 impl GapDetector {
     /// Create a new gap detector for the given frame rate.
     pub fn new(fps: u32) -> Self {
-        Self { fps, min_gap_frames: 0 }
+        Self {
+            fps,
+            min_gap_frames: 0,
+        }
     }
 
     /// Set the minimum gap size in frames.  Gaps shorter than this are ignored.

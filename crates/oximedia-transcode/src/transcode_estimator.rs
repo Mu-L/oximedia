@@ -78,11 +78,11 @@ impl TargetCodec {
     #[must_use]
     pub fn ram_per_megapixel_mib(self) -> f32 {
         match self {
-            Self::Av1 => 48.0,  // large lookahead buffer, CDEF, film grain
-            Self::Vp9 => 24.0,  // multi-threaded tile buffers
-            Self::Vp8 => 12.0,  // single-loop filter pass
-            Self::Flac => 2.0,  // minimal buffering
-            Self::Opus => 1.5,  // SILK / CELT frame buffers
+            Self::Av1 => 48.0,   // large lookahead buffer, CDEF, film grain
+            Self::Vp9 => 24.0,   // multi-threaded tile buffers
+            Self::Vp8 => 12.0,   // single-loop filter pass
+            Self::Flac => 2.0,   // minimal buffering
+            Self::Opus => 1.5,   // SILK / CELT frame buffers
             Self::Vorbis => 2.0, // MDCT window buffers
         }
     }
@@ -553,7 +553,10 @@ mod tests {
             TargetCodec::Vorbis,
         ];
         for codec in codecs {
-            assert!(!codec.name().is_empty(), "{codec:?} name should not be empty");
+            assert!(
+                !codec.name().is_empty(),
+                "{codec:?} name should not be empty"
+            );
         }
     }
 
@@ -562,15 +565,21 @@ mod tests {
     #[test]
     fn test_calibration_default_is_valid() {
         let cal = EstimatorCalibration::default();
-        assert!(cal.validate().is_ok(), "Default calibration should be valid");
+        assert!(
+            cal.validate().is_ok(),
+            "Default calibration should be valid"
+        );
     }
 
     #[test]
     fn test_calibration_thread_speedup_single() {
         let cal = EstimatorCalibration::default(); // reference_threads = 1
-        // Single thread vs single reference → speedup = 1.0
+                                                   // Single thread vs single reference → speedup = 1.0
         let speedup = cal.thread_speedup(1);
-        assert!((speedup - 1.0).abs() < 0.01, "1-thread speedup should be ~1.0");
+        assert!(
+            (speedup - 1.0).abs() < 0.01,
+            "1-thread speedup should be ~1.0"
+        );
     }
 
     #[test]

@@ -3,21 +3,20 @@
 //! This module provides comprehensive audio metering including VU, PPM, loudness,
 //! phase correlation, and spectrum analysis.
 
-pub mod vu;
-pub mod ppm;
 pub mod loudness;
 pub mod phase;
+pub mod ppm;
 pub mod spectrum;
+pub mod vu;
 
 use crate::{MonitorError, MonitorResult};
-use oximedia_metering::{LoudnessMeter, MeterConfig, Standard, LoudnessMetrics};
 use serde::{Deserialize, Serialize};
 
-pub use vu::{VuMeter, VuMetrics};
-pub use ppm::{PpmMeter, PpmMetrics, PpmStandard};
 pub use loudness::{LoudnessMonitor, LoudnessMonitorMetrics};
 pub use phase::{PhaseCorrelation, PhaseMetrics};
+pub use ppm::{PpmMeter, PpmMetrics, PpmStandard};
 pub use spectrum::{SpectrumAnalyzer, SpectrumMetrics};
+pub use vu::{VuMeter, VuMetrics};
 
 /// Audio meter type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,9 +79,10 @@ impl AudioMeter {
     /// Returns an error if initialization fails.
     pub fn new(sample_rate: f64, channels: usize) -> MonitorResult<Self> {
         if channels == 0 || channels > 16 {
-            return Err(MonitorError::InvalidConfig(
-                format!("Invalid channel count: {}", channels),
-            ));
+            return Err(MonitorError::InvalidConfig(format!(
+                "Invalid channel count: {}",
+                channels
+            )));
         }
 
         Ok(Self {

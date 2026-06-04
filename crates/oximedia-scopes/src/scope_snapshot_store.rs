@@ -340,7 +340,10 @@ mod tests {
         let a = make_snapshot(ScopeType::Waveform, 0.0, 128, 256);
         let b = make_snapshot(ScopeType::Waveform, 1.0, 128, 256);
         let cmp = SnapshotDiff::compute(&a, &b);
-        assert_eq!(cmp.diff_score, 0.0, "diff_score should be 0 for identical data");
+        assert_eq!(
+            cmp.diff_score, 0.0,
+            "diff_score should be 0 for identical data"
+        );
     }
 
     // ── diff: completely different ───────────────────────────────────────────

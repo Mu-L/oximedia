@@ -50,7 +50,10 @@ mod psf;
 mod removal;
 mod synthesis;
 
-pub use deconvolve::{DeconvolutionMethod, Deconvolver, RichardsonLucyParams, WienerParams};
+pub use deconvolve::{
+    DeconvolutionMethod, Deconvolver, PsfPadStrategy, RichardsonLucyParams, WienerFftParams,
+    WienerParams,
+};
 pub use psf::{MotionPSF, PSFEstimator, PSFShape};
 pub use removal::{DeblurMethod, DeblurQuality, MotionBlurRemover, MultiFrameDeblur};
 pub use synthesis::{

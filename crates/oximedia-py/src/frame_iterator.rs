@@ -341,8 +341,12 @@ impl DecodedAudioChunk {
     fn __repr__(&self) -> String {
         format!(
             "DecodedAudioChunk(index={}, {} samples, {}Hz, {}ch, pts={}, fmt={:?})",
-            self.index, self.sample_count, self.sample_rate, self.channels,
-            self.pts_us, self.sample_format
+            self.index,
+            self.sample_count,
+            self.sample_rate,
+            self.channels,
+            self.pts_us,
+            self.sample_format
         )
     }
 
@@ -469,8 +473,7 @@ impl AudioFrameIterator {
     fn __repr__(&self) -> String {
         format!(
             "AudioFrameIterator({}/{} chunks, {} samples/chunk, {}Hz, {}ch)",
-            self.current, self.chunk_count, self.samples_per_chunk,
-            self.sample_rate, self.channels
+            self.current, self.chunk_count, self.samples_per_chunk, self.sample_rate, self.channels
         )
     }
 

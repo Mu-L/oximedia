@@ -215,7 +215,9 @@ impl SegmentSummarizer {
     pub fn compute_all_stats(&self) -> Vec<SegmentStats> {
         self.segments
             .iter()
-            .map(|(&idx, values)| Self::compute_segment_stats(idx, values, self.segment_duration_frames))
+            .map(|(&idx, values)| {
+                Self::compute_segment_stats(idx, values, self.segment_duration_frames)
+            })
             .collect()
     }
 
@@ -242,23 +244,25 @@ impl SegmentSummarizer {
         } else {
             sum / all_values.len() as f64
         };
-        let global_min = all_values
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min);
-        let global_max = all_values
-            .iter()
-            .copied()
-            .fold(f64::NEG_INFINITY, f64::max);
+        let global_min = all_values.iter().copied().fold(f64::INFINITY, f64::min);
+        let global_max = all_values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
 
         let worst = all_stats
             .iter()
-            .max_by(|a, b| a.mean.partial_cmp(&b.mean).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.mean
+                    .partial_cmp(&b.mean)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|s| s.segment_index);
 
         let best = all_stats
             .iter()
-            .min_by(|a, b| a.mean.partial_cmp(&b.mean).unwrap_or(std::cmp::Ordering::Equal))
+            .min_by(|a, b| {
+                a.mean
+                    .partial_cmp(&b.mean)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|s| s.segment_index);
 
         OverallSummary {

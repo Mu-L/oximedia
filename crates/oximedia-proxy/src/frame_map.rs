@@ -46,8 +46,16 @@ impl ProxyFrameMap {
         debug_assert!(original_fps > 0.0, "original_fps must be positive");
         let proxy_fps = proxy_fps as f64;
         let original_fps = original_fps as f64;
-        let ratio = if proxy_fps > 0.0 { original_fps / proxy_fps } else { 1.0 };
-        Self { proxy_fps, original_fps, ratio }
+        let ratio = if proxy_fps > 0.0 {
+            original_fps / proxy_fps
+        } else {
+            1.0
+        };
+        Self {
+            proxy_fps,
+            original_fps,
+            ratio,
+        }
     }
 
     /// Convert a proxy frame number to the nearest original frame number.

@@ -178,7 +178,12 @@ impl PlanProgress {
         self.completed = self
             .step_status
             .values()
-            .filter(|s| matches!(s, StepStatus::Done | StepStatus::Failed | StepStatus::Skipped))
+            .filter(|s| {
+                matches!(
+                    s,
+                    StepStatus::Done | StepStatus::Failed | StepStatus::Skipped
+                )
+            })
             .count();
     }
 
@@ -214,11 +219,8 @@ impl RecoveryPlan {
         // Sort by priority first, then topological order by dependencies
         steps.sort_by_key(|s| s.priority);
 
-        let id_set: HashMap<StepId, usize> = steps
-            .iter()
-            .enumerate()
-            .map(|(i, s)| (s.id, i))
-            .collect();
+        let id_set: HashMap<StepId, usize> =
+            steps.iter().enumerate().map(|(i, s)| (s.id, i)).collect();
 
         let execution_order = topological_sort(&steps, &id_set);
         let total_estimated_ms = steps.iter().map(|s| s.estimated_ms).sum();
@@ -246,9 +248,9 @@ impl RecoveryPlan {
             .iter()
             .filter(|s| {
                 progress.step_status.get(&s.id) == Some(&StepStatus::Pending)
-                    && s.depends_on.iter().all(|dep| {
-                        progress.step_status.get(dep) == Some(&StepStatus::Done)
-                    })
+                    && s.depends_on
+                        .iter()
+                        .all(|dep| progress.step_status.get(dep) == Some(&StepStatus::Done))
             })
             .map(|s| s.id)
             .collect()
@@ -401,8 +403,16 @@ mod tests {
             RepairStep::new(1, RepairAction::FixHeader, "fix hdr"),
         ];
         let plan = RecoveryPlan::build(steps);
-        let hdr_pos = plan.execution_order.iter().position(|&id| id == 1).expect("unexpected None/Err");
-        let idx_pos = plan.execution_order.iter().position(|&id| id == 2).expect("unexpected None/Err");
+        let hdr_pos = plan
+            .execution_order
+            .iter()
+            .position(|&id| id == 1)
+            .expect("unexpected None/Err");
+        let idx_pos = plan
+            .execution_order
+            .iter()
+            .position(|&id| id == 2)
+            .expect("unexpected None/Err");
         assert!(hdr_pos < idx_pos, "Header must come before index rebuild");
     }
 

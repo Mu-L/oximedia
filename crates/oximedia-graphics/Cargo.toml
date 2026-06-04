@@ -36,6 +36,9 @@ wgpu = { workspace = true, optional = true }
 bytemuck = { workspace = true }
 pollster = { workspace = true, optional = true }
 
+# SVG rendering
+resvg = "0.47"
+
 # Template and control
 tera = "1"
 

@@ -536,9 +536,7 @@ mod tests {
         let caps = HardwareCapabilities::new(
             4,
             1, // Only 1 byte of "RAM" — will always trigger memory pressure for non-trivial stages
-            false,
-            0,
-            None,
+            false, 0, None,
         );
         let report = HardwareResourceValidator::new(caps).validate(&plan);
         // The plan may produce memory pressure warnings.  For a plan with
@@ -562,10 +560,14 @@ mod tests {
         }]);
         let caps = HardwareCapabilities::new(4, 4 * 1024 * 1024 * 1024, false, 0, None);
         let report = HardwareResourceValidator::new(caps).validate(&plan);
-        assert!(report.is_ok(), "non-strict: GPU warning should not be an error");
-        let has_gpu_warn = report.warnings.iter().any(|w| {
-            matches!(w, HardwareValidationWarning::GpuUnavailable { .. })
-        });
+        assert!(
+            report.is_ok(),
+            "non-strict: GPU warning should not be an error"
+        );
+        let has_gpu_warn = report
+            .warnings
+            .iter()
+            .any(|w| matches!(w, HardwareValidationWarning::GpuUnavailable { .. }));
         assert!(has_gpu_warn, "expected GpuUnavailable warning");
     }
 
@@ -602,9 +604,10 @@ mod tests {
         }]);
         let caps = HardwareCapabilities::new(4, 4 * 1024 * 1024 * 1024, false, 0, Some(10.0));
         let report = HardwareResourceValidator::new(caps).validate(&plan);
-        let has_weight_warn = report.warnings.iter().any(|w| {
-            matches!(w, HardwareValidationWarning::CpuWeightExceeded { .. })
-        });
+        let has_weight_warn = report
+            .warnings
+            .iter()
+            .any(|w| matches!(w, HardwareValidationWarning::CpuWeightExceeded { .. }));
         assert!(has_weight_warn, "expected CpuWeightExceeded warning");
     }
 
@@ -614,10 +617,13 @@ mod tests {
         let plan = simple_plan();
         let caps = HardwareCapabilities::new(1, 4 * 1024 * 1024 * 1024, false, 0, None);
         let req = ResourceRequirement::new().with_min_cpu(16);
-        let report = HardwareResourceValidator::new(caps).require(req).validate(&plan);
-        let has_req_warn = report.warnings.iter().any(|w| {
-            matches!(w, HardwareValidationWarning::RequirementNotMet { .. })
-        });
+        let report = HardwareResourceValidator::new(caps)
+            .require(req)
+            .validate(&plan);
+        let has_req_warn = report
+            .warnings
+            .iter()
+            .any(|w| matches!(w, HardwareValidationWarning::RequirementNotMet { .. }));
         assert!(has_req_warn, "expected RequirementNotMet for CPU threads");
     }
 
@@ -627,10 +633,13 @@ mod tests {
         let plan = simple_plan();
         let caps = HardwareCapabilities::new(8, 1024, false, 0, None); // 1 KiB
         let req = ResourceRequirement::new().with_min_memory(1024 * 1024 * 1024); // 1 GiB
-        let report = HardwareResourceValidator::new(caps).require(req).validate(&plan);
-        let has_req_warn = report.warnings.iter().any(|w| {
-            matches!(w, HardwareValidationWarning::RequirementNotMet { .. })
-        });
+        let report = HardwareResourceValidator::new(caps)
+            .require(req)
+            .validate(&plan);
+        let has_req_warn = report
+            .warnings
+            .iter()
+            .any(|w| matches!(w, HardwareValidationWarning::RequirementNotMet { .. }));
         assert!(has_req_warn, "expected RequirementNotMet for memory");
     }
 
@@ -640,10 +649,13 @@ mod tests {
         let plan = simple_plan();
         let caps = HardwareCapabilities::new(4, 4 * 1024 * 1024 * 1024, false, 0, None);
         let req = ResourceRequirement::new().with_gpu(1);
-        let report = HardwareResourceValidator::new(caps).require(req).validate(&plan);
-        let has_req_warn = report.warnings.iter().any(|w| {
-            matches!(w, HardwareValidationWarning::RequirementNotMet { .. })
-        });
+        let report = HardwareResourceValidator::new(caps)
+            .require(req)
+            .validate(&plan);
+        let has_req_warn = report
+            .warnings
+            .iter()
+            .any(|w| matches!(w, HardwareValidationWarning::RequirementNotMet { .. }));
         assert!(has_req_warn, "expected RequirementNotMet for GPU");
     }
 

@@ -184,7 +184,8 @@ impl ClipDetector {
         let mut clipped = false;
         if abs > 1.0 {
             self.hard_clip_count += 1;
-            self.history.push(ClipEvent::new(self.sample_cursor, abs, 1.0));
+            self.history
+                .push(ClipEvent::new(self.sample_cursor, abs, 1.0));
             clipped = true;
         } else if abs > self.config.soft_threshold_linear {
             self.soft_clip_count += 1;
@@ -585,7 +586,10 @@ mod tests {
         };
         let mut guard = ClipGuard::new(config, 48000);
         let output = guard.process_sample(0.5);
-        assert!((output - 0.5).abs() < 1e-4, "should pass signal unchanged: {output}");
+        assert!(
+            (output - 0.5).abs() < 1e-4,
+            "should pass signal unchanged: {output}"
+        );
     }
 
     #[test]
@@ -612,7 +616,7 @@ mod tests {
             detect_clips: false,
             ..Default::default()
         };
-        let mut guard = ClipGuard::new(config, 48000);
+        let guard = ClipGuard::new(config, 48000);
         let ceiling = guard.ceiling();
         // −6 dBFS ≈ 0.5012
         assert!((ceiling - 0.5012).abs() < 0.01, "ceiling={ceiling}");
@@ -626,7 +630,10 @@ mod tests {
         let mut buf = vec![2.0f32; 128];
         guard.process_buffer(&mut buf);
         guard.reset();
-        assert!((guard.current_gain() - 1.0).abs() < 1e-4, "gain should reset to 1.0");
+        assert!(
+            (guard.current_gain() - 1.0).abs() < 1e-4,
+            "gain should reset to 1.0"
+        );
     }
 
     #[test]

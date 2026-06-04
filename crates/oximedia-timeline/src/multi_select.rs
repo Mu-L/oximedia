@@ -184,11 +184,7 @@ impl MultiSelect {
     /// Execute `op` on `selection` and return the resulting instructions.
     ///
     /// The caller is responsible for applying the instructions to the timeline.
-    pub fn execute(
-        &mut self,
-        selection: &Selection,
-        op: SelectionOp,
-    ) -> SelectionOpResult {
+    pub fn execute(&mut self, selection: &Selection, op: SelectionOp) -> SelectionOpResult {
         let mut result = SelectionOpResult::default();
 
         match op {
@@ -378,7 +374,12 @@ mod tests {
         ms.execute(&sel, SelectionOp::Copy);
 
         // Now paste at position 100
-        let result = ms.execute(&sel, SelectionOp::Paste { at: Position::new(100) });
+        let result = ms.execute(
+            &sel,
+            SelectionOp::Paste {
+                at: Position::new(100),
+            },
+        );
         assert!(!result.pastes.is_empty());
     }
 

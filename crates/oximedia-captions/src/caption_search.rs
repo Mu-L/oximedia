@@ -2,8 +2,59 @@
 //!
 //! Provides full-text and pattern-based search over caption tracks,
 //! returning structured match results with optional surrounding context.
+//!
+//! # Regex Cache
+//!
+//! Compiling a [`regex::Regex`] is expensive.  The [`cached_regex`] function
+//! maintains a process-global `OnceLock<Mutex<HashMap<String, Regex>>>` that
+//! amortises compilation across repeated searches with the same pattern.
+//! The cache key is the raw pattern string; case-insensitive variants use the
+//! `(?i)` flag embedded in the pattern.
 
-#![allow(dead_code)]
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+// ============================================================================
+// Regex Cache
+// ============================================================================
+
+/// Process-global cache of compiled [`regex::Regex`] instances.
+///
+/// Keyed by the exact pattern string (including embedded flags such as `(?i)`).
+/// Guarded by a [`Mutex`] for interior mutability; contention is negligible
+/// because regex compilation is rare compared to the time spent matching.
+static REGEX_CACHE: OnceLock<Mutex<HashMap<String, regex::Regex>>> = OnceLock::new();
+
+/// Returns a compiled [`regex::Regex`] for `pattern`, using a global cache.
+///
+/// On the first call for a given pattern the regex is compiled and stored.
+/// Subsequent calls for the same pattern clone the cached instance — [`regex::Regex`]
+/// is `Clone` and cheap to clone (it uses internal `Arc`).
+///
+/// # Errors
+///
+/// Returns [`regex::Error`] if `pattern` is not a valid regular expression.
+pub fn cached_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
+    let cache = REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    // Fast path: already compiled — just clone.
+    {
+        let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(re) = guard.get(pattern) {
+            return Ok(re.clone());
+        }
+    }
+
+    // Slow path: compile, then insert.
+    let compiled = regex::Regex::new(pattern)?;
+    {
+        let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        // Another thread may have inserted while we were compiling — that is fine;
+        // we just overwrite with an equivalent value.
+        guard.insert(pattern.to_string(), compiled.clone());
+    }
+    Ok(compiled)
+}
 
 /// Controls how text matching is performed during caption search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,12 +232,29 @@ impl CaptionSearcher {
     }
 
     /// Searches `cues` using the provided `config` and returns all matches.
+    ///
+    /// For [`CaptionSearchMode::Regex`] and [`CaptionSearchMode::RegexIgnoreCase`]
+    /// the pattern is compiled once via [`cached_regex`] and reused across all cues.
+    /// If the regex is invalid the call returns an empty result rather than panicking.
     #[must_use]
     pub fn search(
         &self,
         cues: &[SearchableCue],
         config: &CaptionSearchConfig,
     ) -> CaptionSearchResult {
+        // Pre-build regex for regex modes — invalid pattern yields empty result.
+        if config.mode.is_regex() {
+            let pattern = match config.mode {
+                CaptionSearchMode::RegexIgnoreCase => format!("(?i){}", config.query),
+                _ => config.query.clone(),
+            };
+            match cached_regex(&pattern) {
+                Ok(re) => return self.search_regex(cues, config, &re),
+                Err(_) => return CaptionSearchResult::new(vec![]),
+            }
+        }
+
+        // Substring / whole-word path.
         let mut matches = Vec::new();
 
         for cue in cues {
@@ -204,6 +272,15 @@ impl CaptionSearcher {
             let mut search_start = 0usize;
             while let Some(pos) = haystack[search_start..].find(&needle) {
                 let abs_pos = search_start + pos;
+                // Whole-word check: adjacent characters (if any) must not be alphanumeric.
+                if matches!(
+                    config.mode,
+                    CaptionSearchMode::WholeWord | CaptionSearchMode::WholeWordCaseSensitive
+                ) && !self.is_whole_word_match(&haystack, abs_pos, needle.len())
+                {
+                    search_start = abs_pos + 1;
+                    continue;
+                }
                 let ctx =
                     self.extract_context(&cue.text, abs_pos, needle.len(), config.context_chars);
                 matches.push(CaptionMatch::new(
@@ -215,6 +292,53 @@ impl CaptionSearcher {
                     abs_pos,
                 ));
                 search_start = abs_pos + needle.len().max(1);
+                if config.max_results > 0 && matches.len() >= config.max_results {
+                    return CaptionSearchResult::new(matches);
+                }
+            }
+        }
+
+        CaptionSearchResult::new(matches)
+    }
+
+    /// Checks whether the match at `[offset, offset+len)` in `text` is on a word boundary.
+    fn is_whole_word_match(&self, text: &str, offset: usize, len: usize) -> bool {
+        let chars: Vec<char> = text.chars().collect();
+        let char_offset = text[..offset].chars().count();
+        let before_ok = char_offset == 0
+            || !chars
+                .get(char_offset - 1)
+                .map(|c| c.is_alphanumeric() || *c == '_')
+                .unwrap_or(false);
+        let after_offset = char_offset + len;
+        let after_ok = !chars
+            .get(after_offset)
+            .map(|c| c.is_alphanumeric() || *c == '_')
+            .unwrap_or(false);
+        before_ok && after_ok
+    }
+
+    /// Inner search path for regex modes.
+    fn search_regex(
+        &self,
+        cues: &[SearchableCue],
+        config: &CaptionSearchConfig,
+        re: &regex::Regex,
+    ) -> CaptionSearchResult {
+        let mut matches = Vec::new();
+
+        for cue in cues {
+            for mat in re.find_iter(&cue.text) {
+                let abs_pos = mat.start();
+                let ctx = self.extract_context(&cue.text, abs_pos, mat.len(), config.context_chars);
+                matches.push(CaptionMatch::new(
+                    cue.index,
+                    cue.start_ms,
+                    cue.end_ms,
+                    mat.as_str(),
+                    ctx,
+                    abs_pos,
+                ));
                 if config.max_results > 0 && matches.len() >= config.max_results {
                     return CaptionSearchResult::new(matches);
                 }
@@ -418,5 +542,90 @@ mod tests {
         assert_eq!(cue.start_ms, 1000);
         assert_eq!(cue.end_ms, 2000);
         assert_eq!(cue.text, "Test text");
+    }
+
+    // -----------------------------------------------------------------------
+    // Regex cache tests
+    // -----------------------------------------------------------------------
+
+    /// Calling `cached_regex` twice with the same pattern should succeed both times
+    /// (second call is a cache hit and should return a valid, equivalent regex).
+    #[test]
+    fn test_regex_cache_hit() {
+        let pattern = r"\bworld\b_cache_hit_test";
+        // First call — compiles and inserts.
+        let re1 = cached_regex(pattern).expect("first compile should succeed");
+        // Second call — must hit the cache.
+        let re2 = cached_regex(pattern).expect("second (cached) compile should succeed");
+        // Both regex instances should match the same string.
+        let sample = "hello world_cache_hit_test end";
+        assert_eq!(
+            re1.is_match(sample),
+            re2.is_match(sample),
+            "cached and freshly compiled regex must agree"
+        );
+    }
+
+    /// An invalid regex pattern must return an `Err`, not panic.
+    #[test]
+    fn test_regex_cache_invalid_pattern() {
+        // `(unclosed` is not a valid regex.
+        let result = cached_regex("(unclosed_bracket_pattern");
+        assert!(result.is_err(), "invalid regex must return Err");
+    }
+
+    /// `CaptionSearchMode::Regex` routes through the cache and finds real matches.
+    #[test]
+    fn test_search_regex_mode_finds_match() {
+        let cues = sample_cues();
+        let config = CaptionSearchConfig::new(r"[Ww]orld").with_mode(CaptionSearchMode::Regex);
+        let result = CaptionSearcher::new().search(&cues, &config);
+        // "Hello world", "World of captions", "Goodbye world" → 3 matches.
+        assert_eq!(
+            result.match_count(),
+            3,
+            "regex [Ww]orld should match 3 cues"
+        );
+    }
+
+    /// `CaptionSearchMode::RegexIgnoreCase` wraps the pattern with `(?i)`.
+    #[test]
+    fn test_search_regex_ignore_case() {
+        let cues = sample_cues();
+        // Pattern "world" case-insensitive → should match "world", "World".
+        let config =
+            CaptionSearchConfig::new("world").with_mode(CaptionSearchMode::RegexIgnoreCase);
+        let result = CaptionSearcher::new().search(&cues, &config);
+        assert_eq!(
+            result.match_count(),
+            3,
+            "case-insensitive regex should find 3 matches"
+        );
+    }
+
+    /// An invalid regex in `search()` returns empty results, not a panic.
+    #[test]
+    fn test_search_invalid_regex_returns_empty() {
+        let cues = sample_cues();
+        let config = CaptionSearchConfig::new("(broken").with_mode(CaptionSearchMode::Regex);
+        let result = CaptionSearcher::new().search(&cues, &config);
+        assert!(
+            result.is_empty(),
+            "invalid regex query must yield empty results"
+        );
+    }
+
+    /// `WholeWord` mode only matches whole-word occurrences.
+    #[test]
+    fn test_search_whole_word_mode() {
+        let cues = vec![
+            SearchableCue::new(0, 0, 1000, "hello world"),
+            SearchableCue::new(1, 1000, 2000, "worldwide news"),
+        ];
+        let config = CaptionSearchConfig::new("world").with_mode(CaptionSearchMode::WholeWord);
+        let result = CaptionSearcher::new().search(&cues, &config);
+        // "hello world" matches; "worldwide" does not (word boundary violated).
+        assert_eq!(result.match_count(), 1);
+        assert_eq!(result.matches[0].cue_index, 0);
     }
 }

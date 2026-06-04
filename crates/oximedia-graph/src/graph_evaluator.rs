@@ -33,7 +33,11 @@ pub struct CycleError {
 
 impl std::fmt::Display for CycleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Cycle detected in graph involving {} nodes", self.cycle_nodes.len())
+        write!(
+            f,
+            "Cycle detected in graph involving {} nodes",
+            self.cycle_nodes.len()
+        )
     }
 }
 
@@ -70,7 +74,9 @@ impl SimpleGraph {
     pub fn add_edge(&mut self, from: NodeId, to: NodeId) {
         self.edges.entry(from).or_default().push(to);
         self.edges.entry(to).or_default();
-        self.labels.entry(from).or_insert_with(|| format!("{}", from.0));
+        self.labels
+            .entry(from)
+            .or_insert_with(|| format!("{}", from.0));
         self.labels.entry(to).or_insert_with(|| format!("{}", to.0));
     }
 
@@ -118,11 +124,7 @@ impl GraphEvaluator {
     /// Returns [`CycleError`] if the graph contains a cycle.
     pub fn topological_sort(graph: &SimpleGraph) -> Result<Vec<NodeId>, CycleError> {
         // Build in-degree map
-        let mut in_degree: HashMap<NodeId, usize> = graph
-            .edges
-            .keys()
-            .map(|&id| (id, 0))
-            .collect();
+        let mut in_degree: HashMap<NodeId, usize> = graph.edges.keys().map(|&id| (id, 0)).collect();
 
         for successors in graph.edges.values() {
             for &succ in successors {
@@ -145,11 +147,7 @@ impl GraphEvaluator {
 
         while let Some(node) = queue.pop_front() {
             order.push(node);
-            let mut successors: Vec<NodeId> = graph
-                .edges
-                .get(&node)
-                .cloned()
-                .unwrap_or_default();
+            let mut successors: Vec<NodeId> = graph.edges.get(&node).cloned().unwrap_or_default();
             successors.sort_by_key(|id| id.0);
             for succ in successors {
                 if let Some(d) = in_degree.get_mut(&succ) {
@@ -180,7 +178,10 @@ impl GraphEvaluator {
     /// `fn(Option<FilterFrame>) -> Option<FilterFrame>`.
     pub fn evaluate(
         order: &[NodeId],
-        processors: &mut HashMap<NodeId, Box<dyn FnMut(Option<FilterFrame>) -> Option<FilterFrame>>>,
+        processors: &mut HashMap<
+            NodeId,
+            Box<dyn FnMut(Option<FilterFrame>) -> Option<FilterFrame>>,
+        >,
         input: FilterFrame,
     ) -> Option<FilterFrame> {
         let mut current = Some(input);
@@ -323,7 +324,11 @@ impl GraphEditor {
         graph.edges.entry(new_node_id).or_default();
 
         // Add edges: from → new → to
-        graph.edges.get_mut(&edge.from).unwrap_or(&mut vec![]).push(new_node_id);
+        graph
+            .edges
+            .get_mut(&edge.from)
+            .unwrap_or(&mut vec![])
+            .push(new_node_id);
         // Use entry to avoid double borrow
         graph.edges.entry(edge.from).or_default().push(new_node_id);
         // Add new_node → to
@@ -389,7 +394,11 @@ impl GraphSerializer {
         let mut ids = graph.node_ids();
         ids.sort_by_key(|id| id.0);
         for id in ids {
-            let label = graph.labels.get(&id).cloned().unwrap_or_else(|| format!("{}", id.0));
+            let label = graph
+                .labels
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| format!("{}", id.0));
             let succs = graph.edges.get(&id).cloned().unwrap_or_default();
             let succ_str: Vec<String> = succs.iter().map(|s| format!("{}", s.0)).collect();
             out.push_str(&format!("{} ({}): {}\n", id.0, label, succ_str.join(", ")));
@@ -423,7 +432,11 @@ impl GraphStats {
         let node_count = graph.node_count();
         let edge_count = graph.edge_count();
         let max_depth = Self::compute_max_depth(graph);
-        GraphStatsSnapshot { node_count, edge_count, max_depth }
+        GraphStatsSnapshot {
+            node_count,
+            edge_count,
+            max_depth,
+        }
     }
 
     fn compute_max_depth(graph: &SimpleGraph) -> usize {
@@ -535,18 +548,30 @@ impl MultiInputNode {
 }
 
 impl Node for MultiInputNode {
-    fn id(&self) -> NodeId { self.id }
-    fn name(&self) -> &str { &self.name }
-    fn node_type(&self) -> NodeType { NodeType::Filter }
-    fn state(&self) -> NodeState { self.state }
+    fn id(&self) -> NodeId {
+        self.id
+    }
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn node_type(&self) -> NodeType {
+        NodeType::Filter
+    }
+    fn state(&self) -> NodeState {
+        self.state
+    }
 
     fn set_state(&mut self, state: NodeState) -> GraphResult<()> {
         self.state = state;
         Ok(())
     }
 
-    fn inputs(&self) -> &[InputPort] { &self.inputs }
-    fn outputs(&self) -> &[OutputPort] { &self.outputs }
+    fn inputs(&self) -> &[InputPort] {
+        &self.inputs
+    }
+    fn outputs(&self) -> &[OutputPort] {
+        &self.outputs
+    }
 
     fn process(&mut self, input: Option<FilterFrame>) -> GraphResult<Option<FilterFrame>> {
         // Pass-through: forward the first available input unchanged
@@ -631,23 +656,39 @@ impl ConditionalRouter {
     /// Evaluate the condition and return the output port index (0 or 1).
     #[must_use]
     pub fn route(&self, frame: &FilterFrame) -> u32 {
-        if (self.condition)(frame) { 0 } else { 1 }
+        if (self.condition)(frame) {
+            0
+        } else {
+            1
+        }
     }
 }
 
 impl Node for ConditionalRouter {
-    fn id(&self) -> NodeId { self.id }
-    fn name(&self) -> &str { &self.name }
-    fn node_type(&self) -> NodeType { NodeType::Filter }
-    fn state(&self) -> NodeState { self.state }
+    fn id(&self) -> NodeId {
+        self.id
+    }
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn node_type(&self) -> NodeType {
+        NodeType::Filter
+    }
+    fn state(&self) -> NodeState {
+        self.state
+    }
 
     fn set_state(&mut self, state: NodeState) -> GraphResult<()> {
         self.state = state;
         Ok(())
     }
 
-    fn inputs(&self) -> &[InputPort] { &self.inputs }
-    fn outputs(&self) -> &[OutputPort] { &self.outputs }
+    fn inputs(&self) -> &[InputPort] {
+        &self.inputs
+    }
+    fn outputs(&self) -> &[OutputPort] {
+        &self.outputs
+    }
 
     fn process(&mut self, input: Option<FilterFrame>) -> GraphResult<Option<FilterFrame>> {
         match input {
@@ -695,10 +736,12 @@ impl GainNode {
             state: NodeState::Idle,
             gain_db,
             linear_gain,
-            inputs: vec![InputPort::new(PortId(0), "input", PortType::Audio)
-                .with_format(audio_fmt.clone())],
-            outputs: vec![OutputPort::new(PortId(0), "output", PortType::Audio)
-                .with_format(audio_fmt)],
+            inputs: vec![
+                InputPort::new(PortId(0), "input", PortType::Audio).with_format(audio_fmt.clone())
+            ],
+            outputs: vec![
+                OutputPort::new(PortId(0), "output", PortType::Audio).with_format(audio_fmt)
+            ],
         }
     }
 
@@ -754,7 +797,8 @@ impl GainNode {
                     out.extend_from_slice(&scaled);
                 }
 
-                let mut output_frame = AudioFrame::new(frame.format, frame.sample_rate, frame.channels.clone());
+                let mut output_frame =
+                    AudioFrame::new(frame.format, frame.sample_rate, frame.channels.clone());
                 output_frame.samples = AudioBuffer::Interleaved(bytes::Bytes::from(out));
                 output_frame
             }
@@ -785,7 +829,8 @@ impl GainNode {
                     })
                     .collect();
 
-                let mut output_frame = AudioFrame::new(frame.format, frame.sample_rate, frame.channels.clone());
+                let mut output_frame =
+                    AudioFrame::new(frame.format, frame.sample_rate, frame.channels.clone());
                 output_frame.samples = AudioBuffer::Planar(scaled_planes);
                 output_frame
             }
@@ -816,7 +861,8 @@ impl GainNode {
                     return bytes.to_vec();
                 }
                 let v = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-                let scaled = ((v as f64) * gain as f64).clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+                let scaled =
+                    ((v as f64) * gain as f64).clamp(i32::MIN as f64, i32::MAX as f64) as i32;
                 scaled.to_le_bytes().to_vec()
             }
             SampleFormat::U8 => {
@@ -835,18 +881,30 @@ impl GainNode {
 }
 
 impl Node for GainNode {
-    fn id(&self) -> NodeId { self.id }
-    fn name(&self) -> &str { &self.name }
-    fn node_type(&self) -> NodeType { NodeType::Filter }
-    fn state(&self) -> NodeState { self.state }
+    fn id(&self) -> NodeId {
+        self.id
+    }
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn node_type(&self) -> NodeType {
+        NodeType::Filter
+    }
+    fn state(&self) -> NodeState {
+        self.state
+    }
 
     fn set_state(&mut self, state: NodeState) -> GraphResult<()> {
         self.state = state;
         Ok(())
     }
 
-    fn inputs(&self) -> &[InputPort] { &self.inputs }
-    fn outputs(&self) -> &[OutputPort] { &self.outputs }
+    fn inputs(&self) -> &[InputPort] {
+        &self.inputs
+    }
+    fn outputs(&self) -> &[OutputPort] {
+        &self.outputs
+    }
 
     fn process(&mut self, input: Option<FilterFrame>) -> GraphResult<Option<FilterFrame>> {
         match input {
@@ -1135,10 +1193,15 @@ mod tests {
         let edge = EdgeId::new(NodeId(0), NodeId(2));
         // Insert B between A and C
         let result = GraphEditor::insert_node_between(&mut g, NodeId(1), "B", edge);
-        assert!(result.is_ok(), "insert_node_between should succeed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "insert_node_between should succeed: {result:?}"
+        );
 
         // A should now have B as successor (not C directly)
-        assert!(g.edges[&NodeId(0)].contains(&NodeId(1)) || !g.edges[&NodeId(0)].contains(&NodeId(2)));
+        assert!(
+            g.edges[&NodeId(0)].contains(&NodeId(1)) || !g.edges[&NodeId(0)].contains(&NodeId(2))
+        );
         // B should have C as successor
         assert!(g.edges[&NodeId(1)].contains(&NodeId(2)));
     }

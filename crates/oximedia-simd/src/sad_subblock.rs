@@ -128,6 +128,7 @@ fn sad_scalar_strided(
 /// Both `src` and `ref_` must have at least 64 elements.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.1")]
+#[allow(clippy::cast_ptr_alignment)]
 unsafe fn sad_8x8_sse41(src: &[u8; 64], ref_: &[u8; 64]) -> u32 {
     use std::arch::x86_64::*;
 
@@ -160,6 +161,7 @@ unsafe fn sad_8x8_sse41(src: &[u8; 64], ref_: &[u8; 64]) -> u32 {
 /// Both `src` and `ref_` must have at least 16 elements.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.1")]
+#[allow(clippy::cast_ptr_alignment)]
 unsafe fn sad_4x4_sse41(src: &[u8; 16], ref_: &[u8; 16]) -> u32 {
     use std::arch::x86_64::*;
 

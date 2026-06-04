@@ -667,7 +667,8 @@ mod tests {
 
     #[test]
     fn test_policy_keep_first_returns_first() {
-        let dir = std::env::temp_dir().join("oximedia_policy_keep_first");
+        let dir =
+            std::env::temp_dir().join(format!("oximedia_policy_keep_first_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let f1 = dir.join("first.bin");
         let f2 = dir.join("second.bin");
@@ -681,7 +682,8 @@ mod tests {
 
     #[test]
     fn test_policy_delete_returns_none() {
-        let dir = std::env::temp_dir().join("oximedia_policy_delete");
+        let dir =
+            std::env::temp_dir().join(format!("oximedia_policy_delete_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let f1 = dir.join("a.bin");
         let f2 = dir.join("b.bin");
@@ -695,7 +697,8 @@ mod tests {
 
     #[test]
     fn test_policy_keep_newest_returns_latest() {
-        let dir = std::env::temp_dir().join("oximedia_policy_newest");
+        let dir =
+            std::env::temp_dir().join(format!("oximedia_policy_newest_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let f_old = dir.join("old.bin");
         let f_new = dir.join("new.bin");
@@ -716,7 +719,8 @@ mod tests {
 
     #[test]
     fn test_policy_keep_highest_quality_largest_file() {
-        let dir = std::env::temp_dir().join("oximedia_policy_quality");
+        let dir =
+            std::env::temp_dir().join(format!("oximedia_policy_quality_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let f_small = dir.join("small.bin");
         let f_large = dir.join("large.bin");

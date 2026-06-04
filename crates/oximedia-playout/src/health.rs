@@ -50,7 +50,9 @@ impl PlayoutHealth {
     /// previous observation, not absolute totals.  Call `reset()` to clear
     /// the accumulators.
     pub fn update(&mut self, dropped_frames: u32, late_segments: u32) {
-        self.dropped_frames = self.dropped_frames.saturating_add(u64::from(dropped_frames));
+        self.dropped_frames = self
+            .dropped_frames
+            .saturating_add(u64::from(dropped_frames));
         self.late_segments = self.late_segments.saturating_add(u64::from(late_segments));
         self.update_count = self.update_count.saturating_add(1);
     }
@@ -62,8 +64,7 @@ impl PlayoutHealth {
     /// makes the server unhealthy.
     #[must_use]
     pub fn is_healthy(&self, threshold: u32) -> bool {
-        self.dropped_frames <= u64::from(threshold)
-            && self.late_segments <= u64::from(threshold)
+        self.dropped_frames <= u64::from(threshold) && self.late_segments <= u64::from(threshold)
     }
 
     /// Total accumulated dropped frames.

@@ -397,9 +397,7 @@ impl LookaheadBuffer {
         let max_delta = self.config.max_crf_delta as i16;
 
         let mut delta: i16 = match self.config.strategy {
-            CrfAdjustStrategy::ComplexityBased => {
-                self.complexity_delta(analysis.mean_complexity)
-            }
+            CrfAdjustStrategy::ComplexityBased => self.complexity_delta(analysis.mean_complexity),
             CrfAdjustStrategy::SceneAware => {
                 let mut d = self.complexity_delta(analysis.mean_complexity);
                 if analysis.scene_cut_imminent {
@@ -433,10 +431,7 @@ impl LookaheadBuffer {
         };
 
         // Clamp to configured range.
-        let clamped = smoothed.clamp(
-            self.config.min_crf as i16,
-            self.config.max_crf as i16,
-        );
+        let clamped = smoothed.clamp(self.config.min_crf as i16, self.config.max_crf as i16);
         clamped as u8
     }
 
@@ -542,7 +537,10 @@ mod tests {
             buf.push(simple_frame(i, 0.9, 0.8, 0.0));
         }
         let (_, crf) = buf.pop_with_crf().expect("pop ok");
-        assert!(crf < 28, "high complexity should lower CRF below base (got {crf})");
+        assert!(
+            crf < 28,
+            "high complexity should lower CRF below base (got {crf})"
+        );
     }
 
     #[test]
@@ -561,7 +559,10 @@ mod tests {
             buf.push(simple_frame(i, 0.1, 0.05, 0.0));
         }
         let (_, crf) = buf.pop_with_crf().expect("pop ok");
-        assert!(crf > 28, "low complexity should raise CRF above base (got {crf})");
+        assert!(
+            crf > 28,
+            "low complexity should raise CRF above base (got {crf})"
+        );
     }
 
     #[test]
@@ -586,7 +587,10 @@ mod tests {
         }
         let (_, crf) = buf.pop_with_crf().expect("pop ok");
         // Should be lower than base due to imminent scene cut.
-        assert!(crf <= 28, "scene cut should not raise CRF above base (got {crf})");
+        assert!(
+            crf <= 28,
+            "scene cut should not raise CRF above base (got {crf})"
+        );
     }
 
     #[test]
@@ -608,7 +612,10 @@ mod tests {
             buf.push(simple_frame(i, 0.5, 0.3, 0.0));
         }
         let crf = buf.peek_crf().expect("peek ok");
-        assert!(crf < 28, "SceneCutOptimise should drop CRF significantly (got {crf})");
+        assert!(
+            crf < 28,
+            "SceneCutOptimise should drop CRF significantly (got {crf})"
+        );
     }
 
     #[test]

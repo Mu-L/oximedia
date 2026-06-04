@@ -368,7 +368,14 @@ impl SceneGraph {
         if pixels.len() < expected {
             return;
         }
-        self.render_node(pixels, width, height, self.root, &Transform2D::identity(), 1.0);
+        self.render_node(
+            pixels,
+            width,
+            height,
+            self.root,
+            &Transform2D::identity(),
+            1.0,
+        );
     }
 
     // ── Private helpers ────────────────────────────────────────────────────
@@ -418,17 +425,45 @@ impl SceneGraph {
                 height: h,
                 color,
             } => {
-                draw_rect(pixels, width, height, &world_transform, 0.0, 0.0, *w, *h, *color, eff_opacity);
+                draw_rect(
+                    pixels,
+                    width,
+                    height,
+                    &world_transform,
+                    0.0,
+                    0.0,
+                    *w,
+                    *h,
+                    *color,
+                    eff_opacity,
+                );
             }
             NodeContent::Text {
                 content,
                 color,
                 font_size,
             } => {
-                draw_text(pixels, width, height, &world_transform, content, *color, *font_size, eff_opacity);
+                draw_text(
+                    pixels,
+                    width,
+                    height,
+                    &world_transform,
+                    content,
+                    *color,
+                    *font_size,
+                    eff_opacity,
+                );
             }
             NodeContent::Circle { radius, color } => {
-                draw_circle(pixels, width, height, &world_transform, *radius, *color, eff_opacity);
+                draw_circle(
+                    pixels,
+                    width,
+                    height,
+                    &world_transform,
+                    *radius,
+                    *color,
+                    eff_opacity,
+                );
             }
             NodeContent::Line {
                 x2,
@@ -438,7 +473,18 @@ impl SceneGraph {
             } => {
                 let (x0, y0) = world_transform.transform_point(0.0, 0.0);
                 let (ex, ey) = world_transform.transform_point(*x2, *y2);
-                draw_line(pixels, width, height, x0, y0, ex, ey, *color, *lw, eff_opacity);
+                draw_line(
+                    pixels,
+                    width,
+                    height,
+                    x0,
+                    y0,
+                    ex,
+                    ey,
+                    *color,
+                    *lw,
+                    eff_opacity,
+                );
             }
         }
 
@@ -451,7 +497,14 @@ impl SceneGraph {
         });
 
         for child_id in children {
-            self.render_node(pixels, width, height, child_id, &world_transform, eff_opacity);
+            self.render_node(
+                pixels,
+                width,
+                height,
+                child_id,
+                &world_transform,
+                eff_opacity,
+            );
         }
     }
 }
@@ -506,7 +559,7 @@ fn composite_pixel(
     let src_g = f32::from(color[1]);
     let src_b = f32::from(color[2]);
 
-    pixels[idx]     = ((src_r * src_a + dst_r * dst_a * inv_a) / out_a).clamp(0.0, 255.0) as u8;
+    pixels[idx] = ((src_r * src_a + dst_r * dst_a * inv_a) / out_a).clamp(0.0, 255.0) as u8;
     pixels[idx + 1] = ((src_g * src_a + dst_g * dst_a * inv_a) / out_a).clamp(0.0, 255.0) as u8;
     pixels[idx + 2] = ((src_b * src_a + dst_b * dst_a * inv_a) / out_a).clamp(0.0, 255.0) as u8;
     pixels[idx + 3] = (out_a * 255.0).clamp(0.0, 255.0) as u8;
@@ -601,11 +654,19 @@ fn draw_line(
     let dx = x1 - x0;
     let dy = y1 - y0;
     let length = (dx * dx + dy * dy).sqrt();
-    let steps = if length < 1.0 { 1 } else { length.ceil() as u32 * 2 };
+    let steps = if length < 1.0 {
+        1
+    } else {
+        length.ceil() as u32 * 2
+    };
     let half_w = (stroke_width / 2.0).max(0.5);
 
     for i in 0..=steps {
-        let t = if steps == 0 { 0.0 } else { i as f32 / steps as f32 };
+        let t = if steps == 0 {
+            0.0
+        } else {
+            i as f32 / steps as f32
+        };
         let sx = x0 + dx * t;
         let sy = y0 + dy * t;
 
@@ -669,10 +730,18 @@ fn aabb_of_corners(corners: &[(f32, f32)]) -> (f32, f32, f32, f32) {
     let mut max_x = f32::MIN;
     let mut max_y = f32::MIN;
     for &(x, y) in corners {
-        if x < min_x { min_x = x; }
-        if y < min_y { min_y = y; }
-        if x > max_x { max_x = x; }
-        if y > max_y { max_y = y; }
+        if x < min_x {
+            min_x = x;
+        }
+        if y < min_y {
+            min_y = y;
+        }
+        if x > max_x {
+            max_x = x;
+        }
+        if y > max_y {
+            max_y = y;
+        }
     }
     (min_x, min_y, max_x, max_y)
 }
@@ -731,7 +800,9 @@ mod tests {
     fn test_add_node_returns_valid_id() {
         let mut sg = SceneGraph::new();
         let root = sg.root();
-        let id = sg.add_node(root, NodeContent::Empty).expect("must return Some");
+        let id = sg
+            .add_node(root, NodeContent::Empty)
+            .expect("must return Some");
         assert!(sg.get(id).is_some(), "returned id must be retrievable");
     }
 
@@ -757,7 +828,7 @@ mod tests {
         let parent = sg.add_node(root, NodeContent::Empty).expect("parent");
         let child1 = sg.add_node(parent, NodeContent::Empty).expect("child1");
         let child2 = sg.add_node(parent, NodeContent::Empty).expect("child2");
-        let grand  = sg.add_node(child1, NodeContent::Empty).expect("grand");
+        let grand = sg.add_node(child1, NodeContent::Empty).expect("grand");
 
         // 1 root + 4 nodes
         assert_eq!(sg.node_count(), 5);
@@ -781,7 +852,10 @@ mod tests {
         let ok = sg.reparent(child, b);
         assert!(ok, "reparent should succeed");
         let b_node = sg.get(b).expect("b must exist");
-        assert!(b_node.children.contains(&child), "child must now be under b");
+        assert!(
+            b_node.children.contains(&child),
+            "child must now be under b"
+        );
     }
 
     // ── 7. reparent removes from old parent ───────────────────────────────────
@@ -796,7 +870,10 @@ mod tests {
 
         sg.reparent(child, b);
         let a_node = sg.get(a).expect("a must exist");
-        assert!(!a_node.children.contains(&child), "child must no longer be under a");
+        assert!(
+            !a_node.children.contains(&child),
+            "child must no longer be under a"
+        );
     }
 
     // ── 8. invisible node produces no colored pixels ──────────────────────────
@@ -805,31 +882,41 @@ mod tests {
     fn test_node_visibility_skips_render() {
         let mut sg = SceneGraph::new();
         let root = sg.root();
-        let id = sg.add_node(root, NodeContent::ColorRect {
-            width: 50.0,
-            height: 50.0,
-            color: [255, 0, 0, 255],
-        }).expect("rect");
+        let id = sg
+            .add_node(
+                root,
+                NodeContent::ColorRect {
+                    width: 50.0,
+                    height: 50.0,
+                    color: [255, 0, 0, 255],
+                },
+            )
+            .expect("rect");
         sg.get_mut(id).expect("node").visible = false;
 
         let (w, h) = (64, 64);
         let mut buf = blank_buffer(w, h);
         sg.render(&mut buf, w, h);
 
-        assert!(!any_nonzero_alpha(&buf), "invisible node must not paint anything");
+        assert!(
+            !any_nonzero_alpha(&buf),
+            "invisible node must not paint anything"
+        );
     }
 
     // ── 9. opacity affects alpha ──────────────────────────────────────────────
 
     #[test]
     fn test_node_opacity_affects_alpha() {
-        let mut sg_full  = SceneGraph::new();
-        let mut sg_half  = SceneGraph::new();
+        let mut sg_full = SceneGraph::new();
+        let mut sg_half = SceneGraph::new();
         let root_f = sg_full.root();
         let root_h = sg_half.root();
 
         let content = NodeContent::ColorRect {
-            width: 20.0, height: 20.0, color: [200, 100, 50, 255],
+            width: 20.0,
+            height: 20.0,
+            color: [200, 100, 50, 255],
         };
         let id_f = sg_full.add_node(root_f, content.clone()).expect("f");
         let id_h = sg_half.add_node(root_h, content).expect("h");
@@ -844,15 +931,28 @@ mod tests {
         sg_half.render(&mut buf_half, w, h);
 
         // Find any painted pixel and compare alpha values.
-        let alpha_full: Vec<u8> = buf_full.chunks_exact(4).filter(|p| p[3] > 0).map(|p| p[3]).collect();
-        let alpha_half: Vec<u8> = buf_half.chunks_exact(4).filter(|p| p[3] > 0).map(|p| p[3]).collect();
+        let alpha_full: Vec<u8> = buf_full
+            .chunks_exact(4)
+            .filter(|p| p[3] > 0)
+            .map(|p| p[3])
+            .collect();
+        let alpha_half: Vec<u8> = buf_half
+            .chunks_exact(4)
+            .filter(|p| p[3] > 0)
+            .map(|p| p[3])
+            .collect();
 
         assert!(!alpha_full.is_empty(), "full opacity must paint pixels");
         assert!(!alpha_half.is_empty(), "half opacity must paint pixels");
 
-        let avg_full: f32 = alpha_full.iter().map(|&a| a as f32).sum::<f32>() / alpha_full.len() as f32;
-        let avg_half: f32 = alpha_half.iter().map(|&a| a as f32).sum::<f32>() / alpha_half.len() as f32;
-        assert!(avg_full > avg_half, "full-opacity alpha ({avg_full}) must exceed half-opacity alpha ({avg_half})");
+        let avg_full: f32 =
+            alpha_full.iter().map(|&a| a as f32).sum::<f32>() / alpha_full.len() as f32;
+        let avg_half: f32 =
+            alpha_half.iter().map(|&a| a as f32).sum::<f32>() / alpha_half.len() as f32;
+        assert!(
+            avg_full > avg_half,
+            "full-opacity alpha ({avg_full}) must exceed half-opacity alpha ({avg_half})"
+        );
     }
 
     // ── 10. translate positions content ──────────────────────────────────────
@@ -861,9 +961,16 @@ mod tests {
     fn test_transform_translate() {
         let mut sg = SceneGraph::new();
         let root = sg.root();
-        let id = sg.add_node(root, NodeContent::ColorRect {
-            width: 4.0, height: 4.0, color: [0, 255, 0, 255],
-        }).expect("rect");
+        let id = sg
+            .add_node(
+                root,
+                NodeContent::ColorRect {
+                    width: 4.0,
+                    height: 4.0,
+                    color: [0, 255, 0, 255],
+                },
+            )
+            .expect("rect");
         sg.get_mut(id).expect("n").transform = Transform2D::translate(20.0, 20.0);
 
         let (w, h) = (64, 64);
@@ -871,7 +978,10 @@ mod tests {
         sg.render(&mut buf, w, h);
 
         // Pixel at (0,0) should be untouched.
-        assert_eq!(buf[3], 0, "pixel at (0,0) should have alpha=0 (not painted)");
+        assert_eq!(
+            buf[3], 0,
+            "pixel at (0,0) should have alpha=0 (not painted)"
+        );
 
         // Pixel around (20,20) should be painted.
         let idx = (20 * w as usize + 20) * 4;
@@ -888,9 +998,16 @@ mod tests {
         let parent = sg.add_node(root, NodeContent::Empty).expect("parent");
         sg.get_mut(parent).expect("p").transform = Transform2D::translate(10.0, 10.0);
 
-        let child = sg.add_node(parent, NodeContent::ColorRect {
-            width: 4.0, height: 4.0, color: [0, 0, 255, 255],
-        }).expect("child");
+        let child = sg
+            .add_node(
+                parent,
+                NodeContent::ColorRect {
+                    width: 4.0,
+                    height: 4.0,
+                    color: [0, 0, 255, 255],
+                },
+            )
+            .expect("child");
         sg.get_mut(child).expect("c").transform = Transform2D::translate(5.0, 5.0);
 
         let (w, h) = (32, 32);
@@ -899,7 +1016,10 @@ mod tests {
 
         // Combined offset = (15, 15).
         let idx = (15 * w as usize + 15) * 4;
-        assert!(buf[idx + 3] > 0, "combined translate must place pixel at (15,15)");
+        assert!(
+            buf[idx + 3] > 0,
+            "combined translate must place pixel at (15,15)"
+        );
     }
 
     // ── 12. z_order — higher renders on top ──────────────────────────────────
@@ -911,14 +1031,28 @@ mod tests {
         let mut sg = SceneGraph::new();
         let root = sg.root();
 
-        let red  = sg.add_node(root, NodeContent::ColorRect {
-            width: 16.0, height: 16.0, color: [255, 0, 0, 255],
-        }).expect("red");
-        let blue = sg.add_node(root, NodeContent::ColorRect {
-            width: 16.0, height: 16.0, color: [0, 0, 255, 255],
-        }).expect("blue");
+        let red = sg
+            .add_node(
+                root,
+                NodeContent::ColorRect {
+                    width: 16.0,
+                    height: 16.0,
+                    color: [255, 0, 0, 255],
+                },
+            )
+            .expect("red");
+        let blue = sg
+            .add_node(
+                root,
+                NodeContent::ColorRect {
+                    width: 16.0,
+                    height: 16.0,
+                    color: [0, 0, 255, 255],
+                },
+            )
+            .expect("blue");
 
-        sg.get_mut(red).expect("r").z_order  = 1;
+        sg.get_mut(red).expect("r").z_order = 1;
         sg.get_mut(blue).expect("b").z_order = 2;
 
         let (w, h) = (32, 32);
@@ -927,7 +1061,7 @@ mod tests {
 
         // Centre pixel should be blue (the higher z_order).
         let idx = (8 * w as usize + 8) * 4;
-        assert_eq!(buf[idx], 0,   "R channel should be 0 (blue wins)");
+        assert_eq!(buf[idx], 0, "R channel should be 0 (blue wins)");
         assert_eq!(buf[idx + 2], 255, "B channel should be 255 (blue wins)");
     }
 
@@ -937,9 +1071,15 @@ mod tests {
     fn test_render_color_rect() {
         let mut sg = SceneGraph::new();
         let root = sg.root();
-        sg.add_node(root, NodeContent::ColorRect {
-            width: 10.0, height: 10.0, color: [128, 64, 32, 255],
-        }).expect("rect");
+        sg.add_node(
+            root,
+            NodeContent::ColorRect {
+                width: 10.0,
+                height: 10.0,
+                color: [128, 64, 32, 255],
+            },
+        )
+        .expect("rect");
 
         let (w, h) = (16, 16);
         let mut buf = blank_buffer(w, h);
@@ -955,10 +1095,15 @@ mod tests {
     fn test_render_circle() {
         let mut sg = SceneGraph::new();
         let root = sg.root();
-        let id = sg.add_node(root, NodeContent::Circle {
-            radius: 10.0,
-            color: [0, 200, 100, 255],
-        }).expect("circle");
+        let id = sg
+            .add_node(
+                root,
+                NodeContent::Circle {
+                    radius: 10.0,
+                    color: [0, 200, 100, 255],
+                },
+            )
+            .expect("circle");
         // Centre the circle.
         sg.get_mut(id).expect("n").transform = Transform2D::translate(16.0, 16.0);
 
@@ -968,11 +1113,18 @@ mod tests {
 
         // Pixel at centre must be painted.
         let centre_idx = (16 * w as usize + 16) * 4;
-        assert!(buf[centre_idx + 3] > 0, "pixel at circle centre must be painted");
+        assert!(
+            buf[centre_idx + 3] > 0,
+            "pixel at circle centre must be painted"
+        );
 
         // Pixel far outside the circle must be unpainted.
         let far_idx = (0 * w as usize + 0) * 4;
-        assert_eq!(buf[far_idx + 3], 0, "pixel far outside circle must not be painted");
+        assert_eq!(
+            buf[far_idx + 3],
+            0,
+            "pixel far outside circle must not be painted"
+        );
     }
 
     // ── 15. render to empty / zero-size buffer doesn't panic ─────────────────
@@ -981,15 +1133,20 @@ mod tests {
     fn test_render_empty_buffer_no_panic() {
         let mut sg = SceneGraph::new();
         let root = sg.root();
-        sg.add_node(root, NodeContent::ColorRect {
-            width: 100.0, height: 100.0, color: [255, 255, 255, 255],
-        });
+        sg.add_node(
+            root,
+            NodeContent::ColorRect {
+                width: 100.0,
+                height: 100.0,
+                color: [255, 255, 255, 255],
+            },
+        );
 
         let mut empty: Vec<u8> = Vec::new();
-        sg.render(&mut empty, 0, 0);   // zero dimensions
+        sg.render(&mut empty, 0, 0); // zero dimensions
 
         let mut tiny = vec![0u8; 4];
-        sg.render(&mut tiny, 1, 1);    // 1×1 buffer — must not panic
+        sg.render(&mut tiny, 1, 1); // 1×1 buffer — must not panic
     }
 
     // ── 16. identity transform doesn't move content ───────────────────────────
@@ -998,9 +1155,16 @@ mod tests {
     fn test_identity_transform() {
         let mut sg = SceneGraph::new();
         let root = sg.root();
-        let id = sg.add_node(root, NodeContent::ColorRect {
-            width: 5.0, height: 5.0, color: [10, 20, 30, 255],
-        }).expect("rect");
+        let id = sg
+            .add_node(
+                root,
+                NodeContent::ColorRect {
+                    width: 5.0,
+                    height: 5.0,
+                    color: [10, 20, 30, 255],
+                },
+            )
+            .expect("rect");
         sg.get_mut(id).expect("n").transform = Transform2D::identity();
 
         let (w, h) = (16, 16);
@@ -1020,7 +1184,10 @@ mod tests {
         let root = sg.root();
         let id = sg.add_node(root, NodeContent::Empty).expect("node");
         let node = sg.get(id).expect("must exist");
-        assert!((node.opacity - 1.0).abs() < f32::EPSILON,
-            "default opacity must be 1.0, got {}", node.opacity);
+        assert!(
+            (node.opacity - 1.0).abs() < f32::EPSILON,
+            "default opacity must be 1.0, got {}",
+            node.opacity
+        );
     }
 }

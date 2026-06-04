@@ -269,9 +269,8 @@ impl ChapterMarker {
         chapter_number: u32,
         title: impl Into<String>,
     ) -> Self {
-        let marker =
-            TimelineMarker::point(asset_id, MarkerKind::Chapter, timecode_ms, title)
-                .with_color(MarkerColor::Blue);
+        let marker = TimelineMarker::point(asset_id, MarkerKind::Chapter, timecode_ms, title)
+            .with_color(MarkerColor::Blue);
         Self {
             marker,
             chapter_number,
@@ -327,9 +326,8 @@ impl CuePoint {
     /// Create a new cue point.
     #[must_use]
     pub fn new(asset_id: Uuid, timecode_ms: u64, name: impl Into<String>) -> Self {
-        let marker =
-            TimelineMarker::point(asset_id, MarkerKind::Cue, timecode_ms, name)
-                .with_color(MarkerColor::Magenta);
+        let marker = TimelineMarker::point(asset_id, MarkerKind::Cue, timecode_ms, name)
+            .with_color(MarkerColor::Magenta);
         Self {
             marker,
             action: None,
@@ -599,7 +597,10 @@ mod tests {
         let asset_id = sample_asset_id();
         let mut m = TimelineMarker::point(asset_id, MarkerKind::Comment, 0, "Note");
         m.set_metadata("reviewer", "alice");
-        assert_eq!(m.metadata.get("reviewer").map(String::as_str), Some("alice"));
+        assert_eq!(
+            m.metadata.get("reviewer").map(String::as_str),
+            Some("alice")
+        );
     }
 
     #[test]
@@ -617,8 +618,7 @@ mod tests {
     #[test]
     fn test_cue_point_trigger() {
         let asset_id = sample_asset_id();
-        let mut cue = CuePoint::new(asset_id, 30_000, "Break 1")
-            .with_action("START_AD_BREAK");
+        let mut cue = CuePoint::new(asset_id, 30_000, "Break 1").with_action("START_AD_BREAK");
         assert!(!cue.triggered);
         let now = Utc::now();
         cue.trigger(now);
@@ -630,9 +630,24 @@ mod tests {
     fn test_marker_set_insert_maintains_order() {
         let asset_id = sample_asset_id();
         let mut set = MarkerSet::new(asset_id);
-        set.insert(TimelineMarker::point(asset_id, MarkerKind::Cue, 30_000, "C"));
-        set.insert(TimelineMarker::point(asset_id, MarkerKind::Cue, 10_000, "A"));
-        set.insert(TimelineMarker::point(asset_id, MarkerKind::Cue, 20_000, "B"));
+        set.insert(TimelineMarker::point(
+            asset_id,
+            MarkerKind::Cue,
+            30_000,
+            "C",
+        ));
+        set.insert(TimelineMarker::point(
+            asset_id,
+            MarkerKind::Cue,
+            10_000,
+            "A",
+        ));
+        set.insert(TimelineMarker::point(
+            asset_id,
+            MarkerKind::Cue,
+            20_000,
+            "B",
+        ));
         let markers = set.all();
         assert_eq!(markers[0].label, "A");
         assert_eq!(markers[1].label, "B");
@@ -643,9 +658,24 @@ mod tests {
     fn test_marker_set_by_kind() {
         let asset_id = sample_asset_id();
         let mut set = MarkerSet::new(asset_id);
-        set.insert(TimelineMarker::point(asset_id, MarkerKind::Chapter, 0, "Ch1"));
-        set.insert(TimelineMarker::point(asset_id, MarkerKind::Cue, 5_000, "Cue1"));
-        set.insert(TimelineMarker::point(asset_id, MarkerKind::Chapter, 60_000, "Ch2"));
+        set.insert(TimelineMarker::point(
+            asset_id,
+            MarkerKind::Chapter,
+            0,
+            "Ch1",
+        ));
+        set.insert(TimelineMarker::point(
+            asset_id,
+            MarkerKind::Cue,
+            5_000,
+            "Cue1",
+        ));
+        set.insert(TimelineMarker::point(
+            asset_id,
+            MarkerKind::Chapter,
+            60_000,
+            "Ch2",
+        ));
         let chapters = set.by_kind(&MarkerKind::Chapter);
         assert_eq!(chapters.len(), 2);
         let cues = set.by_kind(&MarkerKind::Cue);
@@ -657,8 +687,18 @@ mod tests {
         let asset_id = sample_asset_id();
         let mut set = MarkerSet::new(asset_id);
         set.insert(TimelineMarker::point(asset_id, MarkerKind::Cue, 5_000, "A"));
-        set.insert(TimelineMarker::point(asset_id, MarkerKind::Cue, 15_000, "B"));
-        set.insert(TimelineMarker::point(asset_id, MarkerKind::Cue, 25_000, "C"));
+        set.insert(TimelineMarker::point(
+            asset_id,
+            MarkerKind::Cue,
+            15_000,
+            "B",
+        ));
+        set.insert(TimelineMarker::point(
+            asset_id,
+            MarkerKind::Cue,
+            25_000,
+            "C",
+        ));
         let window = set.in_window(10_000, 20_000);
         assert_eq!(window.len(), 1);
         assert_eq!(window[0].label, "B");
@@ -668,9 +708,24 @@ mod tests {
     fn test_marker_set_next_chapter() {
         let asset_id = sample_asset_id();
         let mut set = MarkerSet::new(asset_id);
-        set.insert(TimelineMarker::point(asset_id, MarkerKind::Chapter, 0, "Intro"));
-        set.insert(TimelineMarker::point(asset_id, MarkerKind::Chapter, 60_000, "Act 1"));
-        set.insert(TimelineMarker::point(asset_id, MarkerKind::Chapter, 120_000, "Act 2"));
+        set.insert(TimelineMarker::point(
+            asset_id,
+            MarkerKind::Chapter,
+            0,
+            "Intro",
+        ));
+        set.insert(TimelineMarker::point(
+            asset_id,
+            MarkerKind::Chapter,
+            60_000,
+            "Act 1",
+        ));
+        set.insert(TimelineMarker::point(
+            asset_id,
+            MarkerKind::Chapter,
+            120_000,
+            "Act 2",
+        ));
         let next = set.next_chapter(30_000);
         assert!(next.is_some());
         assert_eq!(next.unwrap().label, "Act 1");
@@ -680,8 +735,18 @@ mod tests {
     fn test_marker_set_prev_chapter() {
         let asset_id = sample_asset_id();
         let mut set = MarkerSet::new(asset_id);
-        set.insert(TimelineMarker::point(asset_id, MarkerKind::Chapter, 0, "Intro"));
-        set.insert(TimelineMarker::point(asset_id, MarkerKind::Chapter, 60_000, "Act 1"));
+        set.insert(TimelineMarker::point(
+            asset_id,
+            MarkerKind::Chapter,
+            0,
+            "Intro",
+        ));
+        set.insert(TimelineMarker::point(
+            asset_id,
+            MarkerKind::Chapter,
+            60_000,
+            "Act 1",
+        ));
         let prev = set.prev_chapter(90_000);
         assert!(prev.is_some());
         assert_eq!(prev.unwrap().label, "Act 1");
@@ -706,7 +771,12 @@ mod tests {
         let a2 = Uuid::new_v4();
         let mut registry = MarkerRegistry::new();
         registry.insert(TimelineMarker::point(a1, MarkerKind::Chapter, 0, "Ch1"));
-        registry.insert(TimelineMarker::point(a1, MarkerKind::Chapter, 60_000, "Ch2"));
+        registry.insert(TimelineMarker::point(
+            a1,
+            MarkerKind::Chapter,
+            60_000,
+            "Ch2",
+        ));
         registry.insert(TimelineMarker::point(a2, MarkerKind::Cue, 10_000, "Cue1"));
         assert_eq!(registry.asset_count(), 2);
         assert_eq!(registry.total_marker_count(), 3);
@@ -720,12 +790,6 @@ mod tests {
         let mid = m.id;
         registry.insert(m);
         assert!(registry.remove_marker(asset_id, mid));
-        assert_eq!(
-            registry
-                .get_set(asset_id)
-                .map(|s| s.len())
-                .unwrap_or(0),
-            0
-        );
+        assert_eq!(registry.get_set(asset_id).map(|s| s.len()).unwrap_or(0), 0);
     }
 }

@@ -85,9 +85,7 @@ impl MemoryProfile {
                 self.allocation_count += 1;
                 self.current_bytes = self.current_bytes.saturating_add(event.bytes as i64);
                 // Update peak
-                if self.current_bytes > 0
-                    && (self.current_bytes as usize) > self.peak_bytes
-                {
+                if self.current_bytes > 0 && (self.current_bytes as usize) > self.peak_bytes {
                     self.peak_bytes = self.current_bytes as usize;
                 }
             }
@@ -102,9 +100,7 @@ impl MemoryProfile {
                 self.total_freed = self.total_freed.saturating_add(*old_bytes as u64);
                 self.allocation_count += 1;
                 self.current_bytes = self.current_bytes.saturating_add(net);
-                if self.current_bytes > 0
-                    && (self.current_bytes as usize) > self.peak_bytes
-                {
+                if self.current_bytes > 0 && (self.current_bytes as usize) > self.peak_bytes {
                     self.peak_bytes = self.current_bytes as usize;
                 }
             }
@@ -262,7 +258,7 @@ mod tests {
         let mut p = MemoryProfiler::new();
         p.record_alloc("stage", 4096, 0);
         p.record_alloc("stage", 4096, 1); // peak = 8192
-        p.record_free("stage", 4096, 2);  // current drops to 4096, peak stays
+        p.record_free("stage", 4096, 2); // current drops to 4096, peak stays
         let stats = p.stage_stats("stage").expect("stage exists");
         assert_eq!(stats.profile.peak_bytes, 8192);
         assert_eq!(stats.profile.current_bytes, 4096);

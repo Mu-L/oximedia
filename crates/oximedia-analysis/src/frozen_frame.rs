@@ -204,7 +204,9 @@ mod tests {
     #[test]
     fn test_different_frames_no_frozen() {
         let det = FrozenFrameDetector::new(0.0, 3);
-        let frames: Vec<FrameHash> = (0..5).map(|i| FrameHash::new(i, i as u64 * 0x1234)).collect();
+        let frames: Vec<FrameHash> = (0..5)
+            .map(|i| FrameHash::new(i, i as u64 * 0x1234))
+            .collect();
         assert!(det.detect(&frames).is_empty());
     }
 

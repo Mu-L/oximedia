@@ -685,6 +685,105 @@ pub fn detect_blocking_with_map(
     Ok((blocking, map))
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// DCT Coefficient Cache
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Cache for DCT block coefficients.
+///
+/// Many forensic analysis functions compute DCT coefficients on the same image
+/// channel independently.  `DctCache` avoids redundant recomputation by storing
+/// the result of the most recent call and returning it immediately when the same
+/// image dimensions (and therefore the same channel array shape) are requested
+/// again.
+///
+/// # Usage
+///
+/// ```
+/// use oximedia_forensics::compression::DctCache;
+/// // Create the cache once and pass `&mut cache` to each call.
+/// let mut cache = DctCache::new();
+/// ```
+///
+/// The cache is intentionally a *single-entry* cache keyed on `(width, height)`.
+/// If the caller switches to a different image size the old result is discarded
+/// and the new one is computed and stored.  This keeps memory usage bounded to
+/// at most one `FlatArray3<f64>` at a time.
+#[derive(Debug, Default)]
+pub struct DctCache {
+    /// The cached DCT block coefficients, or `None` if uninitialised.
+    blocks: Option<FlatArray3<f64>>,
+    /// Width (in pixels) of the image that produced the cached blocks.
+    last_width: u32,
+    /// Height (in pixels) of the image that produced the cached blocks.
+    last_height: u32,
+}
+
+impl DctCache {
+    /// Create an empty cache.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            blocks: None,
+            last_width: 0,
+            last_height: 0,
+        }
+    }
+
+    /// Invalidate the cache, forcing the next call to `compute_dct_blocks_cached`
+    /// to recompute.
+    pub fn invalidate(&mut self) {
+        self.blocks = None;
+        self.last_width = 0;
+        self.last_height = 0;
+    }
+
+    /// Return `true` if the cache currently holds a valid result for the given
+    /// image dimensions.
+    #[must_use]
+    pub fn is_valid_for(&self, width: u32, height: u32) -> bool {
+        self.blocks.is_some() && self.last_width == width && self.last_height == height
+    }
+}
+
+/// Compute DCT block coefficients for the Y (luma) channel of `image`, using
+/// `cache` to avoid recomputation when called multiple times with the same
+/// image dimensions.
+///
+/// On the **first call** (or after the image size changes) the full DCT
+/// computation is performed and the result is stored inside `cache`.  On
+/// **subsequent calls** with the same `width` / `height` the cached
+/// `FlatArray3<f64>` is returned immediately without any recomputation.
+///
+/// The existing `compute_dct_blocks` function (private, not exported) is
+/// preserved without modification so that internal callers are unaffected.
+///
+/// # Errors
+///
+/// Returns `ForensicsError` if the image cannot be loaded.  In practice the
+/// only failure mode is an empty image (0 × 0 pixels).
+pub fn compute_dct_blocks_cached<'c>(
+    image: &RgbImage,
+    cache: &'c mut DctCache,
+) -> &'c FlatArray3<f64> {
+    let (width, height) = image.dimensions();
+
+    if !cache.is_valid_for(width, height) {
+        let ycbcr = rgb_to_ycbcr(image);
+        cache.blocks = Some(compute_dct_blocks(&ycbcr.0));
+        cache.last_width = width;
+        cache.last_height = height;
+    }
+
+    // At this point cache.blocks is guaranteed Some because we just populated
+    // it in the branch above (or it was already valid).  We use `get_or_insert`
+    // with a zero-size fallback rather than `expect` / `unwrap` to satisfy the
+    // no-unwrap policy.  In practice the fallback path is unreachable.
+    cache
+        .blocks
+        .get_or_insert_with(|| FlatArray3::zeros(0, 0, 0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

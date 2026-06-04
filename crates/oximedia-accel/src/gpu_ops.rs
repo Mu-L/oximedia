@@ -162,8 +162,8 @@ fn dct1d(data: &mut [f32; 8]) {
     const N: usize = 8;
     let input = *data;
     // Orthonormal scale factors.
-    let s0 = 1.0f32 / (N as f32).sqrt();          // k = 0
-    let sk = (2.0f32 / N as f32).sqrt();           // k > 0
+    let s0 = 1.0f32 / (N as f32).sqrt(); // k = 0
+    let sk = (2.0f32 / N as f32).sqrt(); // k > 0
 
     for k in 0..N {
         let scale = if k == 0 { s0 } else { sk };
@@ -442,7 +442,10 @@ mod tests {
         let frame = vec![255u8, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0];
         let hist = compute_histogram_gpu(&frame, 2, 2);
         let luma_bucket = (0.299 * 255.0_f32).round() as usize;
-        assert_eq!(hist[luma_bucket], 4, "Expected 4 red pixels in bucket {luma_bucket}");
+        assert_eq!(
+            hist[luma_bucket], 4,
+            "Expected 4 red pixels in bucket {luma_bucket}"
+        );
         let total: u32 = hist.iter().sum();
         assert_eq!(total, 4, "Total histogram counts should equal pixel count");
     }
@@ -532,10 +535,7 @@ mod tests {
             .zip(recovered.iter())
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
-        assert!(
-            max_err < 1e-2,
-            "round-trip error too large: {max_err}"
-        );
+        assert!(max_err < 1e-2, "round-trip error too large: {max_err}");
     }
 
     #[test]
@@ -569,7 +569,11 @@ mod tests {
         // DC = C * 8 in un-normalised; scaled by AAN factors → approx C*8
         // Just verify it is the largest coefficient
         let max_coeff = coeffs.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
-        assert_eq!(coeffs[0].abs(), max_coeff, "DC should be largest coefficient");
+        assert_eq!(
+            coeffs[0].abs(),
+            max_coeff,
+            "DC should be largest coefficient"
+        );
     }
 
     // ── Noise reduction ───────────────────────────────────────────────────────
@@ -610,14 +614,20 @@ mod tests {
         assert_eq!(out.len(), frame.len(), "output size must match");
         // At least one pixel should differ from the noisy input.
         let differs = frame.iter().zip(out.iter()).any(|(a, b)| a != b);
-        assert!(differs, "Gaussian blur should change at least one pixel of a noisy frame");
+        assert!(
+            differs,
+            "Gaussian blur should change at least one pixel of a noisy frame"
+        );
     }
 
     #[test]
     fn test_build_gaussian_kernel_sum_to_one() {
         let (_, kernel) = build_gaussian_kernel(1.5);
         let total: f32 = kernel.iter().sum();
-        assert!((total - 1.0).abs() < 1e-5, "kernel must sum to 1.0, got {total}");
+        assert!(
+            (total - 1.0).abs() < 1e-5,
+            "kernel must sum to 1.0, got {total}"
+        );
     }
 
     #[test]

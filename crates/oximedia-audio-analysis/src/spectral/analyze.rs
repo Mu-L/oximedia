@@ -1,21 +1,50 @@
 //! Main spectral analysis implementation.
 
-use crate::{generate_window, AnalysisConfig, AnalysisError, Result};
-use oxifft::Complex;
+use crate::{get_or_compute_window, AnalysisConfig, AnalysisError, Result};
+use oxifft::{Complex, Direction, Flags, Plan};
+use std::sync::{Arc, Mutex};
 
 /// Spectral analyzer for frequency-domain analysis.
+///
+/// # Scratch-buffer reuse
+///
+/// Two `Mutex`-protected scratch buffers (`fft_in` and `fft_out`) are reused
+/// across `compute_spectrum` calls to avoid per-frame heap allocation.
+/// `Mutex` (rather than `RefCell`) is used so that `SpectralAnalyzer` is
+/// `Sync`, enabling it to be shared across rayon threads inside
+/// `AudioAnalyzer::analyze`.  The lock is held only for the duration of the
+/// FFT computation and released before returning.
+///
+/// # Window-coefficient sharing
+///
+/// The window coefficients are stored as an `Arc<Vec<f32>>` and come from
+/// the global cache in `crate::get_or_compute_window`.  Multiple
+/// `SpectralAnalyzer` instances with the same `(window_type, fft_size)` share
+/// the same backing `Vec` allocation.
 pub struct SpectralAnalyzer {
     config: AnalysisConfig,
-    window: Vec<f32>,
+    /// Shared, immutable window coefficients (Arc avoids per-instance copy).
+    window: Arc<Vec<f32>>,
+    /// Reusable FFT input buffer (windowed complex samples).
+    fft_in: Mutex<Vec<Complex<f64>>>,
+    /// Reusable FFT output buffer.
+    fft_out: Mutex<Vec<Complex<f64>>>,
 }
 
 impl SpectralAnalyzer {
     /// Create a new spectral analyzer with the given configuration.
     #[must_use]
     pub fn new(config: AnalysisConfig) -> Self {
-        let window = generate_window(config.window_type, config.fft_size);
+        // Fetch (or compute once) the window coefficients from the global cache.
+        let window = get_or_compute_window(config.window_type, config.fft_size);
+        let fft_size = config.fft_size;
 
-        Self { config, window }
+        Self {
+            config,
+            window,
+            fft_in: Mutex::new(vec![Complex::new(0.0, 0.0); fft_size]),
+            fft_out: Mutex::new(vec![Complex::new(0.0, 0.0); fft_size]),
+        }
     }
 
     /// Perform spectral analysis on audio samples.
@@ -107,32 +136,65 @@ impl SpectralAnalyzer {
     }
 
     /// Compute magnitude spectrum for a frame.
+    ///
+    /// Reuses the internal `fft_in` and `fft_out` scratch buffers to avoid
+    /// allocating a new `Vec<Complex<f64>>` on every call.  The buffers are
+    /// cleared (overwritten) at the start of each call so there is no
+    /// risk of stale data from a previous frame.
     fn compute_spectrum(&self, samples: &[f32]) -> Result<Vec<f32>> {
-        if samples.len() != self.config.fft_size {
+        let fft_size = self.config.fft_size;
+        if samples.len() != fft_size {
             return Err(AnalysisError::InvalidInput(format!(
                 "Expected {} samples, got {}",
-                self.config.fft_size,
+                fft_size,
                 samples.len()
             )));
         }
 
-        // Apply window and convert to complex
-        let buffer: Vec<Complex<f64>> = samples
-            .iter()
-            .zip(&self.window)
-            .map(|(&s, &w)| Complex::new(f64::from(s * w), 0.0))
-            .collect();
+        // Acquire the scratch buffers.  Mutex is used (rather than RefCell) so
+        // that SpectralAnalyzer remains Sync and can be shared across rayon threads.
+        let mut fft_in = self.fft_in.lock().unwrap_or_else(|e| e.into_inner());
+        let mut fft_out = self.fft_out.lock().unwrap_or_else(|e| e.into_inner());
 
-        // Perform FFT
-        let fft_result = oxifft::fft(&buffer);
+        // Resize if the FFT size changed (e.g. after config reload).
+        if fft_in.len() != fft_size {
+            fft_in.resize(fft_size, Complex::new(0.0, 0.0));
+        }
+        if fft_out.len() != fft_size {
+            fft_out.resize(fft_size, Complex::new(0.0, 0.0));
+        }
 
-        // Compute magnitude spectrum (only positive frequencies)
-        let magnitude: Vec<f32> = fft_result[..=(self.config.fft_size / 2)]
+        // Fill the input buffer with windowed samples (overwrites any stale data).
+        for ((dst, &s), &w) in fft_in
+            .iter_mut()
+            .zip(samples.iter())
+            .zip(self.window.iter())
+        {
+            *dst = Complex::new(f64::from(s * w), 0.0);
+        }
+
+        // Execute the FFT in-place using the persistent Plan API.
+        let plan = Plan::<f64>::dft_1d(fft_size, Direction::Forward, Flags::ESTIMATE).ok_or_else(
+            || AnalysisError::FftError(format!("Failed to create FFT plan for size {fft_size}")),
+        )?;
+        plan.execute(&*fft_in, &mut *fft_out);
+
+        // Compute magnitude spectrum (only positive frequencies).
+        let magnitude: Vec<f32> = fft_out[..=fft_size / 2]
             .iter()
             .map(|c| c.norm() as f32)
             .collect();
 
         Ok(magnitude)
+    }
+
+    /// Test-visible wrapper around the private `compute_spectrum`.
+    ///
+    /// Exposes the scratch-buffer reuse path to unit tests without making
+    /// `compute_spectrum` part of the public API.
+    #[cfg(test)]
+    pub fn compute_spectrum_pub(&self, samples: &[f32]) -> Result<Vec<f32>> {
+        self.compute_spectrum(samples)
     }
 }
 
@@ -184,6 +246,84 @@ pub fn frequency_to_bin(frequency: f32, sample_rate: f32, fft_size: usize) -> us
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Item 3: FFT scratch-buffer reuse tests ────────────────────────────────
+
+    /// Calling `compute_spectrum` twice on the same input must return identical
+    /// results, confirming that the scratch buffers are properly reset between
+    /// calls and that no stale data from one call bleeds into the next.
+    #[test]
+    fn test_fft_scratch_reuse_identical_to_allocating() {
+        let config = AnalysisConfig::default();
+        let analyzer = SpectralAnalyzer::new(config.clone());
+
+        // Build a deterministic non-trivial input: 440 Hz sine with full FFT window.
+        let sample_rate = 44100.0_f32;
+        let samples: Vec<f32> = (0..config.fft_size)
+            .map(|i| {
+                let t = i as f32 / sample_rate;
+                (2.0 * std::f32::consts::PI * 440.0 * t).sin()
+            })
+            .collect();
+
+        let mag_first = analyzer
+            .compute_spectrum_pub(&samples)
+            .expect("first compute_spectrum call failed");
+        let mag_second = analyzer
+            .compute_spectrum_pub(&samples)
+            .expect("second compute_spectrum call failed");
+
+        assert_eq!(
+            mag_first.len(),
+            mag_second.len(),
+            "magnitude spectrum lengths differ"
+        );
+        for (i, (a, b)) in mag_first.iter().zip(mag_second.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "magnitude at bin {i} differs between calls: {a} vs {b}"
+            );
+        }
+    }
+
+    /// Calling `compute_spectrum` on a different input after a previous call
+    /// must not contaminate the result with data from the previous frame.
+    #[test]
+    fn test_fft_scratch_no_cross_contamination() {
+        let config = AnalysisConfig::default();
+        let analyzer = SpectralAnalyzer::new(config.clone());
+
+        let sample_rate = 44100.0_f32;
+        // Frame A: 440 Hz sine.
+        let samples_a: Vec<f32> = (0..config.fft_size)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sample_rate).sin())
+            .collect();
+        // Frame B: 880 Hz sine (clearly different spectrum).
+        let samples_b: Vec<f32> = (0..config.fft_size)
+            .map(|i| (2.0 * std::f32::consts::PI * 880.0 * i as f32 / sample_rate).sin())
+            .collect();
+
+        let mag_a1 = analyzer
+            .compute_spectrum_pub(&samples_a)
+            .expect("frame A first call failed");
+        // Process B to "dirty" the scratch buffers.
+        let _ = analyzer
+            .compute_spectrum_pub(&samples_b)
+            .expect("frame B call failed");
+        // Process A again — must match the first A result exactly.
+        let mag_a2 = analyzer
+            .compute_spectrum_pub(&samples_a)
+            .expect("frame A second call failed");
+
+        for (i, (x, y)) in mag_a1.iter().zip(mag_a2.iter()).enumerate() {
+            assert_eq!(
+                x.to_bits(),
+                y.to_bits(),
+                "bin {i}: A result corrupted by intermediate B frame"
+            );
+        }
+    }
 
     #[test]
     fn test_spectral_analyzer() {

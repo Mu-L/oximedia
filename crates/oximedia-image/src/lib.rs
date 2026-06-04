@@ -68,6 +68,7 @@ pub mod dpx_packed;
 pub mod edge_detect;
 pub mod exif_parser;
 pub mod exr;
+pub mod exr_multipart;
 pub mod film_grain;
 pub mod filter;
 pub mod filters;
@@ -88,7 +89,9 @@ pub mod inpainting;
 pub mod jpeg;
 pub mod lens_correct;
 pub mod metadata_xmp;
+pub mod mmap_reader;
 pub mod morphology;
+pub mod morphology_vhgw;
 pub mod mosaic;
 pub mod multi_layer_exr;
 pub mod noise_estimation;
@@ -104,6 +107,7 @@ pub mod rotate_flip;
 pub mod segmentation;
 pub mod separable_conv;
 pub mod sequence;
+pub mod simd_convert;
 pub mod stitch;
 pub mod super_resolution;
 pub mod texture_analysis;
@@ -118,9 +122,12 @@ pub mod webp;
 mod error;
 mod image;
 mod pattern;
+#[cfg(test)]
+mod wave13_tests;
 
 pub use error::{ImageError, ImageResult};
 pub use image::{ImageData, ImageFrame};
+pub use mmap_reader::{BufferedImageReader, ImageSequenceFormat, MmapImageReader};
 pub use pattern::SequencePattern;
 pub use sequence::ImageSequence;
 

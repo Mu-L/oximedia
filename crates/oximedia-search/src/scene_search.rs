@@ -228,11 +228,9 @@ impl SceneSearchIndex {
         self.scenes
             .iter()
             .filter(|(_, labels)| {
-                required.iter().all(|&req| {
-                    labels
-                        .iter()
-                        .any(|label| label.eq_ignore_ascii_case(req))
-                })
+                required
+                    .iter()
+                    .all(|&req| labels.iter().any(|label| label.eq_ignore_ascii_case(req)))
             })
             .map(|(id, _)| id.clone())
             .collect()
@@ -249,9 +247,22 @@ mod tests {
 
     fn make_index() -> SceneSearchIndex {
         let mut idx = SceneSearchIndex::new();
-        idx.add_scene("doc1".to_string(), vec!["car".to_string(), "road".to_string(), "outdoor".to_string()]);
-        idx.add_scene("doc2".to_string(), vec!["cat".to_string(), "sofa".to_string(), "indoor".to_string()]);
-        idx.add_scene("doc3".to_string(), vec!["car".to_string(), "person".to_string(), "outdoor".to_string()]);
+        idx.add_scene(
+            "doc1".to_string(),
+            vec!["car".to_string(), "road".to_string(), "outdoor".to_string()],
+        );
+        idx.add_scene(
+            "doc2".to_string(),
+            vec!["cat".to_string(), "sofa".to_string(), "indoor".to_string()],
+        );
+        idx.add_scene(
+            "doc3".to_string(),
+            vec![
+                "car".to_string(),
+                "person".to_string(),
+                "outdoor".to_string(),
+            ],
+        );
         idx
     }
 
@@ -312,7 +323,12 @@ mod tests {
         let res = idx.search(&filter);
         // doc1 matches "car" (1/2), doc2 matches "cat" (1/2), doc3 matches "car" (1/2)
         for r in &res {
-            assert!((r.confidence - 0.5).abs() < 1e-5, "id={} conf={}", r.document_id, r.confidence);
+            assert!(
+                (r.confidence - 0.5).abs() < 1e-5,
+                "id={} conf={}",
+                r.document_id,
+                r.confidence
+            );
         }
     }
 
@@ -447,8 +463,14 @@ mod tests {
     fn test_results_sorted_by_confidence_desc() {
         let mut idx = SceneSearchIndex::new();
         // doc_a matches 2/2, doc_b matches 1/2
-        idx.add_scene("doc_a".to_string(), vec!["cat".to_string(), "dog".to_string()]);
-        idx.add_scene("doc_b".to_string(), vec!["cat".to_string(), "fish".to_string()]);
+        idx.add_scene(
+            "doc_a".to_string(),
+            vec!["cat".to_string(), "dog".to_string()],
+        );
+        idx.add_scene(
+            "doc_b".to_string(),
+            vec!["cat".to_string(), "fish".to_string()],
+        );
         let filter = SceneSearchFilter {
             detected_objects: vec!["cat".to_string(), "dog".to_string()],
             scene_types: vec![],

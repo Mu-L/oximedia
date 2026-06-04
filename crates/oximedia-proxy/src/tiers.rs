@@ -71,11 +71,11 @@ impl ProxyTierSelector {
     #[must_use]
     pub fn standard() -> Self {
         let mut s = Self::new();
-        s.add_tier(ProxyTier::new("4K",    3840, 20_000));
-        s.add_tier(ProxyTier::new("1080p", 1920,  8_000));
-        s.add_tier(ProxyTier::new("720p",  1280,  3_000));
-        s.add_tier(ProxyTier::new("480p",   854,  1_500));
-        s.add_tier(ProxyTier::new("360p",   640,    800));
+        s.add_tier(ProxyTier::new("4K", 3840, 20_000));
+        s.add_tier(ProxyTier::new("1080p", 1920, 8_000));
+        s.add_tier(ProxyTier::new("720p", 1280, 3_000));
+        s.add_tier(ProxyTier::new("480p", 854, 1_500));
+        s.add_tier(ProxyTier::new("360p", 640, 800));
         s
     }
 
@@ -143,9 +143,9 @@ mod tests {
     #[test]
     fn selector_picks_best_fitting_tier() {
         let mut sel = ProxyTierSelector::new();
-        sel.add_tier(ProxyTier::new("HD",  1920, 8_000));
-        sel.add_tier(ProxyTier::new("SD",   854, 1_500));
-        sel.add_tier(ProxyTier::new("Low",  640,   800));
+        sel.add_tier(ProxyTier::new("HD", 1920, 8_000));
+        sel.add_tier(ProxyTier::new("SD", 854, 1_500));
+        sel.add_tier(ProxyTier::new("Low", 640, 800));
 
         // 10 Mbps, 1080p source → should pick HD
         let t = sel.select(1920, 10_000).expect("tier");

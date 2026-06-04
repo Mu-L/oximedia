@@ -320,9 +320,13 @@ impl AudioDescriptionTrack {
 
         let mut gaps = Vec::new();
         let mut cursor: u64 = 0;
-        let end_of_program = self
-            .video_duration_ms
-            .unwrap_or_else(|| self.segments.values().last().map(|s| s.window.end_ms).unwrap_or(0));
+        let end_of_program = self.video_duration_ms.unwrap_or_else(|| {
+            self.segments
+                .values()
+                .last()
+                .map(|s| s.window.end_ms)
+                .unwrap_or(0)
+        });
 
         for segment in self.segments.values() {
             let gap_end = segment.window.start_ms;
@@ -474,9 +478,15 @@ mod tests {
 
     #[test]
     fn test_ad_segment_placement_confidence_range() {
-        assert!(make_segment("s1", 0, 1000, "text").with_placement_confidence(1.1).is_err());
-        assert!(make_segment("s1", 0, 1000, "text").with_placement_confidence(0.0).is_ok());
-        assert!(make_segment("s1", 0, 1000, "text").with_placement_confidence(0.75).is_ok());
+        assert!(make_segment("s1", 0, 1000, "text")
+            .with_placement_confidence(1.1)
+            .is_err());
+        assert!(make_segment("s1", 0, 1000, "text")
+            .with_placement_confidence(0.0)
+            .is_ok());
+        assert!(make_segment("s1", 0, 1000, "text")
+            .with_placement_confidence(0.75)
+            .is_ok());
     }
 
     #[test]
@@ -487,7 +497,9 @@ mod tests {
             AudioDescriptionStyle::Standard,
             AdPriority::Primary,
         );
-        track.add_segment(make_segment("s1", 0, 3000, "First cue")).unwrap();
+        track
+            .add_segment(make_segment("s1", 0, 3000, "First cue"))
+            .unwrap();
         let result = track.add_segment(make_segment("s2", 2000, 5000, "Overlapping cue"));
         assert!(result.is_err());
     }
@@ -502,8 +514,12 @@ mod tests {
         )
         .with_video_duration_ms(20_000);
 
-        track.add_segment(make_segment("s1", 0, 3_000, "Opening")).unwrap();
-        track.add_segment(make_segment("s2", 8_000, 11_000, "Mid")).unwrap();
+        track
+            .add_segment(make_segment("s1", 0, 3_000, "Opening"))
+            .unwrap();
+        track
+            .add_segment(make_segment("s2", 8_000, 11_000, "Mid"))
+            .unwrap();
 
         assert_eq!(track.coverage_ms(), 6_000);
         let frac = track.coverage_fraction().expect("fraction available");
@@ -525,7 +541,9 @@ mod tests {
             AudioDescriptionStyle::Standard,
             AdPriority::Primary,
         );
-        track.add_segment(make_segment("s1", 1_000, 4_000, "Hello")).unwrap();
+        track
+            .add_segment(make_segment("s1", 1_000, 4_000, "Hello"))
+            .unwrap();
         assert!(track.active_at(2_000).is_some());
         assert!(track.active_at(500).is_none());
         assert!(track.active_at(4_000).is_none());
@@ -534,22 +552,18 @@ mod tests {
     #[test]
     fn test_registry_priority_selection() {
         let mut reg = AudioDescriptionRegistry::new();
-        reg.register(
-            AudioDescriptionTrack::new(
-                "fallback",
-                "en-GB",
-                AudioDescriptionStyle::Standard,
-                AdPriority::Fallback,
-            )
-        );
-        reg.register(
-            AudioDescriptionTrack::new(
-                "primary",
-                "en-GB",
-                AudioDescriptionStyle::Extended,
-                AdPriority::Primary,
-            )
-        );
+        reg.register(AudioDescriptionTrack::new(
+            "fallback",
+            "en-GB",
+            AudioDescriptionStyle::Standard,
+            AdPriority::Fallback,
+        ));
+        reg.register(AudioDescriptionTrack::new(
+            "primary",
+            "en-GB",
+            AudioDescriptionStyle::Extended,
+            AdPriority::Primary,
+        ));
 
         let selected = reg.select_track("en-GB").expect("track found");
         assert_eq!(selected.track_id, "primary");
@@ -591,7 +605,9 @@ mod tests {
             AudioDescriptionStyle::Standard,
             AdPriority::Primary,
         );
-        track.add_segment(make_segment("s1", 0, 2_000, "Cue one")).unwrap();
+        track
+            .add_segment(make_segment("s1", 0, 2_000, "Cue one"))
+            .unwrap();
         let removed = track.remove_segment("s1");
         assert!(removed.is_some());
         assert_eq!(track.segment_count(), 0);

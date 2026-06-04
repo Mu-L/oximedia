@@ -636,7 +636,10 @@ mod tests {
         });
         // After backspace the 'I' should be erased
         let text = text.expect("should have display caption");
-        assert!(!text.contains("HI"), "I should have been erased, got: {text}");
+        assert!(
+            !text.contains("HI"),
+            "I should have been erased, got: {text}"
+        );
     }
 
     #[test]

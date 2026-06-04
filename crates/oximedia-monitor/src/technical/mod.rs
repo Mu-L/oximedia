@@ -3,20 +3,20 @@
 //! This module provides technical analysis of video signals including levels,
 //! range checking, gamut violations, cadence detection, and sync monitoring.
 
+pub mod cadence;
+pub mod gamut;
 pub mod levels;
 pub mod range;
-pub mod gamut;
-pub mod cadence;
 pub mod sync;
 
-use crate::{MonitorError, MonitorResult};
+use crate::MonitorResult;
 use serde::{Deserialize, Serialize};
 
+pub use cadence::{CadenceDetector, CadenceMetrics};
+pub use gamut::{GamutChecker, GamutMetrics};
 pub use levels::{LevelAnalyzer, LevelMetrics};
 pub use range::{RangeChecker, RangeMetrics};
-pub use gamut::{GamutChecker, GamutMetrics};
-pub use cadence::{CadenceDetector, CadenceMetrics};
-pub use sync::{SyncMonitor, SyncMetrics};
+pub use sync::{SyncMetrics, SyncMonitor};
 
 /// Video quality metrics.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -187,6 +187,108 @@ impl VttSerializer {
     }
 }
 
+// ── WebVTT Parser ────────────────────────────────────────────────────────────
+
+/// Parse a WebVTT timestamp `HH:MM:SS.mmm` (or `MM:SS.mmm`) to milliseconds.
+///
+/// Returns `None` if the string is not a valid WebVTT timestamp.
+fn parse_vtt_timestamp(s: &str) -> Option<u64> {
+    let s = s.trim();
+    // Accept both `HH:MM:SS.mmm` and `MM:SS.mmm`
+    let (time_part, millis_part) = s.split_once('.')?;
+    let millis: u64 = millis_part.trim().parse().ok()?;
+    let parts: Vec<&str> = time_part.split(':').collect();
+    let (hours, mins, secs) = match parts.len() {
+        3 => {
+            let h: u64 = parts[0].trim().parse().ok()?;
+            let m: u64 = parts[1].trim().parse().ok()?;
+            let s: u64 = parts[2].trim().parse().ok()?;
+            (h, m, s)
+        }
+        2 => {
+            let m: u64 = parts[0].trim().parse().ok()?;
+            let s: u64 = parts[1].trim().parse().ok()?;
+            (0, m, s)
+        }
+        _ => return None,
+    };
+    Some(((hours * 3600 + mins * 60 + secs) * 1000) + millis)
+}
+
+/// Parses WebVTT formatted text into subtitle entries.
+pub struct VttParser;
+
+impl VttParser {
+    /// Parse WebVTT-formatted text into a `Vec<SubtitleEntry>`.
+    ///
+    /// Skips the `WEBVTT` header, NOTE blocks, and cue settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `String` error message if the input cannot be parsed.
+    pub fn from_vtt(input: &str) -> Result<Vec<SubtitleEntry>, String> {
+        let mut entries = Vec::new();
+
+        // Split into blocks separated by blank lines
+        let blocks: Vec<&str> = input
+            .split("\n\n")
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .collect();
+
+        for block in &blocks {
+            // Skip the WEBVTT header block and NOTE blocks
+            if block.starts_with("WEBVTT") || block.starts_with("NOTE") {
+                continue;
+            }
+
+            let lines: Vec<&str> = block.lines().collect();
+            if lines.is_empty() {
+                continue;
+            }
+
+            // Detect whether the first line is a cue identifier (no `-->`)
+            let timing_line_idx = if lines[0].contains("-->") { 0 } else { 1 };
+            let timing_line = match lines.get(timing_line_idx) {
+                Some(l) => l,
+                None => continue,
+            };
+            if !timing_line.contains("-->") {
+                continue;
+            }
+
+            // Split timing line (may have cue settings after the end timestamp)
+            let arrow_pos = timing_line
+                .find("-->")
+                .ok_or_else(|| format!("missing --> in timing line: {timing_line:?}"))?;
+            let start_str = &timing_line[..arrow_pos];
+            // End timestamp ends at the first space after `-->` + end-time token
+            let after_arrow = timing_line[arrow_pos + 3..].trim();
+            let end_str = after_arrow.split_whitespace().next().unwrap_or(after_arrow);
+
+            let start_ms = parse_vtt_timestamp(start_str)
+                .ok_or_else(|| format!("invalid WebVTT start: {start_str:?}"))?;
+            let end_ms = parse_vtt_timestamp(end_str)
+                .ok_or_else(|| format!("invalid WebVTT end: {end_str:?}"))?;
+
+            let text_start = timing_line_idx + 1;
+            let text = lines[text_start..].join("\n");
+
+            if text.is_empty() {
+                continue;
+            }
+
+            entries.push(SubtitleEntry {
+                start_ms,
+                end_ms,
+                text,
+            });
+        }
+
+        Ok(entries)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,5 +427,109 @@ mod tests {
     fn test_vtt_serializer_empty() {
         let vtt = VttSerializer::to_vtt(&[]);
         assert_eq!(vtt, "WEBVTT\n\n");
+    }
+
+    // ── VTT parser tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_vtt_parser_basic() {
+        let vtt = "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nHello VTT\n\n";
+        let entries = VttParser::from_vtt(vtt).expect("parse should succeed");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].start_ms, 1_000);
+        assert_eq!(entries[0].end_ms, 4_000);
+        assert_eq!(entries[0].text, "Hello VTT");
+    }
+
+    #[test]
+    fn test_vtt_parser_with_cue_id() {
+        let vtt = "WEBVTT\n\ncue1\n00:00:01.000 --> 00:00:04.000\nHello\n\n";
+        let entries = VttParser::from_vtt(vtt).expect("parse should succeed");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].start_ms, 1_000);
+    }
+
+    #[test]
+    fn test_vtt_parser_skips_note_blocks() {
+        let vtt = "WEBVTT\n\nNOTE This is a comment\n\n00:00:01.000 --> 00:00:02.000\nText\n\n";
+        let entries = VttParser::from_vtt(vtt).expect("parse should succeed");
+        assert_eq!(entries.len(), 1);
+    }
+
+    // ── Round-trip timing precision tests ──────────────────────────────────
+
+    /// SRT → WebVTT → SRT round-trip must be lossless at millisecond precision.
+    #[test]
+    fn test_srt_webvtt_roundtrip_ms_precision() {
+        // Build 50 cues with varied millisecond-precise timestamps.
+        let mut original: Vec<SubtitleEntry> = Vec::with_capacity(50);
+        for i in 0u64..50 {
+            // Use prime-number offsets to hit non-round millisecond values.
+            let start_ms = i * 3_617 + (i * 127) % 1000;
+            let end_ms = start_ms + 1_234 + (i * 37) % 999;
+            original.push(SubtitleEntry::new(
+                start_ms,
+                end_ms,
+                format!("Cue {i} text"),
+            ));
+        }
+
+        // Step 1: SRT → serialize
+        let srt_text = SrtSerializer::to_srt(&original);
+
+        // Step 2: SRT → parse back
+        let from_srt = SrtParser::from_srt(&srt_text).expect("SRT parse should succeed");
+        assert_eq!(from_srt.len(), 50, "should recover all 50 entries from SRT");
+
+        // Step 3: → WebVTT → serialize
+        let vtt_text = VttSerializer::to_vtt(&from_srt);
+
+        // Step 4: WebVTT → parse back
+        let from_vtt = VttParser::from_vtt(&vtt_text).expect("VTT parse should succeed");
+        assert_eq!(from_vtt.len(), 50, "should recover all 50 entries from VTT");
+
+        // Verify exact millisecond preservation across the full round-trip.
+        for (i, (orig, recovered)) in original.iter().zip(from_vtt.iter()).enumerate() {
+            assert_eq!(
+                orig.start_ms, recovered.start_ms,
+                "start_ms mismatch at cue {i}: original={} recovered={}",
+                orig.start_ms, recovered.start_ms
+            );
+            assert_eq!(
+                orig.end_ms, recovered.end_ms,
+                "end_ms mismatch at cue {i}: original={} recovered={}",
+                orig.end_ms, recovered.end_ms
+            );
+            assert_eq!(orig.text, recovered.text, "text mismatch at cue {i}");
+        }
+    }
+
+    #[test]
+    fn test_srt_webvtt_roundtrip_boundary_timestamps() {
+        // Edge cases: 0ms, exact-second, exact-minute, exact-hour.
+        let edge_cases: &[(u64, u64, &str)] = &[
+            (0, 1000, "zero start"),
+            (1000, 2000, "exact second"),
+            (60_000, 61_000, "exact minute"),
+            (3_600_000, 3_601_000, "exact hour"),
+            (3_599_999, 3_600_001, "straddles hour boundary"),
+            (86_399_000, 86_400_000, "24h boundary"),
+        ];
+
+        let entries: Vec<SubtitleEntry> = edge_cases
+            .iter()
+            .map(|(s, e, t)| SubtitleEntry::new(*s, *e, t.to_string()))
+            .collect();
+
+        let srt = SrtSerializer::to_srt(&entries);
+        let from_srt = SrtParser::from_srt(&srt).expect("SRT parse");
+        let vtt = VttSerializer::to_vtt(&from_srt);
+        let from_vtt = VttParser::from_vtt(&vtt).expect("VTT parse");
+
+        assert_eq!(from_vtt.len(), entries.len());
+        for (orig, got) in entries.iter().zip(from_vtt.iter()) {
+            assert_eq!(orig.start_ms, got.start_ms, "start_ms edge: {}", orig.text);
+            assert_eq!(orig.end_ms, got.end_ms, "end_ms edge: {}", orig.text);
+        }
     }
 }

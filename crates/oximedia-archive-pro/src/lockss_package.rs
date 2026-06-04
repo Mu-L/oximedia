@@ -193,18 +193,15 @@ impl LockssPackageBuilder {
     /// # Errors
     ///
     /// Returns an error if the source file cannot be accessed.
-    pub fn add_file(
-        mut self,
-        source: &Path,
-        dest_path: &Path,
-    ) -> Result<Self, crate::Error> {
+    pub fn add_file(mut self, source: &Path, dest_path: &Path) -> Result<Self, crate::Error> {
         if !source.exists() {
             return Err(crate::Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("Source file not found: {}", source.display()),
             )));
         }
-        self.source_files.push((source.to_owned(), dest_path.to_owned()));
+        self.source_files
+            .push((source.to_owned(), dest_path.to_owned()));
         Ok(self)
     }
 
@@ -282,10 +279,22 @@ impl LockssPackageBuilder {
         xml.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
         xml.push('\n');
         xml.push_str("<lockss-au>\n");
-        xml.push_str(&format!("  <au_id>{}</au_id>\n", Self::xml_escape(&meta.au_id)));
-        xml.push_str(&format!("  <title>{}</title>\n", Self::xml_escape(&meta.title)));
-        xml.push_str(&format!("  <publisher>{}</publisher>\n", Self::xml_escape(&meta.publisher)));
-        xml.push_str(&format!("  <base_url>{}</base_url>\n", Self::xml_escape(&meta.base_url)));
+        xml.push_str(&format!(
+            "  <au_id>{}</au_id>\n",
+            Self::xml_escape(&meta.au_id)
+        ));
+        xml.push_str(&format!(
+            "  <title>{}</title>\n",
+            Self::xml_escape(&meta.title)
+        ));
+        xml.push_str(&format!(
+            "  <publisher>{}</publisher>\n",
+            Self::xml_escape(&meta.publisher)
+        ));
+        xml.push_str(&format!(
+            "  <base_url>{}</base_url>\n",
+            Self::xml_escape(&meta.base_url)
+        ));
         xml.push_str(&format!("  <network>{}</network>\n", meta.network.prefix()));
         if let Some(y) = meta.year {
             xml.push_str(&format!("  <year>{y}</year>\n"));
@@ -372,7 +381,10 @@ mod tests {
 
         assert!(pkg.root.exists());
         assert!(pkg.manifest_path().exists(), "lockss.xml must exist");
-        assert!(pkg.checksum_manifest_path().exists(), "sha256manifest.txt must exist");
+        assert!(
+            pkg.checksum_manifest_path().exists(),
+            "sha256manifest.txt must exist"
+        );
         assert_eq!(pkg.files.len(), 1);
         assert!(pkg.total_bytes() > 0);
     }
@@ -415,7 +427,10 @@ mod tests {
             .expect("build");
 
         let txt = std::fs::read_to_string(pkg.checksum_manifest_path()).expect("read");
-        assert!(txt.contains("check.bin"), "filename must appear in checksum manifest");
+        assert!(
+            txt.contains("check.bin"),
+            "filename must appear in checksum manifest"
+        );
         // SHA-256 hex is 64 characters
         let sha_line = txt.lines().find(|l| l.contains("check.bin")).expect("line");
         let hex_part = sha_line.split_whitespace().next().expect("hex");
@@ -464,8 +479,14 @@ mod tests {
 
         let xml = std::fs::read_to_string(pkg.manifest_path()).expect("read");
         assert!(xml.contains("<year>2024</year>"), "year must appear in XML");
-        assert!(xml.contains("<issn>9876-5432</issn>"), "ISSN must appear in XML");
-        assert!(xml.contains("<volume>7</volume>"), "volume must appear in XML");
+        assert!(
+            xml.contains("<issn>9876-5432</issn>"),
+            "ISSN must appear in XML"
+        );
+        assert!(
+            xml.contains("<volume>7</volume>"),
+            "volume must appear in XML"
+        );
     }
 
     #[test]
@@ -494,7 +515,11 @@ mod tests {
         assert!(pkg.total_bytes() > 0, "total bytes must be positive");
         // Each file should have a distinct SHA-256 (different content)
         let hashes: std::collections::HashSet<_> = pkg.files.iter().map(|f| &f.sha256).collect();
-        assert_eq!(hashes.len(), 2, "SHA-256 hashes must differ for different content");
+        assert_eq!(
+            hashes.len(),
+            2,
+            "SHA-256 hashes must differ for different content"
+        );
     }
 
     #[test]
@@ -508,7 +533,10 @@ mod tests {
         .with_param("journal_id", "test_j")
         .with_param("volume", "42");
 
-        assert_eq!(meta.params.get("journal_id").map(String::as_str), Some("test_j"));
+        assert_eq!(
+            meta.params.get("journal_id").map(String::as_str),
+            Some("test_j")
+        );
         assert_eq!(meta.params.len(), 2);
     }
 }

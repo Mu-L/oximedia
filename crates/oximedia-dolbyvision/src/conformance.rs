@@ -7,9 +7,8 @@
 //! break the binary format.
 
 use crate::{
-    parser, writer, DolbyVisionRpu, Level11Metadata, Level1Metadata, Level2Metadata,
-    Level4Metadata, Level5Metadata, Level6Metadata, Level7Metadata, Level8Metadata, Level9Metadata,
-    Profile,
+    parser, writer, DolbyVisionRpu, Level11Metadata, Level1Metadata, Level5Metadata,
+    Level6Metadata, Level8Metadata, Level9Metadata, Profile,
 };
 
 // ---------------------------------------------------------------------------
@@ -179,6 +178,7 @@ pub fn verify_level11_roundtrip() -> crate::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Level2Metadata, Level4Metadata, Level7Metadata};
 
     // ── Profile round-trip tests ──────────────────────────────────────────────
 

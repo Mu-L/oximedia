@@ -6,7 +6,7 @@ Advanced Authoring Format (AAF) support for OxiMedia — SMPTE ST 377-1 complian
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.7 — 2026-05-16 — 705 tests
+Version: 0.1.8 — 2026-05-29 — 705 tests
 
 ## Features
 
@@ -28,7 +28,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-aaf = "0.1.7"
+oximedia-aaf = "0.1.8"
 ```
 
 ```rust

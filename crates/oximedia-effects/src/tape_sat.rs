@@ -212,6 +212,8 @@ impl TapeSaturation {
 }
 
 impl crate::AudioEffect for TapeSaturation {
+    const EFFECT_ID: &'static str = "tape_saturation";
+
     fn process_sample(&mut self, input: f32) -> f32 {
         self.process_sample(input)
     }

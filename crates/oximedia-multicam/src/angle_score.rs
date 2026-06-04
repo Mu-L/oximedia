@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Camera angle scoring for automated selection.
 //!
 //! Provides `ScoringMetric`, `AngleScore`, and `AngleScorer` to evaluate and
@@ -220,10 +219,22 @@ pub fn score_rule_of_thirds(frame: &[u8], width: u32, height: u32) -> f32 {
 
 // ── AngleScorer ───────────────────────────────────────────────────────────────
 
+use std::collections::HashMap;
+
 /// Accumulates per-metric data and produces `AngleScore` results.
+///
+/// The scorer maintains an internal memoization cache keyed by `(angle_index,
+/// frame_number)` so that repeated queries for the same angle/frame pair
+/// return immediately without re-running any expensive detection pipeline.
+/// Call [`invalidate_cache`] whenever the underlying video data or scorer
+/// configuration changes.
+///
+/// [`invalidate_cache`]: AngleScorer::invalidate_cache
 #[derive(Debug, Default)]
 pub struct AngleScorer {
     scores: Vec<AngleScore>,
+    /// Memoization cache: (angle_index, frame_number) → AngleScore
+    score_cache: HashMap<(usize, u64), AngleScore>,
 }
 
 impl AngleScorer {
@@ -236,6 +247,57 @@ impl AngleScorer {
     /// Add a pre-built `AngleScore`.
     pub fn score_angle(&mut self, score: AngleScore) {
         self.scores.push(score);
+    }
+
+    /// Retrieve (or insert) the cached score for a specific `(angle_index,
+    /// frame_number)` pair.
+    ///
+    /// On the first call for a given key the supplied `compute` closure is
+    /// invoked to produce the score; the result is stored and returned.
+    /// Subsequent calls for the **same** key return the cached value without
+    /// calling `compute` again.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use oximedia_multicam::angle_score::{AngleScore, AngleScorer};
+    ///
+    /// let mut scorer = AngleScorer::new();
+    /// let score = scorer.score_for_frame(0, 42, |angle_idx, _frame| {
+    ///     // Heavy detection pipeline would run here in production.
+    ///     let mut s = AngleScore::new(angle_idx);
+    ///     s.focus = 0.9;
+    ///     s
+    /// });
+    /// assert!((score.focus - 0.9).abs() < 1e-6);
+    /// ```
+    pub fn score_for_frame(
+        &mut self,
+        angle_index: usize,
+        frame_number: u64,
+        compute: impl Fn(usize, u64) -> AngleScore,
+    ) -> AngleScore {
+        let key = (angle_index, frame_number);
+        if let Some(cached) = self.score_cache.get(&key) {
+            return cached.clone();
+        }
+        let score = compute(angle_index, frame_number);
+        self.score_cache.insert(key, score.clone());
+        score
+    }
+
+    /// Discard all cached per-frame scores.
+    ///
+    /// Call this whenever the underlying video data or scorer configuration
+    /// changes to ensure stale values are not returned.
+    pub fn invalidate_cache(&mut self) {
+        self.score_cache.clear();
+    }
+
+    /// Return the number of entries currently held in the score cache.
+    #[must_use]
+    pub fn cache_len(&self) -> usize {
+        self.score_cache.len()
     }
 
     /// Return the index of the angle with the highest total score, or `None`
@@ -394,5 +456,100 @@ mod tests {
     #[test]
     fn test_composition_metric_weight() {
         assert!((ScoringMetric::Composition.weight() - 0.20).abs() < 1e-6);
+    }
+
+    // ── Cache tests ──────────────────────────────────────────────────────────
+
+    /// Score the same (angle, frame) twice; the results must be identical and
+    /// the compute closure must only be called once.
+    #[test]
+    fn test_angle_score_cache_hit() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let mut scorer = AngleScorer::new();
+
+        let score_first = {
+            let cc = Arc::clone(&call_count);
+            scorer.score_for_frame(0, 10, move |idx, _frame| {
+                cc.fetch_add(1, Ordering::SeqCst);
+                AngleScore {
+                    angle_index: idx,
+                    focus: 0.8,
+                    exposure: 0.7,
+                    motion: 0.6,
+                    composition: 0.5,
+                }
+            })
+        };
+
+        let score_second = {
+            let cc = Arc::clone(&call_count);
+            scorer.score_for_frame(0, 10, move |idx, _frame| {
+                cc.fetch_add(1, Ordering::SeqCst);
+                AngleScore {
+                    angle_index: idx,
+                    focus: 0.8,
+                    exposure: 0.7,
+                    motion: 0.6,
+                    composition: 0.5,
+                }
+            })
+        };
+
+        // Compute closure must only have run once (cache hit on second call).
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "compute closure should be called exactly once"
+        );
+
+        // Both calls must return the same score values.
+        assert!((score_first.focus - score_second.focus).abs() < 1e-6);
+        assert!((score_first.exposure - score_second.exposure).abs() < 1e-6);
+        assert!((score_first.motion - score_second.motion).abs() < 1e-6);
+        assert!((score_first.composition - score_second.composition).abs() < 1e-6);
+        assert_eq!(scorer.cache_len(), 1);
+    }
+
+    /// After invalidation the compute closure must be called again.
+    #[test]
+    fn test_angle_score_cache_invalidation() {
+        let mut scorer = AngleScorer::new();
+
+        let make_score = |idx: usize, val: f32| AngleScore {
+            angle_index: idx,
+            focus: val,
+            exposure: val,
+            motion: val,
+            composition: val,
+        };
+
+        // Populate the cache.
+        let before = scorer.score_for_frame(1, 5, |idx, _| make_score(idx, 0.4));
+        assert_eq!(scorer.cache_len(), 1);
+
+        // Invalidate and re-score — results should still be consistent because
+        // the closure is deterministic, but the cache must have been cleared.
+        scorer.invalidate_cache();
+        assert_eq!(
+            scorer.cache_len(),
+            0,
+            "cache should be empty after invalidation"
+        );
+
+        let after = scorer.score_for_frame(1, 5, |idx, _| make_score(idx, 0.4));
+
+        // Both results originate from the same computation logic.
+        assert!(
+            (before.focus - after.focus).abs() < 1e-6,
+            "scores before and after invalidation should match when computation is deterministic"
+        );
+        assert_eq!(
+            scorer.cache_len(),
+            1,
+            "cache should hold one entry after re-scoring"
+        );
     }
 }

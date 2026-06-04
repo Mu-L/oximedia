@@ -67,11 +67,7 @@ impl VpVideoFrame {
     ) -> Self {
         // Compute pts from sequence number and fps.
         let pts = frame_to_timestamp(sequence, fps);
-        let dur = if fps.num != 0 {
-            fps.den as i64
-        } else {
-            0
-        };
+        let dur = if fps.num != 0 { fps.den as i64 } else { 0 };
         let info = VideoFrameInfo::new(
             pts.pts,
             pts.pts,

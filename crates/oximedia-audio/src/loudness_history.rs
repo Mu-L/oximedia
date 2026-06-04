@@ -157,9 +157,7 @@ impl LoudnessHistoryTracker {
         let timestamp_secs = index as f64 * self.config.block_duration_secs;
         self.next_index += 1;
 
-        if self.config.max_blocks > 0
-            && self.blocks.len() >= self.config.max_blocks
-        {
+        if self.config.max_blocks > 0 && self.blocks.len() >= self.config.max_blocks {
             self.blocks.pop_front();
         }
 
@@ -225,10 +223,7 @@ impl LoudnessHistoryTracker {
             .filter(|v| v.is_finite())
             .collect();
 
-        let min_lufs = finite_values
-            .iter()
-            .cloned()
-            .fold(f64::INFINITY, f64::min);
+        let min_lufs = finite_values.iter().cloned().fold(f64::INFINITY, f64::min);
         let max_lufs = finite_values
             .iter()
             .cloned()
@@ -287,7 +282,11 @@ impl LoudnessHistoryTracker {
         self.blocks
             .iter()
             .filter(|b| b.lufs.is_finite())
-            .max_by(|a, b| a.lufs.partial_cmp(&b.lufs).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.lufs
+                    .partial_cmp(&b.lufs)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|b| b.index)
     }
 
@@ -297,7 +296,11 @@ impl LoudnessHistoryTracker {
         self.blocks
             .iter()
             .filter(|b| b.lufs.is_finite())
-            .min_by(|a, b| a.lufs.partial_cmp(&b.lufs).unwrap_or(std::cmp::Ordering::Equal))
+            .min_by(|a, b| {
+                a.lufs
+                    .partial_cmp(&b.lufs)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|b| b.index)
     }
 
@@ -498,6 +501,10 @@ mod tests {
         tracker.push_blocks(&[-20.0, -24.0, -22.0]);
         let stats = tracker.stats();
         // Mean of -20, -24, -22 is -22.
-        assert!((stats.mean_lufs - (-22.0)).abs() < 0.001, "mean={}", stats.mean_lufs);
+        assert!(
+            (stats.mean_lufs - (-22.0)).abs() < 0.001,
+            "mean={}",
+            stats.mean_lufs
+        );
     }
 }

@@ -1,7 +1,14 @@
 //! Metadata crosswalk — mapping between different archival metadata schemas.
 //!
 //! Provides a rule-based engine for transforming metadata fields from one
-//! schema (e.g. Dublin Core) into another (e.g. PREMIS or METS).
+//! schema (e.g. Dublin Core, PBCore) into another (e.g. PREMIS or METS).
+//!
+//! ## PBCore 2.1 Support
+//!
+//! PBCore (Public Broadcasting Core) 2.1 field mappings are registered via
+//! [`pbcore_to_internal_crosswalk`] and [`internal_to_pbcore_crosswalk`].
+//! The "internal" scheme uses a flat normalized field set aligned to common
+//! media metadata vocabulary (title, identifier, description, subject, etc.).
 
 #![allow(dead_code)]
 
@@ -16,6 +23,10 @@ pub enum MetadataScheme {
     Premis,
     /// METS — Metadata Encoding and Transmission Standard.
     Mets,
+    /// PBCore 2.1 — Public Broadcasting Metadata Dictionary.
+    PbCore,
+    /// Internal normalized field model (flat key-value for crosswalk targets).
+    Internal,
 }
 
 impl MetadataScheme {
@@ -27,6 +38,8 @@ impl MetadataScheme {
             Self::Ead => "urn:isbn:1-931666-22-9",
             Self::Premis => "http://www.loc.gov/premis/v3",
             Self::Mets => "http://www.loc.gov/METS/",
+            Self::PbCore => "http://www.pbcore.org/PBCore/PBCoreNamespace.html",
+            Self::Internal => "",
         }
     }
 
@@ -38,6 +51,8 @@ impl MetadataScheme {
             Self::Ead => "ead",
             Self::Premis => "premis",
             Self::Mets => "mets",
+            Self::PbCore => "pb",
+            Self::Internal => "internal",
         }
     }
 }
@@ -152,6 +167,172 @@ impl MetadataCrosswalk {
     pub fn rules(&self) -> &[CrosswalkRule] {
         &self.rules
     }
+}
+
+// ---------------------------------------------------------------------------
+// PBCore 2.1 crosswalk builders
+// ---------------------------------------------------------------------------
+
+/// Builds a [`MetadataCrosswalk`] mapping PBCore 2.1 elements to the internal
+/// normalized field model.
+///
+/// ## PBCore 2.1 → Internal field mapping
+///
+/// | PBCore 2.1 element                                        | Internal field     |
+/// |-----------------------------------------------------------|--------------------|
+/// | `pbcoreTitle`                                             | `title`            |
+/// | `pbcoreIdentifier`                                        | `identifier`       |
+/// | `pbcoreDescription`                                       | `description`      |
+/// | `pbcoreSubject`                                           | `subject`          |
+/// | `pbcoreInstantiation/instantiationDuration`               | `duration`         |
+/// | `pbcoreInstantiation/instantiationMediaType`              | `media_type`       |
+/// | `pbcoreInstantiation/instantiationFileSize`               | `file_size`        |
+/// | `pbcoreInstantiation/instantiationFrameRate`              | `frame_rate`       |
+/// | `pbcoreInstantiation/instantiationAudioSamplingRate`      | `sample_rate`      |
+/// | `pbcoreEssenceTrack/essenceTrackType`                     | `track_type`       |
+#[must_use]
+pub fn pbcore_to_internal_crosswalk() -> MetadataCrosswalk {
+    let mut cw = MetadataCrosswalk::new();
+
+    // Descriptive metadata
+    cw.add_rule(CrosswalkRule::new(
+        MetadataScheme::PbCore,
+        "pbcoreTitle",
+        MetadataScheme::Internal,
+        "title",
+    ));
+    cw.add_rule(CrosswalkRule::new(
+        MetadataScheme::PbCore,
+        "pbcoreIdentifier",
+        MetadataScheme::Internal,
+        "identifier",
+    ));
+    cw.add_rule(CrosswalkRule::new(
+        MetadataScheme::PbCore,
+        "pbcoreDescription",
+        MetadataScheme::Internal,
+        "description",
+    ));
+    cw.add_rule(CrosswalkRule::new(
+        MetadataScheme::PbCore,
+        "pbcoreSubject",
+        MetadataScheme::Internal,
+        "subject",
+    ));
+
+    // Instantiation metadata
+    cw.add_rule(CrosswalkRule::new(
+        MetadataScheme::PbCore,
+        "pbcoreInstantiation/instantiationDuration",
+        MetadataScheme::Internal,
+        "duration",
+    ));
+    cw.add_rule(CrosswalkRule::new(
+        MetadataScheme::PbCore,
+        "pbcoreInstantiation/instantiationMediaType",
+        MetadataScheme::Internal,
+        "media_type",
+    ));
+    cw.add_rule(CrosswalkRule::new(
+        MetadataScheme::PbCore,
+        "pbcoreInstantiation/instantiationFileSize",
+        MetadataScheme::Internal,
+        "file_size",
+    ));
+    cw.add_rule(CrosswalkRule::new(
+        MetadataScheme::PbCore,
+        "pbcoreInstantiation/instantiationFrameRate",
+        MetadataScheme::Internal,
+        "frame_rate",
+    ));
+    cw.add_rule(CrosswalkRule::new(
+        MetadataScheme::PbCore,
+        "pbcoreInstantiation/instantiationAudioSamplingRate",
+        MetadataScheme::Internal,
+        "sample_rate",
+    ));
+
+    // Essence track metadata
+    cw.add_rule(CrosswalkRule::new(
+        MetadataScheme::PbCore,
+        "pbcoreEssenceTrack/essenceTrackType",
+        MetadataScheme::Internal,
+        "track_type",
+    ));
+
+    cw
+}
+
+/// Builds a [`MetadataCrosswalk`] mapping the internal normalized field model
+/// back to PBCore 2.1 elements.
+///
+/// This is the inverse of [`pbcore_to_internal_crosswalk`].
+#[must_use]
+pub fn internal_to_pbcore_crosswalk() -> MetadataCrosswalk {
+    let mut cw = MetadataCrosswalk::new();
+
+    cw.add_rule(CrosswalkRule::new(
+        MetadataScheme::Internal,
+        "title",
+        MetadataScheme::PbCore,
+        "pbcoreTitle",
+    ));
+    cw.add_rule(CrosswalkRule::new(
+        MetadataScheme::Internal,
+        "identifier",
+        MetadataScheme::PbCore,
+        "pbcoreIdentifier",
+    ));
+    cw.add_rule(CrosswalkRule::new(
+        MetadataScheme::Internal,
+        "description",
+        MetadataScheme::PbCore,
+        "pbcoreDescription",
+    ));
+    cw.add_rule(CrosswalkRule::new(
+        MetadataScheme::Internal,
+        "subject",
+        MetadataScheme::PbCore,
+        "pbcoreSubject",
+    ));
+    cw.add_rule(CrosswalkRule::new(
+        MetadataScheme::Internal,
+        "duration",
+        MetadataScheme::PbCore,
+        "pbcoreInstantiation/instantiationDuration",
+    ));
+    cw.add_rule(CrosswalkRule::new(
+        MetadataScheme::Internal,
+        "media_type",
+        MetadataScheme::PbCore,
+        "pbcoreInstantiation/instantiationMediaType",
+    ));
+    cw.add_rule(CrosswalkRule::new(
+        MetadataScheme::Internal,
+        "file_size",
+        MetadataScheme::PbCore,
+        "pbcoreInstantiation/instantiationFileSize",
+    ));
+    cw.add_rule(CrosswalkRule::new(
+        MetadataScheme::Internal,
+        "frame_rate",
+        MetadataScheme::PbCore,
+        "pbcoreInstantiation/instantiationFrameRate",
+    ));
+    cw.add_rule(CrosswalkRule::new(
+        MetadataScheme::Internal,
+        "sample_rate",
+        MetadataScheme::PbCore,
+        "pbcoreInstantiation/instantiationAudioSamplingRate",
+    ));
+    cw.add_rule(CrosswalkRule::new(
+        MetadataScheme::Internal,
+        "track_type",
+        MetadataScheme::PbCore,
+        "pbcoreEssenceTrack/essenceTrackType",
+    ));
+
+    cw
 }
 
 #[cfg(test)]
@@ -340,6 +521,174 @@ mod tests {
         assert_eq!(
             result.get("dmSubject").expect("operation should succeed"),
             "documentary"
+        );
+    }
+
+    // ── PBCore 2.1 tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_pbcore_scheme_namespace() {
+        assert_eq!(
+            MetadataScheme::PbCore.namespace(),
+            "http://www.pbcore.org/PBCore/PBCoreNamespace.html"
+        );
+        assert_eq!(MetadataScheme::PbCore.prefix(), "pb");
+    }
+
+    #[test]
+    fn test_pbcore_crosswalk_to_internal() {
+        let cw = pbcore_to_internal_crosswalk();
+        let mut source = HashMap::new();
+        source.insert(
+            "pbcoreTitle".to_string(),
+            "The Great Archive Film".to_string(),
+        );
+        source.insert(
+            "pbcoreIdentifier".to_string(),
+            "urn:pbcore:test:001".to_string(),
+        );
+        source.insert(
+            "pbcoreDescription".to_string(),
+            "A test broadcast recording.".to_string(),
+        );
+        source.insert("pbcoreSubject".to_string(), "broadcasting".to_string());
+        source.insert(
+            "pbcoreInstantiation/instantiationMediaType".to_string(),
+            "Moving Image".to_string(),
+        );
+        source.insert(
+            "pbcoreInstantiation/instantiationDuration".to_string(),
+            "00:01:30.000".to_string(),
+        );
+
+        let result = cw.transform(&source, MetadataScheme::PbCore, MetadataScheme::Internal);
+
+        assert_eq!(
+            result.get("title").map(String::as_str),
+            Some("The Great Archive Film"),
+            "pbcoreTitle must map to internal 'title'"
+        );
+        assert_eq!(
+            result.get("identifier").map(String::as_str),
+            Some("urn:pbcore:test:001"),
+            "pbcoreIdentifier must map to internal 'identifier'"
+        );
+        assert_eq!(
+            result.get("description").map(String::as_str),
+            Some("A test broadcast recording."),
+            "pbcoreDescription must map to internal 'description'"
+        );
+        assert_eq!(
+            result.get("subject").map(String::as_str),
+            Some("broadcasting"),
+            "pbcoreSubject must map to internal 'subject'"
+        );
+        assert_eq!(
+            result.get("media_type").map(String::as_str),
+            Some("Moving Image"),
+            "instantiationMediaType must map to internal 'media_type'"
+        );
+        assert_eq!(
+            result.get("duration").map(String::as_str),
+            Some("00:01:30.000"),
+            "instantiationDuration must map to internal 'duration'"
+        );
+    }
+
+    #[test]
+    fn test_pbcore_crosswalk_round_trip() {
+        let forward = pbcore_to_internal_crosswalk();
+        let backward = internal_to_pbcore_crosswalk();
+
+        let mut pbcore_source = HashMap::new();
+        pbcore_source.insert("pbcoreTitle".to_string(), "Round-Trip Test".to_string());
+        pbcore_source.insert(
+            "pbcoreIdentifier".to_string(),
+            "urn:pbcore:roundtrip:42".to_string(),
+        );
+        pbcore_source.insert(
+            "pbcoreInstantiation/instantiationFrameRate".to_string(),
+            "29.97".to_string(),
+        );
+        pbcore_source.insert(
+            "pbcoreInstantiation/instantiationAudioSamplingRate".to_string(),
+            "48000".to_string(),
+        );
+
+        // PBCore → Internal
+        let internal = forward.transform(
+            &pbcore_source,
+            MetadataScheme::PbCore,
+            MetadataScheme::Internal,
+        );
+        assert_eq!(
+            internal.get("title").map(String::as_str),
+            Some("Round-Trip Test")
+        );
+        assert_eq!(
+            internal.get("identifier").map(String::as_str),
+            Some("urn:pbcore:roundtrip:42")
+        );
+        assert_eq!(
+            internal.get("frame_rate").map(String::as_str),
+            Some("29.97")
+        );
+        assert_eq!(
+            internal.get("sample_rate").map(String::as_str),
+            Some("48000")
+        );
+
+        // Internal → PBCore
+        let pbcore_result =
+            backward.transform(&internal, MetadataScheme::Internal, MetadataScheme::PbCore);
+        assert_eq!(
+            pbcore_result.get("pbcoreTitle").map(String::as_str),
+            Some("Round-Trip Test"),
+            "title must survive round-trip back to pbcoreTitle"
+        );
+        assert_eq!(
+            pbcore_result.get("pbcoreIdentifier").map(String::as_str),
+            Some("urn:pbcore:roundtrip:42"),
+            "identifier must survive round-trip back to pbcoreIdentifier"
+        );
+        assert_eq!(
+            pbcore_result
+                .get("pbcoreInstantiation/instantiationFrameRate")
+                .map(String::as_str),
+            Some("29.97"),
+            "frame_rate must survive round-trip"
+        );
+    }
+
+    #[test]
+    fn test_pbcore_crosswalk_rule_count() {
+        let cw = pbcore_to_internal_crosswalk();
+        assert_eq!(
+            cw.rule_count(),
+            10,
+            "PBCore crosswalk must have 10 mapping rules"
+        );
+        let cw_inv = internal_to_pbcore_crosswalk();
+        assert_eq!(
+            cw_inv.rule_count(),
+            10,
+            "Inverse PBCore crosswalk must have 10 rules"
+        );
+    }
+
+    #[test]
+    fn test_pbcore_essence_track_type_mapping() {
+        let cw = pbcore_to_internal_crosswalk();
+        let mut source = HashMap::new();
+        source.insert(
+            "pbcoreEssenceTrack/essenceTrackType".to_string(),
+            "Video".to_string(),
+        );
+        let result = cw.transform(&source, MetadataScheme::PbCore, MetadataScheme::Internal);
+        assert_eq!(
+            result.get("track_type").map(String::as_str),
+            Some("Video"),
+            "essenceTrackType must map to internal 'track_type'"
         );
     }
 }

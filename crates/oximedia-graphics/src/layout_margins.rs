@@ -51,7 +51,10 @@ impl BroadcastStandard {
             Self::Smpte => (0.90, 0.80),
             Self::EbuR95 => (0.88, 0.80),
             Self::Streaming => (0.95, 0.90),
-            Self::Custom { action_safe, title_safe } => (action_safe, title_safe),
+            Self::Custom {
+                action_safe,
+                title_safe,
+            } => (action_safe, title_safe),
         }
     }
 }
@@ -78,12 +81,22 @@ pub struct SafeRect {
 impl SafeRect {
     /// Create a new rectangle.
     pub fn new(left: u32, top: u32, right: u32, bottom: u32) -> Self {
-        Self { left, top, right, bottom }
+        Self {
+            left,
+            top,
+            right,
+            bottom,
+        }
     }
 
     /// Rectangle covering the whole frame.
     pub fn full_frame(width: u32, height: u32) -> Self {
-        Self { left: 0, top: 0, right: width, bottom: height }
+        Self {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+        }
     }
 
     /// Width of the rectangle in pixels.
@@ -125,7 +138,12 @@ impl SafeRect {
         let right = self.right.min(other.right);
         let bottom = self.bottom.min(other.bottom);
         if left < right && top < bottom {
-            Some(Self { left, top, right, bottom })
+            Some(Self {
+                left,
+                top,
+                right,
+                bottom,
+            })
         } else {
             None
         }
@@ -272,7 +290,12 @@ impl SafeAreaMargins {
         let top = rect.top.max(safe.top);
         let right = rect.right.min(safe.right);
         let bottom = rect.bottom.min(safe.bottom);
-        SafeRect { left, top, right: right.max(left), bottom: bottom.max(top) }
+        SafeRect {
+            left,
+            top,
+            right: right.max(left),
+            bottom: bottom.max(top),
+        }
     }
 
     /// Clamp `rect` to fit within the title-safe area.
@@ -282,7 +305,12 @@ impl SafeAreaMargins {
         let top = rect.top.max(safe.top);
         let right = rect.right.min(safe.right);
         let bottom = rect.bottom.min(safe.bottom);
-        SafeRect { left, top, right: right.max(left), bottom: bottom.max(top) }
+        SafeRect {
+            left,
+            top,
+            right: right.max(left),
+            bottom: bottom.max(top),
+        }
     }
 
     /// Generate an overlay mask (RGBA buffer) that highlights both safe zones
@@ -322,8 +350,18 @@ impl SafeAreaMargins {
             }
         };
 
-        draw_rect_border(&mut buf, self.action_safe_rect(), action_color, border_thickness.max(1));
-        draw_rect_border(&mut buf, self.title_safe_rect(), title_color, border_thickness.max(1));
+        draw_rect_border(
+            &mut buf,
+            self.action_safe_rect(),
+            action_color,
+            border_thickness.max(1),
+        );
+        draw_rect_border(
+            &mut buf,
+            self.title_safe_rect(),
+            title_color,
+            border_thickness.max(1),
+        );
         buf
     }
 }
@@ -444,8 +482,10 @@ mod tests {
         let oversized = SafeRect::new(0, 0, W, H);
         let clamped = m.clamp_to_action_safe(oversized);
         let action = m.action_safe_rect();
-        assert!(action.contains_rect(&clamped),
-            "clamped rect must fit inside action safe area");
+        assert!(
+            action.contains_rect(&clamped),
+            "clamped rect must fit inside action safe area"
+        );
     }
 
     // 11. render_guide_overlay returns a buffer of the correct length.

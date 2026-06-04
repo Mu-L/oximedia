@@ -275,8 +275,7 @@ impl<R: Read> StreamChunker<R> {
                 if chunk_len < self.config.min_chunk {
                     continue;
                 }
-                let is_boundary =
-                    (h & mask) == 0 || chunk_len >= self.config.max_chunk;
+                let is_boundary = (h & mask) == 0 || chunk_len >= self.config.max_chunk;
                 if is_boundary {
                     let digest = ChunkDigest {
                         hash: fnv1a_64(&self.chunk_buf),
@@ -385,15 +384,14 @@ impl StreamDedupIndex {
     /// # Errors
     ///
     /// Propagates `io::Error` from `reader`.
-    pub fn ingest<R: Read>(
-        &mut self,
-        name: &str,
-        reader: R,
-    ) -> io::Result<StreamFingerprint> {
+    pub fn ingest<R: Read>(&mut self, name: &str, reader: R) -> io::Result<StreamFingerprint> {
         let chunker = StreamChunker::new(reader, self.config.clone());
         let chunks = chunker.collect_all()?;
         let total_bytes: u64 = chunks.iter().map(|c| c.len as u64).sum();
-        let fp = StreamFingerprint { chunks, total_bytes };
+        let fp = StreamFingerprint {
+            chunks,
+            total_bytes,
+        };
         self.entries.insert(name.to_string(), fp.clone());
         Ok(fp)
     }
@@ -412,11 +410,7 @@ impl StreamDedupIndex {
 
     /// Compute the Jaccard similarity between two fingerprints.
     #[must_use]
-    pub fn jaccard_similarity(
-        &self,
-        a: &StreamFingerprint,
-        b: &StreamFingerprint,
-    ) -> f64 {
+    pub fn jaccard_similarity(&self, a: &StreamFingerprint, b: &StreamFingerprint) -> f64 {
         a.jaccard(b)
     }
 
@@ -558,7 +552,10 @@ mod tests {
         let fp_b = index.ingest("b", Cursor::new(data_b)).expect("ok");
         let sim = index.jaccard_similarity(&fp_a, &fp_b);
         // Chunks should be different → low similarity.
-        assert!(sim < 0.5, "different data should have low Jaccard, got {sim}");
+        assert!(
+            sim < 0.5,
+            "different data should have low Jaccard, got {sim}"
+        );
     }
 
     #[test]
@@ -584,8 +581,12 @@ mod tests {
     fn test_find_duplicates_no_pairs_above_high_threshold() {
         let cfg = small_config();
         let mut index = StreamDedupIndex::new(cfg);
-        index.ingest("p", Cursor::new(vec![0x11u8; 2048])).expect("ok");
-        index.ingest("q", Cursor::new(vec![0x22u8; 2048])).expect("ok");
+        index
+            .ingest("p", Cursor::new(vec![0x11u8; 2048]))
+            .expect("ok");
+        index
+            .ingest("q", Cursor::new(vec![0x22u8; 2048]))
+            .expect("ok");
         // Very high threshold; different data won't meet it.
         let pairs = index.find_duplicates(0.99);
         assert!(
@@ -598,7 +599,9 @@ mod tests {
     fn test_index_len_and_is_empty() {
         let mut index = StreamDedupIndex::new(small_config());
         assert!(index.is_empty());
-        index.ingest("file", Cursor::new(vec![1u8; 100])).expect("ok");
+        index
+            .ingest("file", Cursor::new(vec![1u8; 100]))
+            .expect("ok");
         assert_eq!(index.len(), 1);
         assert!(!index.is_empty());
     }
@@ -606,7 +609,9 @@ mod tests {
     #[test]
     fn test_get_fingerprint_after_ingest() {
         let mut index = StreamDedupIndex::new(small_config());
-        index.ingest("myfile", Cursor::new(vec![42u8; 512])).expect("ok");
+        index
+            .ingest("myfile", Cursor::new(vec![42u8; 512]))
+            .expect("ok");
         let fp = index.get("myfile");
         assert!(fp.is_some());
         assert!(fp.unwrap().chunk_count() >= 1);

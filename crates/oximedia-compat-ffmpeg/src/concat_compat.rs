@@ -256,10 +256,7 @@ pub fn parse_concat_protocol(input: &str) -> Result<ConcatSpec, ConcatError> {
     }
 
     // Strip the "concat:" prefix (case-insensitive).
-    let rest = &input[input
-        .to_lowercase()
-        .find("concat:")
-        .map_or(0, |p| p + 7)..];
+    let rest = &input[input.to_lowercase().find("concat:").map_or(0, |p| p + 7)..];
 
     if rest.trim().is_empty() {
         return Err(ConcatError::EmptyProtocolList);
@@ -457,8 +454,7 @@ mod tests {
 
     #[test]
     fn test_parse_concat_protocol_spaces_trimmed() {
-        let spec =
-            parse_concat_protocol("concat: file1.ts | file2.ts ").expect("parse failed");
+        let spec = parse_concat_protocol("concat: file1.ts | file2.ts ").expect("parse failed");
         assert_eq!(spec.segments[0].path, "file1.ts");
         assert_eq!(spec.segments[1].path, "file2.ts");
     }

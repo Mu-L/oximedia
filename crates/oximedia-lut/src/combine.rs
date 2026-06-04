@@ -132,7 +132,10 @@ mod tests {
         assert_eq!(combined.len(), 256);
         for (i, &v) in combined.iter().enumerate() {
             let expected = i as f32 / 255.0;
-            assert!((v - expected).abs() < 1e-5, "index {i}: expected {expected}, got {v}");
+            assert!(
+                (v - expected).abs() < 1e-5,
+                "index {i}: expected {expected}, got {v}"
+            );
         }
     }
 
@@ -182,7 +185,10 @@ mod tests {
             let v = 128.0_f32 / 255.0;
             (v * v) * (v * v)
         };
-        assert!((mid - expected).abs() < 0.01, "got {mid}, expected {expected}");
+        assert!(
+            (mid - expected).abs() < 0.01,
+            "got {mid}, expected {expected}"
+        );
     }
 
     #[test]
@@ -194,7 +200,10 @@ mod tests {
         assert_eq!(result.len(), 128);
         for (i, &v) in result.iter().enumerate() {
             let expected = (i as f32 / 127.0) * 0.5;
-            assert!((v - expected).abs() < 0.02, "index {i}: expected {expected}, got {v}");
+            assert!(
+                (v - expected).abs() < 0.02,
+                "index {i}: expected {expected}, got {v}"
+            );
         }
     }
 

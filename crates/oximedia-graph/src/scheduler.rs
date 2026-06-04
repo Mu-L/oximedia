@@ -212,6 +212,38 @@ impl ResourceAwareScheduler {
     }
 }
 
+/// Result for a single node execution in a parallel stage.
+#[derive(Debug)]
+pub struct ParallelNodeResult {
+    /// Node identifier.
+    pub node_id: String,
+    /// Whether the node completed successfully.
+    pub success: bool,
+    /// Duration the node spent executing.
+    pub elapsed: std::time::Duration,
+    /// Optional error message if `success` is false.
+    pub error: Option<String>,
+}
+
+/// Aggregate statistics for a parallel execution run.
+#[derive(Debug, Default)]
+pub struct ParallelRunStats {
+    /// Total nodes executed.
+    pub total_nodes: usize,
+    /// Number of nodes executed (alias for compatibility).
+    pub nodes_executed: usize,
+    /// Number of nodes that succeeded.
+    pub succeeded: usize,
+    /// Number of nodes that failed.
+    pub failures: usize,
+    /// Total wall-clock duration.
+    pub total_elapsed: std::time::Duration,
+    /// Number of stages executed.
+    pub stages_executed: usize,
+    /// Maximum concurrency observed (nodes running in a single stage).
+    pub max_concurrency: usize,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Unit tests
 // ─────────────────────────────────────────────────────────────────────────────

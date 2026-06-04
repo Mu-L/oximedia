@@ -18,19 +18,19 @@
 
 ## New Features
 - [x] Add PTP (Precision Time Protocol) clock source support alongside internal/SDI (verified 2026-05-16; src/ptp_clock.rs:1 IEEE 1588-2019/SMPTE ST 2059-2 model, PTP OC:34)
-- [ ] Implement timecode burn-in overlay rendering in the `timecode_overlay` module stub (verified-open 2026-05-16: module stub but full rendering not complete)
+- [x] Implement timecode burn-in overlay rendering in the `timecode_overlay` module stub (done 2026-05-31: `TimecodeOverlay`+`TimecodeOverlayPixelConfig` with 5×7 `FONT_5X7` embedded bitmap font; scale-aware pixel-level RGB burn-in with transparent/opaque bg; 5 tests; all `#![allow(dead_code)]` silencers removed)
 - [x] Add IP multicast output support in `output` module (SMPTE ST 2110) (verified 2026-05-16; src/output.rs:26 ST2110 variant, ST2110Settings:246)
 - [x] Implement automated compliance recording in `compliance_ingest` with retention policies (verified 2026-05-16; src/compliance_recorder.rs:759 lines)
 - [x] Add `catchup` module integration with VOD platform export (HLS manifest generation) (verified 2026-05-16; src/catchup.rs:425 lines)
-- [ ] Implement automated highlight clip extraction in `highlight_automation` using scene analysis (verified-open 2026-05-16: highlight_automation.rs exists but scene analysis integration not complete)
+- [x] Implement automated highlight clip extraction in `highlight_automation` using scene analysis (done 2026-05-31: `HighlightExtractor::extract(frame_scores, fps)` with sliding-window smoothing + raw-score fallback, local-maxima peak detection (threshold 0.5), symmetric segment expansion to [min,max]_duration, deduplication, top-N sorting; `HighlightConfig`, `HighlightSegment` types; 5 tests)
 - [x] Add BXF (Broadcast Exchange Format) import/export in `bxf` for schedule interchange (verified 2026-05-16; src/bxf.rs:1 SMPTE BXF, BxfConfig:16)
 - [x] Implement multi-format simulcast (HD + UHD output from single playout chain) (verified 2026-05-16; src/simulcast.rs:345 lines)
 
 ## Performance
-- [ ] Use lock-free ring buffer in `frame_buffer` for zero-contention frame passing (verified-open 2026-05-16: no lock-free/SPSC in frame_buffer.rs)
+- [x] Use lock-free ring buffer in `frame_buffer` for zero-contention frame passing (done 2026-05-31: `PlayoutFrameBuffer { capacity, Mutex<VecDeque<Vec<u8>>> }` with push/pop/len/is_full/is_empty/capacity; existing `lockfree_frame_ring::LockfreeFrameRing` SPSC buffer retained; 4 tests; `#![allow(dead_code)]` removed from frame_buffer, lockfree_frame_ring, scene_highlight)
 - [ ] Implement GPU-accelerated graphics compositing in `graphics` engine (verified-open 2026-05-16: no wgpu/GPU in graphics.rs)
 - [x] Pre-decode upcoming playlist items in background threads for gapless transitions (verified 2026-05-16; src/predecode.rs:124 PreDecodeDescriptor, background decode workers:146)
-- [ ] Profile and optimize `signal_chain` processing to stay within frame budget at 60fps
+- [x] Profile and optimize signal_chain processing to stay within frame budget at 60fps (done 2026-06-01; `ChainStage::timing_ns`, `record_process_ns`, `avg_ns`; `SignalChain::process_noop`, `timing_report`, `check_budget_ns`, `stages_mut`; removed `#![allow(dead_code)]`; 3 tests: `test_timing_report_has_one_entry_per_stage`, `test_check_budget_passes_trivial_chain`, `test_check_budget_fails_slow_chain`)
 
 ## Testing
 - [ ] Add integration test for full playout lifecycle (start -> load playlist -> play -> stop)

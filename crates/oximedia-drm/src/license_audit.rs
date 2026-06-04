@@ -329,12 +329,7 @@ impl LicenseAuditLog {
     // -----------------------------------------------------------------------
 
     /// Record a `Request` event.
-    pub fn record_request(
-        &mut self,
-        timestamp_ms: u64,
-        device_id: &str,
-        content_id: &str,
-    ) -> u64 {
+    pub fn record_request(&mut self, timestamp_ms: u64, device_id: &str, content_id: &str) -> u64 {
         self.push(LicenseAuditEvent::new(
             0,
             timestamp_ms,
@@ -385,12 +380,7 @@ impl LicenseAuditLog {
     }
 
     /// Record a `Revoke` event.
-    pub fn record_revoke(
-        &mut self,
-        timestamp_ms: u64,
-        device_id: &str,
-        content_id: &str,
-    ) -> u64 {
+    pub fn record_revoke(&mut self, timestamp_ms: u64, device_id: &str, content_id: &str) -> u64 {
         self.push(LicenseAuditEvent::new(
             0,
             timestamp_ms,
@@ -790,10 +780,7 @@ mod tests {
     fn test_compliance_denial_reasons() {
         let log = populated_log();
         let report = log.compliance_report(0, 100_000).expect("ok");
-        assert_eq!(
-            *report.denial_reasons.get("geo_block").expect("key"),
-            1u64
-        );
+        assert_eq!(*report.denial_reasons.get("geo_block").expect("key"), 1u64);
     }
 
     #[test]

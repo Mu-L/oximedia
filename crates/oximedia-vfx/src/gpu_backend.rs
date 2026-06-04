@@ -274,7 +274,7 @@ mod tests {
         let px = output.get_pixel(0, 0).expect("px");
         assert_eq!(px[0], 155); // 255 - 100
         assert_eq!(px[1], 105); // 255 - 150
-        assert_eq!(px[2], 55);  // 255 - 200
+        assert_eq!(px[2], 55); // 255 - 200
         assert_eq!(px[3], 255); // alpha preserved
     }
 

@@ -28,8 +28,8 @@
 
 ## Performance
 - [x] Use SIMD for 3x3 matrix multiplication in `chromatic` adaptation transforms (implemented 2026-05-15: `mat3x3_mul_vec3_simd` with AVX2/NEON/scalar dispatch; wired into `ChromaticAdaptation::apply_matrix`; tests `test_mat3x3_simd_matches_scalar`, `test_mat3x3_simd_identity`)
-- [ ] Parallelize ICC profile application across image tiles using rayon
-- [ ] Cache frequently-used illuminant-to-illuminant adaptation matrices in `chromatic`
+- [x] Parallelize ICC profile application across image tiles using rayon (done — par_chunks_exact_mut at src/icc/apply.rs:63)
+- [x] Cache frequently-used illuminant-to-illuminant adaptation matrices in `chromatic` (done — ADAPT_MATRIX_CACHE + cached_transform_matrix at src/chromatic/adapt.rs:160-233)
 - [ ] Optimize `patch_extract` with early-exit when sufficient patches detected
 - [ ] Pre-compute and cache LUT interpolation coefficients in `lut` module
 

@@ -65,7 +65,11 @@ impl AiTagResult {
     #[must_use]
     pub fn top_n(&self, n: usize) -> Vec<&KeywordSuggestion> {
         let mut sorted: Vec<&KeywordSuggestion> = self.suggestions.iter().collect();
-        sorted.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         sorted.into_iter().take(n).collect()
     }
 }
@@ -223,17 +227,11 @@ impl ClipAiTagger {
     fn analyse_duration(&self, clip: &Clip, out: &mut Vec<KeywordSuggestion>) {
         if let Some(dur) = clip.effective_duration() {
             // Assume 24 fps if no frame rate is available.
-            let fps = clip
-                .frame_rate
-                .map_or(24.0, |fr| fr.to_f64());
+            let fps = clip.frame_rate.map_or(24.0, |fr| fr.to_f64());
             let seconds = dur as f64 / fps;
 
             if seconds < 5.0 {
-                out.push(KeywordSuggestion::new(
-                    "clip-short",
-                    0.70,
-                    "duration < 5 s",
-                ));
+                out.push(KeywordSuggestion::new("clip-short", 0.70, "duration < 5 s"));
             } else if seconds > 120.0 {
                 out.push(KeywordSuggestion::new(
                     "clip-long",
@@ -321,10 +319,7 @@ mod tests {
         let tagger = ClipAiTagger::default();
         let clip = make_clip("interview_001");
         let result = tagger.tag_clip(&clip);
-        let has_interview = result
-            .suggestions
-            .iter()
-            .any(|s| s.keyword == "interview");
+        let has_interview = result.suggestions.iter().any(|s| s.keyword == "interview");
         assert!(has_interview, "Expected 'interview' suggestion");
     }
 
@@ -343,10 +338,7 @@ mod tests {
         let mut clip = make_clip("stinger");
         clip.set_duration(60); // 60 frames @ 24fps = 2.5s
         let result = tagger.tag_clip(&clip);
-        let has_short = result
-            .suggestions
-            .iter()
-            .any(|s| s.keyword == "clip-short");
+        let has_short = result.suggestions.iter().any(|s| s.keyword == "clip-short");
         assert!(has_short, "Expected 'clip-short' suggestion");
     }
 
@@ -358,10 +350,7 @@ mod tests {
         cam.iso = Some(6400);
         clip.set_camera_metadata(cam);
         let result = tagger.tag_clip(&clip);
-        let has_low_light = result
-            .suggestions
-            .iter()
-            .any(|s| s.keyword == "low-light");
+        let has_low_light = result.suggestions.iter().any(|s| s.keyword == "low-light");
         assert!(has_low_light, "Expected 'low-light' suggestion from ISO");
     }
 
@@ -418,10 +407,7 @@ mod tests {
     #[test]
     fn test_tag_clips_batch() {
         let tagger = ClipAiTagger::default();
-        let clips = vec![
-            make_clip("interview_01"),
-            make_clip("broll_outdoor"),
-        ];
+        let clips = vec![make_clip("interview_01"), make_clip("broll_outdoor")];
         let results = tagger.tag_clips(&clips);
         assert_eq!(results.len(), 2);
     }

@@ -157,7 +157,11 @@ impl CompositionAnalyzer {
         let cols = config.grid_cols.max(2);
         let rows = config.grid_rows.max(2);
         Self {
-            config: CompositionConfig { grid_cols: cols, grid_rows: rows, ..config },
+            config: CompositionConfig {
+                grid_cols: cols,
+                grid_rows: rows,
+                ..config
+            },
         }
     }
 
@@ -182,9 +186,10 @@ impl CompositionAnalyzer {
         let balance = compute_balance(y_plane, width, height);
 
         // Normalise weights
-        let total_w =
-            self.config.weight_thirds + self.config.weight_symmetry
-            + self.config.weight_lines + self.config.weight_balance;
+        let total_w = self.config.weight_thirds
+            + self.config.weight_symmetry
+            + self.config.weight_lines
+            + self.config.weight_balance;
         let (wt, ws, wl, wb) = if total_w > 0.0 {
             (
                 self.config.weight_thirds / total_w,
@@ -213,10 +218,7 @@ impl CompositionAnalyzer {
     }
 
     /// Analyse a batch of frames and return results.
-    pub fn process_batch(
-        &self,
-        frames: &[(&[u8], usize, usize)],
-    ) -> Vec<CompositionResult> {
+    pub fn process_batch(&self, frames: &[(&[u8], usize, usize)]) -> Vec<CompositionResult> {
         frames
             .iter()
             .enumerate()
@@ -266,8 +268,7 @@ fn compute_rule_of_thirds(
     }
 
     // Mean luminance of the whole frame (used to identify "salient" pixels)
-    let mean_luma =
-        y_plane.iter().map(|&v| f64::from(v)).sum::<f64>() / (width * height) as f64;
+    let mean_luma = y_plane.iter().map(|&v| f64::from(v)).sum::<f64>() / (width * height) as f64;
 
     // Power-point intersection coordinates (normalised 0..1)
     let mut power_points: Vec<(f64, f64)> = Vec::new();
@@ -445,12 +446,20 @@ fn compute_leading_lines(
     }
 
     // Dominant angle (centre of the peak bin)
-    let (peak_bin, _) = norm_hist
-        .iter()
-        .enumerate()
-        .fold((0usize, 0.0_f64), |(mi, mv), (i, &v)| {
-            if v > mv { (i, v) } else { (mi, mv) }
-        });
+    let (peak_bin, _) =
+        norm_hist
+            .iter()
+            .enumerate()
+            .fold(
+                (0usize, 0.0_f64),
+                |(mi, mv), (i, &v)| {
+                    if v > mv {
+                        (i, v)
+                    } else {
+                        (mi, mv)
+                    }
+                },
+            );
     let dominant_angle = (peak_bin as f64 + 0.5) * bin_width - PI / 2.0;
 
     // Coherence: circular variance proxy (1 - entropy-like spread)
@@ -477,8 +486,7 @@ fn compute_balance(y_plane: &[u8], width: usize, height: usize) -> BalanceResult
     let mid_y = height / 2;
 
     // Visual weight = luminance contrast above global mean
-    let mean_luma =
-        y_plane.iter().map(|&v| f64::from(v)).sum::<f64>() / (width * height) as f64;
+    let mean_luma = y_plane.iter().map(|&v| f64::from(v)).sum::<f64>() / (width * height) as f64;
 
     let mut left = 0.0_f64;
     let mut right = 0.0_f64;
@@ -488,8 +496,16 @@ fn compute_balance(y_plane: &[u8], width: usize, height: usize) -> BalanceResult
     for py in 0..height {
         for px in 0..width {
             let weight = (f64::from(y_plane[py * width + px]) - mean_luma).abs();
-            if px < mid_x { left += weight; } else { right += weight; }
-            if py < mid_y { top += weight; } else { bottom += weight; }
+            if px < mid_x {
+                left += weight;
+            } else {
+                right += weight;
+            }
+            if py < mid_y {
+                top += weight;
+            } else {
+                bottom += weight;
+            }
         }
     }
 
@@ -497,9 +513,17 @@ fn compute_balance(y_plane: &[u8], width: usize, height: usize) -> BalanceResult
     let tb_total = top + bottom;
 
     let left_fraction = if lr_total > 0.0 { left / lr_total } else { 0.5 };
-    let right_fraction = if lr_total > 0.0 { right / lr_total } else { 0.5 };
+    let right_fraction = if lr_total > 0.0 {
+        right / lr_total
+    } else {
+        0.5
+    };
     let top_fraction = if tb_total > 0.0 { top / tb_total } else { 0.5 };
-    let bottom_fraction = if tb_total > 0.0 { bottom / tb_total } else { 0.5 };
+    let bottom_fraction = if tb_total > 0.0 {
+        bottom / tb_total
+    } else {
+        0.5
+    };
 
     // Balance score: 1 when fractions are 0.5/0.5, 0 when all energy in one half
     let lr_balance = 1.0 - (left_fraction - 0.5).abs() * 2.0;

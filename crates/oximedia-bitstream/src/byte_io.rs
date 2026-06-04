@@ -1,6 +1,11 @@
+//! Byte-level I/O trait for bitstream reading.
+
+/// Trait for types that can supply bytes for bitstream parsing.
 pub trait ByteSource: Sized {
+    /// Error type returned by read operations.
     type Error: Sized;
 
+    /// Read a single byte.
     #[inline(always)]
     fn read_byte(&mut self) -> Result<u8, Self::Error> {
         let mut byte = 0;
@@ -8,8 +13,10 @@ pub trait ByteSource: Sized {
             .map(|()| byte)
     }
 
+    /// Fill `buf` entirely from the source.
     fn read_bytes(&mut self, buf: &mut [u8]) -> Result<(), Self::Error>;
 
+    /// Discard `bytes` bytes from the source.
     fn skip_bytes(&mut self, bytes: u32) -> Result<(), Self::Error> {
         fn skip_chunks<const SIZE: usize, R>(
             reader: &mut R,

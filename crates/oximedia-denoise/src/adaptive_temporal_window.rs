@@ -208,31 +208,30 @@ impl AdaptiveTemporalWindow {
             }
         }
 
-        let analysis = if let (Some(ref prev), Some((pw, ph))) =
-            (&self.prev_luma, self.prev_dimensions)
-        {
-            if pw == w && ph == h {
-                self.compute_motion(&current_luma, prev, w, h)
-            } else {
-                // Dimension change = scene cut
-                MotionAnalysis {
-                    avg_sad: self.config.scene_cut_threshold + 1.0,
-                    max_block_sad: self.config.scene_cut_threshold + 1.0,
-                    level: MotionLevel::SceneCut,
-                    recommended_window: self.config.min_window,
-                    motion_coverage: 1.0,
+        let analysis =
+            if let (Some(ref prev), Some((pw, ph))) = (&self.prev_luma, self.prev_dimensions) {
+                if pw == w && ph == h {
+                    self.compute_motion(&current_luma, prev, w, h)
+                } else {
+                    // Dimension change = scene cut
+                    MotionAnalysis {
+                        avg_sad: self.config.scene_cut_threshold + 1.0,
+                        max_block_sad: self.config.scene_cut_threshold + 1.0,
+                        level: MotionLevel::SceneCut,
+                        recommended_window: self.config.min_window,
+                        motion_coverage: 1.0,
+                    }
                 }
-            }
-        } else {
-            // First frame: assume static
-            MotionAnalysis {
-                avg_sad: 0.0,
-                max_block_sad: 0.0,
-                level: MotionLevel::Static,
-                recommended_window: self.config.max_window,
-                motion_coverage: 0.0,
-            }
-        };
+            } else {
+                // First frame: assume static
+                MotionAnalysis {
+                    avg_sad: 0.0,
+                    max_block_sad: 0.0,
+                    level: MotionLevel::Static,
+                    recommended_window: self.config.max_window,
+                    motion_coverage: 0.0,
+                }
+            };
 
         // Update motion history
         self.motion_history.push_back(analysis.avg_sad);
@@ -499,8 +498,7 @@ mod tests {
     #[test]
     fn test_first_frame_is_static() {
         let config = AdaptiveWindowConfig::default();
-        let mut ctrl = AdaptiveTemporalWindow::new(config)
-            .expect("controller should be valid");
+        let mut ctrl = AdaptiveTemporalWindow::new(config).expect("controller should be valid");
 
         let frame = make_test_frame(64, 64, 128);
         let analysis = ctrl.analyze_frame(&frame).expect("analysis should succeed");
@@ -512,8 +510,7 @@ mod tests {
     #[test]
     fn test_identical_frames_are_static() {
         let config = AdaptiveWindowConfig::default();
-        let mut ctrl = AdaptiveTemporalWindow::new(config)
-            .expect("controller should be valid");
+        let mut ctrl = AdaptiveTemporalWindow::new(config).expect("controller should be valid");
 
         let frame = make_test_frame(64, 64, 128);
         let _ = ctrl.analyze_frame(&frame).expect("frame 1");
@@ -526,8 +523,8 @@ mod tests {
     #[test]
     fn test_static_scene_gets_large_window() {
         let config = AdaptiveWindowConfig::default();
-        let mut ctrl = AdaptiveTemporalWindow::new(config.clone())
-            .expect("controller should be valid");
+        let mut ctrl =
+            AdaptiveTemporalWindow::new(config.clone()).expect("controller should be valid");
 
         let frame = make_test_frame(64, 64, 128);
         // Feed multiple identical frames
@@ -545,8 +542,8 @@ mod tests {
     #[test]
     fn test_high_motion_gets_small_window() {
         let config = AdaptiveWindowConfig::default();
-        let mut ctrl = AdaptiveTemporalWindow::new(config.clone())
-            .expect("controller should be valid");
+        let mut ctrl =
+            AdaptiveTemporalWindow::new(config.clone()).expect("controller should be valid");
 
         // Alternate between very different frames
         for i in 0..8 {
@@ -565,8 +562,8 @@ mod tests {
     #[test]
     fn test_scene_cut_resets_window() {
         let config = AdaptiveWindowConfig::default();
-        let mut ctrl = AdaptiveTemporalWindow::new(config.clone())
-            .expect("controller should be valid");
+        let mut ctrl =
+            AdaptiveTemporalWindow::new(config.clone()).expect("controller should be valid");
 
         // Build up to large window with static scene
         let frame_a = make_test_frame(64, 64, 128);
@@ -594,8 +591,8 @@ mod tests {
     #[test]
     fn test_moderate_motion_intermediate_window() {
         let config = AdaptiveWindowConfig::default();
-        let mut ctrl = AdaptiveTemporalWindow::new(config.clone())
-            .expect("controller should be valid");
+        let mut ctrl =
+            AdaptiveTemporalWindow::new(config.clone()).expect("controller should be valid");
 
         // Create frames with moderate motion (small gradient shift)
         for i in 0..8 {
@@ -613,8 +610,7 @@ mod tests {
     #[test]
     fn test_motion_to_window_interpolation() {
         let config = AdaptiveWindowConfig::default();
-        let ctrl = AdaptiveTemporalWindow::new(config.clone())
-            .expect("controller should be valid");
+        let ctrl = AdaptiveTemporalWindow::new(config.clone()).expect("controller should be valid");
 
         // Below static threshold -> max window
         let w_static = ctrl.motion_to_window(0.5);
@@ -633,8 +629,7 @@ mod tests {
     #[test]
     fn test_current_window_always_odd() {
         let config = AdaptiveWindowConfig::default();
-        let mut ctrl = AdaptiveTemporalWindow::new(config)
-            .expect("controller should be valid");
+        let mut ctrl = AdaptiveTemporalWindow::new(config).expect("controller should be valid");
 
         for i in 0..10 {
             let fill = (i * 30 + 20) as u8;
@@ -648,8 +643,8 @@ mod tests {
     #[test]
     fn test_reset_controller() {
         let config = AdaptiveWindowConfig::default();
-        let mut ctrl = AdaptiveTemporalWindow::new(config.clone())
-            .expect("controller should be valid");
+        let mut ctrl =
+            AdaptiveTemporalWindow::new(config.clone()).expect("controller should be valid");
 
         let frame = make_test_frame(64, 64, 128);
         for _ in 0..5 {
@@ -664,8 +659,7 @@ mod tests {
     #[test]
     fn test_smoothed_motion_empty() {
         let config = AdaptiveWindowConfig::default();
-        let ctrl = AdaptiveTemporalWindow::new(config)
-            .expect("controller should be valid");
+        let ctrl = AdaptiveTemporalWindow::new(config).expect("controller should be valid");
         assert!((ctrl.smoothed_motion() - 0.0).abs() < f32::EPSILON);
     }
 
@@ -685,8 +679,7 @@ mod tests {
     #[test]
     fn test_empty_planes_error() {
         let config = AdaptiveWindowConfig::default();
-        let mut ctrl = AdaptiveTemporalWindow::new(config)
-            .expect("controller should be valid");
+        let mut ctrl = AdaptiveTemporalWindow::new(config).expect("controller should be valid");
 
         let frame = VideoFrame::new(PixelFormat::Yuv420p, 64, 64);
         // Not allocated
@@ -697,8 +690,7 @@ mod tests {
     #[test]
     fn test_motion_coverage() {
         let config = AdaptiveWindowConfig::default();
-        let mut ctrl = AdaptiveTemporalWindow::new(config)
-            .expect("controller should be valid");
+        let mut ctrl = AdaptiveTemporalWindow::new(config).expect("controller should be valid");
 
         // Two identical frames -> zero coverage
         let frame = make_test_frame(64, 64, 128);

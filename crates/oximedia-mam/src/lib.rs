@@ -34,8 +34,12 @@ pub mod api;
 /// Cold/glacier storage tier management with automatic demotion policies.
 pub mod archive_tier;
 pub mod asset;
+/// Asset LRU/LFU cache with TTL eviction for frequently accessed media.
+pub mod asset_cache;
 pub mod asset_collection;
 pub mod asset_lifecycle;
+/// Quality-control pass definitions and per-asset QC state tracking.
+pub mod asset_qc;
 /// Asset relationship graph for tracking connections between media assets.
 pub mod asset_relations;
 /// Structured asset search engine with field-level filtering.
@@ -47,10 +51,16 @@ pub mod asset_tag;
 pub mod asset_tag_index;
 /// Automatic and manual asset tagging with taxonomy support.
 pub mod asset_tagging;
+/// Version history snapshots, diff generation, and restore for media assets.
+pub mod asset_versioning;
 pub mod audit;
 pub mod batch_ingest;
+/// Bulk metadata updates across multiple assets in a single transactional pass.
+pub mod batch_metadata;
 /// Bulk operations on media assets with progress tracking.
 pub mod bulk_operation;
+/// Atomic bulk field-update engine with undo log support.
+pub mod bulk_update;
 /// Catalog search filters, entries, searcher, and result sets.
 pub mod catalog_search;
 /// Real-time comments, annotations, and review markers on assets.
@@ -72,34 +82,52 @@ pub mod federated_search;
 /// Hierarchical folder tree for organising media assets.
 pub mod folder_hierarchy;
 pub mod folders;
+/// Incremental search-index rebuilds for large asset catalogues.
+pub mod incremental_index;
 pub mod ingest;
 pub mod ingest_pipeline;
 pub mod ingest_workflow;
 pub mod integration;
+/// Materialised-path adjacency table for efficient hierarchical queries.
+pub mod materialized_path;
 pub mod media_catalog;
 /// Media format family classification and format information registry.
 pub mod media_format_info;
 pub mod media_linking;
 /// Media project lifecycle management with status tracking.
 pub mod media_project;
+/// Broadcast rights clearance workflow with territory and window tracking.
+pub mod media_rights_clearance;
+/// Metadata schema definitions, field types, and validation rules.
+pub mod metadata_schema;
 /// Metadata template definitions and template library.
 pub mod metadata_template;
-/// Email/Slack/Teams notifications for asset and workflow events.
 pub mod notification;
 pub mod permissions;
+/// Database connection-pool sizing and tuning heuristics.
+pub mod pool_tuning;
 pub mod proxy;
+/// Email/Slack/Teams notifications for asset and workflow events.
+/// Asset connection graph: typed relationships between media assets.
+pub mod relationship;
 /// Scheduled report generation (storage usage, asset stats, etc.).
 pub mod reporting;
 /// Data retention policy engine for automated asset lifecycle management.
 pub mod retention_policy;
+/// Rights relationship links: connect assets to rights records.
+pub mod rights_link;
 /// Rights coverage summary and builder for asset rights tracking.
 pub mod rights_summary;
 pub mod search;
 pub mod search_index;
+/// Search-index pre-warming strategies and scheduled warming jobs.
+pub mod search_warming;
 /// Enhanced search with BM25-inspired scoring, faceted filtering, and Jaccard similarity.
 pub mod smart_search;
 pub mod storage;
 pub mod tags;
+/// SMPTE and custom timeline markers for editorial annotations.
+pub mod timeline_marker;
 pub mod transcoding_profile;
 /// File transfer job manager with status tracking and retry support.
 pub mod transfer_manager;
@@ -107,10 +135,14 @@ pub mod transfer_manager;
 pub mod trash_bin;
 /// Asset usage analytics and access pattern tracking.
 pub mod usage_analytics;
+/// Semantic versioning comparisons and range resolution for asset versions.
+pub mod version_compare;
 pub mod version_control;
 pub mod versioning;
 pub mod webhook;
 pub mod workflow;
+/// Workflow approval steps, approver sets, and escalation rules.
+pub mod workflow_approval;
 pub mod workflow_integration;
 /// Event-driven trigger rules that fire workflow actions on asset events.
 pub mod workflow_trigger;

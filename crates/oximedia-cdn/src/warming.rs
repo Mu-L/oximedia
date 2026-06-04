@@ -1,10 +1,10 @@
 //! Cache warming — pre-fetching popular content to edges before demand arrives.
 //!
-//! [`CacheWarmer`] maintains a priority queue of URLs to warm and allows
+//! `CacheWarmer` maintains a priority queue of URLs to warm and allows
 //! callers to schedule and dequeue them in priority order.
 
-use std::collections::BinaryHeap;
 use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 
 // ── WarmEntry ──────────────────────────────────────────────────────────────
 

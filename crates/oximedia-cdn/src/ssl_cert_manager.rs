@@ -2,7 +2,7 @@
 //!
 //! # Overview
 //!
-//! [`SslCertManager`] maintains a registry of [`CertRecord`]s, one per edge
+//! `SslCertManager` maintains a registry of `CertRecord`s, one per edge
 //! node.  Each record stores the certificate's not-before/not-after window,
 //! the associated domain names, and metadata (issuer, serial number,
 //! fingerprint).  The manager can:
@@ -15,7 +15,7 @@
 //! # Design
 //!
 //! No external X.509 parser is used.  Callers supply pre-parsed certificate
-//! metadata when calling [`SslCertManager::register`].  The manager's job is
+//! metadata when calling `SslCertManager::register`.  The manager's job is
 //! purely to track and report on expiration state.
 //!
 //! Thread-safety is provided by an `RwLock`-protected `HashMap` so reads

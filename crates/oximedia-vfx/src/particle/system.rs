@@ -646,6 +646,125 @@ impl ParticleEmitter {
         p.angular_velocity = n2 * std::f32::consts::PI;
         p
     }
+
+    /// Apply pairwise repulsion interactions between all live particles using
+    /// a spatial hash grid for O(n) average performance (Teschner et al. 2003).
+    ///
+    /// Particles within `interaction_radius` of each other receive equal and
+    /// opposite impulses proportional to how much they overlap:
+    /// `force = overlap_fraction * repulsion_strength`.
+    ///
+    /// `interaction_radius` — distance threshold in pixels.
+    /// `repulsion_strength` — velocity impulse magnitude per unit overlap.
+    pub fn apply_interactions(&mut self, interaction_radius: f32, repulsion_strength: f32) {
+        if self.particles.len() < 2 || interaction_radius <= 0.0 {
+            return;
+        }
+
+        let positions: Vec<(f32, f32)> = self
+            .particles
+            .iter()
+            .map(|p| (p.position.x, p.position.y))
+            .collect();
+
+        let mut grid = SpatialHashGrid::new(interaction_radius, positions.len());
+        grid.rebuild(&positions);
+
+        // Collect impulses separately to avoid borrowing conflicts
+        let n = positions.len();
+        let mut impulses: Vec<Vec2> = vec![Vec2::zero(); n];
+
+        for i in 0..n {
+            for j in grid.neighbors(positions[i].0, positions[i].1) {
+                let j = j as usize;
+                if j <= i {
+                    continue; // avoid double-counting
+                }
+                let dx = positions[j].0 - positions[i].0;
+                let dy = positions[j].1 - positions[i].1;
+                let dist = (dx * dx + dy * dy).sqrt();
+                if dist >= interaction_radius || dist < 1e-6 {
+                    continue;
+                }
+                let overlap = 1.0 - dist / interaction_radius;
+                let force = overlap * repulsion_strength;
+                let nx = dx / dist;
+                let ny = dy / dist;
+                impulses[i] = Vec2::new(impulses[i].x - nx * force, impulses[i].y - ny * force);
+                impulses[j] = Vec2::new(impulses[j].x + nx * force, impulses[j].y + ny * force);
+            }
+        }
+
+        for (p, imp) in self.particles.iter_mut().zip(impulses.iter()) {
+            p.velocity = p.velocity.add(*imp);
+        }
+    }
+}
+
+// ── SpatialHashGrid ────────────────────────────────────────────────────────────
+
+/// Uniform spatial hash grid for O(1) amortised neighbour queries.
+///
+/// Uses the spatial hashing scheme of Teschner et al. (2003):
+/// each particle is placed in the bucket `hash(cell_ix, cell_iy)`.
+/// Neighbour queries probe all 9 surrounding cells.
+pub struct SpatialHashGrid {
+    cell_size: f32,
+    inv_cell: f32,
+    buckets: Vec<Vec<u32>>,
+    table_mask: usize,
+}
+
+impl SpatialHashGrid {
+    /// Create a new hash grid.
+    ///
+    /// `interaction_radius` — cell size is set to `2 * interaction_radius`.
+    /// `capacity` — expected particle count (tunes hash-table size).
+    #[must_use]
+    pub fn new(interaction_radius: f32, capacity: usize) -> Self {
+        let cell_size = (2.0 * interaction_radius).max(1e-6);
+        let table_size = (capacity * 4).next_power_of_two().max(64);
+        Self {
+            cell_size,
+            inv_cell: 1.0 / cell_size,
+            buckets: vec![Vec::new(); table_size],
+            table_mask: table_size - 1,
+        }
+    }
+
+    /// Rebuild the grid from the given particle positions.  O(n).
+    pub fn rebuild(&mut self, positions: &[(f32, f32)]) {
+        for b in &mut self.buckets {
+            b.clear();
+        }
+        for (i, &(x, y)) in positions.iter().enumerate() {
+            let h = self.hash(x, y);
+            self.buckets[h].push(i as u32);
+        }
+    }
+
+    /// Iterate over particle indices in the 9 cells surrounding `(x, y)`.
+    pub fn neighbors(&self, x: f32, y: f32) -> impl Iterator<Item = u32> + '_ {
+        let cx = (x * self.inv_cell).floor() as i64;
+        let cy = (y * self.inv_cell).floor() as i64;
+        (-1i64..=1).flat_map(move |dx| {
+            (-1i64..=1).flat_map(move |dy| {
+                let h = self.hash_ij(cx + dx, cy + dy);
+                self.buckets[h].iter().copied()
+            })
+        })
+    }
+
+    fn hash(&self, x: f32, y: f32) -> usize {
+        let ix = (x * self.inv_cell).floor() as i64;
+        let iy = (y * self.inv_cell).floor() as i64;
+        self.hash_ij(ix, iy)
+    }
+
+    fn hash_ij(&self, ix: i64, iy: i64) -> usize {
+        let h = (ix.wrapping_mul(73_856_093) ^ iy.wrapping_mul(19_349_663)) as usize;
+        h & self.table_mask
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -790,6 +909,158 @@ mod tests {
             emitter.live_count() > before,
             "burst should increase live_count, before={before} after={}",
             emitter.live_count()
+        );
+    }
+
+    // ── SpatialHashGrid ────────────────────────────────────────────────────────
+
+    /// Brute-force pair collector: returns all (i, j) pairs where i < j and
+    /// distance(positions[i], positions[j]) < `radius`.
+    fn brute_pairs(positions: &[(f32, f32)], radius: f32) -> Vec<(usize, usize)> {
+        let mut pairs = Vec::new();
+        for i in 0..positions.len() {
+            for j in (i + 1)..positions.len() {
+                let dx = positions[i].0 - positions[j].0;
+                let dy = positions[i].1 - positions[j].1;
+                if (dx * dx + dy * dy).sqrt() < radius {
+                    pairs.push((i, j));
+                }
+            }
+        }
+        pairs.sort_unstable();
+        pairs
+    }
+
+    /// Grid-based pair collector: for each particle, ask neighbors, keep (i, j) with i < j.
+    fn grid_pairs(positions: &[(f32, f32)], radius: f32) -> Vec<(usize, usize)> {
+        let mut grid = SpatialHashGrid::new(radius, positions.len());
+        grid.rebuild(positions);
+        let mut pairs = std::collections::HashSet::new();
+        for i in 0..positions.len() {
+            for j in grid.neighbors(positions[i].0, positions[i].1) {
+                let j = j as usize;
+                if j == i {
+                    continue;
+                }
+                let (a, b) = if i < j { (i, j) } else { (j, i) };
+                let dx = positions[a].0 - positions[b].0;
+                let dy = positions[a].1 - positions[b].1;
+                if (dx * dx + dy * dy).sqrt() < radius {
+                    pairs.insert((a, b));
+                }
+            }
+        }
+        let mut result: Vec<(usize, usize)> = pairs.into_iter().collect();
+        result.sort_unstable();
+        result
+    }
+
+    #[test]
+    fn test_spatial_grid_correctness() {
+        // 100 deterministic particles in a 200×200 area, radius 20
+        let mut positions = Vec::with_capacity(100);
+        let mut seed = 0xABCD_EF12_3456_7890u64;
+        let a: u64 = 6_364_136_223_846_793_005;
+        let c: u64 = 1_442_695_040_888_963_407;
+        for _ in 0..100 {
+            seed = seed.wrapping_mul(a).wrapping_add(c);
+            let x = ((seed >> 33) as f32 / (1u64 << 31) as f32) * 200.0;
+            seed = seed.wrapping_mul(a).wrapping_add(c);
+            let y = ((seed >> 33) as f32 / (1u64 << 31) as f32) * 200.0;
+            positions.push((x, y));
+        }
+
+        let radius = 20.0f32;
+        let brute = brute_pairs(&positions, radius);
+        let grid = grid_pairs(&positions, radius);
+        assert_eq!(
+            brute, grid,
+            "grid pairs should match brute-force pairs exactly"
+        );
+    }
+
+    #[test]
+    fn test_spatial_grid_10k_particles() {
+        // Build 10,000 particles and measure rebuild+query time
+        let mut positions = Vec::with_capacity(10_000);
+        let mut seed = 0xDEAD_BEEF_1234_5678u64;
+        let a: u64 = 6_364_136_223_846_793_005;
+        let c: u64 = 1_442_695_040_888_963_407;
+        for _ in 0..10_000 {
+            seed = seed.wrapping_mul(a).wrapping_add(c);
+            let x = ((seed >> 33) as f32 / (1u64 << 31) as f32) * 1000.0;
+            seed = seed.wrapping_mul(a).wrapping_add(c);
+            let y = ((seed >> 33) as f32 / (1u64 << 31) as f32) * 1000.0;
+            positions.push((x, y));
+        }
+
+        let start = std::time::Instant::now();
+        let mut grid = SpatialHashGrid::new(10.0, positions.len());
+        grid.rebuild(&positions);
+        let mut total_neighbors = 0usize;
+        for i in 0..positions.len() {
+            for _j in grid.neighbors(positions[i].0, positions[i].1) {
+                total_neighbors += 1;
+            }
+        }
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed.as_millis() < 1000,
+            "10k particle rebuild+query should complete in < 1000ms, took {}ms (found {} neighbor refs)",
+            elapsed.as_millis(),
+            total_neighbors
+        );
+    }
+
+    #[test]
+    fn test_particle_system_interactions_correct() {
+        // 20 particles tightly clustered, apply_interactions should change velocities
+        let mut cfg = EmitterConfig::sparkle(Vec2::new(50.0, 50.0));
+        cfg.max_particles = 100;
+        cfg.emission_rate = 0.0;
+        let mut emitter = ParticleEmitter::new(cfg);
+
+        // Manually place 20 particles within a 30px radius
+        let mut seed = 0x1234_5678_9ABC_DEF0u64;
+        let a: u64 = 6_364_136_223_846_793_005;
+        let c: u64 = 1_442_695_040_888_963_407;
+        for _ in 0..20 {
+            seed = seed.wrapping_mul(a).wrapping_add(c);
+            let x = 50.0 + ((seed >> 33) as f32 / (1u64 << 31) as f32) * 20.0 - 10.0;
+            seed = seed.wrapping_mul(a).wrapping_add(c);
+            let y = 50.0 + ((seed >> 33) as f32 / (1u64 << 31) as f32) * 20.0 - 10.0;
+            let mut p = Particle::new(Vec2::new(x, y), Vec2::zero(), 10.0);
+            p.velocity = Vec2::zero();
+            emitter.particles.push(p);
+        }
+
+        let vel_before: Vec<Vec2> = emitter.particles.iter().map(|p| p.velocity).collect();
+
+        // Apply grid-based interactions
+        emitter.apply_interactions(15.0, 1.0);
+
+        // At least one particle should have changed velocity (they're clustered)
+        let changed = emitter
+            .particles
+            .iter()
+            .zip(vel_before.iter())
+            .any(|(p, v)| (p.velocity.x - v.x).abs() > 1e-6 || (p.velocity.y - v.y).abs() > 1e-6);
+        assert!(
+            changed,
+            "apply_interactions should change at least one particle's velocity"
+        );
+
+        // Total momentum impulse should be near zero (action-reaction)
+        let total_vx: f32 = emitter.particles.iter().map(|p| p.velocity.x).sum();
+        let total_vy: f32 = emitter.particles.iter().map(|p| p.velocity.y).sum();
+        assert!(
+            total_vx.abs() < 1e-3,
+            "net x impulse should cancel out, got {total_vx}"
+        );
+        assert!(
+            total_vy.abs() < 1e-3,
+            "net y impulse should cancel out, got {total_vy}"
         );
     }
 }

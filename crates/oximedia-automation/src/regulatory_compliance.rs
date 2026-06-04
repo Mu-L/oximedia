@@ -138,7 +138,9 @@ pub struct ComplianceDirective {
 impl ComplianceDirective {
     /// Returns `true` if `BlockContent` is in the actions list.
     pub fn is_blocked(&self) -> bool {
-        self.actions.iter().any(|a| *a == ComplianceAction::BlockContent)
+        self.actions
+            .iter()
+            .any(|a| *a == ComplianceAction::BlockContent)
     }
 }
 
@@ -167,99 +169,142 @@ impl ComplianceEngine {
 
         // ── US TV Parental Guidelines ─────────────────────────────────────────
         engine.register_rule(ComplianceRule::new(
-            "US", "TV-Y",
+            "US",
+            "TV-Y",
             vec![ComplianceAction::InsertRatingBug { interval_secs: 0 }],
         ));
         engine.register_rule(ComplianceRule::new(
-            "US", "TV-G",
+            "US",
+            "TV-G",
             vec![ComplianceAction::InsertRatingBug { interval_secs: 0 }],
         ));
         engine.register_rule(ComplianceRule::new(
-            "US", "TV-PG",
+            "US",
+            "TV-PG",
             vec![
                 ComplianceAction::InsertRatingBug { interval_secs: 0 },
                 ComplianceAction::DisplayTextAdvisory { duration_secs: 5 },
             ],
         ));
-        engine.register_rule(ComplianceRule::new(
-            "US", "TV-14",
-            vec![
-                ComplianceAction::InsertRatingBug { interval_secs: 0 },
-                ComplianceAction::PlayVoiceAdvisory,
-                ComplianceAction::DisplayTextAdvisory { duration_secs: 5 },
-                ComplianceAction::EnforceTimeWindow { start_hour: 22, end_hour: 6 },
-            ],
-        ).with_notes("FCC Children's Television Act: restricted to late night"));
-        engine.register_rule(ComplianceRule::new(
-            "US", "TV-MA",
-            vec![
-                ComplianceAction::InsertRatingBug { interval_secs: 0 },
-                ComplianceAction::PlayVoiceAdvisory,
-                ComplianceAction::DisplayTextAdvisory { duration_secs: 8 },
-                ComplianceAction::EnforceTimeWindow { start_hour: 22, end_hour: 6 },
-            ],
-        ).with_notes("Mature content: after watershed only"));
+        engine.register_rule(
+            ComplianceRule::new(
+                "US",
+                "TV-14",
+                vec![
+                    ComplianceAction::InsertRatingBug { interval_secs: 0 },
+                    ComplianceAction::PlayVoiceAdvisory,
+                    ComplianceAction::DisplayTextAdvisory { duration_secs: 5 },
+                    ComplianceAction::EnforceTimeWindow {
+                        start_hour: 22,
+                        end_hour: 6,
+                    },
+                ],
+            )
+            .with_notes("FCC Children's Television Act: restricted to late night"),
+        );
+        engine.register_rule(
+            ComplianceRule::new(
+                "US",
+                "TV-MA",
+                vec![
+                    ComplianceAction::InsertRatingBug { interval_secs: 0 },
+                    ComplianceAction::PlayVoiceAdvisory,
+                    ComplianceAction::DisplayTextAdvisory { duration_secs: 8 },
+                    ComplianceAction::EnforceTimeWindow {
+                        start_hour: 22,
+                        end_hour: 6,
+                    },
+                ],
+            )
+            .with_notes("Mature content: after watershed only"),
+        );
 
         // ── UK Ofcom watershed ────────────────────────────────────────────────
         engine.register_rule(ComplianceRule::new(
-            "GB", "PG",
+            "GB",
+            "PG",
             vec![ComplianceAction::InsertRatingBug { interval_secs: 0 }],
         ));
         engine.register_rule(ComplianceRule::new(
-            "GB", "12",
+            "GB",
+            "12",
             vec![
                 ComplianceAction::InsertRatingBug { interval_secs: 0 },
-                ComplianceAction::EnforceTimeWindow { start_hour: 20, end_hour: 6 },
+                ComplianceAction::EnforceTimeWindow {
+                    start_hour: 20,
+                    end_hour: 6,
+                },
             ],
         ));
+        engine.register_rule(
+            ComplianceRule::new(
+                "GB",
+                "15",
+                vec![
+                    ComplianceAction::InsertRatingBug { interval_secs: 0 },
+                    ComplianceAction::EnforceTimeWindow {
+                        start_hour: 21,
+                        end_hour: 5,
+                    },
+                ],
+            )
+            .with_notes("Ofcom Broadcasting Code Section 1.4 watershed"),
+        );
         engine.register_rule(ComplianceRule::new(
-            "GB", "15",
-            vec![
-                ComplianceAction::InsertRatingBug { interval_secs: 0 },
-                ComplianceAction::EnforceTimeWindow { start_hour: 21, end_hour: 5 },
-            ],
-        ).with_notes("Ofcom Broadcasting Code Section 1.4 watershed"));
-        engine.register_rule(ComplianceRule::new(
-            "GB", "18",
+            "GB",
+            "18",
             vec![
                 ComplianceAction::InsertRatingBug { interval_secs: 0 },
                 ComplianceAction::PlayVoiceAdvisory,
-                ComplianceAction::EnforceTimeWindow { start_hour: 22, end_hour: 5 },
+                ComplianceAction::EnforceTimeWindow {
+                    start_hour: 22,
+                    end_hour: 5,
+                },
             ],
         ));
 
         // ── Australia ─────────────────────────────────────────────────────────
         engine.register_rule(ComplianceRule::new(
-            "AU", "G",
+            "AU",
+            "G",
             vec![ComplianceAction::InsertRatingBug { interval_secs: 0 }],
         ));
         engine.register_rule(ComplianceRule::new(
-            "AU", "PG",
+            "AU",
+            "PG",
             vec![
                 ComplianceAction::InsertRatingBug { interval_secs: 0 },
                 ComplianceAction::DisplayTextAdvisory { duration_secs: 5 },
             ],
         ));
         engine.register_rule(ComplianceRule::new(
-            "AU", "M",
+            "AU",
+            "M",
             vec![
                 ComplianceAction::InsertRatingBug { interval_secs: 0 },
                 ComplianceAction::DisplayTextAdvisory { duration_secs: 5 },
-                ComplianceAction::EnforceTimeWindow { start_hour: 20, end_hour: 6 },
+                ComplianceAction::EnforceTimeWindow {
+                    start_hour: 20,
+                    end_hour: 6,
+                },
             ],
         ));
         engine.register_rule(ComplianceRule::new(
-            "AU", "MA15+",
+            "AU",
+            "MA15+",
             vec![
                 ComplianceAction::InsertRatingBug { interval_secs: 0 },
                 ComplianceAction::PlayVoiceAdvisory,
-                ComplianceAction::EnforceTimeWindow { start_hour: 21, end_hour: 5 },
+                ComplianceAction::EnforceTimeWindow {
+                    start_hour: 21,
+                    end_hour: 5,
+                },
             ],
         ));
-        engine.register_rule(ComplianceRule::new(
-            "AU", "R18+",
-            vec![ComplianceAction::BlockContent],
-        ).with_notes("R18+ content is not permitted on free-to-air broadcast television"));
+        engine.register_rule(
+            ComplianceRule::new("AU", "R18+", vec![ComplianceAction::BlockContent])
+                .with_notes("R18+ content is not permitted on free-to-air broadcast television"),
+        );
 
         engine
     }
@@ -270,7 +315,9 @@ impl ComplianceEngine {
     pub fn register_rule(&mut self, rule: ComplianceRule) {
         info!(
             "Compliance rule registered: {}/{} → {} actions",
-            rule.jurisdiction, rule.rating, rule.actions.len()
+            rule.jurisdiction,
+            rule.rating,
+            rule.actions.len()
         );
         let key = (rule.jurisdiction.clone(), rule.rating.clone());
         self.rules.insert(key, rule);
@@ -320,10 +367,7 @@ impl ComplianceEngine {
     /// Evaluate for a list of jurisdictions, returning one directive per
     /// matching rule.  Useful for syndicated content that airs in multiple
     /// territories.
-    pub fn evaluate_multi(
-        &self,
-        ratings: &[ContentRating],
-    ) -> Vec<ComplianceDirective> {
+    pub fn evaluate_multi(&self, ratings: &[ContentRating]) -> Vec<ComplianceDirective> {
         ratings.iter().map(|r| self.evaluate(r)).collect()
     }
 }
@@ -373,7 +417,8 @@ mod tests {
     fn test_register_custom_rule() {
         let mut engine = ComplianceEngine::new();
         engine.register_rule(ComplianceRule::new(
-            "XX", "ADULT",
+            "XX",
+            "ADULT",
             vec![ComplianceAction::BlockContent],
         ));
         let rating = ContentRating::new("XX", "ADULT", vec![]);

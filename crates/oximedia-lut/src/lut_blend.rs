@@ -118,13 +118,17 @@ fn blend_hue_preserving(a: &Rgb, b: &Rgb, t: f64) -> Rgb {
     let chroma_a = [a[0] - intensity_a, a[1] - intensity_a, a[2] - intensity_a];
     let chroma_b = [b[0] - intensity_b, b[1] - intensity_b, b[2] - intensity_b];
 
-    let mag_a = (chroma_a[0] * chroma_a[0] + chroma_a[1] * chroma_a[1] + chroma_a[2] * chroma_a[2]).sqrt();
-    let mag_b = (chroma_b[0] * chroma_b[0] + chroma_b[1] * chroma_b[1] + chroma_b[2] * chroma_b[2]).sqrt();
+    let mag_a =
+        (chroma_a[0] * chroma_a[0] + chroma_a[1] * chroma_a[1] + chroma_a[2] * chroma_a[2]).sqrt();
+    let mag_b =
+        (chroma_b[0] * chroma_b[0] + chroma_b[1] * chroma_b[1] + chroma_b[2] * chroma_b[2]).sqrt();
     let mag_blend = mag_a * (1.0 - t) + mag_b * t;
 
     // Blend chroma direction via SLERP-like approach (simplified as NLERP)
     let dir_blend = blend_linear(&chroma_a, &chroma_b, t);
-    let dir_mag = (dir_blend[0] * dir_blend[0] + dir_blend[1] * dir_blend[1] + dir_blend[2] * dir_blend[2]).sqrt();
+    let dir_mag =
+        (dir_blend[0] * dir_blend[0] + dir_blend[1] * dir_blend[1] + dir_blend[2] * dir_blend[2])
+            .sqrt();
 
     if dir_mag < 1e-10 {
         return [intensity_blend; 3];
@@ -324,11 +328,7 @@ impl BlendMask {
 /// # Errors
 ///
 /// Returns `LutError::InvalidData` if LUTs/weights are empty or sizes differ.
-pub fn blend_multi_lut3d(
-    luts: &[&[Rgb]],
-    weights: &[f64],
-    size: usize,
-) -> LutResult<Vec<Rgb>> {
+pub fn blend_multi_lut3d(luts: &[&[Rgb]], weights: &[f64], size: usize) -> LutResult<Vec<Rgb>> {
     if luts.is_empty() || weights.is_empty() || luts.len() != weights.len() {
         return Err(LutError::InvalidData(
             "LUTs and weights must be non-empty and same length".to_string(),
@@ -484,8 +484,8 @@ mod tests {
             .collect();
         let curve_b: Vec<[f64; 3]> = vec![[0.5, 0.5, 0.5]; 10];
 
-        let blended = blend_curve(&curve_a, &curve_b, 0.5, BlendMode::Linear)
-            .expect("blend should succeed");
+        let blended =
+            blend_curve(&curve_a, &curve_b, 0.5, BlendMode::Linear).expect("blend should succeed");
         assert_eq!(blended.len(), 10);
     }
 
@@ -538,8 +538,7 @@ mod tests {
     fn test_blend_multi_lut3d_single() {
         let size = 3;
         let lut = identity_lut3d(size);
-        let result = blend_multi_lut3d(&[&lut], &[1.0], size)
-            .expect("blend should succeed");
+        let result = blend_multi_lut3d(&[&lut], &[1.0], size).expect("blend should succeed");
         assert!(rgb_close(&result[0], &lut[0], 1e-10));
     }
 
@@ -548,8 +547,8 @@ mod tests {
         let size = 3;
         let lut_a = constant_lut3d(size, 0.0);
         let lut_b = constant_lut3d(size, 1.0);
-        let result = blend_multi_lut3d(&[&lut_a, &lut_b], &[1.0, 1.0], size)
-            .expect("blend should succeed");
+        let result =
+            blend_multi_lut3d(&[&lut_a, &lut_b], &[1.0, 1.0], size).expect("blend should succeed");
         // Should be 0.5
         assert!(rgb_close(&result[0], &[0.5, 0.5, 0.5], 1e-10));
     }
@@ -575,8 +574,7 @@ mod tests {
         let b = constant_lut3d(size, 0.5);
         let c = constant_lut3d(size, 1.0);
         let result =
-            blend_multi_lut3d(&[&a, &b, &c], &[1.0, 2.0, 1.0], size)
-                .expect("blend should succeed");
+            blend_multi_lut3d(&[&a, &b, &c], &[1.0, 2.0, 1.0], size).expect("blend should succeed");
         // Weighted average: (0*1 + 0.5*2 + 1*1) / 4 = 2.0/4 = 0.5
         assert!(rgb_close(&result[0], &[0.5, 0.5, 0.5], 1e-10));
     }

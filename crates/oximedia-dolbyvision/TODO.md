@@ -30,8 +30,8 @@
 
 ## Performance
 - [x] Optimize `tonemap.rs` PQ/HLG transfer functions with lookup tables (verified 2026-05-16; src/tonemap.rs:41 pq_to_linear, ReshapingLut:236, ColorVolumeLut:299 3D-LUT trilinear)
-- [ ] Add SIMD-accelerated `ipt_pq.rs` color space conversion (verified-open 2026-05-16: ipt_pq.rs has 439 lines but no SIMD intrinsics)
-- [ ] Cache parsed RPU structures in `parser.rs` to avoid re-parsing identical NAL units (verified-open 2026-05-16: not yet implemented)
+- [x] Add SIMD-accelerated `ipt_pq.rs` color space conversion (done — ipt_pq_batch_simd at src/ipt_pq_simd.rs:71, registered lib.rs:38)
+- [x] Cache parsed RPU structures in `parser.rs` to avoid re-parsing identical NAL units (done — RPU_CACHE + parse_nal_unit_cached at src/parser.rs:11-65)
 - [x] Optimize `mapping_curve.rs` polynomial evaluation with Horner's method
 - [x] Pre-compute `BilateralGrid` and `ColorVolumeLut` for repeated tone mapping operations (verified 2026-05-16; src/tonemap.rs:667 struct BilateralGrid, :299 ColorVolumeLut with precomputed 3D LUT)
 
@@ -47,3 +47,6 @@
 - [ ] Document the RPU binary format structure in `parser.rs` and `writer.rs`
 - [ ] Add metadata level reference table documenting each level's purpose and fields
 - [ ] Document tone mapping pipeline flow from RPU metadata to display output
+
+## 0.1.8 Wave 6 — 2026-05-29
+- [x] Register 25 orphan modules in lib.rs + dv_xml_export cfix (verified 2026-05-29; 25 orphans wired, 24 smoke tests, 0 warnings)

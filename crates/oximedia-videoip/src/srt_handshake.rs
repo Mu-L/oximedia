@@ -298,7 +298,9 @@ impl HsreqBlock {
     pub fn new(recv_latency_ms: u16, snd_latency_ms: u16) -> Self {
         Self {
             srt_version: SRT_VERSION_1_4,
-            srt_flags: SrtFlags::new(SrtFlags::TSBPD_SND | SrtFlags::TSBPD_RCV | SrtFlags::NAK_REPORT),
+            srt_flags: SrtFlags::new(
+                SrtFlags::TSBPD_SND | SrtFlags::TSBPD_RCV | SrtFlags::NAK_REPORT,
+            ),
             recv_tsbpd_delay_ms: recv_latency_ms,
             snd_tsbpd_delay_ms: snd_latency_ms,
         }
@@ -363,16 +365,18 @@ impl HsrspBlock {
     ) -> Self {
         // Negotiated latency = max of what either side needs.
         let recv = caller_req.recv_tsbpd_delay_ms.max(listener_recv_latency_ms);
-        let snd  = caller_req.snd_tsbpd_delay_ms.max(listener_snd_latency_ms);
+        let snd = caller_req.snd_tsbpd_delay_ms.max(listener_snd_latency_ms);
 
         // Negotiate version: pick minimum supported.
         let version = listener_version.min(caller_req.srt_version);
 
         // Intersect flags: only enable features both sides support.
-        let flags = SrtFlags::new(caller_req.srt_flags.bits() & {
-            // Listener always supports the baseline flags in this model.
-            SrtFlags::TSBPD_SND | SrtFlags::TSBPD_RCV | SrtFlags::NAK_REPORT
-        });
+        let flags = SrtFlags::new(
+            caller_req.srt_flags.bits() & {
+                // Listener always supports the baseline flags in this model.
+                SrtFlags::TSBPD_SND | SrtFlags::TSBPD_RCV | SrtFlags::NAK_REPORT
+            },
+        );
 
         Self {
             srt_version: version,
@@ -646,7 +650,10 @@ impl CallerHandshake {
         response: &HandshakePacket,
     ) -> Result<HandshakePacket, String> {
         if self.phase != CallerPhase::AwaitingInduction {
-            return Err(format!("unexpected induction response in phase {:?}", self.phase));
+            return Err(format!(
+                "unexpected induction response in phase {:?}",
+                self.phase
+            ));
         }
         if response.handshake_type != HandshakeType::WaveaHand {
             return Err(format!(
@@ -701,9 +708,9 @@ impl CallerHandshake {
                 self.phase = CallerPhase::Connected;
                 Ok(None)
             }
-            other => {
-                Err(format!("unexpected handshake type in conclusion response: {other}"))
-            }
+            other => Err(format!(
+                "unexpected handshake type in conclusion response: {other}"
+            )),
         }
     }
 
@@ -756,12 +763,7 @@ pub struct ListenerHandshake {
 impl ListenerHandshake {
     /// Create a new listener handshake.
     #[must_use]
-    pub fn new(
-        socket_id: u32,
-        mss: u32,
-        recv_latency_ms: u16,
-        snd_latency_ms: u16,
-    ) -> Self {
+    pub fn new(socket_id: u32, mss: u32, recv_latency_ms: u16, snd_latency_ms: u16) -> Self {
         Self {
             socket_id,
             mss,
@@ -940,7 +942,10 @@ mod tests {
         let t = HandshakeType::Rejection(RejectionReason::Forbidden);
         let wire = t.to_wire();
         let decoded = HandshakeType::from_wire(wire).expect("should decode rejection");
-        assert_eq!(decoded, HandshakeType::Rejection(RejectionReason::Forbidden));
+        assert_eq!(
+            decoded,
+            HandshakeType::Rejection(RejectionReason::Forbidden)
+        );
     }
 
     #[test]
@@ -955,8 +960,14 @@ mod tests {
     fn test_rejection_reason_from_code() {
         assert_eq!(RejectionReason::from_code(6), RejectionReason::Passphrase);
         assert_eq!(RejectionReason::from_code(9), RejectionReason::Unauthorized);
-        assert_eq!(RejectionReason::from_code(1000), RejectionReason::ApplicationDefined);
-        assert_eq!(RejectionReason::from_code(9999), RejectionReason::ApplicationDefined);
+        assert_eq!(
+            RejectionReason::from_code(1000),
+            RejectionReason::ApplicationDefined
+        );
+        assert_eq!(
+            RejectionReason::from_code(9999),
+            RejectionReason::ApplicationDefined
+        );
     }
 
     #[test]
@@ -1056,7 +1067,8 @@ mod tests {
 
     #[test]
     fn test_induction_response_carries_cookie() {
-        let pkt = HandshakePacket::induction_response(99, 1000, 1500, 0xDEAD_BEEF, [192, 168, 1, 1]);
+        let pkt =
+            HandshakePacket::induction_response(99, 1000, 1500, 0xDEAD_BEEF, [192, 168, 1, 1]);
         assert_eq!(pkt.syn_cookie, 0xDEAD_BEEF);
         assert_eq!(pkt.peer_addr[..4], [192, 168, 1, 1]);
         assert_eq!(pkt.handshake_type, HandshakeType::WaveaHand);
@@ -1065,7 +1077,10 @@ mod tests {
     #[test]
     fn test_rejection_packet_valid_type() {
         let pkt = HandshakePacket::rejection(7, RejectionReason::Overloaded);
-        assert_eq!(pkt.handshake_type, HandshakeType::Rejection(RejectionReason::Overloaded));
+        assert_eq!(
+            pkt.handshake_type,
+            HandshakeType::Rejection(RejectionReason::Overloaded)
+        );
     }
 
     // ── Full caller/listener handshake round-trip ────────────────────────────

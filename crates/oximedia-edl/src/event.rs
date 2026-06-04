@@ -7,6 +7,7 @@ use crate::audio::AudioChannel;
 use crate::error::{EdlError, EdlResult};
 use crate::motion::MotionEffect;
 use crate::timecode::EdlTimecode;
+use smallvec::SmallVec;
 use std::fmt;
 use std::str::FromStr;
 
@@ -47,7 +48,10 @@ pub struct EdlEvent {
     pub clip_name: Option<String>,
 
     /// Additional comments.
-    pub comments: Vec<String>,
+    ///
+    /// Uses `SmallVec<[String; 2]>` to avoid heap allocation for the common
+    /// case of 0–2 comments per event.
+    pub comments: SmallVec<[String; 2]>,
 
     /// Wipe pattern (if edit_type is Wipe).
     pub wipe_pattern: Option<WipePattern>,
@@ -82,7 +86,7 @@ impl EdlEvent {
             transition_duration: None,
             motion_effect: None,
             clip_name: None,
-            comments: Vec::new(),
+            comments: SmallVec::new(),
             wipe_pattern: None,
             key_type: None,
         }
@@ -542,5 +546,60 @@ mod tests {
         assert!(!TrackType::Video.has_audio());
         assert!(TrackType::Audio(AudioChannel::A1).has_audio());
         assert!(TrackType::AudioWithVideo.has_audio());
+    }
+
+    fn make_test_event() -> EdlEvent {
+        let tc1 = EdlTimecode::new(1, 0, 0, 0, EdlFrameRate::Fps25).expect("failed to create");
+        let tc2 = EdlTimecode::new(1, 0, 10, 0, EdlFrameRate::Fps25).expect("failed to create");
+        let tc3 = EdlTimecode::new(1, 0, 20, 0, EdlFrameRate::Fps25).expect("failed to create");
+        let tc4 = EdlTimecode::new(1, 0, 30, 0, EdlFrameRate::Fps25).expect("failed to create");
+        EdlEvent::new(
+            1,
+            "R001".to_string(),
+            TrackType::Video,
+            EditType::Cut,
+            tc1,
+            tc2,
+            tc3,
+            tc4,
+        )
+    }
+
+    /// Verify that 0, 1, and 2 comments remain inline (no heap spill).
+    #[test]
+    fn test_smallvec_inline_comments() {
+        // 0 comments — new event has no comments
+        let ev0 = make_test_event();
+        assert_eq!(ev0.comments.len(), 0);
+        // SmallVec with inline capacity 2 does not allocate on the heap for <= 2 items
+        assert!(!ev0.comments.spilled());
+
+        // 1 comment
+        let mut ev1 = make_test_event();
+        ev1.add_comment("first".to_string());
+        assert_eq!(ev1.comments.len(), 1);
+        assert!(!ev1.comments.spilled());
+
+        // 2 comments — still inline
+        let mut ev2 = make_test_event();
+        ev2.add_comment("first".to_string());
+        ev2.add_comment("second".to_string());
+        assert_eq!(ev2.comments.len(), 2);
+        assert!(!ev2.comments.spilled());
+    }
+
+    /// Verify that 5+ comments spill to the heap but all values are preserved.
+    #[test]
+    fn test_smallvec_spill_comments() {
+        let mut ev = make_test_event();
+        for i in 0..5 {
+            ev.add_comment(format!("comment {i}"));
+        }
+        assert_eq!(ev.comments.len(), 5);
+        // SmallVec spills to heap once capacity > 2
+        assert!(ev.comments.spilled());
+        for i in 0..5 {
+            assert_eq!(ev.comments[i], format!("comment {i}"));
+        }
     }
 }

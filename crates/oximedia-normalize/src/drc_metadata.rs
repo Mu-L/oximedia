@@ -90,8 +90,8 @@ impl DrcProfile {
             Self::FilmStandard => 0b0000_1000, // general compression
             Self::FilmLight => 0b0000_1100,    // general + limited range
             Self::MusicStandard => 0b0000_1000,
-            Self::MusicLight => 0b0000_0100,   // limited range
-            Self::Speech => 0b0100_0000,        // speech
+            Self::MusicLight => 0b0000_0100, // limited range
+            Self::Speech => 0b0100_0000,     // speech
             Self::None | Self::Custom => 0,
         }
     }
@@ -289,9 +289,7 @@ impl DrcMetadataEncoder {
             DrcProfile::FilmLight => DrcGainConfig::film_light(),
             DrcProfile::MusicStandard => DrcGainConfig::music_standard(),
             DrcProfile::Speech => DrcGainConfig::speech(),
-            DrcProfile::MusicLight | DrcProfile::None | DrcProfile::Custom => {
-                DrcGainConfig::none()
-            }
+            DrcProfile::MusicLight | DrcProfile::None | DrcProfile::Custom => DrcGainConfig::none(),
         };
         Self { config }
     }
@@ -481,11 +479,7 @@ impl DrcMetadataBuilder {
     ///
     /// `dialnorm_lufs` — measured dialogue level used to set the AC-3
     /// `dialnorm` word for the programme (e.g. `−27.0`).
-    pub fn new(
-        heavy_profile: DrcProfile,
-        light_profile: DrcProfile,
-        dialnorm_lufs: f64,
-    ) -> Self {
+    pub fn new(heavy_profile: DrcProfile, light_profile: DrcProfile, dialnorm_lufs: f64) -> Self {
         Self {
             heavy_encoder: DrcMetadataEncoder::new(heavy_profile),
             light_encoder: DrcMetadataEncoder::new(light_profile),
@@ -541,7 +535,7 @@ pub fn encode_ac3_dynrng(gain_db: f64) -> u8 {
     let g = gain_db.clamp(-24.0, 24.0);
     // Map to integer steps of 0.25 dB, offset by 96 to make the range 0..192
     let steps = (g * 4.0).round() as i32; // steps of 0.25 dB
-    // Encode as a signed-magnitude 8-bit value: sign in bit 7, magnitude in [6:0]
+                                          // Encode as a signed-magnitude 8-bit value: sign in bit 7, magnitude in [6:0]
     let sign: u8 = if steps < 0 { 0x80 } else { 0 };
     let mag = steps.unsigned_abs().min(127) as u8;
     sign | mag
@@ -684,7 +678,10 @@ mod tests {
         let original = -6.0_f64;
         let word = encode_ac3_dynrng(original);
         let decoded = decode_ac3_dynrng(word);
-        assert!((decoded - original).abs() < 0.5, "round-trip {original}: got {decoded}");
+        assert!(
+            (decoded - original).abs() < 0.5,
+            "round-trip {original}: got {decoded}"
+        );
     }
 
     #[test]
@@ -704,7 +701,10 @@ mod tests {
         for &db in &[-6.0_f64, 0.0, 3.0] {
             let code = encode_aac_compression_value(db);
             let decoded = decode_aac_compression_value(code);
-            assert!((decoded - db).abs() < 0.5, "AAC round-trip {db}: got {decoded}");
+            assert!(
+                (decoded - db).abs() < 0.5,
+                "AAC round-trip {db}: got {decoded}"
+            );
         }
     }
 
@@ -730,8 +730,7 @@ mod tests {
 
     #[test]
     fn test_metadata_builder_sequence_increments() {
-        let mut builder =
-            DrcMetadataBuilder::new(DrcProfile::Speech, DrcProfile::None, -23.0);
+        let mut builder = DrcMetadataBuilder::new(DrcProfile::Speech, DrcProfile::None, -23.0);
         let f0 = builder.encode_block(-15.0);
         let f1 = builder.encode_block(-15.0);
         assert_eq!(f0.mpeg4_sequence_number, 0);

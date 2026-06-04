@@ -163,8 +163,7 @@ pub fn doppler_3d(
     let v_source = SoundSource::velocity_toward(source.position, listener_pos, source.velocity);
 
     // For the listener component we want the speed toward the source.
-    let v_listener =
-        SoundSource::velocity_toward(listener_pos, source.position, listener_velocity);
+    let v_listener = SoundSource::velocity_toward(listener_pos, source.position, listener_velocity);
 
     doppler_frequency(source.frequency_hz, v_source, v_listener, config)
 }
@@ -314,7 +313,10 @@ mod tests {
     fn test_doppler_listener_approaching_raises_frequency() {
         // Listener moving toward source → observed > source.
         let f = doppler_frequency(440.0, 0.0, 50.0, &cfg());
-        assert!(f > 440.0, "approaching listener must raise frequency, got {f}");
+        assert!(
+            f > 440.0,
+            "approaching listener must raise frequency, got {f}"
+        );
     }
 
     // ── SoundSource::velocity_toward ─────────────────────────────────────────

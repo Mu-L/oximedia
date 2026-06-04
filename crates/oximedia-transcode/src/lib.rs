@@ -192,6 +192,56 @@ pub mod transcode_session;
 pub mod utils;
 pub mod watch_folder;
 pub mod watermark_overlay;
+
+// ── Newly registered orphan modules ──────────────────────────────────────────
+/// Subtitle burn-in pipeline specification (style, safe area, render cues).
+pub mod burn_in_spec;
+/// Chapter-aware transcoding utilities (chapter map, trim adjustment, merge).
+pub mod chapter_transcode;
+/// Chroma subsampling selector for per-codec optimal chroma mode.
+pub mod chroma_selector;
+/// Common Media Application Format (CMAF) init- and media-segment writer.
+pub mod cmaf;
+/// Codec/container/profile compatibility matrix with constraint validation.
+pub mod codec_compat;
+/// Multi-level codec capability negotiation with fallback chains.
+pub mod codec_negotiation;
+/// Audio down-mix coefficient table for multi-channel to fewer-channel reduction.
+pub mod downmix_table;
+/// ABR encode-ladder validation against CMAF, HLS, and DASH specifications.
+pub mod encode_ladder_validator;
+/// ETA smoothing — rolling-average / exponential-decay ETA for progress reports.
+pub mod eta_smoother;
+/// Scene-aware adaptive Group-of-Pictures (GOP) size optimizer.
+pub mod gop_optimizer;
+/// HDR format enumeration (HDR10, HDR10+, HLG, Dolby Vision) and passthrough config.
+pub mod hdr_format;
+/// HDR metadata passthrough/conversion bridge across the transcode pipeline.
+pub mod hdr_metadata_bridge;
+/// Lookahead buffer for scene-adaptive CRF adjustment.
+pub mod lookahead_buffer;
+/// Large-file I/O abstraction for memory-efficient transcoding.
+pub mod mmap_io;
+/// Transcode output validation via spec-comparison with configurable tolerances.
+pub mod output_validator;
+/// Frame-level decode → filter → encode pipeline execution engine.
+pub mod pipeline_executor;
+/// TranscodeProfile import/export in a compact JSON format.
+pub mod profile_io;
+/// Exponential back-off retry scheduling for failed transcode jobs.
+pub mod retry_backoff;
+/// Dolby Atmos and spatial audio passthrough support for the transcode pipeline.
+pub mod spatial_audio_passthrough;
+/// VTT-compatible sprite sheet / thumbnail strip generator.
+pub mod thumbnail_strip;
+/// Hash-based transcode result caching with LRU/LFU eviction policy.
+pub mod transcode_cache;
+/// Enhanced transcode time and resource estimator (CPU, RAM, file size).
+pub mod transcode_estimator;
+/// Watch folder automation for auto-transcoding with debounce and profiles.
+pub mod watch_transcode;
+/// Watch folder automation — lightweight stable-file detector.
+pub mod watcher;
 pub use codec_config::{
     codec_config_from_quality, Av1Config, Av1Usage, CodecConfig, Ffv1Coder, Ffv1Config, Ffv1Level,
     FlacConfig, H264Config, H264Profile, JxlConfig, JxlEffort, OpusApplication, OpusConfig,

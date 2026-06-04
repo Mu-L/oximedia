@@ -234,8 +234,7 @@ impl KeySchedule {
         let mut out = Vec::with_capacity(data.len());
         let mut counter_block = *nonce;
         // Extract big-endian 32-bit counter from last 4 bytes.
-        let mut counter =
-            u32::from_be_bytes([nonce[12], nonce[13], nonce[14], nonce[15]]);
+        let mut counter = u32::from_be_bytes([nonce[12], nonce[13], nonce[14], nonce[15]]);
 
         let mut offset = 0usize;
         while offset < data.len() {
@@ -263,12 +262,7 @@ impl KeySchedule {
 
         // Load the original key into the first Nk words.
         for i in 0..nk {
-            w[i] = u32::from_be_bytes([
-                key[4 * i],
-                key[4 * i + 1],
-                key[4 * i + 2],
-                key[4 * i + 3],
-            ]);
+            w[i] = u32::from_be_bytes([key[4 * i], key[4 * i + 1], key[4 * i + 2], key[4 * i + 3]]);
         }
 
         // Expand.
@@ -338,7 +332,7 @@ fn shift_rows(state: &mut [[u8; 4]; 4]) {
     // Re-order: after state.swap(0,2) the columns are exchanged, but
     // we only need rows 2 and 3.
     state.swap(0, 2); // undo column swap
-    // Correct approach — swap within row 2:
+                      // Correct approach — swap within row 2:
     let t0 = state[0][2];
     let t1 = state[1][2];
     state[0][2] = state[2][2];
@@ -569,30 +563,28 @@ mod tests {
 
     /// FIPS-197 Appendix B — known AES-128 test vector.
     const FIPS_KEY: [u8; 16] = [
-        0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
-        0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c,
+        0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f,
+        0x3c,
     ];
     const FIPS_PLAINTEXT: [u8; 16] = [
-        0x32, 0x43, 0xf6, 0xa8, 0x88, 0x5a, 0x30, 0x8d,
-        0x31, 0x31, 0x98, 0xa2, 0xe0, 0x37, 0x07, 0x34,
+        0x32, 0x43, 0xf6, 0xa8, 0x88, 0x5a, 0x30, 0x8d, 0x31, 0x31, 0x98, 0xa2, 0xe0, 0x37, 0x07,
+        0x34,
     ];
     const FIPS_CIPHERTEXT: [u8; 16] = [
-        0x39, 0x25, 0x84, 0x1d, 0x02, 0xdc, 0x09, 0xfb,
-        0xdc, 0x11, 0x85, 0x97, 0x19, 0x6a, 0x0b, 0x32,
+        0x39, 0x25, 0x84, 0x1d, 0x02, 0xdc, 0x09, 0xfb, 0xdc, 0x11, 0x85, 0x97, 0x19, 0x6a, 0x0b,
+        0x32,
     ];
 
     #[test]
     fn test_aes128_encrypt_fips197() {
-        let sched = KeySchedule::new(&FIPS_KEY, AesKeySize::Aes128)
-            .expect("AES-128 key schedule");
+        let sched = KeySchedule::new(&FIPS_KEY, AesKeySize::Aes128).expect("AES-128 key schedule");
         let ct = sched.encrypt_block(&FIPS_PLAINTEXT);
         assert_eq!(ct, FIPS_CIPHERTEXT, "AES-128 encrypt FIPS-197 Appendix B");
     }
 
     #[test]
     fn test_aes128_decrypt_fips197() {
-        let sched = KeySchedule::new(&FIPS_KEY, AesKeySize::Aes128)
-            .expect("AES-128 key schedule");
+        let sched = KeySchedule::new(&FIPS_KEY, AesKeySize::Aes128).expect("AES-128 key schedule");
         let pt = sched.decrypt_block(&FIPS_CIPHERTEXT);
         assert_eq!(pt, FIPS_PLAINTEXT, "AES-128 decrypt FIPS-197 Appendix B");
     }
@@ -600,11 +592,10 @@ mod tests {
     #[test]
     fn test_aes128_encrypt_decrypt_roundtrip() {
         let key = [
-            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-            0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f,
         ];
-        let sched = KeySchedule::new(&key, AesKeySize::Aes128)
-            .expect("AES-128 key schedule");
+        let sched = KeySchedule::new(&key, AesKeySize::Aes128).expect("AES-128 key schedule");
         let pt = [0u8; 16];
         let ct = sched.encrypt_block(&pt);
         let pt2 = sched.decrypt_block(&ct);
@@ -614,16 +605,14 @@ mod tests {
     #[test]
     fn test_aes256_encrypt_decrypt_roundtrip() {
         let key = [
-            0x60, 0x3d, 0xeb, 0x10, 0x15, 0xca, 0x71, 0xbe,
-            0x2b, 0x73, 0xae, 0xf0, 0x85, 0x7d, 0x77, 0x81,
-            0x1f, 0x35, 0x2c, 0x07, 0x3b, 0x61, 0x08, 0xd7,
-            0x2d, 0x98, 0x10, 0xa3, 0x09, 0x14, 0xdf, 0xf4,
+            0x60, 0x3d, 0xeb, 0x10, 0x15, 0xca, 0x71, 0xbe, 0x2b, 0x73, 0xae, 0xf0, 0x85, 0x7d,
+            0x77, 0x81, 0x1f, 0x35, 0x2c, 0x07, 0x3b, 0x61, 0x08, 0xd7, 0x2d, 0x98, 0x10, 0xa3,
+            0x09, 0x14, 0xdf, 0xf4,
         ];
-        let sched = KeySchedule::new(&key, AesKeySize::Aes256)
-            .expect("AES-256 key schedule");
+        let sched = KeySchedule::new(&key, AesKeySize::Aes256).expect("AES-256 key schedule");
         let pt: [u8; 16] = [
-            0xae, 0x2d, 0x8a, 0x57, 0x1e, 0x03, 0xac, 0x9c,
-            0x9e, 0xb7, 0x6f, 0xac, 0x45, 0xaf, 0x8e, 0x51,
+            0xae, 0x2d, 0x8a, 0x57, 0x1e, 0x03, 0xac, 0x9c, 0x9e, 0xb7, 0x6f, 0xac, 0x45, 0xaf,
+            0x8e, 0x51,
         ];
         let ct = sched.encrypt_block(&pt);
         let pt2 = sched.decrypt_block(&ct);
@@ -640,8 +629,7 @@ mod tests {
     #[test]
     fn test_ctr_mode_encrypt_decrypt_symmetry() {
         let key = [0x2b_u8; 16];
-        let sched = KeySchedule::new(&key, AesKeySize::Aes128)
-            .expect("AES-128 key schedule");
+        let sched = KeySchedule::new(&key, AesKeySize::Aes128).expect("AES-128 key schedule");
         let nonce = [0xA0_u8; 16];
         let plaintext = b"Hello, DRM world! This is a test of CTR mode.";
         let ciphertext = sched.apply_ctr(plaintext, &nonce);
@@ -652,8 +640,7 @@ mod tests {
     #[test]
     fn test_ctr_mode_different_nonces_give_different_output() {
         let key = [0x55_u8; 16];
-        let sched = KeySchedule::new(&key, AesKeySize::Aes128)
-            .expect("AES-128 key schedule");
+        let sched = KeySchedule::new(&key, AesKeySize::Aes128).expect("AES-128 key schedule");
         let pt = [0xAB_u8; 32];
         let ct1 = sched.apply_ctr(&pt, &[0x00_u8; 16]);
         let ct2 = sched.apply_ctr(&pt, &[0x01_u8; 16]);
@@ -663,8 +650,7 @@ mod tests {
     #[test]
     fn test_ctr_mode_empty_input() {
         let key = [0x00_u8; 16];
-        let sched = KeySchedule::new(&key, AesKeySize::Aes128)
-            .expect("AES-128 key schedule");
+        let sched = KeySchedule::new(&key, AesKeySize::Aes128).expect("AES-128 key schedule");
         let result = sched.apply_ctr(&[], &[0u8; 16]);
         assert!(result.is_empty());
     }
@@ -728,8 +714,7 @@ mod tests {
     fn test_multiple_blocks_ctr() {
         // Test that CTR counter increments correctly across block boundaries.
         let key = [0xAB_u8; 16];
-        let sched = KeySchedule::new(&key, AesKeySize::Aes128)
-            .expect("key schedule");
+        let sched = KeySchedule::new(&key, AesKeySize::Aes128).expect("key schedule");
         let nonce = [0u8; 16];
         // Encrypt 3 full blocks (48 bytes)
         let pt = [0x42_u8; 48];

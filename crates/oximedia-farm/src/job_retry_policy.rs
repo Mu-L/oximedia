@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Farm-level job retry policies for the encoding farm.
 //!
 //! This module provides a flexible, composable retry framework that controls
@@ -67,9 +66,7 @@ impl BackoffStrategy {
     pub fn delay_for(&self, attempt: u32, job_seed: u64) -> Duration {
         match self {
             Self::Fixed { delay } => *delay,
-            Self::Linear { base, step } => {
-                base.saturating_add(step.saturating_mul(attempt))
-            }
+            Self::Linear { base, step } => base.saturating_add(step.saturating_mul(attempt)),
             Self::Exponential { base, max } => {
                 let factor = 1u64.checked_shl(attempt.min(62)).unwrap_or(u64::MAX);
                 let nanos = base
@@ -496,8 +493,7 @@ mod tests {
         let mut state = JobRetryState::new(make_job());
         let worker = make_worker("w1");
         state.record_attempt_started(&worker);
-        let decision =
-            policy.evaluate(&mut state, &worker, AttemptOutcome::PermanentFailure, 0);
+        let decision = policy.evaluate(&mut state, &worker, AttemptOutcome::PermanentFailure, 0);
         assert_eq!(
             decision,
             RetryDecision::Abandon {
@@ -585,7 +581,10 @@ mod tests {
         };
         for attempt in 0..10u32 {
             let d = strat.delay_for(attempt, 12345);
-            assert!(d <= Duration::from_secs(30), "delay {d:?} exceeded max at attempt {attempt}");
+            assert!(
+                d <= Duration::from_secs(30),
+                "delay {d:?} exceeded max at attempt {attempt}"
+            );
         }
     }
 
@@ -622,8 +621,7 @@ mod tests {
         let worker = make_worker("w1");
         state.record_attempt_started(&worker);
         // Sleep is not needed: Duration::ZERO means elapsed() >= 0 is always true
-        let decision =
-            policy.evaluate(&mut state, &worker, AttemptOutcome::TransientFailure, 0);
+        let decision = policy.evaluate(&mut state, &worker, AttemptOutcome::TransientFailure, 0);
         assert_eq!(
             decision,
             RetryDecision::Abandon {

@@ -52,6 +52,8 @@
 #![warn(missing_docs)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod adaptive;
+pub mod admission_filter;
 pub mod bloom_filter;
 pub mod cache_metrics;
 pub mod cache_partitioning;
@@ -59,11 +61,20 @@ pub mod cache_serialization;
 pub mod cache_warming;
 pub mod content_aware_cache;
 pub mod distributed_cache;
+pub mod eviction;
 pub mod eviction_policies;
+pub mod key_norm;
 pub mod lru_cache;
+pub mod negative;
 pub mod prefetch;
+pub mod segment_cache;
 pub mod sharded_lru;
 pub mod slab_allocator;
+pub mod stats;
+pub mod tier_compressor;
 pub mod tiered_cache;
+pub mod ttl_cache;
 pub mod two_queue;
+pub mod weighted_cache;
 pub mod write_behind_cache;
+pub mod write_through;

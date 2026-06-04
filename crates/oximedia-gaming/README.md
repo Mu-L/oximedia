@@ -1,13 +1,13 @@
 # oximedia-gaming
 
 ![Status: Stable](https://img.shields.io/badge/status-stable-green)
-![Version: 0.1.7](https://img.shields.io/badge/version-0.1.7-blue)
+![Version: 0.1.8](https://img.shields.io/badge/version-0.1.8-blue)
 
 Game streaming and screen capture optimization for OxiMedia, providing ultra-low latency game streaming, capture, replay, highlights, and platform integration.
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.7 — 2026-05-16 — 1,194 tests
+Version: 0.1.8 — 2026-05-29 — 1,194 tests
 
 ## Features
 
@@ -41,7 +41,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-gaming = "0.1.7"
+oximedia-gaming = "0.1.8"
 ```
 
 ```rust

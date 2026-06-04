@@ -207,10 +207,7 @@ impl ProfileDetector {
                         explanation: if m {
                             format!("{} (matched: {:?})", $explanation, val)
                         } else {
-                            format!(
-                                "{} (expected {:?}, got {:?})",
-                                $explanation, $expected, val
-                            )
+                            format!("{} (expected {:?}, got {:?})", $explanation, $expected, val)
                         },
                     });
                 }
@@ -490,7 +487,7 @@ mod tests {
             bl_video_full_range_flag: None,
             el_spatial_resampling_filter_flag: Some(false),
             disable_residual_flag: Some(true),
-            signal_eotf: Some(1), // PQ
+            signal_eotf: Some(1),         // PQ
             mapping_color_space: Some(2), // IPT
             component_order: Some(2),
             nlq_method_idc: None,
@@ -507,7 +504,7 @@ mod tests {
             vdr_rpu_profile: Some(7),
             el_spatial_resampling_filter_flag: Some(true),
             disable_residual_flag: Some(false),
-            signal_eotf: Some(1), // PQ
+            signal_eotf: Some(1),         // PQ
             mapping_color_space: Some(1), // RGB
             component_order: Some(0),
             el_bit_depth: Some(8),
@@ -521,7 +518,7 @@ mod tests {
             vdr_rpu_profile: Some(8),
             el_spatial_resampling_filter_flag: Some(false),
             disable_residual_flag: Some(true),
-            signal_eotf: Some(1), // PQ
+            signal_eotf: Some(1),         // PQ
             mapping_color_space: Some(1), // RGB
             component_order: Some(0),
             low_latency_hint: Some(false),
@@ -535,7 +532,7 @@ mod tests {
             vdr_rpu_profile: Some(81),
             el_spatial_resampling_filter_flag: Some(false),
             disable_residual_flag: Some(true),
-            signal_eotf: Some(1), // PQ
+            signal_eotf: Some(1),         // PQ
             mapping_color_space: Some(1), // RGB
             component_order: Some(0),
             low_latency_hint: Some(true),
@@ -549,7 +546,7 @@ mod tests {
             vdr_rpu_profile: Some(84),
             el_spatial_resampling_filter_flag: Some(false),
             disable_residual_flag: Some(true),
-            signal_eotf: Some(2), // HLG
+            signal_eotf: Some(2),         // HLG
             mapping_color_space: Some(1), // RGB
             component_order: Some(0),
             vdr_dm_metadata_present: Some(true),
@@ -564,7 +561,11 @@ mod tests {
         assert!(result.is_some());
         let detected = result.expect("detection should succeed");
         assert_eq!(detected.profile, Profile::Profile5);
-        assert!(detected.confidence > 0.8, "confidence={}", detected.confidence);
+        assert!(
+            detected.confidence > 0.8,
+            "confidence={}",
+            detected.confidence
+        );
     }
 
     #[test]
@@ -574,7 +575,11 @@ mod tests {
         assert!(result.is_some());
         let detected = result.expect("detection should succeed");
         assert_eq!(detected.profile, Profile::Profile7);
-        assert!(detected.confidence > 0.8, "confidence={}", detected.confidence);
+        assert!(
+            detected.confidence > 0.8,
+            "confidence={}",
+            detected.confidence
+        );
     }
 
     #[test]
@@ -584,7 +589,11 @@ mod tests {
         assert!(result.is_some());
         let detected = result.expect("detection should succeed");
         assert_eq!(detected.profile, Profile::Profile8);
-        assert!(detected.confidence > 0.8, "confidence={}", detected.confidence);
+        assert!(
+            detected.confidence > 0.8,
+            "confidence={}",
+            detected.confidence
+        );
     }
 
     #[test]
@@ -594,7 +603,11 @@ mod tests {
         assert!(result.is_some());
         let detected = result.expect("detection should succeed");
         assert_eq!(detected.profile, Profile::Profile8_1);
-        assert!(detected.confidence > 0.7, "confidence={}", detected.confidence);
+        assert!(
+            detected.confidence > 0.7,
+            "confidence={}",
+            detected.confidence
+        );
     }
 
     #[test]
@@ -604,7 +617,11 @@ mod tests {
         assert!(result.is_some());
         let detected = result.expect("detection should succeed");
         assert_eq!(detected.profile, Profile::Profile8_4);
-        assert!(detected.confidence > 0.8, "confidence={}", detected.confidence);
+        assert!(
+            detected.confidence > 0.8,
+            "confidence={}",
+            detected.confidence
+        );
     }
 
     #[test]

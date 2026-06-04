@@ -11,9 +11,9 @@
 - [x] Implement proxy health monitoring in `proxy_status` — detect corrupted/incomplete proxies (verified 2026-05-16; src/proxy_status.rs:128 ProxyStatusTracker, ProxyJobStatus:48, transition:155, 430 lines)
 - [x] Extend `conform` with AAF (Advanced Authoring Format) project file conforming support (verified 2026-05-16; src/conform/timeline.rs:219 TimelineFormat::Aaf variant, Aaf extension parsing:193)
 - [x] Add multi-resolution proxy generation in `smart_proxy` — create 1/4, 1/2, full-res variants in one pass (verified 2026-05-16; src/smart_proxy.rs:445 ResolutionVariant, MultiResolutionProxySet:486 quarter/half/full, 682 lines)
-- [ ] Implement proxy migration in `proxy_sync` — transfer proxy databases between workstations (verified-open 2026-05-16: proxy_sync.rs:65 SyncPoint covers timecode sync; no cross-workstation database migration/transfer)
+- [x] Implement proxy migration in `proxy_sync` — transfer proxy databases between workstations (verified 2026-06-02: proxy_sync.rs `ProxyDbExport { entries, root_prefix, created_at }` + `import_with_rebase(new_root)` + `RebaseResult`; 4 tests pass: round-trip, rebase-rewrites-root, non-prefix-unchanged, reports-missing)
 - [x] Extend `proxy_fingerprint` with perceptual hashing for content-based proxy-original matching (verified 2026-05-16; src/proxy_fingerprint.rs:452 PerceptualHash, DHashEngine:493, diff_hash:465)
-- [ ] Add batch conforming support in `ConformEngine` — conform multiple EDLs to a single timeline (verified-open 2026-05-16: conform/engine.rs:8 ConformEngine has single-EDL relink only; no batch_conform fn)
+- [x] Add batch conforming support in `ConformEngine` — conform multiple EDLs to a single timeline (verified 2026-06-02: conform/engine.rs `batch_conform(&[Edl], MergeStrategy) -> BatchConformResult`; `MergeStrategy { PreferEarlier, PreferLonger, LayerToTracks }`; `ConformedEvent`, `EventProvenance`; 5 tests pass: non-overlapping, overlap-prefer-earlier, overlap-prefer-longer, empty, provenance)
 - [x] Implement proxy expiration policies in `proxy_aging` with configurable TTL per project (verified 2026-05-16; src/proxy_aging.rs 471 lines — TTL/expiration management)
 
 ## New Features
@@ -26,9 +26,9 @@
 - [x] Add proxy pool management for shared storage environments in `registry` (verified 2026-05-16; src/proxy_pool.rs:30 Worker, ProxyJob:95, ProxyPool with assign/drain, 376 lines)
 
 ## Performance
-- [ ] Implement parallel proxy generation in `transcode_queue` using rayon work-stealing
+- [x] Implement parallel proxy generation in `transcode_queue` using rayon work-stealing (verified 2026-06-01; transcode_queue.rs:625 ThreadPoolBuilder::new().num_threads, :632 jobs.par_iter(), fallback to global rayon pool)
 - [ ] Add proxy cache warming — pre-generate proxies for frequently accessed media
-- [ ] Optimize `proxy_index` lookups with B-tree index on file path and timecode
+- [x] Optimize `proxy_index` lookups with B-tree index on file path and timecode (verified 2026-06-01; proxy_index.rs RangeProxyIndex BTreeMap<RangeKey,ProxyEntry> composite key (path,pts): find_by_original, find_in_timecode_range, find_by_path_prefix)
 - [ ] Use memory-mapped I/O in `proxy_fingerprint` for large file hashing
 - [ ] Implement streaming proxy generation — start editing before proxy is fully generated
 

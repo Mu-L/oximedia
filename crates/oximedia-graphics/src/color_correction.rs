@@ -103,7 +103,11 @@ impl ColorWheels {
         // 3. Lift / gain
         let adjusted = (contrasted * self.gain[ch] + self.lift[ch]).clamp(0.0, 1.0);
         // 4. Gamma power (guard against non-positive gamma)
-        let gamma_val = if self.gamma[ch] > 0.0 { self.gamma[ch] } else { 1.0 };
+        let gamma_val = if self.gamma[ch] > 0.0 {
+            self.gamma[ch]
+        } else {
+            1.0
+        };
         let corrected = adjusted.powf(1.0 / gamma_val);
         // 5. sRGB encode
         linear_to_srgb(corrected)
@@ -190,26 +194,24 @@ impl ColorCorrectionLut {
         let lut = &self.lut;
         let saturation = self.saturation;
 
-        pixels
-            .par_chunks_mut(row_stride)
-            .for_each(|row| {
-                for chunk in row.chunks_exact_mut(4) {
-                    let r_lut = lut[0][chunk[0] as usize] as f32 / 255.0;
-                    let g_lut = lut[1][chunk[1] as usize] as f32 / 255.0;
-                    let b_lut = lut[2][chunk[2] as usize] as f32 / 255.0;
+        pixels.par_chunks_mut(row_stride).for_each(|row| {
+            for chunk in row.chunks_exact_mut(4) {
+                let r_lut = lut[0][chunk[0] as usize] as f32 / 255.0;
+                let g_lut = lut[1][chunk[1] as usize] as f32 / 255.0;
+                let b_lut = lut[2][chunk[2] as usize] as f32 / 255.0;
 
-                    // Saturation (cross-channel, not in LUT)
-                    let luma = 0.2126 * r_lut + 0.7152 * g_lut + 0.0722 * b_lut;
-                    let r_out = (luma + saturation * (r_lut - luma)).clamp(0.0, 1.0);
-                    let g_out = (luma + saturation * (g_lut - luma)).clamp(0.0, 1.0);
-                    let b_out = (luma + saturation * (b_lut - luma)).clamp(0.0, 1.0);
+                // Saturation (cross-channel, not in LUT)
+                let luma = 0.2126 * r_lut + 0.7152 * g_lut + 0.0722 * b_lut;
+                let r_out = (luma + saturation * (r_lut - luma)).clamp(0.0, 1.0);
+                let g_out = (luma + saturation * (g_lut - luma)).clamp(0.0, 1.0);
+                let b_out = (luma + saturation * (b_lut - luma)).clamp(0.0, 1.0);
 
-                    chunk[0] = (r_out * 255.0).round() as u8;
-                    chunk[1] = (g_out * 255.0).round() as u8;
-                    chunk[2] = (b_out * 255.0).round() as u8;
-                    // chunk[3] (alpha) intentionally untouched
-                }
-            });
+                chunk[0] = (r_out * 255.0).round() as u8;
+                chunk[1] = (g_out * 255.0).round() as u8;
+                chunk[2] = (b_out * 255.0).round() as u8;
+                // chunk[3] (alpha) intentionally untouched
+            }
+        });
     }
 }
 
@@ -269,7 +271,11 @@ mod tests {
         let mut buf = pixel(10, 10, 10);
         let orig = buf[0];
         wheels.apply(&mut buf, 1, 1);
-        assert!(buf[0] > orig, "positive lift should raise dark pixels: {orig} → {}", buf[0]);
+        assert!(
+            buf[0] > orig,
+            "positive lift should raise dark pixels: {orig} → {}",
+            buf[0]
+        );
     }
 
     // ── 4. Gamma > 1 darkens midtones ────────────────────────────────────────
@@ -291,7 +297,11 @@ mod tests {
         assert_ne!(buf[0], orig, "gamma=2.0 should change midtones");
         // Specifically, gamma=2 → powf(0.5) = sqrt which BRIGHTENS linear values < 1
         // So result should be lighter (higher pixel value)
-        assert!(buf[0] > orig, "gamma=2.0 (exponent 0.5) should lighten midtones: {orig}→{}", buf[0]);
+        assert!(
+            buf[0] > orig,
+            "gamma=2.0 (exponent 0.5) should lighten midtones: {orig}→{}",
+            buf[0]
+        );
     }
 
     // ── 5. Saturation=0 produces grayscale ───────────────────────────────────
@@ -343,8 +353,16 @@ mod tests {
         wheels.apply(&mut bright, 1, 1);
         wheels.apply(&mut dark, 1, 1);
         // Contrast > 1: values above pivot pushed higher, below pushed lower
-        assert!(bright[0] >= orig_bright, "contrast>1 should push brights up: {orig_bright}→{}", bright[0]);
-        assert!(dark[0] <= orig_dark, "contrast>1 should push darks down: {orig_dark}→{}", dark[0]);
+        assert!(
+            bright[0] >= orig_bright,
+            "contrast>1 should push brights up: {orig_bright}→{}",
+            bright[0]
+        );
+        assert!(
+            dark[0] <= orig_dark,
+            "contrast>1 should push darks down: {orig_dark}→{}",
+            dark[0]
+        );
     }
 
     // ── 8. LUT matches direct apply within ±1 LSB ────────────────────────────
@@ -376,7 +394,9 @@ mod tests {
                         assert!(
                             diff <= 1,
                             "ch={ch} r={r} g={g} b={b}: direct={} lut={} diff={}",
-                            direct[ch], via_lut[ch], diff
+                            direct[ch],
+                            via_lut[ch],
+                            diff
                         );
                     }
                 }
@@ -430,7 +450,11 @@ mod tests {
         for &a in &alpha_values {
             let mut buf = pixel_a(128, 64, 32, a);
             wheels.apply(&mut buf, 1, 1);
-            assert_eq!(buf[3], a, "alpha must be preserved: original={a} got={}", buf[3]);
+            assert_eq!(
+                buf[3], a,
+                "alpha must be preserved: original={a} got={}",
+                buf[3]
+            );
         }
 
         // Also with LUT
@@ -438,7 +462,11 @@ mod tests {
         for &a in &alpha_values {
             let mut buf = pixel_a(128, 64, 32, a);
             lut.apply(&mut buf, 1, 1);
-            assert_eq!(buf[3], a, "LUT alpha must be preserved: original={a} got={}", buf[3]);
+            assert_eq!(
+                buf[3], a,
+                "LUT alpha must be preserved: original={a} got={}",
+                buf[3]
+            );
         }
     }
 
@@ -489,7 +517,11 @@ mod tests {
         let mut buf = pixel(128, 128, 128);
         let orig = buf[0];
         wheels.apply(&mut buf, 1, 1);
-        assert!(buf[0] < orig, "negative lift should darken midtones: {orig}→{}", buf[0]);
+        assert!(
+            buf[0] < orig,
+            "negative lift should darken midtones: {orig}→{}",
+            buf[0]
+        );
     }
 
     // ── 15. Rayon parallel matches serial ────────────────────────────────────
@@ -532,7 +564,9 @@ mod tests {
                 assert!(
                     diff <= 1,
                     "idx={i} direct={} lut={} diff={}",
-                    buf_direct[i], buf_lut[i], diff
+                    buf_direct[i],
+                    buf_lut[i],
+                    diff
                 );
             }
         }

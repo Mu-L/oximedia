@@ -74,7 +74,13 @@ impl FocusAssist {
     /// # Errors
     ///
     /// Returns an error if processing fails.
-    pub fn apply(&mut self, frame: &[u8], width: u32, height: u32, output: &mut [u8]) -> MonitorResult<()> {
+    pub fn apply(
+        &mut self,
+        frame: &[u8],
+        width: u32,
+        height: u32,
+        output: &mut [u8],
+    ) -> MonitorResult<()> {
         if frame.len() != output.len() || frame.len() < (width * height * 3) as usize {
             return Err(MonitorError::ProcessingError(
                 "Invalid frame dimensions".to_string(),

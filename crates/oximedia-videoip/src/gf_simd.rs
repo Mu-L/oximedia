@@ -173,6 +173,7 @@ fn build_nibble_tables(scalar: u8) -> ([u8; 16], [u8; 16]) {
 
 #[cfg(target_arch = "x86_64")]
 #[allow(unsafe_code)]
+#[allow(clippy::cast_ptr_alignment)]
 #[target_feature(enable = "avx2")]
 unsafe fn gf_mul_slice_avx2(src: &[u8], scalar: u8, dst: &mut [u8]) {
     use std::arch::x86_64::*;
@@ -180,15 +181,15 @@ unsafe fn gf_mul_slice_avx2(src: &[u8], scalar: u8, dst: &mut [u8]) {
     let (lo16, hi16) = build_nibble_tables(scalar);
 
     // Broadcast the 16-byte nibble tables into 256-bit YMM registers.
-    let lo_vec = _mm256_broadcastsi128_si256(_mm_loadu_si128(lo16.as_ptr() as *const __m128i));
-    let hi_vec = _mm256_broadcastsi128_si256(_mm_loadu_si128(hi16.as_ptr() as *const __m128i));
+    let lo_vec = _mm256_broadcastsi128_si256(_mm_loadu_si128(lo16.as_ptr().cast::<__m128i>()));
+    let hi_vec = _mm256_broadcastsi128_si256(_mm_loadu_si128(hi16.as_ptr().cast::<__m128i>()));
     let mask_lo = _mm256_set1_epi8(0x0F_u8 as i8);
 
     let chunks = src.len() / 32;
     let mut offset = 0usize;
 
     for _ in 0..chunks {
-        let data = _mm256_loadu_si256(src.as_ptr().add(offset) as *const __m256i);
+        let data = _mm256_loadu_si256(src.as_ptr().add(offset).cast::<__m256i>());
 
         // Low nibble: data & 0x0F → index into lo_vec.
         let lo_idx = _mm256_and_si256(data, mask_lo);
@@ -201,7 +202,7 @@ unsafe fn gf_mul_slice_avx2(src: &[u8], scalar: u8, dst: &mut [u8]) {
         // XOR the two contributions.
         let result = _mm256_xor_si256(lo_res, hi_res);
 
-        _mm256_storeu_si256(dst.as_mut_ptr().add(offset) as *mut __m256i, result);
+        _mm256_storeu_si256(dst.as_mut_ptr().add(offset).cast::<__m256i>(), result);
         offset += 32;
     }
 
@@ -211,21 +212,22 @@ unsafe fn gf_mul_slice_avx2(src: &[u8], scalar: u8, dst: &mut [u8]) {
 
 #[cfg(target_arch = "x86_64")]
 #[allow(unsafe_code)]
+#[allow(clippy::cast_ptr_alignment)]
 #[target_feature(enable = "ssse3")]
 unsafe fn gf_mul_slice_ssse3(src: &[u8], scalar: u8, dst: &mut [u8]) {
     use std::arch::x86_64::*;
 
     let (lo16, hi16) = build_nibble_tables(scalar);
 
-    let lo_vec = _mm_loadu_si128(lo16.as_ptr() as *const __m128i);
-    let hi_vec = _mm_loadu_si128(hi16.as_ptr() as *const __m128i);
+    let lo_vec = _mm_loadu_si128(lo16.as_ptr().cast::<__m128i>());
+    let hi_vec = _mm_loadu_si128(hi16.as_ptr().cast::<__m128i>());
     let mask_lo = _mm_set1_epi8(0x0F_u8 as i8);
 
     let chunks = src.len() / 16;
     let mut offset = 0usize;
 
     for _ in 0..chunks {
-        let data = _mm_loadu_si128(src.as_ptr().add(offset) as *const __m128i);
+        let data = _mm_loadu_si128(src.as_ptr().add(offset).cast::<__m128i>());
 
         let lo_idx = _mm_and_si128(data, mask_lo);
         let lo_res = _mm_shuffle_epi8(lo_vec, lo_idx);
@@ -234,7 +236,7 @@ unsafe fn gf_mul_slice_ssse3(src: &[u8], scalar: u8, dst: &mut [u8]) {
         let hi_res = _mm_shuffle_epi8(hi_vec, hi_idx);
 
         let result = _mm_xor_si128(lo_res, hi_res);
-        _mm_storeu_si128(dst.as_mut_ptr().add(offset) as *mut __m128i, result);
+        _mm_storeu_si128(dst.as_mut_ptr().add(offset).cast::<__m128i>(), result);
         offset += 16;
     }
 

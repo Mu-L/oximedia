@@ -99,10 +99,7 @@ impl GainLane {
     /// Returns `None` if `index >= point_count()`.
     #[must_use]
     pub fn get_point(&self, index: usize) -> Option<(u64, f32)> {
-        self.points
-            .iter()
-            .nth(index)
-            .map(|(&pos, &val)| (pos, val))
+        self.points.iter().nth(index).map(|(&pos, &val)| (pos, val))
     }
 
     /// Evaluate the lane at `sample_pos` using linear interpolation.
@@ -266,8 +263,7 @@ impl AutomationRecorder {
     pub fn set_min_interval_ms(&mut self, ms: f32) {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         {
-            self.min_interval_samples =
-                (ms * self.sample_rate as f32 / 1000.0).max(0.0) as u64;
+            self.min_interval_samples = (ms * self.sample_rate as f32 / 1000.0).max(0.0) as u64;
         }
     }
 
@@ -432,7 +428,10 @@ mod tests {
         lane.set_point(0, 0.0);
         lane.set_point(100, 1.0);
         let mid = lane.evaluate(50).unwrap();
-        assert!((mid - 0.5).abs() < 1e-5, "mid-point should be 0.5, got {mid}");
+        assert!(
+            (mid - 0.5).abs() < 1e-5,
+            "mid-point should be 0.5, got {mid}"
+        );
     }
 
     #[test]
@@ -450,7 +449,10 @@ mod tests {
         lane.set_point(0, 0.4);
         lane.set_point(100, 0.8);
         let val = lane.evaluate(9999).unwrap();
-        assert!((val - 0.8).abs() < 1e-6, "past last point should hold last value");
+        assert!(
+            (val - 0.8).abs() < 1e-6,
+            "past last point should hold last value"
+        );
     }
 
     #[test]
@@ -472,7 +474,8 @@ mod tests {
         rec.record_gain(&mut lane, 500, 0.3);
 
         assert!(
-            lane.evaluate(1000).map_or(false, |v| (v - 0.3).abs() < 1e-6),
+            lane.evaluate(1000)
+                .map_or(false, |v| (v - 0.3).abs() < 1e-6),
             "Future points should be erased; lane should hold 0.3 after sample 500"
         );
     }
@@ -488,7 +491,10 @@ mod tests {
         // Trim +0.1 at position 500 — base value is 0.5, result should be 0.6.
         rec.record_gain(&mut lane, 500, 0.1);
         let val = lane.evaluate(500).unwrap();
-        assert!((val - 0.6).abs() < 1e-5, "trim should add to base: got {val}");
+        assert!(
+            (val - 0.6).abs() < 1e-5,
+            "trim should add to base: got {val}"
+        );
     }
 
     #[test]
@@ -522,7 +528,11 @@ mod tests {
         rec.record_gain(&mut lane, 0, 0.5);
         rec.record_gain(&mut lane, 100, 0.6); // too soon → should be skipped
         rec.record_gain(&mut lane, 480, 0.7); // exactly at interval → should record
-        assert_eq!(lane.point_count(), 2, "only 2 points should be written due to throttling");
+        assert_eq!(
+            lane.point_count(),
+            2,
+            "only 2 points should be written due to throttling"
+        );
     }
 
     #[test]
@@ -565,7 +575,10 @@ mod tests {
         rec.set_mode(RecordMode::Write);
         rec.record_pan(&mut lane, 0, 2.5); // > 1.0, should clamp
         let (_, val) = lane.get_point(0).unwrap();
-        assert!((val - 1.0).abs() < 1e-6, "pan should be clamped to 1.0, got {val}");
+        assert!(
+            (val - 1.0).abs() < 1e-6,
+            "pan should be clamped to 1.0, got {val}"
+        );
     }
 
     #[test]

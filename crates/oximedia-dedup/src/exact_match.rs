@@ -16,10 +16,12 @@ impl ContentId {
     /// Return a lowercase hex string representation of this identifier.
     #[must_use]
     pub fn to_hex(&self) -> String {
-        self.bytes.iter().fold(String::with_capacity(32), |mut s, b| {
-            s.push_str(&format!("{b:02x}"));
-            s
-        })
+        self.bytes
+            .iter()
+            .fold(String::with_capacity(32), |mut s, b| {
+                s.push_str(&format!("{b:02x}"));
+                s
+            })
     }
 
     /// Derive a `ContentId` from raw data using FNV-1a over two 64-bit lanes.
@@ -115,7 +117,10 @@ impl FileSizeFilter {
     /// Create a new filter.
     #[must_use]
     pub fn new(min_bytes: u64, max_bytes: u64) -> Self {
-        Self { min_bytes, max_bytes }
+        Self {
+            min_bytes,
+            max_bytes,
+        }
     }
 
     /// Return `true` if `size` falls within the accepted range.
@@ -140,7 +145,11 @@ impl ExactDedupReport {
     /// Create a new report.
     #[must_use]
     pub fn new(scanned: u64, duplicates: u64, wasted_bytes: u64) -> Self {
-        Self { scanned, duplicates, wasted_bytes }
+        Self {
+            scanned,
+            duplicates,
+            wasted_bytes,
+        }
     }
 
     /// Return the percentage of files that are duplicates (0.0–100.0).

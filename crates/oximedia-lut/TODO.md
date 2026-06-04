@@ -26,3 +26,6 @@
 ## Testing
 - [ ] Add round-trip tests for all LUT formats: .cube -> parse -> write -> parse -> compare
 - [ ] Test `lut_chain.rs` with long chains (>10 LUTs) for numerical stability
+
+## 0.1.8 Wave 6 — 2026-05-29
+- [x] Register 22 orphan modules in lib.rs + hald_clut cfix (Slice D, 2026-05-29)

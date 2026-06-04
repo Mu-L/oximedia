@@ -412,9 +412,7 @@ impl BatchWriteResult {
 /// assert!(result.all_ok());
 /// ```
 #[must_use]
-pub fn batch_parse(
-    inputs: &[(u64, &[u8], MetadataFormat)],
-) -> BatchReadResult {
+pub fn batch_parse(inputs: &[(u64, &[u8], MetadataFormat)]) -> BatchReadResult {
     let mut result = BatchReadResult::new();
     for &(id, data, format) in inputs {
         match Metadata::parse(data, format) {
@@ -500,10 +498,7 @@ impl BulkTagOps {
     /// Count how many records contain a non-empty value for `field`.
     #[must_use]
     pub fn field_coverage(collection: &MetadataCollection, field: &str) -> usize {
-        collection
-            .iter()
-            .filter(|(_, m)| m.contains(field))
-            .count()
+        collection.iter().filter(|(_, m)| m.contains(field)).count()
     }
 
     /// Collect the distinct text values for `field` across all records.
@@ -582,8 +577,22 @@ mod tests {
 
     fn make_collection() -> MetadataCollection {
         let mut c = MetadataCollection::new();
-        c.insert(1, make_meta(&[("title", "Song A"), ("artist", "Artist X"), ("year", "2020")]));
-        c.insert(2, make_meta(&[("title", "Song B"), ("artist", "Artist Y"), ("year", "2021")]));
+        c.insert(
+            1,
+            make_meta(&[
+                ("title", "Song A"),
+                ("artist", "Artist X"),
+                ("year", "2020"),
+            ]),
+        );
+        c.insert(
+            2,
+            make_meta(&[
+                ("title", "Song B"),
+                ("artist", "Artist Y"),
+                ("year", "2021"),
+            ]),
+        );
         c.insert(3, make_meta(&[("title", "Song C"), ("year", "2022")]));
         c
     }
@@ -607,7 +616,8 @@ mod tests {
         let is_new = c.insert(1, make_meta(&[("title", "New")]));
         assert!(!is_new);
         assert_eq!(c.len(), 1);
-        let title = c.get(1)
+        let title = c
+            .get(1)
             .and_then(|m| m.get("title"))
             .and_then(MetadataValue::as_text)
             .map(String::from);
@@ -632,8 +642,13 @@ mod tests {
     fn test_bulk_operation_set_remove() {
         let mut c = make_collection();
         let ops = vec![
-            BulkOperation::Set { key: "genre".to_string(), value: "Jazz".to_string() },
-            BulkOperation::Remove { key: "year".to_string() },
+            BulkOperation::Set {
+                key: "genre".to_string(),
+                value: "Jazz".to_string(),
+            },
+            BulkOperation::Remove {
+                key: "year".to_string(),
+            },
         ];
         let operator = BulkOperator::new(ops);
         let outcomes = operator.apply(&mut c);
@@ -678,11 +693,20 @@ mod tests {
     fn test_bulk_operation_append_prepend() {
         let mut m = make_meta(&[("title", "Hello")]);
         let ops = vec![
-            BulkOperation::PrependPrefix { key: "title".to_string(), prefix: "[Re] ".to_string() },
-            BulkOperation::AppendSuffix { key: "title".to_string(), suffix: " (Live)".to_string() },
+            BulkOperation::PrependPrefix {
+                key: "title".to_string(),
+                prefix: "[Re] ".to_string(),
+            },
+            BulkOperation::AppendSuffix {
+                key: "title".to_string(),
+                suffix: " (Live)".to_string(),
+            },
         ];
         BulkOperator::new(ops).apply_one(&mut m);
-        let title = m.get("title").and_then(MetadataValue::as_text).map(String::from);
+        let title = m
+            .get("title")
+            .and_then(MetadataValue::as_text)
+            .map(String::from);
         assert_eq!(title.as_deref(), Some("[Re] Hello (Live)"));
     }
 
@@ -707,7 +731,10 @@ mod tests {
     fn test_bulk_tag_ops_distinct_values() {
         let c = make_collection();
         let years = BulkTagOps::distinct_values(&c, "year");
-        assert_eq!(years, vec!["2020".to_string(), "2021".to_string(), "2022".to_string()]);
+        assert_eq!(
+            years,
+            vec!["2020".to_string(), "2021".to_string(), "2022".to_string()]
+        );
     }
 
     #[test]
@@ -732,11 +759,17 @@ mod tests {
 
     #[test]
     fn test_value_to_string_variants() {
-        assert_eq!(value_to_string(&MetadataValue::Text("hi".to_string())), "hi");
+        assert_eq!(
+            value_to_string(&MetadataValue::Text("hi".to_string())),
+            "hi"
+        );
         assert_eq!(value_to_string(&MetadataValue::Integer(42)), "42");
         assert_eq!(value_to_string(&MetadataValue::Boolean(true)), "true");
         assert_eq!(
-            value_to_string(&MetadataValue::TextList(vec!["a".to_string(), "b".to_string()])),
+            value_to_string(&MetadataValue::TextList(vec![
+                "a".to_string(),
+                "b".to_string()
+            ])),
             "a; b"
         );
     }

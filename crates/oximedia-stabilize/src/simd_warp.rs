@@ -211,8 +211,8 @@ pub fn batch_bilinear_sample(
             let y0v = y0_arr[i];
             let fxv = fx_arr[i].clamp(0.0, 1.0);
             let fyv = fy_arr[i].clamp(0.0, 1.0);
-            let ifx = (1.0 - fxv).clamp(0.0, 1.0);
-            let ify = (1.0 - fyv).clamp(0.0, 1.0);
+            let ifx = (1.0_f64 - fxv).clamp(0.0_f64, 1.0_f64);
+            let ify = (1.0_f64 - fyv).clamp(0.0_f64, 1.0_f64);
 
             let ix0 = (x0v as isize).clamp(0, (data_width as isize) - 1) as usize;
             let ix1 = (ix0 + 1).min(data_width - 1);

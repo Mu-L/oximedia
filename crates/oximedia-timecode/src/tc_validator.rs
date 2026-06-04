@@ -216,6 +216,95 @@ impl TimecodeValidator {
 
 // ── Helper: build a raw Timecode bypassing constructor checks ─────────────────
 
+// ── Non-monotonic sequence detection ──────────────────────────────────────────
+
+/// A single non-monotonic event detected in a timecode sequence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NonMonotonicEvent {
+    /// Index of the timecode in the sequence that caused the event.
+    pub frame_index: usize,
+    /// The previous timecode (at `frame_index - 1`).
+    pub prev_tc: Timecode,
+    /// The current timecode (at `frame_index`).
+    pub curr_tc: Timecode,
+    /// Signed frame jump: `curr_tc.to_frames() - prev_tc.to_frames()`.
+    /// Negative means backwards; very large positive means a forward skip.
+    pub jump_frames: i64,
+}
+
+/// Scans a timecode sequence and reports positions where the timecode
+/// does **not** advance monotonically by the expected one frame per step.
+///
+/// Only jumps whose absolute value exceeds `threshold_frames` are reported,
+/// so callers can ignore minor jitter (e.g. `threshold_frames = 0` reports
+/// every non-unit step; `threshold_frames = 1` only reports jumps ≥ 2 frames).
+///
+/// # Example
+/// ```
+/// use oximedia_timecode::{Timecode, FrameRate};
+/// use oximedia_timecode::tc_validator::NonMonotonicDetector;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let tc0 = Timecode::new(0, 0, 0, 0, FrameRate::Fps25)?;
+/// let tc1 = Timecode::new(0, 0, 2, 0, FrameRate::Fps25)?; // 2-second jump
+/// let events = NonMonotonicDetector::new(1).scan_sequence(&[tc0, tc1]);
+/// assert_eq!(events.len(), 1);
+/// assert_eq!(events[0].frame_index, 1);
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+pub struct NonMonotonicDetector {
+    /// Only report absolute jumps strictly greater than this value.
+    /// A threshold of `0` reports every non-unit step (including backwards).
+    /// A threshold of `1` reports jumps whose absolute magnitude is > 1 frame
+    /// (i.e. gaps of ≥ 2 or backwards movement of ≥ 2 frames).
+    threshold_frames: i64,
+}
+
+impl NonMonotonicDetector {
+    /// Create a new detector with the given threshold.
+    ///
+    /// `threshold_frames` is the *exclusive* lower bound on `|jump|` for
+    /// events to be emitted. Set to `0` to report every non-unit step.
+    pub fn new(threshold_frames: i64) -> Self {
+        Self { threshold_frames }
+    }
+
+    /// Scan `timecodes` and return all non-monotonic events.
+    ///
+    /// The slice must contain at least 2 elements for any events to be
+    /// produced; a slice of 0 or 1 elements always returns an empty `Vec`.
+    pub fn scan_sequence(self, timecodes: &[Timecode]) -> Vec<NonMonotonicEvent> {
+        let mut events = Vec::new();
+
+        for i in 1..timecodes.len() {
+            let prev = timecodes[i - 1];
+            let curr = timecodes[i];
+
+            let prev_f = prev.to_frames() as i64;
+            let curr_f = curr.to_frames() as i64;
+            let jump = curr_f - prev_f;
+
+            // Expected monotonic step is +1; any other step is non-monotonic.
+            // Only emit if |jump - 1| > threshold.
+            let deviation = (jump - 1).abs();
+            if deviation > self.threshold_frames {
+                events.push(NonMonotonicEvent {
+                    frame_index: i,
+                    prev_tc: prev,
+                    curr_tc: curr,
+                    jump_frames: jump,
+                });
+            }
+        }
+
+        events
+    }
+}
+
+// ── Helper: build a raw Timecode bypassing constructor checks ─────────────────
+
 /// Build a `Timecode` directly without the safe constructor (for tests).
 fn raw_timecode(hours: u8, minutes: u8, seconds: u8, frames: u8, fps: u8, drop: bool) -> Timecode {
     Timecode::from_raw_fields(hours, minutes, seconds, frames, fps, drop, 0)
@@ -386,5 +475,90 @@ mod tests {
         let vios = v.validate(&tc);
         // Should find at least hours, minutes, seconds, frames violations
         assert!(vios.len() >= 4);
+    }
+
+    // ── NonMonotonicDetector tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_non_monotonic_empty_slice() {
+        let events = NonMonotonicDetector::new(0).scan_sequence(&[]);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_non_monotonic_single_element() {
+        let tc = Timecode::new(0, 0, 0, 0, FrameRate::Fps25).expect("valid");
+        let events = NonMonotonicDetector::new(0).scan_sequence(&[tc]);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_non_monotonic_normal_sequence_no_events() {
+        // Build a perfectly sequential 25-frame sequence at 25fps.
+        let tcs: Vec<Timecode> = (0u8..25)
+            .map(|f| Timecode::new(0, 0, 0, f, FrameRate::Fps25).expect("valid"))
+            .collect();
+        let events = NonMonotonicDetector::new(0).scan_sequence(&tcs);
+        assert!(
+            events.is_empty(),
+            "sequential sequence should produce no events, got: {:?}",
+            events
+        );
+    }
+
+    #[test]
+    fn test_non_monotonic_2_second_jump_detected() {
+        // Jump from 00:00:00:00 to 00:00:02:00 = +50 frames at 25fps.
+        let tc0 = Timecode::new(0, 0, 0, 0, FrameRate::Fps25).expect("valid");
+        let tc1 = Timecode::new(0, 0, 2, 0, FrameRate::Fps25).expect("valid");
+        let events = NonMonotonicDetector::new(1).scan_sequence(&[tc0, tc1]);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].frame_index, 1);
+        assert_eq!(events[0].jump_frames, 50);
+    }
+
+    #[test]
+    fn test_non_monotonic_backwards_detected() {
+        let tc0 = Timecode::new(0, 0, 1, 0, FrameRate::Fps25).expect("valid");
+        let tc1 = Timecode::new(0, 0, 0, 0, FrameRate::Fps25).expect("valid"); // backwards
+        let events = NonMonotonicDetector::new(0).scan_sequence(&[tc0, tc1]);
+        assert_eq!(events.len(), 1);
+        assert!(events[0].jump_frames < 0);
+    }
+
+    #[test]
+    fn test_non_monotonic_threshold_filters_small_jumps() {
+        // Jump of exactly 2 frames: with threshold=1, |2-1|=1 which is NOT > 1, so no event.
+        let tc0 = Timecode::new(0, 0, 0, 0, FrameRate::Fps25).expect("valid");
+        let tc1 = Timecode::new(0, 0, 0, 2, FrameRate::Fps25).expect("valid"); // +2 frame jump
+                                                                               // threshold=1: deviation = |2-1| = 1, NOT > 1 → no event
+        let events = NonMonotonicDetector::new(1).scan_sequence(&[tc0, tc1]);
+        assert!(
+            events.is_empty(),
+            "jump of 2 should be filtered by threshold=1"
+        );
+
+        // threshold=0: deviation = 1 > 0 → event emitted
+        let tc0b = Timecode::new(0, 0, 0, 0, FrameRate::Fps25).expect("valid");
+        let tc1b = Timecode::new(0, 0, 0, 2, FrameRate::Fps25).expect("valid");
+        let events2 = NonMonotonicDetector::new(0).scan_sequence(&[tc0b, tc1b]);
+        assert_eq!(events2.len(), 1);
+    }
+
+    #[test]
+    fn test_non_monotonic_multiple_events() {
+        // A sequence: normal, then jump, then normal again, then backwards.
+        let tcs = vec![
+            Timecode::new(0, 0, 0, 0, FrameRate::Fps25).expect("valid"),
+            Timecode::new(0, 0, 0, 1, FrameRate::Fps25).expect("valid"), // +1 ok
+            Timecode::new(0, 0, 1, 0, FrameRate::Fps25).expect("valid"), // +24 jump
+            Timecode::new(0, 0, 1, 1, FrameRate::Fps25).expect("valid"), // +1 ok
+            Timecode::new(0, 0, 0, 5, FrameRate::Fps25).expect("valid"), // backwards
+        ];
+        let events = NonMonotonicDetector::new(1).scan_sequence(&tcs);
+        // Should detect index 2 (jump) and index 4 (backwards)
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].frame_index, 2);
+        assert_eq!(events[1].frame_index, 4);
     }
 }

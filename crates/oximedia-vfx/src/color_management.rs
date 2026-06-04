@@ -374,7 +374,11 @@ impl ColorPipeline {
     /// Identity pipeline (no conversion).
     #[must_use]
     pub fn identity() -> Self {
-        Self::new(ColorSpace::LinearSrgb, ColorSpace::LinearSrgb, ColorSpace::LinearSrgb)
+        Self::new(
+            ColorSpace::LinearSrgb,
+            ColorSpace::LinearSrgb,
+            ColorSpace::LinearSrgb,
+        )
     }
 
     /// Build the combined 3x3 matrix to go from colour space `a` (linear) to
@@ -579,10 +583,12 @@ mod tests {
     fn test_bradford_d65_to_d50() {
         let m = bradford_adaptation(WhitePoint::D65, WhitePoint::D50);
         // The adaptation matrix should not be identity
-        let is_identity = (0..3).all(|i| (0..3).all(|j| {
-            let expected = if i == j { 1.0 } else { 0.0 };
-            (m[i][j] - expected).abs() < 0.01
-        }));
+        let is_identity = (0..3).all(|i| {
+            (0..3).all(|j| {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                (m[i][j] - expected).abs() < 0.01
+            })
+        });
         assert!(!is_identity, "D65->D50 should not be identity");
     }
 

@@ -234,8 +234,12 @@ mod tests {
     fn test_store_and_retrieve_roundtrip() {
         let mut storage = software_store();
         let key_data = vec![0xAB_u8; 16];
-        storage.store_key("key-1", &key_data).expect("store should succeed");
-        let retrieved = storage.retrieve_key("key-1").expect("retrieve should succeed");
+        storage
+            .store_key("key-1", &key_data)
+            .expect("store should succeed");
+        let retrieved = storage
+            .retrieve_key("key-1")
+            .expect("retrieve should succeed");
         assert_eq!(retrieved, key_data, "retrieved key must equal original");
     }
 
@@ -249,28 +253,41 @@ mod tests {
     fn test_delete_key_returns_true_when_found() {
         let mut storage = software_store();
         let key_data = vec![0x01_u8; 8];
-        storage.store_key("del-key", &key_data).expect("store should succeed");
+        storage
+            .store_key("del-key", &key_data)
+            .expect("store should succeed");
         assert!(storage.delete_key("del-key"), "delete should return true");
-        assert!(storage.retrieve_key("del-key").is_none(), "key must be gone after delete");
+        assert!(
+            storage.retrieve_key("del-key").is_none(),
+            "key must be gone after delete"
+        );
     }
 
     #[test]
     fn test_delete_key_returns_false_when_not_found() {
         let mut storage = software_store();
-        assert!(!storage.delete_key("ghost"), "delete of missing key must return false");
+        assert!(
+            !storage.delete_key("ghost"),
+            "delete of missing key must return false"
+        );
     }
 
     #[test]
     fn test_software_backend_is_not_hw_backed() {
         let storage = software_store();
-        assert!(!storage.is_hw_backed(), "software backend must not be hw-backed");
+        assert!(
+            !storage.is_hw_backed(),
+            "software backend must not be hw-backed"
+        );
     }
 
     #[test]
     fn test_xor_obfuscation_differs_from_plaintext() {
         let mut storage = software_store();
         let key_data = vec![0xFF_u8; 16];
-        storage.store_key("obf-key", &key_data).expect("store should succeed");
+        storage
+            .store_key("obf-key", &key_data)
+            .expect("store should succeed");
         // Peek at the raw stored bytes (obfuscated) — they must differ from plaintext.
         let raw = storage.store.get("obf-key").cloned().expect("raw entry");
         assert_ne!(raw, key_data, "stored bytes must be obfuscated");
@@ -294,8 +311,12 @@ mod tests {
         let config = HwKeyStorageConfig::with_backend(HwStorageBackend::Tpm, true);
         let mut storage = HwKeyStorage::new(config);
         let key_data = vec![0x42_u8; 16];
-        storage.store_key("tpm-key", &key_data).expect("should fallback to software");
-        let retrieved = storage.retrieve_key("tpm-key").expect("retrieve after fallback");
+        storage
+            .store_key("tpm-key", &key_data)
+            .expect("should fallback to software");
+        let retrieved = storage
+            .retrieve_key("tpm-key")
+            .expect("retrieve after fallback");
         assert_eq!(retrieved, key_data);
     }
 
@@ -341,9 +362,17 @@ mod tests {
     #[test]
     fn test_overwrite_key() {
         let mut storage = software_store();
-        storage.store_key("ow-key", &[0xAA; 8]).expect("first store");
-        storage.store_key("ow-key", &[0xBB; 8]).expect("second store (overwrite)");
+        storage
+            .store_key("ow-key", &[0xAA; 8])
+            .expect("first store");
+        storage
+            .store_key("ow-key", &[0xBB; 8])
+            .expect("second store (overwrite)");
         let retrieved = storage.retrieve_key("ow-key").expect("retrieve");
-        assert_eq!(retrieved, vec![0xBB_u8; 8], "overwritten value must be returned");
+        assert_eq!(
+            retrieved,
+            vec![0xBB_u8; 8],
+            "overwritten value must be returned"
+        );
     }
 }

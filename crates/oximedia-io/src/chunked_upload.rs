@@ -63,9 +63,7 @@ impl ChunkedUploadSplitter {
         if data.is_empty() {
             return Vec::new();
         }
-        data.chunks(self.chunk_size)
-            .map(|c| c.to_vec())
-            .collect()
+        data.chunks(self.chunk_size).map(|c| c.to_vec()).collect()
     }
 
     /// The configured maximum chunk size in bytes.

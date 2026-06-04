@@ -173,7 +173,8 @@ impl MultiPassAnalyzer {
         // Adaptive scene threshold: base + stddev/255 * range
         let adaptive = self.min_scene_threshold
             + (luma_stddev / 255.0) * (self.max_scene_threshold - self.min_scene_threshold);
-        let suggested_scene_threshold = adaptive.clamp(self.min_scene_threshold, self.max_scene_threshold);
+        let suggested_scene_threshold =
+            adaptive.clamp(self.min_scene_threshold, self.max_scene_threshold);
 
         // Rough scene count estimate using threshold on motion energies
         let estimated_scene_count = motion_energies
@@ -282,7 +283,9 @@ fn edge_density(frame: &[u8]) -> f64 {
     let mut edge_count = 0u64;
     let n = frame.len();
     for i in 1..n - 1 {
-        let dx = i32::from(frame[i + 1]).wrapping_sub(i32::from(frame[i - 1])).abs();
+        let dx = i32::from(frame[i + 1])
+            .wrapping_sub(i32::from(frame[i - 1]))
+            .abs();
         if dx > 30 {
             edge_count += 1;
         }
@@ -344,7 +347,9 @@ mod tests {
     fn test_first_pass_single_frame() {
         let analyzer = MultiPassAnalyzer::new();
         let frame = vec![128u8; 100];
-        let result = analyzer.analyze_first_pass(&[&frame]).expect("first pass should succeed");
+        let result = analyzer
+            .analyze_first_pass(&[&frame])
+            .expect("first pass should succeed");
         assert_eq!(result.frame_count, 1);
         assert!((result.avg_luma - 128.0).abs() < 0.1);
     }
@@ -355,7 +360,9 @@ mod tests {
         let frames_data = make_flat_frames(5, 64, 100);
         let frames: Vec<&[u8]> = frames_data.iter().map(|v| v.as_slice()).collect();
         let first = analyzer.analyze_first_pass(&frames).expect("first pass");
-        let second = analyzer.analyze_second_pass(&frames, &first).expect("second pass");
+        let second = analyzer
+            .analyze_second_pass(&frames, &first)
+            .expect("second pass");
         assert_eq!(second.frames.len(), 5);
     }
 
@@ -365,12 +372,15 @@ mod tests {
         // 5 dark frames then 5 bright frames → scene change at frame 5
         let dark = vec![0u8; 64];
         let bright = vec![255u8; 64];
-        let frames_data: Vec<Vec<u8>> = (0..5).map(|_| dark.clone())
+        let frames_data: Vec<Vec<u8>> = (0..5)
+            .map(|_| dark.clone())
             .chain((0..5).map(|_| bright.clone()))
             .collect();
         let frames: Vec<&[u8]> = frames_data.iter().map(|v| v.as_slice()).collect();
         let first = analyzer.analyze_first_pass(&frames).expect("first pass");
-        let second = analyzer.analyze_second_pass(&frames, &first).expect("second pass");
+        let second = analyzer
+            .analyze_second_pass(&frames, &first)
+            .expect("second pass");
         assert!(
             !second.scene_changes.is_empty(),
             "should detect scene change between dark and bright frames"

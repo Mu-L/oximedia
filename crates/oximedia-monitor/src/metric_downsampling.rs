@@ -205,16 +205,13 @@ impl MetricDownsampler {
         for i in 0..middle_count {
             // Current bucket bounds (within middle samples, 0-indexed into
             // samples[1..n-1]).
-            let bucket_start =
-                (i as f64 * bucket_size).floor() as usize;
-            let bucket_end =
-                ((i + 1) as f64 * bucket_size).floor() as usize;
+            let bucket_start = (i as f64 * bucket_size).floor() as usize;
+            let bucket_end = ((i + 1) as f64 * bucket_size).floor() as usize;
             let bucket_end = bucket_end.min(middle_len - 1);
 
             // Next bucket (used for look-ahead average).
             let next_bucket_start = bucket_end + 1;
-            let next_bucket_end =
-                (((i + 2) as f64) * bucket_size).floor() as usize;
+            let next_bucket_end = (((i + 2) as f64) * bucket_size).floor() as usize;
             let next_bucket_end = next_bucket_end.min(middle_len);
 
             // Compute average of the next bucket (centroid).
@@ -230,10 +227,7 @@ impl MetricDownsampler {
                 (sum_ts / count, sum_val / count)
             } else {
                 // Last bucket: use the final sample as centroid.
-                (
-                    samples[n - 1].timestamp_secs as f64,
-                    samples[n - 1].value,
-                )
+                (samples[n - 1].timestamp_secs as f64, samples[n - 1].value)
             };
 
             // Previously selected point.
@@ -320,14 +314,16 @@ impl MetricDownsampler {
             let bucket = &samples[start..end];
 
             // Find min and max by value.
-            let min_sample = bucket
-                .iter()
-                .copied()
-                .min_by(|a, b| a.value.partial_cmp(&b.value).unwrap_or(std::cmp::Ordering::Equal));
-            let max_sample = bucket
-                .iter()
-                .copied()
-                .max_by(|a, b| a.value.partial_cmp(&b.value).unwrap_or(std::cmp::Ordering::Equal));
+            let min_sample = bucket.iter().copied().min_by(|a, b| {
+                a.value
+                    .partial_cmp(&b.value)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let max_sample = bucket.iter().copied().max_by(|a, b| {
+                a.value
+                    .partial_cmp(&b.value)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
 
             if let (Some(mn), Some(mx)) = (min_sample, max_sample) {
                 // Emit in chronological order.
@@ -394,9 +390,7 @@ mod tests {
     use super::*;
 
     fn make_samples(n: usize) -> Vec<Sample> {
-        (0..n)
-            .map(|i| Sample::new(i as u64, i as f64))
-            .collect()
+        (0..n).map(|i| Sample::new(i as u64, i as f64)).collect()
     }
 
     fn sine_samples(n: usize) -> Vec<Sample> {
@@ -488,8 +482,14 @@ mod tests {
             MetricDownsampler::downsample(&samples, 50, DownsampleMethod::Lttb).expect("ok");
         let has_positive = result.samples.iter().any(|s| s.value > 0.1);
         let has_negative = result.samples.iter().any(|s| s.value < -0.1);
-        assert!(has_positive, "Downsampled sine should include positive values");
-        assert!(has_negative, "Downsampled sine should include negative values");
+        assert!(
+            has_positive,
+            "Downsampled sine should include positive values"
+        );
+        assert!(
+            has_negative,
+            "Downsampled sine should include negative values"
+        );
     }
 
     #[test]
@@ -541,9 +541,7 @@ mod tests {
 
     #[test]
     fn test_average_single_target_is_global_mean() {
-        let samples: Vec<Sample> = (0..5)
-            .map(|i| Sample::new(i as u64, i as f64))
-            .collect(); // values 0,1,2,3,4 → mean = 2.0
+        let samples: Vec<Sample> = (0..5).map(|i| Sample::new(i as u64, i as f64)).collect(); // values 0,1,2,3,4 → mean = 2.0
         let result =
             MetricDownsampler::downsample(&samples, 1, DownsampleMethod::Average).expect("ok");
         assert_eq!(result.samples.len(), 1);

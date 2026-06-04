@@ -70,10 +70,11 @@ impl SeasonalDecomposition {
         //    values at positions p, p+period, p+2*period, …
         let mut seasonal = vec![0.0f32; period];
         for p in 0..period {
-            let vals: Vec<f32> = (0..)
-                .map(|k| p + k * period)
-                .take_while(|&idx| idx < n)
-                .map(|idx| detrended[idx])
+            // Collect all indices congruent to p (mod period) within [0, n).
+            // p < period <= n/2, so p < n is guaranteed by the length validation above.
+            let num_complete = n.saturating_sub(p).div_ceil(period);
+            let vals: Vec<f32> = (0..num_complete)
+                .map(|k| detrended[p + k * period])
                 .collect();
             if !vals.is_empty() {
                 seasonal[p] = vals.iter().sum::<f32>() / vals.len() as f32;
@@ -204,11 +205,7 @@ mod tests {
         // A pure sinusoid should have very small residuals after decomposition.
         let data = sinusoid(96, 24, 10.0);
         let dec = SeasonalDecomposition::decompose(&data, 24).expect("ok");
-        let max_residual = dec
-            .residual
-            .iter()
-            .map(|r| r.abs())
-            .fold(0.0f32, f32::max);
+        let max_residual = dec.residual.iter().map(|r| r.abs()).fold(0.0f32, f32::max);
         // Residuals won't be perfectly zero because CMA boundary effects.
         assert!(
             max_residual < 15.0,

@@ -489,8 +489,14 @@ mod tests {
     fn test_compute_rect_within_frame_bounds() {
         let t = LowerThirdTemplate::news_standard();
         let (x, y, w, h) = t.compute_rect(1920, 1080);
-        assert!(x + w <= 1920, "banner right edge must be within frame width");
-        assert!(y + h <= 1080, "banner bottom edge must be within frame height");
+        assert!(
+            x + w <= 1920,
+            "banner right edge must be within frame width"
+        );
+        assert!(
+            y + h <= 1080,
+            "banner bottom edge must be within frame height"
+        );
         assert!(w > 0);
         assert!(h > 0);
     }
@@ -625,7 +631,7 @@ mod tests {
         let mut q = LowerThirdQueue::new();
         let lt = make_lower_third("Past", "Item", 1000); // duration = 1 000 ms
         q.add(lt, 0); // active [0, 1000)
-        // now_ms=1000 is no longer active (end is exclusive)
+                      // now_ms=1000 is no longer active (end is exclusive)
         assert!(q.current_item(1000).is_none());
     }
 

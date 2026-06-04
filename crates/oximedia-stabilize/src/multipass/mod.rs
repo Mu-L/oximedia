@@ -5,6 +5,8 @@
 
 pub mod analyze;
 pub mod optimize;
+pub mod progressive;
 
 pub use analyze::{MultipassAnalysis, MultipassAnalyzer};
 pub use optimize::GlobalOptimizer;
+pub use progressive::{ProgressiveAnalysisConfig, ProgressiveAnalyzer};

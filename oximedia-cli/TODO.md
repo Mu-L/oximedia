@@ -436,7 +436,7 @@ tabs, `↑`/`↓` navigate, `Enter` show details.
 
 ---
 
-*Last updated: 2026-05-06 — v0.1.7, oximedia-cli summary (Run 4 of `/ultra oximedia-cli` LANDED 2026-05-06: handlers.rs split into per-domain submodule, doctor `--full` Phase 1 with codec matrix + plugin path validation + OXICUDA probe, oximedia-compat-cv2 `dnn` module wrapping oxionnx + ORB pipeline followups (BFMatcher / knn_match / mask), 10 new oximedia-cv2 subcommands; bookkeeping flips Refinement 8 done and closes Refinement 5 as WONT-FIX)*
+*Last updated: 2026-05-06 — v0.1.8, oximedia-cli summary (Run 4 of `/ultra oximedia-cli` LANDED 2026-05-06: handlers.rs split into per-domain submodule, doctor `--full` Phase 1 with codec matrix + plugin path validation + OXICUDA probe, oximedia-compat-cv2 `dnn` module wrapping oxionnx + ORB pipeline followups (BFMatcher / knn_match / mask), 10 new oximedia-cv2 subcommands; bookkeeping flips Refinement 8 done and closes Refinement 5 as WONT-FIX)*
 
 ---
 

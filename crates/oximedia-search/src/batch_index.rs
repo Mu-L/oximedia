@@ -175,9 +175,7 @@ impl IndexBackend for InMemoryBackend {
                 if *remaining == 0 {
                     self.simulate_failure_count = None;
                 }
-                return Err(SearchError::Other(
-                    "simulated write failure".to_string(),
-                ));
+                return Err(SearchError::Other("simulated write failure".to_string()));
             }
         }
         self.pending.extend_from_slice(docs);
@@ -438,7 +436,9 @@ mod tests {
         let backend = InMemoryBackend::new();
         let mut indexer = BatchIndexer::with_capacity(backend, 5);
         for i in 0..4 {
-            indexer.push(make_doc(&format!("doc-{i}"))).expect("push ok");
+            indexer
+                .push(make_doc(&format!("doc-{i}")))
+                .expect("push ok");
         }
         assert_eq!(indexer.buffered_count(), 4);
         // Nothing committed yet.
@@ -450,7 +450,9 @@ mod tests {
         let backend = InMemoryBackend::new();
         let mut indexer = BatchIndexer::with_capacity(backend, 3);
         for i in 0..3 {
-            indexer.push(make_doc(&format!("doc-{i}"))).expect("push ok");
+            indexer
+                .push(make_doc(&format!("doc-{i}")))
+                .expect("push ok");
         }
         // Auto-flush triggered but commit not yet called.
         assert_eq!(indexer.buffered_count(), 0);
@@ -463,7 +465,9 @@ mod tests {
         let backend = InMemoryBackend::new();
         let mut indexer = BatchIndexer::with_capacity(backend, 10);
         for i in 0..7 {
-            indexer.push(make_doc(&format!("doc-{i}"))).expect("push ok");
+            indexer
+                .push(make_doc(&format!("doc-{i}")))
+                .expect("push ok");
         }
         indexer.flush().expect("flush ok");
         assert_eq!(indexer.backend().total_indexed(), 7);
@@ -475,7 +479,9 @@ mod tests {
         let backend = InMemoryBackend::new();
         let mut indexer = BatchIndexer::with_capacity(backend, 3);
         for i in 0..10u32 {
-            indexer.push(make_doc(&format!("doc-{i}"))).expect("push ok");
+            indexer
+                .push(make_doc(&format!("doc-{i}")))
+                .expect("push ok");
         }
         indexer.flush().expect("final flush ok");
         assert_eq!(indexer.backend().total_indexed(), 10);
@@ -487,7 +493,9 @@ mod tests {
     fn test_flush_empty_buffer_is_noop() {
         let backend = InMemoryBackend::new();
         let mut indexer = BatchIndexer::with_capacity(backend, 5);
-        indexer.flush().expect("flush of empty buffer should succeed");
+        indexer
+            .flush()
+            .expect("flush of empty buffer should succeed");
         assert_eq!(indexer.stats().docs_written, 0);
         assert_eq!(indexer.backend().total_indexed(), 0);
     }
@@ -553,7 +561,9 @@ mod tests {
         assert_eq!(stats.total_input, 20);
         assert_eq!(stats.succeeded, 20);
         assert_eq!(stats.failed, 0);
-        assert!(processed.iter().all(|d| d.tags.contains(&"processed".to_string())));
+        assert!(processed
+            .iter()
+            .all(|d| d.tags.contains(&"processed".to_string())));
     }
 
     #[test]
@@ -593,7 +603,7 @@ mod tests {
 
         let stats = indexer.stats();
         assert_eq!(stats.docs_pushed, 9);
-        assert_eq!(stats.auto_flushes, 2);  // 8 docs / 4 = 2 auto-flushes
+        assert_eq!(stats.auto_flushes, 2); // 8 docs / 4 = 2 auto-flushes
         assert_eq!(stats.manual_flushes, 1);
         assert_eq!(stats.docs_written, 9);
         assert_eq!(stats.flush_errors, 0);

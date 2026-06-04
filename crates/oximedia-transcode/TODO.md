@@ -44,3 +44,12 @@
 - [ ] Add architecture diagram showing pipeline stage flow (demux -> decode -> filter -> encode -> mux)
 - [ ] Document preset selection guide in `presets` module (which preset for which use case)
 - [ ] Add inline examples for `TranscodeBuilder` showing common real-world workflows
+
+## 0.1.8 Wave 4 follow-up (added 2026-05-29 by /ultra)
+
+- [x] Register 24 orphan modules in oximedia-transcode (wire-ready ones get `pub mod`, stubs get annotation) (planned 2026-05-29)
+  - **Goal:** 24 source files in `crates/oximedia-transcode/src/` are never compiled because they lack `pub mod` declarations in `lib.rs`. Enumerate, classify, and register all wire-ready ones.
+  - **Design:** Identical pattern to oximedia-graphics orphan sweep: scan → classify (intentional-stub / compile-fix-needed / wire-ready) → register or annotate. Batch 4–6 at a time, validate after each batch. Smoke test per registered orphan.
+  - **Files:** `crates/oximedia-transcode/src/lib.rs` (new `pub mod` declarations), `crates/oximedia-transcode/tests/orphan_smoke.rs` (new or extend), per-orphan annotation edits
+  - **Tests:** Smoke test per registered orphan. Existing tests pass. Zero new clippy warnings.
+  - **Risk:** Transcode orphans may depend on oximedia-codec symbols that were refactored. Annotation path for those.

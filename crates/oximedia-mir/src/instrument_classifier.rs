@@ -135,10 +135,7 @@ impl ClassificationResult {
     /// Return the highest confidence value.
     #[must_use]
     pub fn top_confidence(&self) -> f32 {
-        self.scores
-            .iter()
-            .map(|(_, c)| *c)
-            .fold(0.0_f32, f32::max)
+        self.scores.iter().map(|(_, c)| *c).fold(0.0_f32, f32::max)
     }
 
     /// Return the confidence for a specific family, or `0.0` if not present.
@@ -332,13 +329,13 @@ impl InstrumentClassifier {
             .iter()
             .map(|&d| -d / SOFTMAX_TEMPERATURE)
             .collect();
-        let max_val = neg_scaled
-            .iter()
-            .cloned()
-            .fold(f32::NEG_INFINITY, f32::max);
+        let max_val = neg_scaled.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let exps: Vec<f32> = neg_scaled.iter().map(|&v| (v - max_val).exp()).collect();
         let sum_exp: f32 = exps.iter().sum();
-        let confidences: Vec<f32> = exps.iter().map(|&e| e / sum_exp.max(f32::EPSILON)).collect();
+        let confidences: Vec<f32> = exps
+            .iter()
+            .map(|&e| e / sum_exp.max(f32::EPSILON))
+            .collect();
 
         InstrumentFamily::ALL
             .iter()
@@ -357,23 +354,41 @@ impl InstrumentClassifier {
     fn build_centroids() -> Vec<[f32; FEAT_DIM]> {
         vec![
             // Strings:    warm, mid-range centroid, moderate rolloff
-            [1800.0, 400.0, 5000.0, 1200.0, 0.05, 0.03, 1200.0, 300.0, 0.15, 0.05],
+            [
+                1800.0, 400.0, 5000.0, 1200.0, 0.05, 0.03, 1200.0, 300.0, 0.15, 0.05,
+            ],
             // Brass:      bright, high centroid, strong harmonics
-            [3500.0, 600.0, 8000.0, 1500.0, 0.08, 0.04, 1500.0, 400.0, 0.20, 0.06],
+            [
+                3500.0, 600.0, 8000.0, 1500.0, 0.08, 0.04, 1500.0, 400.0, 0.20, 0.06,
+            ],
             // Woodwind:   mid-high centroid, airy flatness
-            [2800.0, 500.0, 7000.0, 1200.0, 0.06, 0.03, 1800.0, 400.0, 0.30, 0.08],
+            [
+                2800.0, 500.0, 7000.0, 1200.0, 0.06, 0.03, 1800.0, 400.0, 0.30, 0.08,
+            ],
             // Percussion: very high flux, high ZCR, low flatness variation
-            [4500.0, 1500.0, 10000.0, 2500.0, 0.25, 0.15, 4500.0, 1500.0, 0.40, 0.15],
+            [
+                4500.0, 1500.0, 10000.0, 2500.0, 0.25, 0.15, 4500.0, 1500.0, 0.40, 0.15,
+            ],
             // Keys:       broad centroid range, moderate ZCR
-            [2200.0, 700.0, 6000.0, 1500.0, 0.07, 0.04, 1400.0, 400.0, 0.18, 0.06],
+            [
+                2200.0, 700.0, 6000.0, 1500.0, 0.07, 0.04, 1400.0, 400.0, 0.18, 0.06,
+            ],
             // Guitar:     mid centroid, moderate flux with pluck attacks
-            [2500.0, 800.0, 6500.0, 1600.0, 0.10, 0.06, 1600.0, 500.0, 0.22, 0.07],
+            [
+                2500.0, 800.0, 6500.0, 1600.0, 0.10, 0.06, 1600.0, 500.0, 0.22, 0.07,
+            ],
             // Bass:       low centroid, low rolloff, low ZCR
-            [400.0, 150.0, 1800.0, 600.0, 0.04, 0.02, 600.0, 200.0, 0.12, 0.04],
+            [
+                400.0, 150.0, 1800.0, 600.0, 0.04, 0.02, 600.0, 200.0, 0.12, 0.04,
+            ],
             // Vocal:      mid centroid, moderate ZCR, moderate flatness
-            [2000.0, 500.0, 4500.0, 1000.0, 0.05, 0.03, 2000.0, 600.0, 0.25, 0.07],
+            [
+                2000.0, 500.0, 4500.0, 1000.0, 0.05, 0.03, 2000.0, 600.0, 0.25, 0.07,
+            ],
             // Synth:      variable centroid, high flatness (noise components)
-            [3000.0, 1200.0, 7500.0, 2000.0, 0.09, 0.06, 2000.0, 700.0, 0.50, 0.15],
+            [
+                3000.0, 1200.0, 7500.0, 2000.0, 0.09, 0.06, 2000.0, 700.0, 0.50, 0.15,
+            ],
         ]
     }
 
@@ -381,16 +396,16 @@ impl InstrumentClassifier {
         // Relative importance of each feature dimension
         // [mean_c, std_c, mean_r, std_r, mean_flux, std_flux, mean_zcr, std_zcr, mean_flat, std_flat]
         [
-            1.0 / 5000.0, // mean centroid — normalise to ~1
-            1.0 / 1500.0, // std centroid
+            1.0 / 5000.0,  // mean centroid — normalise to ~1
+            1.0 / 1500.0,  // std centroid
             1.0 / 10000.0, // mean rolloff
-            1.0 / 2500.0, // std rolloff
-            5.0,          // mean flux — high discriminative power
-            3.0,          // std flux
-            1.0 / 3000.0, // mean zcr
-            1.0 / 1000.0, // std zcr
-            2.0,          // mean flatness
-            2.0,          // std flatness
+            1.0 / 2500.0,  // std rolloff
+            5.0,           // mean flux — high discriminative power
+            3.0,           // std flux
+            1.0 / 3000.0,  // mean zcr
+            1.0 / 1000.0,  // std zcr
+            2.0,           // mean flatness
+            2.0,           // std flatness
         ]
     }
 }
@@ -525,10 +540,8 @@ mod tests {
 
     #[test]
     fn test_family_names_unique() {
-        let names: std::collections::HashSet<_> = InstrumentFamily::ALL
-            .iter()
-            .map(|f| f.name())
-            .collect();
+        let names: std::collections::HashSet<_> =
+            InstrumentFamily::ALL.iter().map(|f| f.name()).collect();
         assert_eq!(names.len(), InstrumentFamily::ALL.len());
     }
 

@@ -69,7 +69,10 @@ impl Complex {
 
     /// Add two complex numbers.
     fn add(self, rhs: Self) -> Self {
-        Self { re: self.re + rhs.re, im: self.im + rhs.im }
+        Self {
+            re: self.re + rhs.re,
+            im: self.im + rhs.im,
+        }
     }
 }
 
@@ -371,6 +374,217 @@ impl BinauralConvolver {
     }
 }
 
+// ─── Partitioned HRTF Convolver (OxiFFT-backed) ───────────────────────────────
+
+/// Partitioned convolution HRTF renderer using OxiFFT's R2C/C2R transforms.
+///
+/// Implements the Gardner (1995) / Wefers (2015) uniform partitioned convolution
+/// algorithm for low-latency HRTF rendering:
+///
+/// ## Algorithm (overlap-save, uniform partitions)
+///
+/// Given HRTF `h[n]` of length M and block size B:
+///
+/// 1. Partition `h` into `P = ceil(M/B)` segments `h_k[n] = h[kB .. (k+1)B]`.
+/// 2. Pre-compute `H_k = rfft(zero_pad(h_k, 2B))` for each partition k.
+///    Each spectrum has B+1 complex bins.
+/// 3. Maintain a **time-domain input delay line** of length `P×B + B` samples.
+/// 4. **Per block** (new `B` samples arrive):
+///    a. Write new samples into the delay line.
+///    b. For each partition k (k=0 is most recent), extract the 2B-sample
+///       overlap window ending at the current write position offset by k×B.
+///    c. Compute `X_k = rfft(overlap_window_k)`.
+///    d. Accumulate `Y += X_k × H_k` (complex multiply-add per bin).
+///    e. Output = `irfft(Y)[B..2B]` (overlap-save: discard first half).
+///
+/// This approach stores input samples in time-domain (not spectra), which is
+/// correct for overlap-save: each 2B window always has B old + B new samples.
+///
+/// Latency: exactly `block_size` samples.
+///
+/// # Example
+///
+/// ```rust
+/// use oximedia_spatial::partitioned_convolution::PartitionedHrtfConvolver;
+///
+/// let hrtf_left  = vec![1.0_f32, 0.5, 0.25, 0.125];
+/// let hrtf_right = vec![0.5_f32, 1.0, 0.25, 0.125];
+/// let mut conv = PartitionedHrtfConvolver::new(&hrtf_left, &hrtf_right, 4);
+/// let mono_block = vec![1.0_f32; 4];
+/// let (left, right) = conv.process_block(&mono_block);
+/// assert_eq!(left.len(), 4);
+/// assert_eq!(right.len(), 4);
+/// ```
+#[derive(Debug, Clone)]
+pub struct PartitionedHrtfConvolver {
+    /// Block / partition size in samples.
+    block_size: usize,
+    /// Number of partitions: `ceil(hrtf_len / block_size)`.
+    num_partitions: usize,
+    /// Pre-computed rfft spectra of each left-ear HRTF partition.
+    /// Each inner Vec has `block_size + 1` complex bins.
+    left_partitions: Vec<Vec<oxifft::Complex<f32>>>,
+    /// Pre-computed rfft spectra of each right-ear HRTF partition.
+    right_partitions: Vec<Vec<oxifft::Complex<f32>>>,
+    /// Time-domain input delay line of length `(num_partitions + 1) * block_size`.
+    /// Written in a ring-buffer fashion; `write_head` points to the next write position.
+    input_delay: Vec<f32>,
+    /// Current write head in the delay line.
+    write_head: usize,
+    /// Scratch buffer of length `2 * block_size` for building the overlap window.
+    overlap_win: Vec<f32>,
+}
+
+impl PartitionedHrtfConvolver {
+    /// Create a new partitioned HRTF convolver.
+    ///
+    /// # Arguments
+    /// - `hrtf_left`  — left-ear impulse response (any length ≥ 1).
+    /// - `hrtf_right` — right-ear impulse response (must be the same length).
+    /// - `block_size` — processing block size in samples (must be ≥ 1).
+    ///
+    /// If the two IRs differ in length, the shorter one is zero-padded to match
+    /// the longer.  `block_size` == 0 is treated as 1.
+    pub fn new(hrtf_left: &[f32], hrtf_right: &[f32], block_size: usize) -> Self {
+        let block_size = block_size.max(1);
+        let hrtf_len = hrtf_left.len().max(hrtf_right.len()).max(1);
+        let num_partitions = hrtf_len.div_ceil(block_size);
+        let fft_len = 2 * block_size; // overlap-save FFT size
+
+        /// Partition a single IR into `num_partitions` rfft spectra.
+        fn partition_ir(
+            ir: &[f32],
+            block_size: usize,
+            num_partitions: usize,
+            fft_len: usize,
+        ) -> Vec<Vec<oxifft::Complex<f32>>> {
+            (0..num_partitions)
+                .map(|k| {
+                    let start = k * block_size;
+                    let end = (start + block_size).min(ir.len());
+                    let mut padded = vec![0.0_f32; fft_len];
+                    if start < ir.len() {
+                        padded[..end - start].copy_from_slice(&ir[start..end]);
+                    }
+                    oxifft::rfft::<f32>(&padded)
+                })
+                .collect()
+        }
+
+        let left_partitions = partition_ir(hrtf_left, block_size, num_partitions, fft_len);
+        let right_partitions = partition_ir(hrtf_right, block_size, num_partitions, fft_len);
+
+        // Delay line length: (P+1)*B samples — enough for P overlap windows.
+        let delay_len = (num_partitions + 1) * block_size;
+
+        Self {
+            block_size,
+            num_partitions,
+            left_partitions,
+            right_partitions,
+            input_delay: vec![0.0_f32; delay_len],
+            write_head: 0,
+            overlap_win: vec![0.0_f32; fft_len],
+        }
+    }
+
+    /// Process one block of `block_size` mono input samples.
+    ///
+    /// Returns `(left_output, right_output)`, each of length `block_size`.
+    ///
+    /// If `input.len() != block_size`, the block is zero-padded or truncated
+    /// silently so the output always has the expected length.
+    pub fn process_block(&mut self, input: &[f32]) -> (Vec<f32>, Vec<f32>) {
+        let b = self.block_size;
+        let fft_len = 2 * b;
+        let bins = b + 1;
+        let delay_len = self.input_delay.len();
+
+        // ── Write new input block into the ring delay line ────────────────────
+        let copy_len = input.len().min(b);
+        for i in 0..b {
+            let sample = if i < copy_len { input[i] } else { 0.0 };
+            self.input_delay[(self.write_head + i) % delay_len] = sample;
+        }
+
+        // ── Frequency-domain accumulation: Y = Σ_{k=0..P-1} rfft(win_k) × H_k ─
+        //
+        // For partition k, `win_k` is the 2B-sample overlap window ending
+        // just after the k×B-sample look-back from the current block start.
+        // Specifically, the window for partition k spans sample positions:
+        //   [ write_head - (k+1)*B, write_head - k*B + B - 1 ]
+        // i.e., 2B samples starting from (write_head - (k+1)*B) mod delay_len.
+        let mut left_accum = vec![oxifft::Complex::<f32>::zero(); bins];
+        let mut right_accum = vec![oxifft::Complex::<f32>::zero(); bins];
+
+        for k in 0..self.num_partitions {
+            // Start of the 2B overlap window for partition k.
+            // We need to look back (k+1)*B from write_head to get the window
+            // [x[t - (k+1)*B .. t - (k-1)*B ]], i.e. 2B samples.
+            let look_back = (k + 1) * b;
+            let win_start = (write_head_offset(self.write_head, look_back, delay_len)) % delay_len;
+
+            // Extract 2B samples from the ring buffer into `overlap_win`.
+            for i in 0..fft_len {
+                self.overlap_win[i] = self.input_delay[(win_start + i) % delay_len];
+            }
+
+            let x_freq = oxifft::rfft::<f32>(&self.overlap_win);
+
+            let h_left = &self.left_partitions[k];
+            let h_right = &self.right_partitions[k];
+
+            for j in 0..bins {
+                let xl = x_freq[j];
+                left_accum[j].re += xl.re * h_left[j].re - xl.im * h_left[j].im;
+                left_accum[j].im += xl.re * h_left[j].im + xl.im * h_left[j].re;
+                right_accum[j].re += xl.re * h_right[j].re - xl.im * h_right[j].im;
+                right_accum[j].im += xl.re * h_right[j].im + xl.im * h_right[j].re;
+            }
+        }
+
+        // ── IFFT and extract second half (overlap-save discard) ───────────────
+        let left_time = oxifft::irfft::<f32>(&left_accum, fft_len);
+        let right_time = oxifft::irfft::<f32>(&right_accum, fft_len);
+
+        // Overlap-save: keep the second half (samples b..2b).
+        let left_out = left_time[b..].to_vec();
+        let right_out = right_time[b..].to_vec();
+
+        // ── Advance write head ────────────────────────────────────────────────
+        self.write_head = (self.write_head + b) % delay_len;
+
+        (left_out, right_out)
+    }
+
+    /// Return the block size.
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
+
+    /// Return the number of IR partitions.
+    pub fn num_partitions(&self) -> usize {
+        self.num_partitions
+    }
+
+    /// Reset the internal state (delay line and write head).
+    pub fn reset(&mut self) {
+        self.input_delay.fill(0.0);
+        self.write_head = 0;
+    }
+}
+
+/// Compute `(base - offset + total) % total` safely (avoids underflow on usize).
+#[inline]
+fn write_head_offset(base: usize, offset: usize, total: usize) -> usize {
+    let offset_mod = offset % total;
+    if base >= offset_mod {
+        base - offset_mod
+    } else {
+        total - offset_mod + base
+    }
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -499,5 +713,179 @@ mod tests {
         let hrtf = make_impulse(8);
         let bc = BinauralConvolver::new(&hrtf, &hrtf, 4).expect("ok");
         assert_eq!(bc.partition_size(), 4);
+    }
+
+    // ── PartitionedHrtfConvolver ─────────────────────────────────────────────
+
+    /// Compute the PSNR between two equal-length signals.
+    fn psnr(a: &[f32], b: &[f32]) -> f32 {
+        assert_eq!(a.len(), b.len());
+        let mse: f32 = a
+            .iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y) * (x - y))
+            .sum::<f32>()
+            / a.len() as f32;
+        if mse < 1e-20 {
+            return 120.0; // effectively infinite PSNR
+        }
+        let max_val: f32 = a
+            .iter()
+            .chain(b.iter())
+            .fold(0.0_f32, |m, &x| m.max(x.abs()));
+        let peak_sq = max_val * max_val;
+        10.0 * (peak_sq / mse).log10()
+    }
+
+    /// Direct (time-domain) convolution of `signal` with `ir`.
+    fn direct_convolve(signal: &[f32], ir: &[f32]) -> Vec<f32> {
+        let out_len = signal.len() + ir.len() - 1;
+        let mut out = vec![0.0_f32; out_len];
+        for (n, &s) in signal.iter().enumerate() {
+            for (k, &h) in ir.iter().enumerate() {
+                out[n + k] += s * h;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_partitioned_hrtf_delta_response() {
+        // With overlap-save partitioned convolution and a delta HRTF h=[1,0,...,0],
+        // the output of each block EQUALS the input of that block (zero latency).
+        //
+        // Derivation: for partition k=0, the overlap window is
+        //   [previous_B_zeros | current_B_input] → rfft → * H_0 (all-ones) → irfft
+        //   → [zeros | input]; second half = input.
+        // So block[0] output = block[0] input.
+        let block_size = 8_usize;
+        let mut hrtf_l = vec![0.0_f32; block_size];
+        let mut hrtf_r = vec![0.0_f32; block_size];
+        hrtf_l[0] = 1.0; // identity HRTF
+        hrtf_r[0] = 1.0;
+
+        let mut conv = PartitionedHrtfConvolver::new(&hrtf_l, &hrtf_r, block_size);
+
+        let input: Vec<f32> = (0..block_size).map(|i| i as f32 + 1.0).collect();
+        let zeros = vec![0.0_f32; block_size];
+
+        // Block 0: feed input → expect output ≈ input (zero latency for delta HRTF).
+        let (l0, r0) = conv.process_block(&input);
+        // Block 1: feed zeros → expect output ≈ zeros.
+        let (l1, _r1) = conv.process_block(&zeros);
+
+        // l0 should reproduce the input.
+        for (i, (&got, &expected)) in l0.iter().zip(input.iter()).enumerate() {
+            assert!(
+                (got - expected).abs() < 0.5,
+                "delta_response block0: l0[{i}] = {got:.4}, expected {expected:.4}"
+            );
+        }
+        // r0 should also reproduce the input.
+        for (i, (&got, &expected)) in r0.iter().zip(input.iter()).enumerate() {
+            assert!(
+                (got - expected).abs() < 0.5,
+                "delta_response block0: r0[{i}] = {got:.4}, expected {expected:.4}"
+            );
+        }
+        // l1 (zero input) should produce near-zero output.
+        let l1_energy: f32 = l1.iter().map(|x| x * x).sum();
+        assert!(
+            l1_energy < 1.0,
+            "delta_response block1 (zeros): l1 energy should be small, got {l1_energy:.4}"
+        );
+    }
+
+    #[test]
+    fn test_partitioned_hrtf_matches_direct() {
+        // Compare output of PartitionedHrtfConvolver vs direct linear convolution.
+        // We use a 4-partition HRTF (64 samples, block_size=16).
+        //
+        // Overlap-save partitioned convolution computes the same result as linear
+        // convolution with no latency offset: output[n] ≈ (x * h)[n].
+        let block_size = 16_usize;
+        let hrtf_len = 64_usize;
+
+        // Synthetic HRTF: exponential decay.
+        let hrtf_l: Vec<f32> = (0..hrtf_len)
+            .map(|i| (-0.1 * i as f32).exp() * if i == 0 { 1.0 } else { 0.5 })
+            .collect();
+        let hrtf_r: Vec<f32> = (0..hrtf_len)
+            .map(|i| (-0.08 * i as f32).exp() * if i == 0 { 0.8 } else { 0.4 })
+            .collect();
+
+        let mut conv = PartitionedHrtfConvolver::new(&hrtf_l, &hrtf_r, block_size);
+
+        // 8 blocks of sine wave input.
+        let n_blocks = 8_usize;
+        let signal_len = n_blocks * block_size;
+        let signal: Vec<f32> = (0..signal_len)
+            .map(|i| (i as f32 * 0.3).sin() * 0.8)
+            .collect();
+
+        // Run the partitioned convolver block by block.
+        let mut part_left = Vec::with_capacity(signal_len);
+        let mut part_right = Vec::with_capacity(signal_len);
+        for blk in 0..n_blocks {
+            let block = &signal[blk * block_size..(blk + 1) * block_size];
+            let (l, r) = conv.process_block(block);
+            part_left.extend_from_slice(&l);
+            part_right.extend_from_slice(&r);
+        }
+
+        // Reference: direct linear convolution.
+        let direct_left_full = direct_convolve(&signal, &hrtf_l);
+        let direct_right_full = direct_convolve(&signal, &hrtf_r);
+
+        // The partitioned convolver output aligns directly with direct[0..signal_len].
+        // Skip the first few blocks while the multi-partition history fills.
+        // For P=4 partitions, steady state is reached after 4 blocks.
+        let skip = 4 * block_size; // first P blocks may differ due to boundary
+        let compare_len = signal_len - skip;
+        let part_l_trim = &part_left[skip..skip + compare_len];
+        let direct_l_trim = &direct_left_full[skip..skip + compare_len];
+        let part_r_trim = &part_right[skip..skip + compare_len];
+        let direct_r_trim = &direct_right_full[skip..skip + compare_len];
+
+        let psnr_l = psnr(part_l_trim, direct_l_trim);
+        let psnr_r = psnr(part_r_trim, direct_r_trim);
+
+        assert!(
+            psnr_l > 60.0,
+            "Left channel PSNR vs direct convolution should be > 60 dB, got {psnr_l:.1} dB"
+        );
+        assert!(
+            psnr_r > 60.0,
+            "Right channel PSNR vs direct convolution should be > 60 dB, got {psnr_r:.1} dB"
+        );
+    }
+
+    #[test]
+    fn test_partitioned_hrtf_block_size_accessor() {
+        let hrtf = make_impulse(16);
+        let conv = PartitionedHrtfConvolver::new(&hrtf, &hrtf, 8);
+        assert_eq!(conv.block_size(), 8);
+        assert_eq!(conv.num_partitions(), 2); // ceil(16/8) = 2
+    }
+
+    #[test]
+    fn test_partitioned_hrtf_reset_clears_state() {
+        let hrtf: Vec<f32> = (0..8).map(|i| i as f32 * 0.1).collect();
+        let mut conv = PartitionedHrtfConvolver::new(&hrtf, &hrtf, 4);
+        let input = vec![1.0_f32; 4];
+        let _ = conv.process_block(&input);
+        conv.reset();
+        // After reset, output should reflect clean state.
+        let (l, r) = conv.process_block(&vec![0.0_f32; 4]);
+        for (i, (&lv, &rv)) in l.iter().zip(r.iter()).enumerate() {
+            assert!(
+                lv.abs() < 0.5,
+                "After reset, output should be near zero: l[{i}]={lv}"
+            );
+            assert!(
+                rv.abs() < 0.5,
+                "After reset, output should be near zero: r[{i}]={rv}"
+            );
+        }
     }
 }

@@ -6,9 +6,9 @@
 //! (e.g. re-tagging thousands of assets after an ingest run).
 //!
 //! The module is **database-agnostic at the core** — it does not call `sqlx`
-//! directly.  Callers provide a [`BatchExecutor`] implementation that
-//! translates the flushed [`MetadataCommand`]s into concrete SQL or other
-//! persistence calls.  A no-op [`NoopExecutor`] is shipped for testing.
+//! directly.  Callers provide a `BatchExecutor` implementation that
+//! translates the flushed `MetadataCommand`s into concrete SQL or other
+//! persistence calls.  A no-op `NoopExecutor` is shipped for testing.
 //!
 //! # Usage
 //!
@@ -61,7 +61,10 @@ pub enum MetadataField {
     /// Creator / author name.
     Creator(String),
     /// A single custom key-value pair.
-    Custom { key: String, value: serde_json::Value },
+    Custom {
+        key: String,
+        value: serde_json::Value,
+    },
     /// Asset lifecycle status string (e.g. "archived", "active").
     Status(String),
 }
@@ -94,7 +97,10 @@ impl MetadataField {
 #[derive(Debug, Clone)]
 pub enum MetadataCommand {
     /// Set or overwrite a field.
-    Set { asset_id: Uuid, field: MetadataField },
+    Set {
+        asset_id: Uuid,
+        field: MetadataField,
+    },
     /// Delete a custom key from an asset's custom_metadata map.
     DeleteCustomKey { asset_id: Uuid, key: String },
     /// Clear all custom metadata for an asset.
@@ -252,7 +258,10 @@ impl<E: BatchExecutor> BatchBuffer<E> {
     /// # Errors
     ///
     /// Returns on the first auto-flush error.
-    pub fn push_many(&mut self, cmds: impl IntoIterator<Item = MetadataCommand>) -> Result<(), String> {
+    pub fn push_many(
+        &mut self,
+        cmds: impl IntoIterator<Item = MetadataCommand>,
+    ) -> Result<(), String> {
         for cmd in cmds {
             self.push(cmd)?;
         }
@@ -437,7 +446,11 @@ mod tests {
 
         let exec = buf.into_executor();
         assert_eq!(exec.received.len(), 1);
-        if let MetadataCommand::Set { field: MetadataField::Title(t), .. } = &exec.received[0] {
+        if let MetadataCommand::Set {
+            field: MetadataField::Title(t),
+            ..
+        } = &exec.received[0]
+        {
             assert_eq!(t, "Third");
         } else {
             panic!("unexpected command");
@@ -466,7 +479,11 @@ mod tests {
         assert_eq!(stats.commands_deduped, 1);
 
         let exec = buf.into_executor();
-        if let MetadataCommand::Set { field: MetadataField::Title(t), .. } = &exec.received[0] {
+        if let MetadataCommand::Set {
+            field: MetadataField::Title(t),
+            ..
+        } = &exec.received[0]
+        {
             assert_eq!(t, "First");
         } else {
             panic!("unexpected command");
@@ -568,7 +585,10 @@ mod tests {
     #[test]
     fn test_metadata_field_names_are_stable() {
         assert_eq!(MetadataField::Title("".into()).field_name(), "title");
-        assert_eq!(MetadataField::Description("".into()).field_name(), "description");
+        assert_eq!(
+            MetadataField::Description("".into()).field_name(),
+            "description"
+        );
         assert_eq!(MetadataField::Keywords(vec![]).field_name(), "keywords");
         assert_eq!(MetadataField::Status("".into()).field_name(), "status");
         assert_eq!(

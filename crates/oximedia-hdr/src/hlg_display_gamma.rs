@@ -87,7 +87,9 @@ pub fn hlg_system_gamma_for_display(peak_nits: f32) -> Result<f32> {
 /// This is intended for inner loops where the input has already been validated.
 #[inline]
 pub fn hlg_system_gamma_clamped(peak_nits: f32) -> f32 {
-    let clamped = peak_nits.clamp(MIN_PEAK_NITS, MAX_PEAK_NITS).max(f32::EPSILON);
+    let clamped = peak_nits
+        .clamp(MIN_PEAK_NITS, MAX_PEAK_NITS)
+        .max(f32::EPSILON);
     let log_ratio = (clamped / REFERENCE_PEAK_NITS).log10();
     REFERENCE_SYSTEM_GAMMA + GAMMA_SLOPE * log_ratio
 }
@@ -444,7 +446,10 @@ mod tests {
 
     #[test]
     fn gamma_rejects_out_of_range() {
-        assert!(hlg_system_gamma_for_display(50.0).is_err(), "50 nits too low");
+        assert!(
+            hlg_system_gamma_for_display(50.0).is_err(),
+            "50 nits too low"
+        );
         assert!(
             hlg_system_gamma_for_display(15_000.0).is_err(),
             "15000 nits too high"
@@ -516,7 +521,10 @@ mod tests {
         let adapter = HlgDisplayAdapter::for_display_nits(1000.0).expect("valid");
         for &v in &[0.1_f32, 0.5, 0.9, 1.0] {
             let (r, g, b) = adapter.apply_ootf(v, v * 0.5, v * 0.2);
-            assert!(r <= 1.0 && g <= 1.0 && b <= 1.0, "Output out of range at v={v}");
+            assert!(
+                r <= 1.0 && g <= 1.0 && b <= 1.0,
+                "Output out of range at v={v}"
+            );
             assert!(r >= 0.0 && g >= 0.0 && b >= 0.0, "Negative output at v={v}");
         }
     }
@@ -530,7 +538,10 @@ mod tests {
         let diff = (pixels[0] - pixels[3]).abs()
             + (pixels[1] - pixels[4]).abs()
             + (pixels[2] - pixels[5]).abs();
-        assert!(diff < 1e-6, "Identical input pixels should produce identical output");
+        assert!(
+            diff < 1e-6,
+            "Identical input pixels should produce identical output"
+        );
     }
 
     // ── HlgGammaTable ────────────────────────────────────────────────────────
@@ -559,12 +570,18 @@ mod tests {
     #[test]
     fn gamma_delta_is_zero_for_same_display() {
         let delta = gamma_delta(1000.0, 1000.0).expect("valid");
-        assert!(delta.abs() < 1e-6, "Same display should have zero gamma delta");
+        assert!(
+            delta.abs() < 1e-6,
+            "Same display should have zero gamma delta"
+        );
     }
 
     #[test]
     fn gamma_delta_positive_for_different_displays() {
         let delta = gamma_delta(400.0, 4000.0).expect("valid");
-        assert!(delta > 0.0, "Different displays must have non-zero gamma delta");
+        assert!(
+            delta > 0.0,
+            "Different displays must have non-zero gamma delta"
+        );
     }
 }

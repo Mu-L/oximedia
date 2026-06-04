@@ -378,11 +378,7 @@ impl SurroundPanner {
     /// Returns `layout.channel_count()` buffers, each of length `input.len()`.
     /// When LFE crossover is enabled, the LFE channel receives the low-pass
     /// filtered signal scaled by `lfe_send`.
-    pub fn pan_buffer(
-        &mut self,
-        input: &[f32],
-        pos: &SurroundPanPosition,
-    ) -> Vec<Vec<f32>> {
+    pub fn pan_buffer(&mut self, input: &[f32], pos: &SurroundPanPosition) -> Vec<Vec<f32>> {
         let n = self.layout.channel_count();
         let gains = self.compute_gains(pos);
         let mut outputs = vec![vec![0.0_f32; input.len()]; n];
@@ -612,7 +608,10 @@ mod tests {
         let mut out = vec![0.0_f32; 4 * 6];
         panner.pan_buffer_interleaved(&input, &SurroundPanPosition::center(), &mut out);
         let has_nonzero = out.iter().any(|&v| v.abs() > f32::EPSILON);
-        assert!(has_nonzero, "interleaved output should have non-zero values");
+        assert!(
+            has_nonzero,
+            "interleaved output should have non-zero values"
+        );
     }
 
     // -- helpers ------------------------------------------------------------

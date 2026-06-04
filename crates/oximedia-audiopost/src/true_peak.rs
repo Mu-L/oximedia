@@ -245,11 +245,7 @@ impl TruePeakMeter {
     /// Get the maximum true peak across all channels in dBTP.
     #[must_use]
     pub fn max_true_peak_dbtp(&self) -> f32 {
-        let max_linear = self
-            .max_true_peak
-            .iter()
-            .copied()
-            .fold(0.0_f32, f32::max);
+        let max_linear = self.max_true_peak.iter().copied().fold(0.0_f32, f32::max);
         linear_to_dbtp(max_linear)
     }
 

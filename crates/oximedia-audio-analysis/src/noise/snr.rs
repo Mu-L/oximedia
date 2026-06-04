@@ -102,4 +102,60 @@ mod tests {
         let snr_db = estimate_snr_db(&samples);
         assert!(snr_db > 0.0);
     }
+
+    // ── Analytical accuracy test ───────────────────────────────────────────────
+
+    /// Generate a 1000 Hz sinusoidal signal at unit amplitude and scaled white
+    /// noise at exactly -20 dB relative to the signal RMS.  Then verify that
+    /// `compute_snr_db` returns ≈ 20 dB (±2 dB).
+    ///
+    /// The noise amplitude scaling factor: if noise RMS = 1 and signal RMS ≈ 0.707
+    /// (sine), then to achieve SNR = 20 dB (power ratio = 100) we need
+    /// noise_rms = signal_rms / sqrt(100) = signal_rms / 10.
+    ///
+    /// A deterministic pseudo-noise sequence is used instead of a real RNG so
+    /// the test is reproducible without adding test dependencies.
+    #[test]
+    fn test_snr_known_ratio() {
+        let sample_rate = 44100.0_f32;
+        let signal_freq = 1000.0_f32;
+        // 4096 samples gives a clean integer number of cycles near 1000 Hz.
+        let n = 4096_usize;
+
+        // Build the signal.
+        let signal: Vec<f32> = (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * signal_freq * i as f32 / sample_rate).sin())
+            .collect();
+
+        // Compute signal RMS.
+        let signal_rms = {
+            let sum_sq: f32 = signal.iter().map(|&x| x * x).sum();
+            (sum_sq / n as f32).sqrt()
+        };
+
+        // Desired SNR = 20 dB → noise_rms = signal_rms / 10.
+        let desired_snr_db = 20.0_f32;
+        let noise_amplitude = signal_rms / 10.0_f32;
+
+        // Deterministic pseudo-noise via a simple LCG (Lehmer/MINSTD).
+        let noise: Vec<f32> = {
+            let mut state: u32 = 0xDEAD_BEEF;
+            (0..n)
+                .map(|_| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    // Map to [-1, 1] and scale to the desired noise amplitude.
+                    let normalised = (state as f32 / u32::MAX as f32) * 2.0 - 1.0;
+                    normalised * noise_amplitude * std::f32::consts::SQRT_2
+                })
+                .collect()
+        };
+
+        let measured_db = compute_snr_db(&signal, &noise);
+        let tolerance = 2.0_f32; // ±2 dB
+
+        assert!(
+            (measured_db - desired_snr_db).abs() < tolerance,
+            "SNR should be ≈ {desired_snr_db:.1} dB ± {tolerance:.1} dB, measured {measured_db:.2} dB"
+        );
+    }
 }

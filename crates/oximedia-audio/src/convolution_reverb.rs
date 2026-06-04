@@ -150,11 +150,7 @@ fn real_fft(input: &[f32], fft_size: usize) -> Vec<(f32, f32)> {
 }
 
 /// Multiply two complex spectra element-wise and accumulate into `output`.
-fn complex_multiply_accumulate(
-    a: &[(f32, f32)],
-    b: &[(f32, f32)],
-    output: &mut [(f32, f32)],
-) {
+fn complex_multiply_accumulate(a: &[(f32, f32)], b: &[(f32, f32)], output: &mut [(f32, f32)]) {
     let n = a.len().min(b.len()).min(output.len());
     for i in 0..n {
         output[i].0 += a[i].0 * b[i].0 - a[i].1 * b[i].1;
@@ -320,7 +316,11 @@ impl ConvolutionReverb {
 
         // Accumulate convolution: Σ_p  Input_p  ×  IR_p
         let mut output_spectrum = vec![(0.0_f32, 0.0_f32); self.fft_size];
-        complex_multiply_accumulate(&newest_spectrum, &self.ir_partitions[0], &mut output_spectrum);
+        complex_multiply_accumulate(
+            &newest_spectrum,
+            &self.ir_partitions[0],
+            &mut output_spectrum,
+        );
 
         for p in 1..num_partitions {
             complex_multiply_accumulate(
@@ -500,8 +500,7 @@ mod tests {
     #[test]
     fn test_set_mix_clamps_values() {
         let ir = unit_impulse(32);
-        let mut reverb =
-            ConvolutionReverb::new(&ir, 16, ReverbConfig::default()).expect("ok");
+        let mut reverb = ConvolutionReverb::new(&ir, 16, ReverbConfig::default()).expect("ok");
         reverb.set_mix(-0.5, 2.0);
         assert!((reverb.config().wet - 0.0).abs() < 1e-6);
         assert!((reverb.config().dry - 1.0).abs() < 1e-6);
@@ -552,9 +551,7 @@ mod tests {
 
     #[test]
     fn test_fft_roundtrip() {
-        let signal: Vec<f32> = (0..64)
-            .map(|i| (i as f32 * 0.1).sin())
-            .collect();
+        let signal: Vec<f32> = (0..64).map(|i| (i as f32 * 0.1).sin()).collect();
         let mut spectrum = real_fft(&signal, 64);
         let recovered = real_ifft(&mut spectrum);
         for (orig, rec) in signal.iter().zip(recovered.iter()) {

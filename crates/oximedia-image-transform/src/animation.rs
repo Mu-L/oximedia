@@ -146,7 +146,9 @@ impl AnimationSpec {
 
     /// Total animation duration in milliseconds (sum of all frame delays).
     pub fn total_duration_ms(&self) -> u32 {
-        self.frames.iter().fold(0u32, |acc, f| acc.saturating_add(f.delay_ms))
+        self.frames
+            .iter()
+            .fold(0u32, |acc, f| acc.saturating_add(f.delay_ms))
     }
 
     /// Effective frames-per-second based on average frame delay.
@@ -490,7 +492,10 @@ mod tests {
     #[test]
     fn test_resize_solid_colour_preserved() {
         let frame = AnimationFrame::solid(4, 4, 100, [200, 100, 50, 255]);
-        let spec = AnimationSpec { frames: vec![frame], loop_count: 1 };
+        let spec = AnimationSpec {
+            frames: vec![frame],
+            loop_count: 1,
+        };
         let resized = AnimationTransform::resize_frames(&spec, 8, 8);
         // All pixels should still be the same solid colour.
         assert_eq!(resized.frames[0].pixel_at(0, 0), [200, 100, 50, 255]);
@@ -499,7 +504,10 @@ mod tests {
 
     #[test]
     fn test_resize_preserves_loop_count() {
-        let spec = AnimationSpec { frames: vec![], loop_count: 5 };
+        let spec = AnimationSpec {
+            frames: vec![],
+            loop_count: 5,
+        };
         let resized = AnimationTransform::resize_frames(&spec, 10, 10);
         assert_eq!(resized.loop_count, 5);
     }

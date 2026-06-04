@@ -139,7 +139,11 @@ impl HlgOotfParams {
         let gamma = (gamma_base + ambient.gamma_delta()).max(0.01);
         // α = Lw / 12^γ
         let alpha = lw / (12.0_f32).powf(gamma);
-        Ok(Self { gamma, alpha, peak_nits: lw })
+        Ok(Self {
+            gamma,
+            alpha,
+            peak_nits: lw,
+        })
     }
 
     /// Apply the OOTF to a scene-linear normalised luminance value `e` ∈ [0, 1].
@@ -354,7 +358,10 @@ mod tests {
     fn test_ambient_gamma_delta() {
         assert_eq!(AmbientViewingEnvironment::Dark.gamma_delta(), 0.0);
         assert!(AmbientViewingEnvironment::Dim.gamma_delta() < 0.0);
-        assert!(AmbientViewingEnvironment::Bright.gamma_delta() < AmbientViewingEnvironment::Dim.gamma_delta());
+        assert!(
+            AmbientViewingEnvironment::Bright.gamma_delta()
+                < AmbientViewingEnvironment::Dim.gamma_delta()
+        );
     }
 
     #[test]
@@ -388,7 +395,11 @@ mod tests {
         assert!((params.gamma - 1.2).abs() < EPS, "gamma={}", params.gamma);
         // α = 1000 / 12^1.2
         let expected_alpha = 1000.0_f32 / (12.0_f32).powf(1.2);
-        assert!((params.alpha - expected_alpha).abs() < 0.1, "alpha={}", params.alpha);
+        assert!(
+            (params.alpha - expected_alpha).abs() < 0.1,
+            "alpha={}",
+            params.alpha
+        );
     }
 
     #[test]
@@ -421,9 +432,18 @@ mod tests {
 
     #[test]
     fn test_recommend_peak() {
-        assert_eq!(HlgReferenceDisplay::recommend_peak(100.0), ReferenceDisplayPeak::Nits100);
-        assert_eq!(HlgReferenceDisplay::recommend_peak(200.0), ReferenceDisplayPeak::Nits300);
-        assert_eq!(HlgReferenceDisplay::recommend_peak(600.0), ReferenceDisplayPeak::Nits1000);
+        assert_eq!(
+            HlgReferenceDisplay::recommend_peak(100.0),
+            ReferenceDisplayPeak::Nits100
+        );
+        assert_eq!(
+            HlgReferenceDisplay::recommend_peak(200.0),
+            ReferenceDisplayPeak::Nits300
+        );
+        assert_eq!(
+            HlgReferenceDisplay::recommend_peak(600.0),
+            ReferenceDisplayPeak::Nits1000
+        );
     }
 
     #[test]

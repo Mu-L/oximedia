@@ -792,7 +792,7 @@ impl SrtReceiver {
         }
     }
 
-    /// Parse missing sequences from a NAK payload (as produced by [`build_nak`]).
+    /// Parse missing sequences from a NAK payload (as produced by `build_nak`).
     #[must_use]
     pub fn parse_nak_payload(payload: &[u8]) -> Vec<u32> {
         payload

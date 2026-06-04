@@ -37,8 +37,30 @@ pub enum TransitionError {
 /// Progress of a transition (0.0 = fully outgoing, 1.0 = fully incoming).
 pub type TransitionProgress = f32;
 
+/// Easing function type: maps a normalized [0.0, 1.0] progress to a curved value.
+///
+/// The identity (linear) easing is `|t| t`. The function must map 0.0→0.0
+/// and 1.0→1.0, but the intermediate curve may be non-linear.
+pub type EasingFn = fn(f32) -> f32;
+
+/// Linear (identity) easing — no curve applied.
+pub fn ease_linear(t: f32) -> f32 {
+    t
+}
+
+/// Ease-in: slow start, fast finish (cubic).
+pub fn ease_in_cubic(t: f32) -> f32 {
+    t * t * t
+}
+
+/// Ease-out: fast start, slow finish (cubic).
+pub fn ease_out_cubic(t: f32) -> f32 {
+    let u = 1.0 - t;
+    1.0 - u * u * u
+}
+
 /// A pair of frames to transition between.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TransitionInput<'a> {
     /// The outgoing (source) frame.
     pub outgoing: &'a PixelBuffer,
@@ -46,6 +68,67 @@ pub struct TransitionInput<'a> {
     pub incoming: &'a PixelBuffer,
     /// Transition progress: 0.0 = all outgoing, 1.0 = all incoming.
     pub progress: TransitionProgress,
+    /// Easing applied to the first half of the transition (progress 0.0 → 0.5).
+    ///
+    /// Receives a remapped `[0, 1]` sub-progress and returns a curved value.
+    /// Defaults to [`ease_linear`] (no curve). Set both fields the same for
+    /// a symmetric transition.
+    pub in_ease: EasingFn,
+    /// Easing applied to the second half of the transition (progress 0.5 → 1.0).
+    ///
+    /// Receives a remapped `[0, 1]` sub-progress and returns a curved value.
+    /// Defaults to [`ease_linear`] (no curve).
+    pub out_ease: EasingFn,
+}
+
+impl std::fmt::Debug for TransitionInput<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TransitionInput")
+            .field("outgoing", &self.outgoing)
+            .field("incoming", &self.incoming)
+            .field("progress", &self.progress)
+            .field("in_ease", &"EasingFn")
+            .field("out_ease", &"EasingFn")
+            .finish()
+    }
+}
+
+impl<'a> TransitionInput<'a> {
+    /// Creates a symmetric transition input (same easing for both halves).
+    ///
+    /// This is the standard constructor for backward compatibility.
+    #[must_use]
+    pub fn new(
+        outgoing: &'a PixelBuffer,
+        incoming: &'a PixelBuffer,
+        progress: TransitionProgress,
+    ) -> Self {
+        Self {
+            outgoing,
+            incoming,
+            progress,
+            in_ease: ease_linear,
+            out_ease: ease_linear,
+        }
+    }
+
+    /// Creates an asymmetric transition input with separate in/out easing functions.
+    #[must_use]
+    pub fn asymmetric(
+        outgoing: &'a PixelBuffer,
+        incoming: &'a PixelBuffer,
+        progress: TransitionProgress,
+        in_ease: EasingFn,
+        out_ease: EasingFn,
+    ) -> Self {
+        Self {
+            outgoing,
+            incoming,
+            progress,
+            in_ease,
+            out_ease,
+        }
+    }
 }
 
 /// Applies transitions between video frames.
@@ -83,7 +166,17 @@ impl TransitionEngine {
             });
         }
 
-        let p = input.progress.clamp(0.0, 1.0);
+        // Apply asymmetric easing: split at 0.5, apply separate curves to each half.
+        // For progress < 0.5: remap [0, 0.5] → [0, 1] via in_ease, then scale back to [0, 0.5].
+        // For progress >= 0.5: remap [0.5, 1] → [0, 1] via out_ease, then scale back to [0.5, 1].
+        let raw_p = input.progress.clamp(0.0, 1.0);
+        let p = if raw_p < 0.5 {
+            let sub = raw_p * 2.0;
+            (input.in_ease)(sub) * 0.5
+        } else {
+            let sub = (raw_p - 0.5) * 2.0;
+            0.5 + (input.out_ease)(sub) * 0.5
+        };
         let result = match transition.transition_type {
             TransitionType::Dissolve => self.cross_dissolve(input.outgoing, input.incoming, p),
             TransitionType::DipToBlack => {
@@ -421,11 +514,7 @@ mod tests {
         let t = make_dissolve(24);
         let out = solid(255, 0, 0);
         let inc = solid(0, 255, 0);
-        let input = TransitionInput {
-            outgoing: &out,
-            incoming: &inc,
-            progress: 0.5,
-        };
+        let input = TransitionInput::new(&out, &inc, 0.5);
         let result = engine.apply(&t, &input).expect("should succeed in test");
         assert_eq!(result.width, 4);
         assert_eq!(result.height, 4);
@@ -501,11 +590,7 @@ mod tests {
         t.direction = Some(WipeDirection::TopToBottom);
         let out = solid(255, 0, 0);
         let inc = solid(0, 255, 0);
-        let input = TransitionInput {
-            outgoing: &out,
-            incoming: &inc,
-            progress: 0.5,
-        };
+        let input = TransitionInput::new(&out, &inc, 0.5);
         let result = engine.apply(&t, &input).expect("should succeed in test");
         assert_eq!(result.width, 4);
     }
@@ -518,11 +603,7 @@ mod tests {
         t.direction = Some(WipeDirection::LeftToRight);
         let out = solid(100, 0, 0);
         let inc = solid(0, 100, 0);
-        let input = TransitionInput {
-            outgoing: &out,
-            incoming: &inc,
-            progress: 0.3,
-        };
+        let input = TransitionInput::new(&out, &inc, 0.3);
         let result = engine.apply(&t, &input).expect("should succeed in test");
         assert_eq!(result.height, 4);
     }
@@ -554,11 +635,7 @@ mod tests {
         let t = make_dissolve(10);
         let out = PixelBuffer::solid(4, 4, [255, 0, 0, 255]);
         let inc = PixelBuffer::solid(8, 8, [0, 0, 255, 255]);
-        let input = TransitionInput {
-            outgoing: &out,
-            incoming: &inc,
-            progress: 0.5,
-        };
+        let input = TransitionInput::new(&out, &inc, 0.5);
         let result = engine.apply(&t, &input);
         assert!(result.is_err());
         let err = result.expect_err("should be an error");
@@ -574,14 +651,105 @@ mod tests {
         let t = make_dissolve(10);
         let out = PixelBuffer::solid(4, 4, [255, 0, 0, 255]);
         let inc = PixelBuffer::solid(8, 8, [0, 0, 255, 255]);
-        let input = TransitionInput {
-            outgoing: &out,
-            incoming: &inc,
-            progress: 0.5,
-        };
+        let input = TransitionInput::new(&out, &inc, 0.5);
         let result = engine.apply_or_fallback(&t, &input);
         assert_eq!(result.width, 4);
         assert_eq!(result.height, 4);
+    }
+
+    // ── Asymmetric transition tests ───────────────────────────────────────────
+
+    /// `ease_in_cubic` at sub-progress 0.5 → 0.125; scaled back: 0.5 * 0.125 = 0.0625
+    /// `ease_linear` would give 0.5 * 0.5 = 0.25.
+    /// So with in_ease=ease_in_cubic and progress=0.25, the effective p should be ~0.0625
+    /// rather than 0.25 (linear). Outgoing pixel at effective_p≈0.0 should dominate.
+    #[test]
+    fn test_asymmetric_transition_in_half() {
+        let engine = TransitionEngine::new();
+        let t = make_dissolve(24);
+        // Outgoing: red, Incoming: blue.
+        let out = PixelBuffer::solid(4, 4, [200, 0, 0, 255]);
+        let inc = PixelBuffer::solid(4, 4, [0, 0, 200, 255]);
+
+        // Asymmetric: slow ease-in, linear ease-out.
+        let input_asym = TransitionInput::asymmetric(&out, &inc, 0.25, ease_in_cubic, ease_linear);
+        let result_asym = engine
+            .apply(&t, &input_asym)
+            .expect("asymmetric apply should succeed");
+
+        // Linear reference at progress=0.25 → effective_p=0.125 (mid-way 0→0.25 linear half)
+        // Asymmetric (ease_in_cubic at sub=0.5) → effective_p=0.5*0.5^3 = 0.5*0.125 = 0.0625
+        // The asymmetric should be darker in blue (less incoming) than linear.
+        let input_linear = TransitionInput::new(&out, &inc, 0.25);
+        let result_linear = engine
+            .apply(&t, &input_linear)
+            .expect("linear apply should succeed");
+
+        // Asymmetric (ease_in_cubic) bends toward outgoing more: less blue, more red.
+        let asym_blue = result_asym.data[2];
+        let linear_blue = result_linear.data[2];
+        assert!(
+            asym_blue <= linear_blue,
+            "ease_in_cubic in-half should produce less incoming (blue) than linear: asym={asym_blue}, linear={linear_blue}"
+        );
+    }
+
+    /// At progress=0.75 (second half), with out_ease=ease_out_cubic (fast-then-slow),
+    /// effective_p = 0.5 + ease_out_cubic(0.5)*0.5 ≈ 0.5 + 0.875*0.5 = 0.9375.
+    /// Linear would give 0.5 + 0.5*0.5 = 0.75.
+    /// So asymmetric with ease_out_cubic on the out half should pull more toward incoming.
+    #[test]
+    fn test_asymmetric_transition_out_half() {
+        let engine = TransitionEngine::new();
+        let t = make_dissolve(24);
+        let out = PixelBuffer::solid(4, 4, [200, 0, 0, 255]);
+        let inc = PixelBuffer::solid(4, 4, [0, 0, 200, 255]);
+
+        // Asymmetric: linear in, fast-then-slow out.
+        let input_asym = TransitionInput::asymmetric(&out, &inc, 0.75, ease_linear, ease_out_cubic);
+        let result_asym = engine
+            .apply(&t, &input_asym)
+            .expect("asymmetric apply should succeed");
+
+        let input_linear = TransitionInput::new(&out, &inc, 0.75);
+        let result_linear = engine
+            .apply(&t, &input_linear)
+            .expect("linear apply should succeed");
+
+        // ease_out_cubic (fast start) at sub=0.5 gives 1-(1-0.5)^3 = 0.875
+        // so effective_p = 0.5 + 0.875*0.5 = 0.9375.
+        // Linear at 0.75 gives effective_p = 0.75.
+        // Asymmetric should therefore be more blue (more incoming).
+        let asym_blue = result_asym.data[2];
+        let linear_blue = result_linear.data[2];
+        assert!(
+            asym_blue >= linear_blue,
+            "ease_out_cubic out-half should produce more incoming (blue) than linear: asym={asym_blue}, linear={linear_blue}"
+        );
+    }
+
+    /// A symmetric transition (same easing on both halves) must produce the same
+    /// pixel output as the default `TransitionInput::new` constructor.
+    #[test]
+    fn test_symmetric_default_unchanged() {
+        let engine = TransitionEngine::new();
+        let t = make_dissolve(24);
+        let out = PixelBuffer::solid(4, 4, [150, 0, 50, 255]);
+        let inc = PixelBuffer::solid(4, 4, [50, 0, 150, 255]);
+
+        let input_default = TransitionInput::new(&out, &inc, 0.5);
+        let input_explicit_sym =
+            TransitionInput::asymmetric(&out, &inc, 0.5, ease_linear, ease_linear);
+
+        let result_default = engine.apply(&t, &input_default).expect("should succeed");
+        let result_explicit = engine
+            .apply(&t, &input_explicit_sym)
+            .expect("should succeed");
+
+        assert_eq!(
+            result_default.data, result_explicit.data,
+            "Symmetric explicit (both ease_linear) must equal default constructor output"
+        );
     }
 
     #[test]

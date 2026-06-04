@@ -1,5 +1,6 @@
 //! Multi-angle editing for multi-camera production.
 
+pub mod lazy_frame;
 pub mod switch;
 pub mod timeline;
 pub mod transition;
@@ -75,6 +76,9 @@ pub use switch::AngleSwitcher;
 
 /// Transition engine
 pub use transition::TransitionEngine;
+
+/// Lazy frame reference
+pub use lazy_frame::LazyFrameRef;
 
 #[cfg(test)]
 mod tests {

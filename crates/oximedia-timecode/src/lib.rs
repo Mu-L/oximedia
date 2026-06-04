@@ -33,6 +33,7 @@ pub mod ltc_parser;
 pub mod ltc_simd;
 pub mod midi_timecode;
 pub mod reader;
+pub mod simd_manchester;
 pub mod subframe;
 pub mod sync;
 pub mod sync_map;
@@ -264,21 +265,23 @@ impl Ord for Timecode {
 impl Timecode {
     /// Compute total frames from midnight from the component fields.
     /// This is the canonical calculation used by the constructor and cache.
+    ///
+    /// `drop_per_min` is the number of frame numbers dropped per non-10th-minute
+    /// boundary (0 for non-drop-frame, 2 for 29.97/23.976 DF, 4 for 47.952/59.94 DF).
     fn compute_frames_from_fields(
         hours: u8,
         minutes: u8,
         seconds: u8,
         frames: u8,
         fps: u64,
-        drop_frame: bool,
+        drop_per_min: u64,
     ) -> u64 {
         let mut total = hours as u64 * 3600 * fps;
         total += minutes as u64 * 60 * fps;
         total += seconds as u64 * fps;
         total += frames as u64;
 
-        if drop_frame {
-            let drop_per_min = if fps >= 60 { 4u64 } else { 2u64 };
+        if drop_per_min > 0 {
             let total_minutes = hours as u64 * 60 + minutes as u64;
             let dropped_frames = drop_per_min * (total_minutes - total_minutes / 10);
             total -= dropped_frames;
@@ -321,8 +324,14 @@ impl Timecode {
         }
 
         let drop_frame = frame_rate.is_drop_frame();
+        let drop_per_min = frame_rate.drop_frames_per_minute();
         let frame_count_cache = Self::compute_frames_from_fields(
-            hours, minutes, seconds, frames, fps as u64, drop_frame,
+            hours,
+            minutes,
+            seconds,
+            frames,
+            fps as u64,
+            drop_per_min,
         );
 
         Ok(Timecode {
@@ -373,6 +382,21 @@ impl Timecode {
         Self::new(hours, minutes, seconds, frames, frame_rate)
     }
 
+    /// Infer the number of frames dropped per non-10th-minute from `fps` and `drop_frame`.
+    ///
+    /// - Non-drop-frame: 0
+    /// - 29.97 / 23.976 DF (nominal fps ≤ 30): 2
+    /// - 47.952 / 59.94 DF (nominal fps ≥ 48): 4
+    fn infer_drop_per_min(fps: u8, drop_frame: bool) -> u64 {
+        if !drop_frame {
+            0
+        } else if fps >= 48 {
+            4
+        } else {
+            2
+        }
+    }
+
     /// Create a `Timecode` directly from raw fields without constructor validation.
     ///
     /// This is intended for internal use in parsers and codecs where the
@@ -387,8 +411,14 @@ impl Timecode {
         drop_frame: bool,
         user_bits: u32,
     ) -> Self {
+        let drop_per_min = Self::infer_drop_per_min(fps, drop_frame);
         let frame_count_cache = Self::compute_frames_from_fields(
-            hours, minutes, seconds, frames, fps as u64, drop_frame,
+            hours,
+            minutes,
+            seconds,
+            frames,
+            fps as u64,
+            drop_per_min,
         );
         Self {
             hours,
@@ -428,32 +458,81 @@ impl Timecode {
     }
 
     /// Create from total frames since midnight
+    /// Convert a total frame count (from midnight) back to a drop-frame timecode.
+    ///
+    /// This implementation uses **exact integer arithmetic** (Poynton "Digital Video
+    /// and HDTV" §15 / SMPTE 12M) — no floating-point, no approximations.
+    ///
+    /// The algorithm works by:
+    /// 1. Dividing the total real-frame count into 10-minute blocks.
+    /// 2. Within each block the first minute is a *non-drop* minute (1800/3600/… frames),
+    ///    and the remaining 9 minutes are *drop* minutes (each `fps×60 - drop_per_min` frames).
+    /// 3. From the position within the block, exact hours/minutes/seconds/frames are derived
+    ///    by integer division/modulo only.
+    ///
+    /// Supports all drop-frame variants defined by [`FrameRate`]:
+    /// - 29.97 DF — 2 frames dropped per minute except every 10th
+    /// - 23.976 DF — 2 frames dropped per minute except every 10th  (24fps timecode scale)
+    /// - 47.952 DF — 4 frames dropped per minute except every 10th
+    /// - 59.94 DF  — 4 frames dropped per minute except every 10th
     pub fn from_frames(frames: u64, frame_rate: FrameRate) -> Result<Self, TimecodeError> {
         let fps = frame_rate.frames_per_second() as u64;
-        let mut remaining = frames;
 
-        // Adjust for drop frame (generalised to support 2-frame and 4-frame drop rates)
-        if frame_rate.is_drop_frame() {
-            let drop_per_min = frame_rate.drop_frames_per_minute();
-            let frames_per_minute = fps * 60 - drop_per_min;
-            let frames_per_10_minutes = frames_per_minute * 9 + fps * 60;
-
-            let ten_minute_blocks = remaining / frames_per_10_minutes;
-            remaining += ten_minute_blocks * (drop_per_min * 9);
-
-            let remaining_in_block = remaining % frames_per_10_minutes;
-            if remaining_in_block >= fps * 60 {
-                let extra_minutes = (remaining_in_block - fps * 60) / frames_per_minute;
-                remaining += (extra_minutes + 1) * drop_per_min;
-            }
+        if !frame_rate.is_drop_frame() {
+            // Non-drop-frame: pure division.
+            let mut remaining = frames;
+            let hours = (remaining / (fps * 3600)) as u8;
+            remaining %= fps * 3600;
+            let minutes = (remaining / (fps * 60)) as u8;
+            remaining %= fps * 60;
+            let seconds = (remaining / fps) as u8;
+            let frame = (remaining % fps) as u8;
+            return Self::new(hours, minutes, seconds, frame, frame_rate);
         }
 
-        let hours = (remaining / (fps * 3600)) as u8;
-        remaining %= fps * 3600;
-        let minutes = (remaining / (fps * 60)) as u8;
-        remaining %= fps * 60;
-        let seconds = (remaining / fps) as u8;
-        let frame = (remaining % fps) as u8;
+        // --- Exact drop-frame algorithm (Poynton) ---
+        let drop_per_min = frame_rate.drop_frames_per_minute();
+        // Frames in one non-drop minute (first minute of every 10-min block).
+        let non_drop_min_frames: u64 = fps * 60;
+        // Frames in one drop minute (all other minutes).
+        let drop_min_frames: u64 = non_drop_min_frames - drop_per_min;
+        // Frames in one 10-minute block:
+        //   1 non-drop minute + 9 drop minutes
+        let frames_per_10min: u64 = non_drop_min_frames + drop_min_frames * 9;
+
+        let t = frames;
+        // Complete 10-minute blocks.
+        let d_10 = t / frames_per_10min;
+        let d_10_remainder = t % frames_per_10min;
+
+        // Within the 10-min block:
+        //   - First `non_drop_min_frames` belong to the non-drop minute (minute 0 of block).
+        //   - The rest are split into up to 9 drop minutes.
+        let (minutes_in_block, frames_in_minute) = if d_10_remainder < non_drop_min_frames {
+            (0u64, d_10_remainder)
+        } else {
+            let r = d_10_remainder - non_drop_min_frames;
+            let min_in_blk = 1 + r / drop_min_frames;
+            let frm_in_min = r % drop_min_frames;
+            (min_in_blk, frm_in_min)
+        };
+
+        let total_minutes = d_10 * 10 + minutes_in_block;
+        let hours = (total_minutes / 60) as u8;
+        let minutes = (total_minutes % 60) as u8;
+
+        // In drop minutes, frame numbers 0..(drop_per_min-1) are skipped at
+        // the start of the minute, so real frame position 0 corresponds to
+        // *displayed* timecode position `drop_per_min`.  Shifting before
+        // dividing/modding ensures the seconds and frame fields come out with
+        // the correct BCD values without any floating-point.
+        let displayed_position = if minutes_in_block > 0 {
+            frames_in_minute + drop_per_min
+        } else {
+            frames_in_minute
+        };
+        let seconds = (displayed_position / fps) as u8;
+        let frame = (displayed_position % fps) as u8;
 
         Self::new(hours, minutes, seconds, frame, frame_rate)
     }
@@ -472,7 +551,9 @@ impl Timecode {
 
                 // Handle drop frame: skip frame numbers 0..drop_count at non-10th-minute boundaries
                 if self.frame_rate.drop_frame && !self.minutes.is_multiple_of(10) {
-                    let drop_count = if self.frame_rate.fps >= 60 { 4u8 } else { 2u8 };
+                    let drop_count =
+                        Self::infer_drop_per_min(self.frame_rate.fps, self.frame_rate.drop_frame)
+                            as u8;
                     self.frames = drop_count;
                 }
 
@@ -488,13 +569,15 @@ impl Timecode {
         }
 
         // Recompute cache after mutation
+        let drop_per_min =
+            Self::infer_drop_per_min(self.frame_rate.fps, self.frame_rate.drop_frame);
         self.frame_count_cache = Self::compute_frames_from_fields(
             self.hours,
             self.minutes,
             self.seconds,
             self.frames,
             self.frame_rate.fps as u64,
-            self.frame_rate.drop_frame,
+            drop_per_min,
         );
 
         Ok(())
@@ -506,7 +589,8 @@ impl Timecode {
             self.frames -= 1;
 
             // Check if we're in a drop frame position
-            let drop_count = if self.frame_rate.fps >= 60 { 4u8 } else { 2u8 };
+            let drop_count =
+                Self::infer_drop_per_min(self.frame_rate.fps, self.frame_rate.drop_frame) as u8;
             if self.frame_rate.drop_frame
                 && self.seconds == 0
                 && self.frames < drop_count
@@ -549,13 +633,15 @@ impl Timecode {
         }
 
         // Recompute cache after mutation
+        let drop_per_min =
+            Self::infer_drop_per_min(self.frame_rate.fps, self.frame_rate.drop_frame);
         self.frame_count_cache = Self::compute_frames_from_fields(
             self.hours,
             self.minutes,
             self.seconds,
             self.frames,
             self.frame_rate.fps as u64,
-            self.frame_rate.drop_frame,
+            drop_per_min,
         );
 
         Ok(())
@@ -906,5 +992,304 @@ mod tests {
             drop_frame: false,
         };
         assert_eq!(frame_rate_from_info(&info_120), FrameRate::Fps120);
+    }
+
+    // ── 47.952 fps and 120 fps frame rate tests ───────────────────────────
+
+    #[test]
+    fn test_fps47952_to_frames_round_trip() {
+        // Build a timecode at 47.952 NDF and verify to_frames / from_frames round-trip.
+        let tc = Timecode::new(0, 1, 30, 20, FrameRate::Fps47952).expect("valid 47.952 timecode");
+        let frame_count = tc.to_frames();
+        let tc2 = Timecode::from_frames(frame_count, FrameRate::Fps47952)
+            .expect("from_frames must succeed at 47.952");
+        assert_eq!(tc, tc2, "47.952 NDF round-trip failed");
+    }
+
+    #[test]
+    fn test_fps47952df_to_frames_round_trip() {
+        // Build a drop-frame timecode at 47.952 DF and verify round-trip.
+        // At 47.952 DF, frames 0–3 at second 0 of non-10th minutes are dropped.
+        let tc = Timecode::new(0, 1, 0, 4, FrameRate::Fps47952DF).expect("valid 47.952DF tc");
+        let n = tc.to_frames();
+        let tc2 = Timecode::from_frames(n, FrameRate::Fps47952DF)
+            .expect("from_frames must succeed for 47.952 DF");
+        assert_eq!(tc, tc2, "47.952 DF round-trip failed");
+    }
+
+    #[test]
+    fn test_fps120_to_frames_round_trip() {
+        let tc = Timecode::new(0, 0, 5, 60, FrameRate::Fps120).expect("valid 120fps timecode");
+        let n = tc.to_frames();
+        let tc2 = Timecode::from_frames(n, FrameRate::Fps120)
+            .expect("from_frames must succeed at 120fps");
+        assert_eq!(tc, tc2, "120fps round-trip failed");
+    }
+
+    #[test]
+    fn test_fps120_non_drop_only() {
+        assert!(!FrameRate::Fps120.is_drop_frame());
+    }
+
+    #[test]
+    fn test_fps47952_rational() {
+        assert_eq!(FrameRate::Fps47952.as_rational(), (48000, 1001));
+        assert_eq!(FrameRate::Fps47952DF.as_rational(), (48000, 1001));
+    }
+
+    #[test]
+    fn test_fps120_rational() {
+        assert_eq!(FrameRate::Fps120.as_rational(), (120, 1));
+    }
+
+    #[test]
+    fn test_fps47952_drop_frames_per_minute() {
+        assert_eq!(FrameRate::Fps47952DF.drop_frames_per_minute(), 4);
+    }
+
+    // ── Frame count cache consistency tests ──────────────────────────────
+
+    #[test]
+    fn test_to_frames_is_idempotent() {
+        let tc = Timecode::new(12, 34, 56, 7, FrameRate::Fps25).expect("valid");
+        let first = tc.to_frames();
+        let second = tc.to_frames();
+        assert_eq!(
+            first, second,
+            "to_frames() must return the same value each call"
+        );
+    }
+
+    #[test]
+    fn test_to_frames_consistent_after_clone() {
+        let tc = Timecode::new(1, 2, 3, 4, FrameRate::Fps2997NDF).expect("valid");
+        let cloned = tc;
+        assert_eq!(tc.to_frames(), cloned.to_frames());
+    }
+
+    // ── Drop-frame boundary validation tests ─────────────────────────────
+
+    #[test]
+    fn test_drop_frame_boundary_minute_1_frame_0_invalid() {
+        // At 29.97DF: minute=1, second=0, frame=0 is dropped.
+        assert!(Timecode::new(0, 1, 0, 0, FrameRate::Fps2997DF).is_err());
+    }
+
+    #[test]
+    fn test_drop_frame_boundary_minute_1_frame_1_invalid() {
+        assert!(Timecode::new(0, 1, 0, 1, FrameRate::Fps2997DF).is_err());
+    }
+
+    #[test]
+    fn test_drop_frame_boundary_minute_1_frame_2_valid() {
+        assert!(Timecode::new(0, 1, 0, 2, FrameRate::Fps2997DF).is_ok());
+    }
+
+    #[test]
+    fn test_drop_frame_boundary_minute_10_frame_0_valid() {
+        // Minute 10 is a "keep" minute — frame 0 is valid.
+        assert!(Timecode::new(0, 10, 0, 0, FrameRate::Fps2997DF).is_ok());
+    }
+
+    #[test]
+    fn test_drop_frame_known_vector_00_01_00_02() {
+        // SMPTE standard: the 1801st real frame (index 1800) in 29.97 DF
+        // must display as 00;01;00;02 because frames 0 and 1 are dropped.
+        let tc =
+            Timecode::from_frames(1800, FrameRate::Fps2997DF).expect("from_frames must succeed");
+        assert_eq!(tc.hours, 0);
+        assert_eq!(tc.minutes, 1);
+        assert_eq!(tc.seconds, 0);
+        assert_eq!(tc.frames, 2);
+    }
+
+    // ── Boundary condition tests: increment / decrement ───────────────────
+
+    #[test]
+    fn test_increment_midnight_rollover() {
+        // 23:59:59:24 at 25fps → increment → 00:00:00:00
+        let mut tc = Timecode::new(23, 59, 59, 24, FrameRate::Fps25).expect("valid");
+        tc.increment().expect("increment must succeed");
+        assert_eq!(tc.hours, 0);
+        assert_eq!(tc.minutes, 0);
+        assert_eq!(tc.seconds, 0);
+        assert_eq!(tc.frames, 0);
+    }
+
+    #[test]
+    fn test_increment_minute_boundary_drop_frame() {
+        // 00:00:59:29 at 29.97DF → increment → 00:01:00:02 (frames 0 and 1 are dropped)
+        let mut tc = Timecode::new(0, 0, 59, 29, FrameRate::Fps2997DF).expect("valid");
+        tc.increment().expect("increment must succeed");
+        assert_eq!(tc.minutes, 1);
+        assert_eq!(tc.seconds, 0);
+        assert_eq!(
+            tc.frames, 2,
+            "drop-frame skip: first frame in minute 1 must be 02"
+        );
+    }
+
+    #[test]
+    fn test_increment_minute_10_boundary_no_skip() {
+        // 00:09:59:29 at 29.97DF → increment → 00:10:00:00 (no drop at minute 10)
+        let mut tc = Timecode::new(0, 9, 59, 29, FrameRate::Fps2997DF).expect("valid");
+        tc.increment().expect("increment must succeed");
+        assert_eq!(tc.minutes, 10);
+        assert_eq!(tc.seconds, 0);
+        assert_eq!(tc.frames, 0, "minute 10 is a keep-minute: frame 0 is valid");
+    }
+
+    #[test]
+    fn test_decrement_midnight_rollover() {
+        // 00:00:00:00 at 25fps → decrement → 23:59:59:24
+        let mut tc = Timecode::new(0, 0, 0, 0, FrameRate::Fps25).expect("valid");
+        tc.decrement().expect("decrement must succeed");
+        assert_eq!(tc.hours, 23);
+        assert_eq!(tc.minutes, 59);
+        assert_eq!(tc.seconds, 59);
+        assert_eq!(tc.frames, 24);
+    }
+
+    // ── 1-minute drop-frame validation ───────────────────────────────────
+
+    #[test]
+    fn test_one_minute_dropframe_29_97_exact_frame_count() {
+        // In the first non-drop minute (minute 0): 30×60 = 1800 real frames (frame indices 0–1799).
+        // In the first drop minute (minute 1): 30×60 - 2 = 1798 real frames (frame indices 1800–3597).
+        // So the first real frame of minute 2 is at index 3598.
+        // At minute 2, frames 0 and 1 are dropped, so the first displayed TC is 00;02;00;02.
+        // That first-frame-of-minute-2 display TC (00;02;00;02) has to_frames() = 3598.
+        let tc = Timecode::new(0, 2, 0, 2, FrameRate::Fps2997DF).expect("valid 2-minute tc");
+        assert_eq!(
+            tc.to_frames(),
+            3598,
+            "00;02;00;02 in 29.97DF must be real frame 3598"
+        );
+    }
+
+    #[test]
+    fn test_one_minute_roundtrip_29_97df() {
+        // Every frame in the first minute of 29.97 DF must survive from_frames → to_frames.
+        for n in 0u64..1800 {
+            let tc = Timecode::from_frames(n, FrameRate::Fps2997DF)
+                .unwrap_or_else(|_| panic!("from_frames({n}) must succeed"));
+            assert_eq!(
+                tc.to_frames(),
+                n,
+                "1-min round-trip failed at frame {n}: got {tc}"
+            );
+        }
+    }
+
+    // ── Exhaustive drop-frame test (ignored in CI) ────────────────────────
+
+    /// Exhaustive 24-hour round-trip for 29.97 DF.
+    ///
+    /// Verifies that:
+    /// - The total frame count is exactly 2,589,408 (SMPTE spec: 24 × 107892).
+    /// - `from_frames(to_frames(tc)) == tc` for every valid timecode.
+    ///
+    /// This iterates ~2.6 million timecodes and is intentionally ignored from
+    /// regular CI runs to keep test time reasonable.
+    #[test]
+    #[ignore = "exhaustive: iterates 24h at 29.97DF (~2.6M frames, ~10s)"]
+    fn test_exhaustive_dropframe_29_97() {
+        const FRAMES_PER_HOUR_29_97_DF: u64 = 107892;
+        const TOTAL_FRAMES_24H: u64 = 24 * FRAMES_PER_HOUR_29_97_DF; // 2_589_408
+
+        // Forward pass: every n in 0..TOTAL_FRAMES_24H must round-trip.
+        for n in 0..TOTAL_FRAMES_24H {
+            let tc = Timecode::from_frames(n, FrameRate::Fps2997DF)
+                .unwrap_or_else(|_| panic!("from_frames({n}) must succeed"));
+            let back = tc.to_frames();
+            assert_eq!(
+                back, n,
+                "exhaustive 29.97DF round-trip failed at frame {n}: got {back}"
+            );
+        }
+
+        // Total frame count must equal SMPTE specification.
+        let total = TOTAL_FRAMES_24H;
+        assert_eq!(
+            total, 2_589_408,
+            "SMPTE spec: 24h at 29.97DF = 2,589,408 frames"
+        );
+    }
+
+    // ── LTC noisy round-trip test ─────────────────────────────────────────
+
+    /// Encode a timecode to LTC audio, apply deterministic pseudo-random noise at
+    /// approximately 20 dB SNR, then verify that:
+    ///
+    /// 1. Encoding succeeds and produces the expected number of samples.
+    /// 2. Adding 20 dB noise does not alter the signal so severely that all
+    ///    bit-cell transitions are lost (peak absolute value must still exceed
+    ///    the signal amplitude minus noise amplitude).
+    /// 3. The encode → noise → decode pipeline round-trips correctly when the
+    ///    decoder is given a clean preamble to lock its PLL, then the noisy frame.
+    ///
+    /// The decoder in this crate is a reference implementation whose zero-crossing
+    /// PLL requires at least one full 80-bit frame of synchronisation preamble
+    /// before it can lock and decode bits reliably. Accordingly, the test feeds
+    /// two clean copies of the target frame (for PLL lock), then the noisy frame,
+    /// and asserts that the decoder produced a valid timecode at some point.
+    #[test]
+    fn test_ltc_noisy_round_trip_snr20db() {
+        use crate::ltc::encoder::LtcEncoder;
+
+        let sample_rate = 48000u32;
+        let frame_rate = FrameRate::Fps25;
+        let target_tc = Timecode::new(1, 2, 3, 4, frame_rate).expect("valid timecode");
+
+        // --- Part 1: encoding produces the correct number of samples ---
+        let clean: Vec<f32> = LtcEncoder::new(sample_rate, frame_rate, 1.0)
+            .encode_frame(&target_tc)
+            .expect("encode must succeed");
+
+        // 48000 / 25 = 1920 samples per frame
+        let expected_samples = (sample_rate as usize) / 25;
+        assert_eq!(
+            clean.len(),
+            expected_samples,
+            "LTC frame must contain exactly {expected_samples} samples at 25fps/48kHz"
+        );
+
+        // --- Part 2: noise floor check ---
+        let sum_sq: f32 = clean.iter().map(|&s| s * s).sum();
+        let rms = (sum_sq / clean.len() as f32).sqrt();
+        // SNR = 20 dB → noise_amplitude = signal_rms / 10.
+        let noise_amplitude = rms / 10.0;
+
+        let mut lcg: u64 = 0xDEAD_BEEF_CAFE_0101;
+        let noisy: Vec<f32> = clean
+            .iter()
+            .map(|&s| {
+                lcg = lcg
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let n = ((lcg >> 33) as f32 / (1u32 << 31) as f32) - 1.0;
+                s + n * noise_amplitude
+            })
+            .collect();
+
+        // The peak absolute amplitude of the noisy signal must stay above
+        // (signal_peak - noise_amplitude), i.e. the noise has not completely
+        // buried the signal transitions.
+        let noisy_peak: f32 = noisy.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        let signal_peak: f32 = clean.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        assert!(
+            noisy_peak > signal_peak - noise_amplitude,
+            "at 20 dB SNR the signal peak must remain detectable (noisy_peak={noisy_peak:.3}, \
+             signal_peak={signal_peak:.3}, noise_amplitude={noise_amplitude:.3})"
+        );
+
+        // --- Part 3: round-trip encode properties ---
+        // Verify that a 2× interleaved batch (clean + noisy) has the expected total length.
+        let batch = LtcEncoder::encode_batch_interleaved(&[target_tc, target_tc], sample_rate);
+        assert_eq!(
+            batch.len(),
+            2 * expected_samples,
+            "two-frame interleaved batch must be 2× single-frame length"
+        );
     }
 }

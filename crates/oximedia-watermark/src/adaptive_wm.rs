@@ -127,7 +127,10 @@ mod tests {
             .map(|i| if i % 2 == 0 { 1.0f32 } else { -1.0f32 })
             .collect();
         let v = AdaptiveWatermark::local_variance(&samples);
-        assert!((v - 1.0).abs() < 0.01, "alternating ±1 should have variance ≈ 1");
+        assert!(
+            (v - 1.0).abs() < 0.01,
+            "alternating ±1 should have variance ≈ 1"
+        );
     }
 
     #[test]

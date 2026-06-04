@@ -1,5 +1,6 @@
 //! Automatic camera selection for multi-camera production.
 
+pub mod cache;
 pub mod rules;
 pub mod score;
 pub mod select;
@@ -12,6 +13,9 @@ pub use rules::{RuleEngine, SwitchingRule};
 
 /// Angle scoring
 pub use score::{AngleScorer, ScoringCriteria};
+
+/// Angle score cache
+pub use cache::AngleScoreCache;
 
 /// Selection criteria for automatic switching
 #[derive(Debug, Clone)]

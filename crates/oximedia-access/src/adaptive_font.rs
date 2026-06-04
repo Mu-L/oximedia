@@ -212,8 +212,7 @@ impl<M: TextMeasure> AdaptiveFontSizer<M> {
             }
         }
 
-        let (lines, chars_per_line) =
-            self.layout_stats(text, container_width_px, best, config);
+        let (lines, chars_per_line) = self.layout_stats(text, container_width_px, best, config);
 
         FontSizeResult {
             size_px: best,
@@ -379,7 +378,10 @@ mod tests {
         let m = SimpleTextMeasure::default();
         let ascii_width = m.measure_line("Hello", 24);
         let cjk_width = m.measure_line("こんにちは", 24); // 5 CJK chars = 10 cols
-        assert!(cjk_width > ascii_width, "CJK should be wider: cjk={cjk_width} ascii={ascii_width}");
+        assert!(
+            cjk_width > ascii_width,
+            "CJK should be wider: cjk={cjk_width} ascii={ascii_width}"
+        );
     }
 
     // 6. A single long CJK run measures wider than the same-length ASCII run at equal size.

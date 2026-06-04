@@ -84,18 +84,20 @@ impl MeasurementRecord {
         })?;
         let label = parts.next().unwrap_or("").to_string();
 
-        let timestamp_ns = ts_str.trim().parse::<u64>().map_err(|e| {
-            NormalizeError::ProcessingError(format!("invalid timestamp: {e}"))
-        })?;
+        let timestamp_ns = ts_str
+            .trim()
+            .parse::<u64>()
+            .map_err(|e| NormalizeError::ProcessingError(format!("invalid timestamp: {e}")))?;
         let integrated_lufs = lufs_str.trim().parse::<f64>().map_err(|e| {
             NormalizeError::ProcessingError(format!("invalid integrated_lufs: {e}"))
         })?;
         let loudness_range_lu = lra_str.trim().parse::<f64>().map_err(|e| {
             NormalizeError::ProcessingError(format!("invalid loudness_range_lu: {e}"))
         })?;
-        let true_peak_dbtp = tp_str.trim().parse::<f64>().map_err(|e| {
-            NormalizeError::ProcessingError(format!("invalid true_peak_dbtp: {e}"))
-        })?;
+        let true_peak_dbtp = tp_str
+            .trim()
+            .parse::<f64>()
+            .map_err(|e| NormalizeError::ProcessingError(format!("invalid true_peak_dbtp: {e}")))?;
 
         Ok(Self {
             timestamp_ns,
@@ -327,7 +329,11 @@ impl LoudnessHistoryDb {
         let mean_lufs = lufs_values.iter().sum::<f64>() / n;
 
         // Standard deviation
-        let variance = lufs_values.iter().map(|&y| (y - mean_lufs).powi(2)).sum::<f64>() / n;
+        let variance = lufs_values
+            .iter()
+            .map(|&y| (y - mean_lufs).powi(2))
+            .sum::<f64>()
+            / n;
         let std_dev_lufs = variance.sqrt();
 
         // Use timestamp (ns) as x variable; normalise to avoid floating-point overflow
@@ -463,7 +469,8 @@ impl LoudnessHistoryDb {
     ///
     /// Format: one header row followed by one data row per record.
     pub fn to_csv_bytes(&self) -> Vec<u8> {
-        let mut out = String::from("timestamp_ns,integrated_lufs,loudness_range_lu,true_peak_dbtp,label\n");
+        let mut out =
+            String::from("timestamp_ns,integrated_lufs,loudness_range_lu,true_peak_dbtp,label\n");
         for rec in &self.records {
             out.push_str(&rec.to_csv_row());
             out.push('\n');
@@ -475,9 +482,8 @@ impl LoudnessHistoryDb {
     ///
     /// Unknown or malformed rows are silently skipped (best-effort import).
     pub fn from_csv_bytes(data: &[u8]) -> NormalizeResult<Self> {
-        let text = std::str::from_utf8(data).map_err(|e| {
-            NormalizeError::ProcessingError(format!("CSV is not valid UTF-8: {e}"))
-        })?;
+        let text = std::str::from_utf8(data)
+            .map_err(|e| NormalizeError::ProcessingError(format!("CSV is not valid UTF-8: {e}")))?;
         let mut db = Self::new();
         for line in text.lines().skip(1) {
             // skip header
@@ -566,7 +572,7 @@ mod tests {
         for i in 0..n {
             db.record(
                 i as u64 * 1_000_000_000, // 1 s apart
-                -30.0 + i as f64,          // ascending LUFS
+                -30.0 + i as f64,         // ascending LUFS
                 8.0,
                 -1.0,
                 format!("track{i}"),

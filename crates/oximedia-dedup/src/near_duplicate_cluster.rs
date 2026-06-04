@@ -680,10 +680,7 @@ mod tests {
 
     #[test]
     fn test_clusterer_transitive_chain() {
-        let pairs = vec![
-            (s("a"), s("b"), 0.95),
-            (s("b"), s("c"), 0.92),
-        ];
+        let pairs = vec![(s("a"), s("b"), 0.95), (s("b"), s("c"), 0.92)];
         let clusterer = NearDuplicateClusterer::new(0.90);
         let clusters = clusterer.cluster(&pairs);
         assert_eq!(clusters.len(), 1);
@@ -692,10 +689,7 @@ mod tests {
 
     #[test]
     fn test_clusterer_separate_clusters() {
-        let pairs = vec![
-            (s("a"), s("b"), 0.95),
-            (s("x"), s("y"), 0.92),
-        ];
+        let pairs = vec![(s("a"), s("b"), 0.95), (s("x"), s("y"), 0.92)];
         let clusterer = NearDuplicateClusterer::new(0.90);
         let clusters = clusterer.cluster(&pairs);
         assert_eq!(clusters.len(), 2);
@@ -704,10 +698,7 @@ mod tests {
     #[test]
     fn test_clusterer_threshold_filters() {
         // Only the first pair is above the threshold.
-        let pairs = vec![
-            (s("a"), s("b"), 0.95),
-            (s("c"), s("d"), 0.50),
-        ];
+        let pairs = vec![(s("a"), s("b"), 0.95), (s("c"), s("d"), 0.50)];
         let clusterer = NearDuplicateClusterer::new(0.90);
         let clusters = clusterer.cluster(&pairs);
         assert_eq!(clusters.len(), 1);
@@ -762,7 +753,10 @@ mod tests {
 
     #[test]
     fn test_cluster_action_labels() {
-        assert_eq!(ClusterAction::KeepRepresentative.label(), "keep_representative");
+        assert_eq!(
+            ClusterAction::KeepRepresentative.label(),
+            "keep_representative"
+        );
         assert_eq!(ClusterAction::ManualReview.label(), "manual_review");
         assert_eq!(ClusterAction::DeleteAll.label(), "delete_all");
         assert_eq!(ClusterAction::NoAction.label(), "no_action");

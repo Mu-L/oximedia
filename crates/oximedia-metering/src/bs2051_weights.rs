@@ -164,10 +164,7 @@ fn rms_to_lkfs(samples: &[f32]) -> f32 {
 /// Returns `f32::NEG_INFINITY` if all channels are silent or the layout has
 /// no channels.
 #[must_use]
-pub fn compute_integrated_loudness_bs2051(
-    channels: &[Vec<f32>],
-    layout: &Bs2051Weights,
-) -> f32 {
+pub fn compute_integrated_loudness_bs2051(channels: &[Vec<f32>], layout: &Bs2051Weights) -> f32 {
     if layout.num_channels() == 0 {
         return f32::NEG_INFINITY;
     }
@@ -331,10 +328,8 @@ mod tests {
     #[test]
     fn test_lfe_channels_excluded() {
         // An LFE-only layout should produce NEG_INFINITY even with loud signals.
-        let layout = Bs2051Weights::from_groups(vec![
-            Bs2051ChannelGroup::Lfe,
-            Bs2051ChannelGroup::Lfe,
-        ]);
+        let layout =
+            Bs2051Weights::from_groups(vec![Bs2051ChannelGroup::Lfe, Bs2051ChannelGroup::Lfe]);
         let loud: Vec<Vec<f32>> = (0..2).map(|_| vec![1.0f32; 1000]).collect();
         let result = compute_integrated_loudness_bs2051(&loud, &layout);
         assert_eq!(result, f32::NEG_INFINITY);
@@ -361,16 +356,13 @@ mod tests {
     fn test_loudness_top_weighted_less_than_mid() {
         // Pure top-layer signal should be softer than same RMS on mid-layer
         // because top weight (0.707) < mid weight (1.0).
-        let top_layout =
-            Bs2051Weights::from_groups(vec![Bs2051ChannelGroup::TopLayer]);
-        let mid_layout =
-            Bs2051Weights::from_groups(vec![Bs2051ChannelGroup::MidLayer]);
+        let top_layout = Bs2051Weights::from_groups(vec![Bs2051ChannelGroup::TopLayer]);
+        let mid_layout = Bs2051Weights::from_groups(vec![Bs2051ChannelGroup::MidLayer]);
 
         let signal = vec![0.5f32; 48000];
         let top_loudness =
-            compute_integrated_loudness_bs2051(&[signal.clone()], &top_layout);
-        let mid_loudness =
-            compute_integrated_loudness_bs2051(&[signal], &mid_layout);
+            compute_integrated_loudness_bs2051(std::slice::from_ref(&signal), &top_layout);
+        let mid_loudness = compute_integrated_loudness_bs2051(&[signal], &mid_layout);
 
         assert!(
             top_loudness < mid_loudness,

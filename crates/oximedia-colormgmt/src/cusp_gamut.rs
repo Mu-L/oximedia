@@ -209,6 +209,32 @@ fn build_cusp_table(target: TargetGamut, viewing: &CiecamViewingConditions) -> V
         .collect()
 }
 
+/// Public entry point: find the CIECAM02 cusp for arbitrary primaries.
+///
+/// This wrapper exposes the otherwise-private [`find_cusp_at_hue`] so that
+/// other modules (e.g. `aces_gamut`) can compute cusp tables from any set of
+/// CIE xy primaries without duplicating the boundary-scan algorithm.
+///
+/// # Arguments
+///
+/// * `hue_target` - Target CIECAM02 hue angle in degrees [0, 360).
+/// * `primaries` - CIE xy chromaticity coordinates for [R, G, B].
+/// * `white` - CIE xy white-point chromaticity (e.g. D65 = [0.3127, 0.3290]).
+/// * `model` - Shared CIECAM02 model (viewing conditions already embedded).
+///
+/// # Returns
+///
+/// The [`GamutCusp`] with the highest CIECAM02 chroma found near `hue_target`.
+#[must_use]
+pub fn find_cusp_at_hue_for_primaries(
+    hue_target: f64,
+    primaries: &[[f64; 2]; 3],
+    white: [f64; 2],
+    model: &CiecamModel,
+) -> GamutCusp {
+    find_cusp_at_hue(hue_target, primaries, white, model)
+}
+
 /// Find the cusp at a specific target hue angle by scanning the gamut boundary.
 ///
 /// Scans the three edges of the RGB primary triangle (R→G, G→B, B→R) each at

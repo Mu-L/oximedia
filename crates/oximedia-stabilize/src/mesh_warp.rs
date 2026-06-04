@@ -6,6 +6,8 @@
 
 #![allow(dead_code)]
 
+use rayon::prelude::*;
+
 /// A single control point in the warp mesh.
 ///
 /// `(u, v)` are the normalised [0, 1] grid coordinates of this point.
@@ -309,6 +311,162 @@ pub fn bilinear_warp(src: &[u8], dst: &mut [u8], width: u32, height: u32, mesh: 
     }
 }
 
+// ---------------------------------------------------------------------------
+//  Tiled parallel warping
+// ---------------------------------------------------------------------------
+
+/// Default tile size in pixels for tiled warping.
+pub const DEFAULT_TILE: u32 = 64;
+
+/// Tile descriptor used internally.
+struct TileDesc {
+    /// First pixel column of this tile (inclusive).
+    x0: u32,
+    /// First pixel row of this tile (inclusive).
+    y0: u32,
+    /// One-past-last pixel column (exclusive; clamped to frame width).
+    x1: u32,
+    /// One-past-last pixel row (exclusive; clamped to frame height).
+    y1: u32,
+}
+
+/// Applies a `WarpMesh` to a raw RGBA pixel buffer using bilinear sampling,
+/// processing the frame in `tile_size × tile_size` tiles with rayon parallelism.
+///
+/// This function produces **identical output** to [`bilinear_warp`] but
+/// partitions the destination frame into non-overlapping rectangular tiles and
+/// processes each tile on a separate rayon thread.  Because tiles are
+/// non-overlapping in the output buffer the function is embarrassingly parallel:
+/// each tile computes its pixels independently and the results are merged into
+/// the output buffer in a single sequential scatter step.
+///
+/// # Arguments
+///
+/// * `src`       – Source pixel data (4 bytes per pixel, row-major RGBA).
+/// * `w`, `h`    – Frame dimensions in pixels.
+/// * `mesh`      – The warp mesh to apply.
+/// * `tile_size` – Tile width and height in pixels.  Clamped to `[1, max(w,h)]`.
+///                 Use [`DEFAULT_TILE`] for a sensible default.
+///
+/// # Returns
+///
+/// A new `Vec<u8>` of size `w * h * 4` containing the warped frame.
+///
+/// # Panics
+///
+/// Does not panic (all arithmetic is saturating or clamped).
+#[must_use]
+pub fn mesh_warp_tiled(src: &[u8], w: u32, h: u32, mesh: &WarpMesh, tile_size: u32) -> Vec<u8> {
+    let bpp = 4usize;
+    let total = (w as usize) * (h as usize) * bpp;
+
+    if w == 0 || h == 0 || src.is_empty() {
+        return vec![0u8; total];
+    }
+
+    let tile_size = tile_size.max(1);
+
+    // Build the list of tile descriptors.
+    let mut tiles: Vec<TileDesc> = Vec::new();
+    let mut y0 = 0u32;
+    while y0 < h {
+        let y1 = (y0 + tile_size).min(h);
+        let mut x0 = 0u32;
+        while x0 < w {
+            let x1 = (x0 + tile_size).min(w);
+            tiles.push(TileDesc { x0, y0, x1, y1 });
+            x0 = x1;
+        }
+        y0 = y1;
+    }
+
+    // Process each tile in parallel, collecting (descriptor, pixel_data) pairs.
+    let processed: Vec<(TileDesc, Vec<u8>)> = tiles
+        .into_par_iter()
+        .map(|tile| {
+            let tw = (tile.x1 - tile.x0) as usize;
+            let th = (tile.y1 - tile.y0) as usize;
+            let mut tile_pixels = vec![0u8; tw * th * bpp];
+
+            let fw = w as usize;
+            let fh = h as usize;
+
+            for dy in 0..th {
+                let py = tile.y0 as usize + dy; // absolute pixel row
+                for dx in 0..tw {
+                    let px = tile.x0 as usize + dx; // absolute pixel col
+
+                    // Normalised coordinates in [0, 1].
+                    let u = if fw > 1 {
+                        px as f64 / (fw - 1) as f64
+                    } else {
+                        0.0
+                    };
+                    let v = if fh > 1 {
+                        py as f64 / (fh - 1) as f64
+                    } else {
+                        0.0
+                    };
+
+                    let (offset_dx, offset_dy) = mesh.interpolate_at(u, v);
+
+                    // Source location (floating point), clamped to frame.
+                    let sx_f = (px as f64 + offset_dx).clamp(0.0, (fw - 1) as f64);
+                    let sy_f = (py as f64 + offset_dy).clamp(0.0, (fh - 1) as f64);
+
+                    let sx0 = sx_f.floor() as usize;
+                    let sy0 = sy_f.floor() as usize;
+                    let sx1 = (sx0 + 1).min(fw - 1);
+                    let sy1 = (sy0 + 1).min(fh - 1);
+
+                    let tx = sx_f - sx0 as f64;
+                    let ty = sy_f - sy0 as f64;
+
+                    let tile_idx = (dy * tw + dx) * bpp;
+
+                    for c in 0..bpp {
+                        let p00 = src[(sy0 * fw + sx0) * bpp + c] as f64;
+                        let p10 = src[(sy0 * fw + sx1) * bpp + c] as f64;
+                        let p01 = src[(sy1 * fw + sx0) * bpp + c] as f64;
+                        let p11 = src[(sy1 * fw + sx1) * bpp + c] as f64;
+
+                        let val = p00 * (1.0 - tx) * (1.0 - ty)
+                            + p10 * tx * (1.0 - ty)
+                            + p01 * (1.0 - tx) * ty
+                            + p11 * tx * ty;
+
+                        tile_pixels[tile_idx + c] = val.round().clamp(0.0, 255.0) as u8;
+                    }
+                }
+            }
+
+            (tile, tile_pixels)
+        })
+        .collect();
+
+    // Scatter tile results into the output buffer (sequential, but trivially fast
+    // compared to the parallel computation above).
+    let mut dst = vec![0u8; total];
+    let fw = w as usize;
+
+    for (tile, tile_pixels) in processed {
+        let tw = (tile.x1 - tile.x0) as usize;
+        let th = (tile.y1 - tile.y0) as usize;
+        for dy in 0..th {
+            let py = tile.y0 as usize + dy;
+            let dst_row_start = (py * fw + tile.x0 as usize) * bpp;
+            let src_row_start = dy * tw * bpp;
+            let row_bytes = tw * bpp;
+            if dst_row_start + row_bytes <= dst.len() {
+                dst[dst_row_start..dst_row_start + row_bytes]
+                    .copy_from_slice(&tile_pixels[src_row_start..src_row_start + row_bytes]);
+            }
+        }
+    }
+
+    dst
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,5 +578,129 @@ mod tests {
         assert!((p.v - 0.25).abs() < 1e-10);
         assert!((p.dx).abs() < 1e-10);
         assert!((p.dy).abs() < 1e-10);
+    }
+
+    // -----------------------------------------------------------------------
+    //  Tiled warp tests
+    // -----------------------------------------------------------------------
+
+    /// Tiled warp with an identity mesh (zero displacement) must produce the
+    /// same output as the sequential `bilinear_warp`.
+    #[test]
+    fn test_mesh_warp_tiled_matches_sequential() {
+        let width = 128u32;
+        let height = 96u32;
+        let src: Vec<u8> = (0..((width * height * 4) as usize))
+            .map(|i| (i.wrapping_mul(7).wrapping_add(13) % 256) as u8)
+            .collect();
+
+        let mesh = WarpMesh::new(8, 8); // all zeros → identity warp
+
+        // Sequential reference.
+        let mut sequential_dst = vec![0u8; src.len()];
+        bilinear_warp(&src, &mut sequential_dst, width, height, &mesh);
+
+        // Tiled parallel.
+        let tiled_dst = mesh_warp_tiled(&src, width, height, &mesh, DEFAULT_TILE);
+
+        assert_eq!(
+            sequential_dst, tiled_dst,
+            "Tiled warp must match sequential for identity mesh"
+        );
+    }
+
+    /// Verify that a non-square frame (100×100) with `tile_size=32` is handled
+    /// correctly — the last column of tiles is 4 pixels wide (100 mod 32 = 4)
+    /// and must be filled completely and correctly.
+    #[test]
+    fn test_mesh_warp_tiled_boundary() {
+        let width = 100u32;
+        let height = 100u32;
+        let bpp = 4usize;
+        // Fill with a known pattern so we can detect any dropped pixels.
+        let src: Vec<u8> = (0..((width * height) as usize * bpp))
+            .map(|i| (i % 251) as u8) // prime modulus → no repeated period
+            .collect();
+
+        let mesh = WarpMesh::new(5, 5); // zero displacement
+
+        // Sequential reference.
+        let mut sequential_dst = vec![0u8; src.len()];
+        bilinear_warp(&src, &mut sequential_dst, width, height, &mesh);
+
+        // Tiled with tile_size=32 (last column 4 px wide, last row 4 px tall).
+        let tiled_dst = mesh_warp_tiled(&src, width, height, &mesh, 32);
+
+        // Check total size.
+        assert_eq!(
+            tiled_dst.len(),
+            src.len(),
+            "Output buffer must be full size"
+        );
+
+        // Check that the last column tiles (x ∈ [96..100]) are filled correctly.
+        for y in 0..height as usize {
+            for x in 96..width as usize {
+                for c in 0..bpp {
+                    let idx = (y * width as usize + x) * bpp + c;
+                    assert_eq!(
+                        tiled_dst[idx], sequential_dst[idx],
+                        "Boundary pixel mismatch at ({x},{y}) channel {c}"
+                    );
+                }
+            }
+        }
+
+        // And verify full frame equality.
+        assert_eq!(sequential_dst, tiled_dst, "Full frame mismatch");
+    }
+
+    /// `mesh_warp_tiled` with a non-identity mesh must match `bilinear_warp`.
+    #[test]
+    fn test_mesh_warp_tiled_with_displacement_matches_sequential() {
+        let width = 64u32;
+        let height = 64u32;
+        let src: Vec<u8> = (0..((width * height * 4) as usize))
+            .map(|i| (i.wrapping_mul(31).wrapping_add(7) % 256) as u8)
+            .collect();
+
+        // Apply a small uniform displacement to the mesh.
+        let mut mesh = WarpMesh::new(4, 4);
+        for row in 0..4 {
+            for col in 0..4 {
+                mesh.set_offset(col, row, 2.0, -1.0);
+            }
+        }
+
+        let mut sequential_dst = vec![0u8; src.len()];
+        bilinear_warp(&src, &mut sequential_dst, width, height, &mesh);
+
+        let tiled_dst = mesh_warp_tiled(&src, width, height, &mesh, 16);
+
+        assert_eq!(
+            sequential_dst, tiled_dst,
+            "Tiled and sequential must agree with non-zero displacement"
+        );
+    }
+
+    /// `mesh_warp_tiled` with `tile_size` larger than the frame size is
+    /// equivalent to a single-tile (= sequential) run.
+    #[test]
+    fn test_mesh_warp_tiled_single_tile() {
+        let width = 32u32;
+        let height = 32u32;
+        let src: Vec<u8> = (0..((width * height * 4) as usize))
+            .map(|i| (i % 256) as u8)
+            .collect();
+
+        let mesh = WarpMesh::new(4, 4);
+
+        let mut sequential_dst = vec![0u8; src.len()];
+        bilinear_warp(&src, &mut sequential_dst, width, height, &mesh);
+
+        // tile_size > frame → single tile.
+        let tiled_dst = mesh_warp_tiled(&src, width, height, &mesh, 512);
+
+        assert_eq!(sequential_dst, tiled_dst);
     }
 }

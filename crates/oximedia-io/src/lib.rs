@@ -106,32 +106,46 @@
 
 pub mod aligned_io;
 pub mod async_io;
+pub mod async_reader;
 pub mod bits;
 pub mod buffer_pool;
 pub mod buffered_io;
 pub mod buffered_reader;
 pub mod checksum;
+pub mod chunked_upload;
 pub mod chunked_writer;
 pub mod compression;
 pub mod content_detect;
 pub mod copy_engine;
+pub mod crc_stream;
+pub mod dedup_writer;
 pub mod file_metadata;
 pub mod file_watch;
 pub mod format_detector;
+pub mod http_source;
+pub mod io_metrics;
 pub mod io_pipeline;
 pub mod io_stats;
 pub mod mmap;
+pub mod multipart_writer;
 pub mod mxf_probe;
+pub mod parallel_copy;
+pub mod pipe_source;
+pub mod prefetch;
+pub mod progress;
 pub mod progress_reader;
 pub mod rate_limiter;
 pub mod retrying_source;
 pub mod ring_buffer;
+pub mod s3_source;
 pub mod scatter_gather;
 pub mod seekable;
 pub mod source;
+pub mod sparse_file;
 pub mod splice_pipe;
 pub mod temp_files;
 pub mod verify_io;
+pub mod watcher;
 pub mod write_journal;
 
 // Re-export commonly used types

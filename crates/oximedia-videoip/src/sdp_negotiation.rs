@@ -232,11 +232,7 @@ pub struct SdpSession {
 impl SdpSession {
     /// Creates an empty session with the given name and origin.
     #[must_use]
-    pub fn new(
-        version: u8,
-        origin: impl Into<String>,
-        session_name: impl Into<String>,
-    ) -> Self {
+    pub fn new(version: u8, origin: impl Into<String>, session_name: impl Into<String>) -> Self {
         Self {
             version,
             origin: origin.into(),
@@ -370,12 +366,9 @@ impl SdpParser {
             media_sections.push(last);
         }
 
-        let version =
-            version.ok_or_else(|| SdpError::MissingField("v=".to_owned()))?;
-        let origin =
-            origin.ok_or_else(|| SdpError::MissingField("o=".to_owned()))?;
-        let session_name =
-            session_name.ok_or_else(|| SdpError::MissingField("s=".to_owned()))?;
+        let version = version.ok_or_else(|| SdpError::MissingField("v=".to_owned()))?;
+        let origin = origin.ok_or_else(|| SdpError::MissingField("o=".to_owned()))?;
+        let session_name = session_name.ok_or_else(|| SdpError::MissingField("s=".to_owned()))?;
 
         let mut session = SdpSession::new(version, origin, session_name);
         session.attributes = session_attrs;
@@ -405,9 +398,7 @@ impl SdpParser {
         // Format: <nettype> <addrtype> <connection-address>
         let parts: Vec<&str> = value.split_whitespace().collect();
         if parts.len() < 3 {
-            return Err(SdpError::ParseError(format!(
-                "malformed c= line: {value}"
-            )));
+            return Err(SdpError::ParseError(format!("malformed c= line: {value}")));
         }
         Ok(parts[2].to_owned())
     }
@@ -428,10 +419,8 @@ impl SdpParser {
             .ok_or_else(|| SdpError::MissingField("m= protocol".to_owned()))?;
         let fmt_str = parts.next().unwrap_or("");
 
-        let media_type =
-            SdpMediaType::from_str(media_str).ok_or_else(|| {
-                SdpError::ParseError(format!("unknown media type: {media_str}"))
-            })?;
+        let media_type = SdpMediaType::from_str(media_str)
+            .ok_or_else(|| SdpError::ParseError(format!("unknown media type: {media_str}")))?;
 
         // Port may be "<port>/<num-ports>"; only take the first.
         let port: u16 = port_str
@@ -489,16 +478,14 @@ impl SdpBuilder {
         name: impl Into<String>,
         value: impl Into<String>,
     ) -> Self {
-        self.session
-            .push_attribute(SdpAttribute::new(name, value));
+        self.session.push_attribute(SdpAttribute::new(name, value));
         self
     }
 
     /// Adds a session-level flag attribute.
     #[must_use]
     pub fn add_session_flag(mut self, name: impl Into<String>) -> Self {
-        self.session
-            .push_attribute(SdpAttribute::flag(name));
+        self.session.push_attribute(SdpAttribute::flag(name));
         self
     }
 
@@ -511,7 +498,13 @@ impl SdpBuilder {
         formats: &[&str],
         connection_addr: Option<&str>,
     ) -> Self {
-        self.add_media_section(SdpMediaType::Video, port, protocol, formats, connection_addr)
+        self.add_media_section(
+            SdpMediaType::Video,
+            port,
+            protocol,
+            formats,
+            connection_addr,
+        )
     }
 
     /// Adds an audio media section.
@@ -523,7 +516,13 @@ impl SdpBuilder {
         formats: &[&str],
         connection_addr: Option<&str>,
     ) -> Self {
-        self.add_media_section(SdpMediaType::Audio, port, protocol, formats, connection_addr)
+        self.add_media_section(
+            SdpMediaType::Audio,
+            port,
+            protocol,
+            formats,
+            connection_addr,
+        )
     }
 
     /// Adds an ancillary data media section.
@@ -675,9 +674,7 @@ mod tests {
         let attr = parsed.media[0].find_attribute("rtpmap");
         assert!(attr.is_some());
         assert_eq!(
-            attr.expect("attr is Some, checked above")
-                .value
-                .as_deref(),
+            attr.expect("attr is Some, checked above").value.as_deref(),
             Some("96 raw/90000")
         );
     }
@@ -701,8 +698,7 @@ mod tests {
     // 9. Error: invalid port
     #[test]
     fn test_invalid_port_error() {
-        let sdp =
-            "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=Test\r\nm=video notaport RTP/AVP 96\r\n";
+        let sdp = "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=Test\r\nm=video notaport RTP/AVP 96\r\n";
         let result = SdpParser::parse(sdp);
         assert!(matches!(result, Err(SdpError::InvalidPort)));
     }
@@ -717,11 +713,7 @@ mod tests {
         let parsed = SdpParser::parse(&text).expect("should parse");
         let attr = parsed.find_attribute("recvonly");
         assert!(attr.is_some());
-        assert!(
-            attr.expect("attr is Some, checked above")
-                .value
-                .is_none()
-        );
+        assert!(attr.expect("attr is Some, checked above").value.is_none());
     }
 
     // 11. Ancillary data section

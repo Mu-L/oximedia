@@ -4,8 +4,6 @@
 //! [`AuditEntry`] with a timestamp, actor, action, and optional details.
 //! The log is append-only, thread-safe, and supports filtering and export.
 
-#![allow(dead_code)]
-
 use std::collections::VecDeque;
 
 use parking_lot::RwLock;
@@ -19,6 +17,7 @@ use crate::types::JobId;
 
 /// The kind of action that was performed on a job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AuditAction {
     /// A new job was submitted.
     JobSubmitted,
@@ -291,13 +290,7 @@ impl AuditLog {
     /// Retrieve the most recent `n` entries, newest first.
     #[must_use]
     pub fn recent(&self, n: usize) -> Vec<AuditEntry> {
-        self.entries
-            .read()
-            .iter()
-            .rev()
-            .take(n)
-            .cloned()
-            .collect()
+        self.entries.read().iter().rev().take(n).cloned().collect()
     }
 
     /// Retrieve entries within a time range (inclusive).
@@ -313,7 +306,10 @@ impl AuditLog {
 
     /// Count entries by action type for a specific job.
     #[must_use]
-    pub fn action_counts_for_job(&self, job_id: &JobId) -> std::collections::HashMap<String, usize> {
+    pub fn action_counts_for_job(
+        &self,
+        job_id: &JobId,
+    ) -> std::collections::HashMap<String, usize> {
         let mut counts = std::collections::HashMap::new();
         for entry in self.entries.read().iter() {
             if &entry.job_id == job_id {
@@ -511,7 +507,10 @@ mod tests {
         let stats = log.stats();
         assert_eq!(stats.total_entries, 3);
         assert_eq!(stats.unique_jobs, 2);
-        assert_eq!(stats.by_action.get("job_submitted").copied().unwrap_or(0), 2);
+        assert_eq!(
+            stats.by_action.get("job_submitted").copied().unwrap_or(0),
+            2
+        );
     }
 
     #[test]
@@ -628,9 +627,6 @@ mod tests {
         log.log_system(jid("j1"), AuditAction::CheckpointSaved { step: 5 });
         let entries = log.entries_for_job(&jid("j1"));
         assert_eq!(entries.len(), 1);
-        assert_eq!(
-            entries[0].action.to_string(),
-            "checkpoint_saved(step=5)"
-        );
+        assert_eq!(entries[0].action.to_string(), "checkpoint_saved(step=5)");
     }
 }

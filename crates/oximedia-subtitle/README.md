@@ -6,7 +6,7 @@ Comprehensive subtitle and closed caption rendering for OxiMedia.
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.7 — 2026-05-16 — 736 tests
+Version: 0.1.8 — 2026-05-29 — 736 tests
 
 ## Features
 
@@ -54,7 +54,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-subtitle = "0.1.7"
+oximedia-subtitle = "0.1.8"
 ```
 
 ```rust

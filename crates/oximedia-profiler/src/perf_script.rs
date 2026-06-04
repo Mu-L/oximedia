@@ -168,7 +168,11 @@ mod tests {
 
     #[test]
     fn test_export_multiple_lines() {
-        let samples = vec![sample(0.1, "fn_a"), sample(0.2, "fn_b"), sample(0.3, "fn_c")];
+        let samples = vec![
+            sample(0.1, "fn_a"),
+            sample(0.2, "fn_b"),
+            sample(0.3, "fn_c"),
+        ];
         let out = PerfScriptExporter::export(&samples);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 3);

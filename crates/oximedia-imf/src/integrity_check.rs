@@ -64,9 +64,7 @@ impl ImfIntegrityChecker {
         // 2. ASSETMAP.xml
         let assetmap = base.join("ASSETMAP.xml");
         if !assetmap.exists() {
-            issues.push(format!(
-                "WARNING: ASSETMAP.xml not found in '{pkg_path}'"
-            ));
+            issues.push(format!("WARNING: ASSETMAP.xml not found in '{pkg_path}'"));
         } else {
             // Parse referenced file paths from ASSETMAP.xml
             let referenced = extract_paths_from_xml(&assetmap);
@@ -87,9 +85,7 @@ impl ImfIntegrityChecker {
             lower.starts_with("pkl") && lower.ends_with(".xml")
         });
         if !pkl_present {
-            issues.push(format!(
-                "WARNING: No PKL*.xml found in '{pkg_path}'"
-            ));
+            issues.push(format!("WARNING: No PKL*.xml found in '{pkg_path}'"));
         }
 
         // 4. CPL*.xml
@@ -98,9 +94,7 @@ impl ImfIntegrityChecker {
             lower.starts_with("cpl") && lower.ends_with(".xml")
         });
         if !cpl_present {
-            issues.push(format!(
-                "WARNING: No CPL*.xml found in '{pkg_path}'"
-            ));
+            issues.push(format!("WARNING: No CPL*.xml found in '{pkg_path}'"));
         }
 
         issues
@@ -215,10 +209,13 @@ mod tests {
 
     fn temp_pkg() -> std::path::PathBuf {
         let mut dir = std::env::temp_dir();
-        dir.push(format!("oximedia_imf_test_{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)));
+        dir.push(format!(
+            "oximedia_imf_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
     }
@@ -237,8 +234,11 @@ mod tests {
     fn test_verify_package_with_xml_files_no_warnings_for_those() {
         let dir = temp_pkg();
         // Create stub files
-        std::fs::write(dir.join("ASSETMAP.xml"), "<AssetMap><AssetList></AssetList></AssetMap>")
-            .expect("write ASSETMAP");
+        std::fs::write(
+            dir.join("ASSETMAP.xml"),
+            "<AssetMap><AssetList></AssetList></AssetMap>",
+        )
+        .expect("write ASSETMAP");
         std::fs::write(dir.join("PKL_001.xml"), "<PackingList/>").expect("write PKL");
         std::fs::write(dir.join("CPL_001.xml"), "<CompositionPlaylist/>").expect("write CPL");
 
@@ -303,7 +303,11 @@ mod tests {
         let path = dir.to_str().expect("valid utf8 path").to_string();
         let issues = ImfIntegrityChecker::verify(&path);
         let has_video_err = issues.iter().any(|i| i.contains("video.mxf"));
-        assert!(!has_video_err, "Present file should not be flagged: {:?}", issues);
+        assert!(
+            !has_video_err,
+            "Present file should not be flagged: {:?}",
+            issues
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

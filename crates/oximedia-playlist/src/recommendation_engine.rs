@@ -3,8 +3,6 @@
 //! Generates ranked recommendations from a content catalog based on user
 //! context such as time-of-day, device type, and previously watched items.
 
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 
 /// Type of device the user is watching on.
@@ -99,6 +97,58 @@ impl PlaylistItem {
     }
 }
 
+// ── Pre-computed feature vectors ──────────────────────────────────────────────
+
+/// Map a genre string to a bit position (0–63) using a lightweight FNV-1a hash.
+///
+/// Multiple genre strings may collide (intentional: 64 bits is enough for
+/// practical genre vocabularies in broadcast contexts).
+fn genre_to_bit(genre: &str) -> u64 {
+    const FNV_PRIME: u64 = 1_099_511_628_211;
+    const OFFSET_BASIS: u64 = 14_695_981_039_346_656_037;
+    let mut hash = OFFSET_BASIS;
+    for byte in genre.to_lowercase().bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    1u64 << (hash % 64)
+}
+
+/// A numeric feature representation of a `PlaylistItem`.
+///
+/// Pre-computing this vector at ingest time allows the scoring hot-path to
+/// avoid repeated string allocations and `to_lowercase()` calls.
+#[derive(Debug, Clone)]
+pub struct FeatureVector {
+    /// One-hot bit mask over up to 64 genre IDs derived via hash.
+    pub genre_bits: u64,
+    /// Normalised popularity in `[0.0, 1.0]` (already clamped by `PlaylistItem::new`).
+    pub popularity_norm: f32,
+    /// Normalised rating in `[0.0, 1.0]` (rating divided by 5.0).
+    pub rating_norm: f32,
+}
+
+impl FeatureVector {
+    /// Pre-compute the feature vector for an item.
+    #[must_use]
+    pub fn from_item(item: &PlaylistItem) -> Self {
+        Self {
+            genre_bits: genre_to_bit(&item.genre),
+            popularity_norm: item.popularity.clamp(0.0, 1.0),
+            rating_norm: (item.rating / 5.0).clamp(0.0, 1.0),
+        }
+    }
+
+    /// Compute a base score using the pre-computed vector.
+    ///
+    /// Equivalent to `popularity * 0.3 + (rating / 5) * 0.3` but without
+    /// any string operations.
+    #[must_use]
+    pub fn base_score(&self) -> f32 {
+        self.popularity_norm * 0.3 + self.rating_norm * 0.3
+    }
+}
+
 /// Scoring logic for a single item given a context.
 pub struct RecommendationScore;
 
@@ -124,6 +174,29 @@ impl RecommendationScore {
             0.0
         };
 
+        (base + genre_boost - penalty).max(0.0)
+    }
+
+    /// Compute a relevance score using a pre-computed `FeatureVector`.
+    ///
+    /// This variant avoids all string operations on the hot path; the genre
+    /// boost is computed from the `item.genre` string only once per item
+    /// (at `FeatureVector::from_item` time) if callers cache the vector.
+    ///
+    /// The result is numerically identical to `compute` for the same item.
+    #[must_use]
+    pub fn compute_with_vector(
+        item: &PlaylistItem,
+        fv: &FeatureVector,
+        context: &PlaylistContext,
+    ) -> f32 {
+        let base = fv.base_score();
+        let genre_boost = Self::genre_boost(&item.genre, context.time_of_day);
+        let penalty = if context.previous_items.contains(&item.id) {
+            0.5
+        } else {
+            0.0
+        };
         (base + genre_boost - penalty).max(0.0)
     }
 
@@ -360,5 +433,66 @@ mod tests {
         let nonempty = PersonalizedPlaylist::new(vec![1], 0, 3600);
         assert!(!nonempty.is_empty());
         assert_eq!(nonempty.len(), 1);
+    }
+
+    // ── FeatureVector tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_feature_vector_popularity_in_range() {
+        for &pop in &[0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+            let item = PlaylistItem::new(1, "Item", 60, "drama", 3.0, pop);
+            let fv = FeatureVector::from_item(&item);
+            assert!(
+                (0.0..=1.0).contains(&fv.popularity_norm),
+                "popularity_norm={} out of range",
+                fv.popularity_norm
+            );
+        }
+        // Clamped at 1.0 even if the raw value is >1 (item constructor clamps).
+        let item = PlaylistItem::new(1, "Overflow", 60, "drama", 5.0, 2.0);
+        let fv = FeatureVector::from_item(&item);
+        assert_eq!(fv.popularity_norm, 1.0);
+    }
+
+    #[test]
+    fn test_feature_vector_rating_in_range() {
+        let item = PlaylistItem::new(1, "Test", 60, "comedy", 4.5, 0.8);
+        let fv = FeatureVector::from_item(&item);
+        assert!(
+            (0.0..=1.0).contains(&fv.rating_norm),
+            "rating_norm={} out of range",
+            fv.rating_norm
+        );
+    }
+
+    #[test]
+    fn test_feature_vector_scoring_matches_string_scoring() {
+        let catalog = sample_items();
+        let ctx = PlaylistContext::new(20, DeviceType::TV);
+
+        // Compute top-k ordering using the original string-comparison path.
+        let mut string_scored: Vec<(&PlaylistItem, f32)> = catalog
+            .iter()
+            .map(|item| (item, RecommendationScore::compute(item, &ctx)))
+            .collect();
+        string_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let string_order: Vec<u64> = string_scored.iter().map(|(item, _)| item.id).collect();
+
+        // Compute top-k ordering using the feature-vector path.
+        let mut fv_scored: Vec<(&PlaylistItem, f32)> = catalog
+            .iter()
+            .map(|item| {
+                let fv = FeatureVector::from_item(item);
+                let score = RecommendationScore::compute_with_vector(item, &fv, &ctx);
+                (item, score)
+            })
+            .collect();
+        fv_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let fv_order: Vec<u64> = fv_scored.iter().map(|(item, _)| item.id).collect();
+
+        assert_eq!(
+            string_order, fv_order,
+            "feature-vector and string-comparison paths returned different orderings"
+        );
     }
 }

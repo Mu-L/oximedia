@@ -78,9 +78,7 @@ where
     /// Thread-safe: the factory is called at most once, even under concurrent
     /// access.
     pub fn get_or_init(&self) -> &dyn CodecPlugin {
-        self.inner
-            .get_or_init(|| (self.factory)())
-            .as_ref()
+        self.inner.get_or_init(|| (self.factory)()).as_ref()
     }
 
     /// Return `true` if the inner plugin has already been initialized.
@@ -195,7 +193,11 @@ mod tests {
         let _p1 = lazy.get_or_init();
         let _p2 = lazy.get_or_init();
         let _p3 = lazy.get_or_init();
-        assert_eq!(counter.load(Ordering::SeqCst), 1, "factory must be called exactly once");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "factory must be called exactly once"
+        );
     }
 
     // 4. CodecPlugin trait methods delegate to inner plugin

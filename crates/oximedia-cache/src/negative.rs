@@ -192,9 +192,9 @@ mod tests {
     #[test]
     fn test_evict_expired_removes_old_entries() {
         let mut nc = NegativeCache::new(1_000);
-        nc.insert_miss("old", 0);          // expires at 1_000
-        nc.insert_miss("young", 5_000);    // expires at 6_000
-        nc.evict_expired(2_000);           // prune at t=2_000
+        nc.insert_miss("old", 0); // expires at 1_000
+        nc.insert_miss("young", 5_000); // expires at 6_000
+        nc.evict_expired(2_000); // prune at t=2_000
         assert_eq!(nc.len(), 1, "Only 'young' should remain");
         assert!(!nc.is_known_miss("old", 500));
     }

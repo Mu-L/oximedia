@@ -94,10 +94,12 @@ pub mod application_profile;
 pub mod asset_map;
 mod assetmap;
 pub mod audio_layout;
+pub mod compliance_matrix;
 pub mod composition_map;
 pub mod composition_sequence;
 pub mod content_version;
 mod cpl;
+pub mod cpl_cache;
 pub mod cpl_merge;
 pub mod cpl_parser;
 pub mod cpl_segment;
@@ -107,19 +109,29 @@ mod essence;
 pub mod essence_constraints;
 pub mod essence_descriptor;
 pub mod essence_hash;
+pub mod essence_probe;
+pub mod imf_archive;
+pub mod imf_builder;
+pub mod imf_diff;
+pub mod imf_inspector;
 pub mod imf_report;
 pub mod imf_timeline;
 pub mod imsc1;
+pub mod integrity_check;
 pub mod marker_list;
 pub mod marker_resource;
+pub mod metadata_extractor;
 pub mod mxf_descriptor;
 mod opl;
 pub mod opl_document;
 pub mod output_profile_list;
 mod package;
 pub mod package_validator;
+pub mod partial_restore;
 mod pkl;
 pub mod pkl_document;
+pub mod pkl_gen;
+pub mod qc_report;
 pub mod sidecar;
 pub mod subtitle_resource;
 pub mod supplemental_package;
@@ -198,6 +210,10 @@ pub enum ImfError {
     /// SMPTE conformance violation
     #[error("SMPTE conformance violation: {0}")]
     ConformanceViolation(String),
+
+    /// Invalid package structure or directory
+    #[error("Invalid package: {0}")]
+    InvalidPackage(String),
 
     /// Unsupported feature
     #[error("Unsupported feature: {0}")]

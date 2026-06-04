@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Frame pacing and timing control for video-over-IP streams.
 //!
 //! This module ensures that video frames are transmitted at precise intervals
@@ -11,6 +10,7 @@
 //! - **Traffic shaping** - Distributes packet bursts within a frame period
 //! - **Drift correction** - Compensates for clock drift between sender and receiver
 //! - **Burst budget** - Allows controlled bursts for catch-up after delays
+//! - **PreciseClock** - Sub-millisecond clock using mach_absolute_time on macOS
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -81,12 +81,98 @@ pub struct PacingStats {
     pub drift_corrections: u64,
 }
 
+/// Sub-millisecond accurate clock.
+///
+/// On macOS uses `mach_absolute_time` for nanosecond resolution (via an
+/// `extern "C"` declaration — the kernel provides this symbol; it is NOT a
+/// C-library function and is therefore acceptable under the COOLJAPAN Pure
+/// Rust policy when cfg-gated to `target_os = "macos"`).
+///
+/// On other platforms falls back to `std::time::SystemTime` monotonic source.
+pub struct PreciseClock {
+    _private: (),
+}
+
+impl PreciseClock {
+    /// Create a new `PreciseClock`.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { _private: () }
+    }
+
+    /// Returns current monotonic time in nanoseconds.
+    ///
+    /// On macOS this calls `mach_absolute_time` (raw hardware ticks; on x86-64
+    /// and Apple Silicon the OS calibrates the tick unit to nanoseconds).
+    /// On all other platforms it falls back to `SystemTime` wall-clock nanos.
+    #[must_use]
+    pub fn now_ns(&self) -> u64 {
+        #[cfg(target_os = "macos")]
+        {
+            Self::mach_now_ns()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64
+        }
+    }
+
+    /// macOS-only: call `mach_absolute_time` via libc.
+    ///
+    /// `mach_absolute_time` is a pure hardware-counter read with no side
+    /// effects.  The `#[allow(unsafe_code)]` is scoped to this single helper
+    /// following the same pattern used in `gf_simd.rs`.
+    #[cfg(target_os = "macos")]
+    #[allow(unsafe_code)]
+    fn mach_now_ns() -> u64 {
+        extern "C" {
+            fn mach_absolute_time() -> u64;
+        }
+        // SAFETY: mach_absolute_time is a stable macOS kernel routine that
+        // performs a single hardware-counter read and has no side effects.
+        unsafe { mach_absolute_time() }
+    }
+
+    /// Sleep until `target_ns`, using a coarse OS sleep followed by a
+    /// busy-wait tail for sub-millisecond accuracy.
+    pub fn sleep_until_ns(&self, target_ns: u64) {
+        let now = self.now_ns();
+        if now >= target_ns {
+            return;
+        }
+        let gap = target_ns - now;
+        // Leave a 200 µs busy-wait window for sub-ms precision.
+        const BUSY_TAIL_NS: u64 = 200_000;
+        if gap > BUSY_TAIL_NS {
+            std::thread::sleep(Duration::from_nanos(gap - BUSY_TAIL_NS));
+        }
+        // Busy-wait for the final stretch.
+        while self.now_ns() < target_ns {
+            std::hint::spin_loop();
+        }
+    }
+}
+
+impl Default for PreciseClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Frame pacer that controls transmission timing.
 pub struct FramePacer {
     /// Configuration.
     config: FramePacingConfig,
     /// Ideal frame interval.
     frame_interval: Duration,
+    /// High-resolution clock for precise sleeping.
+    clock: PreciseClock,
+    /// Nanosecond timestamp of the next frame deadline (PreciseClock epoch).
+    next_deadline_ns: Option<u64>,
     /// Time the first frame was submitted.
     start_time: Option<Instant>,
     /// Ideal send time for the next frame.
@@ -133,6 +219,8 @@ impl FramePacer {
         Self {
             frame_interval: Duration::from_micros(interval_us),
             config,
+            clock: PreciseClock::new(),
+            next_deadline_ns: None,
             start_time: None,
             next_send_time: None,
             sequence: 0,
@@ -269,6 +357,7 @@ impl FramePacer {
     pub fn reset(&mut self) {
         self.start_time = None;
         self.next_send_time = None;
+        self.next_deadline_ns = None;
         self.sequence = 0;
         self.burst_budget = 0;
         self.drift_history.clear();
@@ -279,6 +368,27 @@ impl FramePacer {
         self.max_observed_drift_us = 0;
         self.drift_sum = 0;
         self.drift_corrections = 0;
+    }
+
+    /// Block the current thread until the next frame deadline and return
+    /// immediately.  Uses `PreciseClock::sleep_until_ns` for sub-millisecond
+    /// accuracy (coarse sleep + busy-wait tail).
+    ///
+    /// Intended for real-time sender threads where low-jitter frame timing
+    /// matters.  For simulation / testing purposes, prefer `pace_frame` which
+    /// accepts an explicit `Instant` argument.
+    pub fn wait_for_next_frame(&mut self) {
+        let interval_ns = self.frame_interval.as_nanos() as u64;
+        let now_ns = self.clock.now_ns();
+        let deadline = match self.next_deadline_ns {
+            None => {
+                self.next_deadline_ns = Some(now_ns + interval_ns);
+                now_ns // first call: send immediately
+            }
+            Some(d) => d,
+        };
+        self.clock.sleep_until_ns(deadline);
+        self.next_deadline_ns = Some(deadline + interval_ns);
     }
 }
 

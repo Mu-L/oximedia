@@ -28,22 +28,36 @@
 - [x] Implement `clip_favorites` module with quick-access collections and recent clips list (verified 2026-05-16; src/clip_favorites.rs:546 lines FavoriteCollection, RecentClipList)
 
 ## Performance
-- [ ] Add database index on `keywords` and `rating` columns for faster filtered queries
-- [ ] Implement batch `add_clips()` method in `ClipManager` with single transaction for bulk import
+- [x] Add database index on `keywords` and `rating` columns for faster filtered queries (verified 2026-06-01; `idx_clips_rating` + `idx_clips_keywords` + `idx_clips_favorite_rating` in `src/database/migration.rs`)
+- [x] Implement batch `add_clips()` method in `ClipManager` with single transaction for bulk import (verified 2026-06-01; `pub async fn add_clips` at `src/manager.rs:118` delegates to `database.batch_save_clips`)
 - [ ] Cache `SmartCollection` query results with invalidation on clip metadata changes
 - [ ] Use prepared statement caching in `database` module to avoid repeated SQL parsing
-- [ ] Add pagination support to `search` and `ClipManager::list_clips()` for large clip libraries
+- [x] Add pagination support to `search` and `ClipManager::list_clips()` for large clip libraries (verified 2026-06-01; `list_clips(page, page_size)` + `LIMIT ? OFFSET ?` in `src/database/storage.rs:334`)
 
 ## Testing
-- [ ] Add integration test for `ClipManager` full lifecycle: create, search, update, delete
+- [x] Add integration test for `ClipManager` full lifecycle: create, search, update, delete (tests/clip_manager_integration.rs::test_clip_lifecycle_create_search_update_delete)
 - [ ] Test `smart_collection` auto-updating when new clips matching criteria are added
-- [ ] Add `export` round-trip test: export EDL, reimport, verify clip in/out points preserved
+- [x] Add `export` round-trip test: export EDL, reimport, verify clip in/out points preserved (tests/clip_manager_integration.rs::test_export_edl_round_trip)
 - [x] Test `subclip` creation with boundary conditions (start=0, end=clip duration) — `test_subclip_boundary_conditions` in `clip/subclip.rs`
-- [ ] Add concurrent access test for `ClipManager` with multiple simultaneous writers
-- [ ] Test `clip_compare` produces correct similarity scores for known duplicate/different clips
-- [ ] Test `bin_organizer` automatic bin assignment based on metadata rules
+- [x] Add concurrent access test for `ClipManager` with multiple simultaneous writers (tests/clip_manager_integration.rs::test_concurrent_add_clips; 5 tasks × 10 clips = 50 total)
+- [x] Test `clip_compare` produces correct similarity scores for known duplicate/different clips (tests/clip_manager_integration.rs::test_clip_compare_identical_vs_different + test_clip_fingerprint_similarity_range)
+- [x] Test `bin_organizer` automatic bin assignment based on metadata rules (tests/clip_manager_integration.rs::test_bin_organizer_auto_assignment_by_rating + test_bin_organizer_apply_rules_by_camera)
 
 ## Documentation
 - [ ] Document database schema and migration strategy for `database` module
 - [ ] Add guide for setting up proxy workflows with `proxy_link` module
 - [ ] Document supported import/export formats with feature requirements
+
+## 0.1.8 follow-up (added 2026-05-29 by /ultra)
+- [x] Fix WASM regression — `uuid` and `serde_json` listed under `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]` but 11 source files import them unconditionally (done 2026-05-29)
+  - **Goal:** `cargo check --target wasm32-unknown-unknown -p oximedia-clips` passes cleanly.
+  - **Design:** Move `uuid` and `serde_json` to unconditional `[dependencies]` (both are pure-Rust, WASM-safe crates; `uuid` already has `js` feature in workspace dep). Keep `tokio`, `sqlx`, `oximedia-audio`, `oximedia-container` under the wasm-cfg gate.
+  - **Files:** `Cargo.toml`
+  - **Tests:** `cargo check --target wasm32-unknown-unknown -p oximedia-clips`
+  - **Risk:** Negligible — both deps compile cleanly to wasm32.
+- [x] Wire FLAC/Opus/MP3/Vorbis waveform decode in `clip_waveform.rs` — currently returns `WaveformData::empty()` for these formats (done 2026-05-29)
+  - **Goal:** `WaveformGenerator::generate()` produces real waveform data for FLAC, Opus, MP3, and Vorbis files; WAV already works. Fallback to `empty()` on decode error preserved.
+  - **Design:** Feature-flag `audio-decode = ["dep:oximedia-container", "dep:oximedia-io"]` (default on). Under `#[cfg(all(feature = "audio-decode", not(target_arch = "wasm32")))]`: detect format via extension/magic, dispatch to `FlacDemuxer`/`OggDemuxer`/`MatroskaDemuxer` + matching `AudioDecoder` (FlacDecoder/OpusDecoder/VorbisDecoder/Mp3Decoder). Pump packets in `tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async { … })` bridge. Collect mono samples via per-frame averaging downmix.
+  - **Files:** `src/clip_waveform.rs`, `Cargo.toml`
+  - **Tests:** 7 new tests — WAV dispatch regression, MP3/OGG/FLAC/MKA missing/corrupted-file error paths, downmix unit tests. FlacDecoder/VorbisDecoder are stubs (Ok(None) from receive_frame) so those paths return empty until codecs are implemented; documented in NOTE comment.
+  - **Limitation:** tokio runtime created per-call (documented in doc comment). FlacDecoder and VorbisDecoder are stubs; OpusDecoder and Mp3Decoder are functional.

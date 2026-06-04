@@ -114,10 +114,7 @@ impl LshSimilarityIndex {
         // Insert into LSH buckets (one per band).
         for band in 0..N_BANDS {
             let band_key = band_hash(&fp.hash, band);
-            self.buckets
-                .entry(band_key)
-                .or_default()
-                .push(id);
+            self.buckets.entry(band_key).or_default().push(id);
         }
 
         self.fingerprints.push(fp);
@@ -134,11 +131,7 @@ impl LshSimilarityIndex {
     /// * `query` — the fingerprint to match against.
     /// * `threshold` — minimum Jaccard similarity (0.0 – 1.0) to include in results.
     #[must_use]
-    pub fn search_similar(
-        &self,
-        query: &AudioFingerprint,
-        threshold: f32,
-    ) -> Vec<(usize, f32)> {
+    pub fn search_similar(&self, query: &AudioFingerprint, threshold: f32) -> Vec<(usize, f32)> {
         // Collect candidate IDs from all matching LSH buckets.
         let mut candidate_ids: Vec<usize> = Vec::new();
 
@@ -313,9 +306,7 @@ fn spectral_band_energies(samples: &[f32], sample_rate: u32) -> Vec<f32> {
             let cos_sum: f32 = frame
                 .iter()
                 .enumerate()
-                .map(|(t, &s)| {
-                    s * (std::f32::consts::TAU * center_freq * t as f32 / sr).cos()
-                })
+                .map(|(t, &s)| s * (std::f32::consts::TAU * center_freq * t as f32 / sr).cos())
                 .sum::<f32>();
             let energy = (cos_sum / frame_n).powi(2);
             band_energies[band_idx] += energy;
@@ -451,9 +442,17 @@ mod tests {
         let fp_a = compute_fingerprint(&sig_a, 44100);
         let fp_b = compute_fingerprint(&sig_b, 44100);
         // Different signals should typically produce different hashes.
-        let same = fp_a.hash.iter().zip(fp_b.hash.iter()).filter(|(a, b)| a == b).count();
+        let same = fp_a
+            .hash
+            .iter()
+            .zip(fp_b.hash.iter())
+            .filter(|(a, b)| a == b)
+            .count();
         // Allow up to 50% collision by chance, but expect significant differences.
-        assert!(same < N_HASHES, "Fingerprints are identical for different signals");
+        assert!(
+            same < N_HASHES,
+            "Fingerprints are identical for different signals"
+        );
     }
 
     // ── Jaccard estimate tests ────────────────────────────────────────────────
@@ -508,7 +507,9 @@ mod tests {
         let results = idx.search_similar(&fp_query, 0.5);
         // The same fingerprint should be a candidate.
         assert!(
-            results.iter().any(|&(found_id, sim)| found_id == id && sim >= 0.5),
+            results
+                .iter()
+                .any(|&(found_id, sim)| found_id == id && sim >= 0.5),
             "Expected to find inserted item in search results"
         );
     }

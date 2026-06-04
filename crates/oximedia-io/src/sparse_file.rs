@@ -66,10 +66,18 @@ impl fmt::Display for SparseRegion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Data { offset, length } => {
-                write!(f, "Data[{offset:#x}..{:#x}, {length} bytes]", offset + length)
+                write!(
+                    f,
+                    "Data[{offset:#x}..{:#x}, {length} bytes]",
+                    offset + length
+                )
             }
             Self::Hole { offset, length } => {
-                write!(f, "Hole[{offset:#x}..{:#x}, {length} bytes]", offset + length)
+                write!(
+                    f,
+                    "Hole[{offset:#x}..{:#x}, {length} bytes]",
+                    offset + length
+                )
             }
         }
     }
@@ -211,8 +219,7 @@ pub fn detect_sparse_regions(data: &[u8], block_size: usize) -> SparseMap {
             };
             if can_merge {
                 match last {
-                    SparseRegion::Data { length, .. }
-                    | SparseRegion::Hole { length, .. } => {
+                    SparseRegion::Data { length, .. } | SparseRegion::Hole { length, .. } => {
                         *length += (end - offset) as u64;
                     }
                 }

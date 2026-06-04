@@ -238,16 +238,19 @@ impl DvToHdr10PlusBridge {
             let slope = f64::from(l2.trim_slope) / f64::from(1i16 << 12);
             let offset = f64::from(l2.trim_offset) / f64::from(1i16 << 12);
             let power = f64::from(l2.trim_power) / f64::from(1i16 << 12);
-            (slope.clamp(0.1, 4.0), offset.clamp(-1.0, 1.0), power.clamp(0.1, 4.0))
+            (
+                slope.clamp(0.1, 4.0),
+                offset.clamp(-1.0, 1.0),
+                power.clamp(0.1, 4.0),
+            )
         } else {
             (1.0, 0.0, 1.0)
         };
 
         // Knee point position influenced by content's max PQ
-        let content_max_ratio =
-            pq_to_linear_nits(level1.max_pq) / source_max.max(1.0);
-        let knee_x_f = (knee_ratio * content_max_ratio.clamp(0.3, 1.0) * slope_adj)
-            .clamp(0.1, 0.95);
+        let content_max_ratio = pq_to_linear_nits(level1.max_pq) / source_max.max(1.0);
+        let knee_x_f =
+            (knee_ratio * content_max_ratio.clamp(0.3, 1.0) * slope_adj).clamp(0.1, 0.95);
         let knee_y_f = self.tone_map_value(knee_x_f, slope_adj, offset_adj, power_adj);
 
         let knee_x = (knee_x_f * 10000.0).clamp(0.0, 10000.0) as u16;
@@ -483,7 +486,8 @@ mod tests {
         let kx_low = sei_low.windows[0].knee_point_x;
         // They may differ (or coincidentally match, but generally won't with these values)
         assert!(
-            kx_high != kx_low || sei_high.windows[0].knee_point_y != sei_low.windows[0].knee_point_y,
+            kx_high != kx_low
+                || sei_high.windows[0].knee_point_y != sei_low.windows[0].knee_point_y,
             "different L2 slopes should produce different curves"
         );
     }

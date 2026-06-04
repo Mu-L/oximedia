@@ -1,6 +1,6 @@
 //! RPU (Reference Processing Unit) binary validation.
 //!
-//! [`RpuValidator`] performs structural checks on raw RPU byte slices before
+//! `RpuValidator` performs structural checks on raw RPU byte slices before
 //! full parsing.  The checks are intentionally conservative: a failed check
 //! adds a human-readable message to the error list, but validation continues
 //! so the caller receives a complete picture of all problems.
@@ -169,11 +169,7 @@ mod tests {
     fn test_valid_rpu() {
         let rpu = build_test_rpu(8, &[0xAB, 0xCD, 0xEF, 0x00]);
         let errors = RpuValidator::validate(&rpu);
-        assert!(
-            errors.is_empty(),
-            "valid RPU should pass: {:?}",
-            errors
-        );
+        assert!(errors.is_empty(), "valid RPU should pass: {:?}", errors);
     }
 
     #[test]
@@ -187,7 +183,7 @@ mod tests {
     fn test_bad_magic() {
         let mut rpu = build_test_rpu(8, &[0x00, 0x00, 0x00, 0x00]);
         rpu[0] = 0xFF; // corrupt magic
-        // Re-compute CRC so only magic is wrong
+                       // Re-compute CRC so only magic is wrong
         let payload_len = rpu.len() - 4;
         let crc = crc32_iso_hdlc(&rpu[..payload_len]);
         let crc_bytes = crc.to_le_bytes();
@@ -196,7 +192,11 @@ mod tests {
 
         let errors = RpuValidator::validate(&rpu);
         let has_magic_err = errors.iter().any(|e| e.contains("magic bytes"));
-        assert!(has_magic_err, "should report magic bytes error: {:?}", errors);
+        assert!(
+            has_magic_err,
+            "should report magic bytes error: {:?}",
+            errors
+        );
     }
 
     #[test]
@@ -214,7 +214,11 @@ mod tests {
         let rpu = build_test_rpu(99, &[0x00, 0x00, 0x00, 0x00]);
         let errors = RpuValidator::validate(&rpu);
         let has_profile_err = errors.iter().any(|e| e.contains("unknown profile"));
-        assert!(has_profile_err, "should report unknown profile: {:?}", errors);
+        assert!(
+            has_profile_err,
+            "should report unknown profile: {:?}",
+            errors
+        );
     }
 
     #[test]

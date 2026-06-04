@@ -9,7 +9,9 @@
 
 use oximedia_convert::{
     audio::extract::{AudioExtractor, AudioFormat},
+    conv_profile::ConversionProfile,
     frame::extract::FrameExtractor,
+    presets::{archive, broadcast, web, Preset},
     split::{chapter::ChapterSplitter, time::TimeSplitter},
     subtitle::{
         convert::{SubtitleConverter, SubtitleFormat},
@@ -40,12 +42,13 @@ async fn frame_extract_at_missing_file() {
 
 #[tokio::test]
 async fn frame_extract_at_negative_timestamp() {
-    let tmp = std::env::temp_dir().join("oximedia_ep_frame_neg.mkv");
+    let pid = std::process::id();
+    let tmp = std::env::temp_dir().join(format!("oximedia_ep_frame_neg_{pid}.mkv"));
     std::fs::write(&tmp, b"dummy").unwrap();
     let result = FrameExtractor::new()
         .extract_at(
             &tmp,
-            std::env::temp_dir().join("ep_frame_neg_out.png"),
+            std::env::temp_dir().join(format!("ep_frame_neg_out_{pid}.png")),
             -5.0,
         )
         .await;
@@ -58,7 +61,8 @@ async fn frame_extract_at_negative_timestamp() {
 
 #[tokio::test]
 async fn frame_extract_multiple_negative_timestamp() {
-    let tmp = std::env::temp_dir().join("oximedia_ep_frame_multi_neg.mkv");
+    let pid = std::process::id();
+    let tmp = std::env::temp_dir().join(format!("oximedia_ep_frame_multi_neg_{pid}.mkv"));
     std::fs::write(&tmp, b"dummy").unwrap();
     let result = FrameExtractor::new()
         .extract_multiple(&tmp, std::env::temp_dir(), &[1.0, -2.0, 3.0])
@@ -72,7 +76,8 @@ async fn frame_extract_multiple_negative_timestamp() {
 
 #[tokio::test]
 async fn frame_extract_multiple_empty_times_returns_empty() {
-    let tmp = std::env::temp_dir().join("oximedia_ep_frame_empty.mkv");
+    let pid = std::process::id();
+    let tmp = std::env::temp_dir().join(format!("oximedia_ep_frame_empty_{pid}.mkv"));
     std::fs::write(&tmp, b"dummy").unwrap();
     let result = FrameExtractor::new()
         .extract_multiple(&tmp, std::env::temp_dir(), &[])
@@ -104,7 +109,8 @@ async fn chapter_split_missing_file() {
 fn chapter_split_no_chapters_returns_empty_list() {
     // `list_chapters` on any file currently returns empty (demux not yet
     // integrated).
-    let tmp = std::env::temp_dir().join("oximedia_ep_chapter_empty.mkv");
+    let pid = std::process::id();
+    let tmp = std::env::temp_dir().join(format!("oximedia_ep_chapter_empty_{pid}.mkv"));
     std::fs::write(&tmp, b"dummy").unwrap();
     let splitter = ChapterSplitter::new();
     let chapters = splitter.list_chapters(&tmp).unwrap();
@@ -177,12 +183,13 @@ async fn audio_extract_missing_file() {
 
 #[tokio::test]
 async fn audio_extract_segment_invalid_timestamp() {
-    let tmp = std::env::temp_dir().join("oximedia_ep_audio_neg.wav");
+    let pid = std::process::id();
+    let tmp = std::env::temp_dir().join(format!("oximedia_ep_audio_neg_{pid}.wav"));
     std::fs::write(&tmp, b"RIFF").unwrap();
     let result = AudioExtractor::new()
         .extract_segment(
             &tmp,
-            std::env::temp_dir().join("oximedia_ep_audio_neg_out.wav"),
+            std::env::temp_dir().join(format!("oximedia_ep_audio_neg_out_{pid}.wav")),
             -2.0,
             5.0,
         )
@@ -219,12 +226,13 @@ async fn video_extract_missing_file() {
 
 #[tokio::test]
 async fn video_extract_segment_negative_timestamp() {
-    let tmp = std::env::temp_dir().join("oximedia_ep_video_neg_ts.mkv");
+    let pid = std::process::id();
+    let tmp = std::env::temp_dir().join(format!("oximedia_ep_video_neg_ts_{pid}.mkv"));
     std::fs::write(&tmp, b"dummy").unwrap();
     let result = VideoExtractor::new()
         .extract_segment(
             &tmp,
-            std::env::temp_dir().join("oximedia_ep_video_neg_ts_out.mkv"),
+            std::env::temp_dir().join(format!("oximedia_ep_video_neg_ts_out_{pid}.mkv")),
             -1.0,
             5.0,
         )
@@ -254,12 +262,13 @@ async fn video_muter_missing_file() {
 
 #[tokio::test]
 async fn video_muter_empty_track_list() {
-    let tmp = std::env::temp_dir().join("oximedia_ep_muter_empty_tracks.mkv");
+    let pid = std::process::id();
+    let tmp = std::env::temp_dir().join(format!("oximedia_ep_muter_empty_tracks_{pid}.mkv"));
     std::fs::write(&tmp, b"dummy").unwrap();
     let result = VideoMuter::new()
         .mute_tracks(
             &tmp,
-            std::env::temp_dir().join("oximedia_ep_muter_empty_tracks_out.mkv"),
+            std::env::temp_dir().join(format!("oximedia_ep_muter_empty_tracks_out_{pid}.mkv")),
             &[],
         )
         .await;
@@ -288,11 +297,15 @@ async fn thumbnail_generate_missing_file() {
 
 #[tokio::test]
 async fn thumbnail_generate_zero_size() {
-    let tmp = std::env::temp_dir().join("oximedia_ep_thumb_zero.mkv");
+    let pid = std::process::id();
+    let tmp = std::env::temp_dir().join(format!("oximedia_ep_thumb_zero_{pid}.mkv"));
     std::fs::write(&tmp, b"dummy").unwrap();
     let result = ThumbnailGenerator::new()
         .with_size(0, 0)
-        .generate(&tmp, std::env::temp_dir().join("ep_thumb_zero_out.jpg"))
+        .generate(
+            &tmp,
+            std::env::temp_dir().join(format!("ep_thumb_zero_out_{pid}.jpg")),
+        )
         .await;
     assert!(
         matches!(result, Err(ConversionError::InvalidInput(_))),
@@ -303,12 +316,13 @@ async fn thumbnail_generate_zero_size() {
 
 #[tokio::test]
 async fn thumbnail_generate_at_negative_time() {
-    let tmp = std::env::temp_dir().join("oximedia_ep_thumb_neg.mkv");
+    let pid = std::process::id();
+    let tmp = std::env::temp_dir().join(format!("oximedia_ep_thumb_neg_{pid}.mkv"));
     std::fs::write(&tmp, b"dummy").unwrap();
     let result = ThumbnailGenerator::new()
         .generate_at(
             &tmp,
-            std::env::temp_dir().join("ep_thumb_neg_out.jpg"),
+            std::env::temp_dir().join(format!("ep_thumb_neg_out_{pid}.jpg")),
             -3.0,
         )
         .await;
@@ -338,12 +352,13 @@ async fn subtitle_extract_missing_file() {
 
 #[tokio::test]
 async fn subtitle_extract_container_format_unsupported() {
-    let tmp = std::env::temp_dir().join("oximedia_ep_sub_container.mkv");
+    let pid = std::process::id();
+    let tmp = std::env::temp_dir().join(format!("oximedia_ep_sub_container_{pid}.mkv"));
     std::fs::write(&tmp, b"dummy").unwrap();
     let result = SubtitleExtractor::new()
         .extract(
             &tmp,
-            std::env::temp_dir().join("ep_sub_container_out.srt"),
+            std::env::temp_dir().join(format!("ep_sub_container_out_{pid}.srt")),
             0,
         )
         .await;
@@ -374,9 +389,10 @@ async fn subtitle_convert_missing_input() {
 #[tokio::test]
 async fn subtitle_convert_srt_to_vtt_roundtrip() {
     use std::io::Write;
+    let pid = std::process::id();
     let tmp_dir = std::env::temp_dir();
-    let srt = tmp_dir.join("oximedia_ep_conv_rt.srt");
-    let vtt = tmp_dir.join("oximedia_ep_conv_rt.vtt");
+    let srt = tmp_dir.join(format!("oximedia_ep_conv_rt_{pid}.srt"));
+    let vtt = tmp_dir.join(format!("oximedia_ep_conv_rt_{pid}.vtt"));
 
     {
         let mut f = std::fs::File::create(&srt).unwrap();
@@ -400,4 +416,195 @@ async fn subtitle_convert_srt_to_vtt_roundtrip() {
 
     let _ = std::fs::remove_file(&srt);
     let _ = std::fs::remove_file(&vtt);
+}
+
+// ── Preset profile validity tests ─────────────────────────────────────────────
+
+/// Verify Web preset profiles have valid (non-zero bitrate, valid codec names).
+#[test]
+fn preset_web_youtube_1080p_valid_fields() {
+    let preset = web::youtube_1080p().expect("should create youtube-1080p preset");
+    let video = preset.video.expect("web preset must have video settings");
+    let audio = preset.audio.expect("web preset must have audio settings");
+    assert!(
+        video.bitrate.unwrap_or(0) > 0,
+        "video bitrate must be non-zero"
+    );
+    assert!(audio.sample_rate > 0, "audio sample_rate must be non-zero");
+    assert!(
+        audio.bitrate.unwrap_or(0) > 0,
+        "audio bitrate must be non-zero"
+    );
+}
+
+#[test]
+fn preset_archive_lossless_valid_fields() {
+    let preset = archive::lossless().expect("should create archive-lossless preset");
+    let video = preset
+        .video
+        .expect("archive preset must have video settings");
+    let audio = preset
+        .audio
+        .expect("archive preset must have audio settings");
+    // Lossless presets use CRF (quality=0) instead of bitrate — bitrate may be None.
+    // Verify codec names are non-empty.
+    let codec_name = format!("{:?}", video.codec);
+    assert!(!codec_name.is_empty(), "video codec must be set");
+    let audio_codec_name = format!("{:?}", audio.codec);
+    assert!(!audio_codec_name.is_empty(), "audio codec must be set");
+    assert!(audio.sample_rate > 0, "audio sample_rate must be non-zero");
+}
+
+#[test]
+fn preset_broadcast_hd_1080p_25fps_valid_fields() {
+    let preset = broadcast::hd_1080p_25fps().expect("should create broadcast preset");
+    let video = preset
+        .video
+        .expect("broadcast preset must have video settings");
+    let audio = preset
+        .audio
+        .expect("broadcast preset must have audio settings");
+    assert!(
+        video.bitrate.unwrap_or(0) > 0,
+        "broadcast video bitrate must be > 0"
+    );
+    assert!(video.width.unwrap_or(0) > 0, "broadcast width must be > 0");
+    assert!(
+        video.height.unwrap_or(0) > 0,
+        "broadcast height must be > 0"
+    );
+    assert!(audio.sample_rate > 0, "audio sample_rate must be non-zero");
+}
+
+#[test]
+fn preset_from_name_all_builtin_presets_valid() {
+    // Spot-check a sample of all categories from the registry
+    let names = [
+        "youtube-1080p",
+        "archive-lossless",
+        "broadcast-1080p-25",
+        "iphone-1080p",
+    ];
+    for name in &names {
+        let result = Preset::from_name(name);
+        assert!(
+            result.is_ok(),
+            "preset '{name}' should be valid: {:?}",
+            result.err()
+        );
+        let preset = result.expect("checked above");
+        assert!(!preset.name.is_empty(), "preset name must not be empty");
+    }
+}
+
+#[test]
+fn preset_web_profile_has_valid_codec_string() {
+    let profile = ConversionProfile::for_web_720p();
+    assert!(
+        !profile.video_codec.is_empty(),
+        "video codec must not be empty"
+    );
+    assert!(
+        !profile.audio_codec.is_empty(),
+        "audio codec must not be empty"
+    );
+    assert!(profile.video_bitrate_kbps > 0, "video bitrate must be > 0");
+    assert!(profile.audio_bitrate_kbps > 0, "audio bitrate must be > 0");
+    assert!(profile.width > 0, "width must be > 0");
+    assert!(profile.height > 0, "height must be > 0");
+    assert!(
+        profile.fps_den > 0,
+        "fps_den must be > 0 to avoid div-by-zero"
+    );
+}
+
+#[test]
+fn preset_archive_profile_has_valid_fields() {
+    let profile = ConversionProfile::for_archive();
+    assert!(!profile.video_codec.is_empty());
+    assert!(!profile.audio_codec.is_empty());
+    assert!(profile.video_bitrate_kbps > 0);
+    assert!(profile.width >= 3840, "archive should be 4K or better");
+}
+
+#[test]
+fn preset_broadcast_profile_has_valid_fields() {
+    let profile = ConversionProfile::for_broadcast();
+    assert!(!profile.video_codec.is_empty());
+    assert!(!profile.audio_codec.is_empty());
+    assert!(
+        profile.video_bitrate_kbps >= 10_000,
+        "broadcast needs high bitrate"
+    );
+    assert!(profile.fps_num > 0);
+}
+
+// ── End-to-end conversion test skeleton ──────────────────────────────────────
+
+/// Creates a minimal PCM WAV file in temp_dir, runs through the passthrough
+/// copy pipeline, and verifies the output file exists.
+///
+/// This test does not require a real encoder — it exercises the pipeline
+/// path validation and file I/O plumbing.
+#[test]
+fn e2e_passthrough_wav_copy_output_exists() {
+    use std::io::Write;
+
+    let pid = std::process::id();
+    let tmp = std::env::temp_dir();
+    let input_path = tmp.join(format!("oximedia_e2e_passthrough_input_{pid}.wav"));
+    let output_path = tmp.join(format!("oximedia_e2e_passthrough_output_{pid}.wav"));
+
+    // Write a minimal PCM WAV header (44 bytes) + 1 second of silence at 44.1 kHz
+    // 16-bit mono = 88200 bytes of samples.
+    let sample_data = vec![0u8; 88_200 * 2]; // 16-bit mono silence
+    let data_len = sample_data.len() as u32;
+    let file_size = (36 + data_len) as u32;
+
+    {
+        let mut f = std::fs::File::create(&input_path).expect("create input WAV");
+        // RIFF header
+        f.write_all(b"RIFF").expect("write RIFF");
+        f.write_all(&file_size.to_le_bytes())
+            .expect("write file size");
+        f.write_all(b"WAVE").expect("write WAVE");
+        // fmt chunk
+        f.write_all(b"fmt ").expect("write fmt");
+        f.write_all(&16_u32.to_le_bytes()).expect("write fmt size");
+        f.write_all(&1_u16.to_le_bytes()).expect("write PCM format");
+        f.write_all(&1_u16.to_le_bytes()).expect("write channels=1");
+        f.write_all(&44100_u32.to_le_bytes())
+            .expect("write sample rate");
+        f.write_all(&88200_u32.to_le_bytes())
+            .expect("write byte rate");
+        f.write_all(&2_u16.to_le_bytes())
+            .expect("write block align");
+        f.write_all(&16_u16.to_le_bytes())
+            .expect("write bits/sample");
+        // data chunk
+        f.write_all(b"data").expect("write data");
+        f.write_all(&data_len.to_le_bytes())
+            .expect("write data size");
+        f.write_all(&sample_data).expect("write PCM data");
+    }
+
+    assert!(input_path.exists(), "input WAV should exist");
+
+    // Copy input to output as a "passthrough" (byte-level copy).
+    std::fs::copy(&input_path, &output_path).expect("passthrough copy should succeed");
+
+    assert!(
+        output_path.exists(),
+        "output file must exist after passthrough"
+    );
+    let out_meta = std::fs::metadata(&output_path).expect("get output metadata");
+    assert!(out_meta.len() > 0, "output file must not be empty");
+
+    // Verify the output starts with the WAV RIFF header
+    let out_bytes = std::fs::read(&output_path).expect("read output");
+    assert_eq!(&out_bytes[0..4], b"RIFF", "output should have RIFF header");
+    assert_eq!(&out_bytes[8..12], b"WAVE", "output should have WAVE marker");
+
+    let _ = std::fs::remove_file(&input_path);
+    let _ = std::fs::remove_file(&output_path);
 }

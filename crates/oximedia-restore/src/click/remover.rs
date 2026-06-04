@@ -72,6 +72,72 @@ impl ClickRemover {
     pub fn remove_single(&self, samples: &[f32], click: &Click) -> RestoreResult<Vec<f32>> {
         self.remove(samples, std::slice::from_ref(click))
     }
+
+    /// Remove clicks from samples **in-place**.
+    ///
+    /// Unlike [`remove`][Self::remove] which allocates a full output buffer,
+    /// this method operates directly on `&mut [f32]` using a single small
+    /// allocation for the sorted click index.  The interpolated values replace
+    /// the corrupted samples without copying the entire buffer.
+    ///
+    /// Click regions are processed in ascending order; each region is
+    /// interpolated with cubic Hermite blending between the two boundary
+    /// samples immediately outside the region.
+    ///
+    /// # Arguments
+    ///
+    /// * `samples` - Mutable sample buffer; modified in place.
+    /// * `clicks` - Detected clicks to remove.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RestoreError`] on internal failures (e.g. from the underlying
+    /// interpolation call).
+    pub fn remove_in_place(&self, samples: &mut [f32], clicks: &[Click]) -> RestoreResult<()> {
+        if clicks.is_empty() || samples.is_empty() {
+            return Ok(());
+        }
+
+        // One allocation: a sorted copy of the click list (indices only).
+        let mut sorted: Vec<&Click> = clicks.iter().collect();
+        sorted.sort_by_key(|c| c.start);
+
+        for click in sorted {
+            let start = click.start.saturating_sub(self.padding);
+            let end = (click.end + self.padding).min(samples.len());
+
+            if start >= end || end > samples.len() {
+                continue;
+            }
+
+            // We need the boundary values *before* we mutate the region.
+            // Read from the surrounding samples (not inside the click region).
+            let left = if start > 0 { samples[start - 1] } else { 0.0 };
+            let right = if end < samples.len() {
+                samples[end]
+            } else {
+                0.0
+            };
+
+            let len = end - start;
+            if len == 0 {
+                continue;
+            }
+
+            // Cubic Hermite blend between left and right boundary values.
+            // t runs from 1/(len+1) to len/(len+1) so the boundaries are not
+            // overwritten (they were already good samples outside the click).
+            #[allow(clippy::cast_precision_loss)]
+            for i in 0..len {
+                let t = (i + 1) as f32 / (len + 1) as f32;
+                // Smoothstep: 3t²-2t³
+                let smooth_t = t * t * (3.0 - 2.0 * t);
+                samples[start + i] = left + smooth_t * (right - left);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl Default for ClickRemover {
@@ -300,5 +366,117 @@ mod tests {
         let samples = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let coeffs = burg_ar(&samples, 2);
         assert_eq!(coeffs.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // In-place click removal tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_click_remover_in_place_basic() {
+        use std::f32::consts::PI;
+
+        // 1000-sample sine wave at a normalised frequency.
+        let n = 1000usize;
+        let mut samples: Vec<f32> = (0..n).map(|i| (2.0 * PI * i as f32 / 50.0).sin()).collect();
+
+        // Snapshot of samples outside the corrupted region for later comparison.
+        let before_prefix: Vec<f32> = samples[..95].to_vec();
+        let before_suffix: Vec<f32> = samples[115..].to_vec();
+
+        // Corrupt samples 100..110 with large values.
+        let corruption = 100.0_f32;
+        for s in &mut samples[100..110] {
+            *s = corruption;
+        }
+
+        // Verify the corruption is visible before removal.
+        let max_before: f32 = samples[100..110]
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            max_before > 10.0,
+            "corruption should be present before removal (max={max_before})"
+        );
+
+        let click = Click {
+            start: 100,
+            end: 110,
+            magnitude: corruption,
+            confidence: 1.0,
+            severity: crate::click::detector::ClickSeverity::High,
+        };
+
+        let remover = ClickRemover::new(InterpolationMethod::Cubic, 0);
+        remover
+            .remove_in_place(&mut samples, &[click])
+            .expect("in-place removal should succeed");
+
+        // After removal the region should be much smaller than the corruption.
+        let max_after: f32 = samples[100..110]
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            max_after < corruption / 2.0,
+            "click region should be interpolated (max after = {max_after}, corruption = {corruption})"
+        );
+
+        // Samples *before* the click region must be unchanged.
+        assert_eq!(
+            &samples[..95],
+            before_prefix.as_slice(),
+            "samples before click region must be unchanged"
+        );
+
+        // Samples *after* the click region must be unchanged.
+        assert_eq!(
+            &samples[115..],
+            before_suffix.as_slice(),
+            "samples after click region must be unchanged"
+        );
+    }
+
+    #[test]
+    fn test_click_remover_in_place_empty_clicks() {
+        // No clicks → buffer unchanged.
+        let mut samples = vec![0.5f32; 100];
+        let original = samples.clone();
+        let remover = ClickRemover::default();
+        remover
+            .remove_in_place(&mut samples, &[])
+            .expect("empty clicks should succeed");
+        assert_eq!(samples, original, "no-op when clicks list is empty");
+    }
+
+    #[test]
+    fn test_click_remover_in_place_at_boundaries() {
+        // Click at the very start and very end should not panic.
+        let mut samples = vec![1.0f32; 50];
+        let click_start = Click {
+            start: 0,
+            end: 3,
+            magnitude: 5.0,
+            confidence: 1.0,
+            severity: crate::click::detector::ClickSeverity::High,
+        };
+        let click_end = Click {
+            start: 47,
+            end: 50,
+            magnitude: 5.0,
+            confidence: 1.0,
+            severity: crate::click::detector::ClickSeverity::High,
+        };
+        let remover = ClickRemover::new(InterpolationMethod::Cubic, 0);
+        remover
+            .remove_in_place(&mut samples, &[click_start, click_end])
+            .expect("boundary clicks should not panic");
+        for (i, &s) in samples.iter().enumerate() {
+            assert!(
+                s.is_finite(),
+                "sample {i} is not finite after in-place removal"
+            );
+        }
     }
 }

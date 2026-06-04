@@ -702,6 +702,8 @@ pub struct InvalidationManager {
     requests_this_minute: u32,
     /// Tag-based invalidation index embedded in the manager.
     tag_store: TagInvalidationStore,
+    /// Active stale-while-revalidate entries (key → entry).
+    stale_entries: HashMap<String, StaleCacheEntry>,
 }
 
 // ─── Tag-based invalidation store ─────────────────────────────────────────────
@@ -805,6 +807,7 @@ impl InvalidationManager {
             rate_limit_per_min,
             requests_this_minute: 0,
             tag_store: TagInvalidationStore::new(),
+            stale_entries: HashMap::new(),
         }
     }
 
@@ -937,6 +940,75 @@ impl InvalidationManager {
         }
         let successes = self.history.iter().filter(|r| r.success).count();
         successes as f64 / self.history.len() as f64
+    }
+}
+
+// ─── SoftPurge / StaleCacheEntry on InvalidationManager ──────────────────────
+
+/// A soft-purge directive: marks an entry stale rather than removing it
+/// immediately, allowing continued serving during background revalidation.
+#[derive(Debug, Clone)]
+pub struct SoftPurge {
+    /// Cache key (URL path) to soft-purge.
+    pub key: String,
+    /// How long (seconds) the entry may continue to be served while stale.
+    pub stale_while_revalidate_secs: u64,
+}
+
+/// A stale cache entry tracked by [`InvalidationManager`].
+#[derive(Debug, Clone)]
+pub struct StaleCacheEntry {
+    /// The cache key (URL path).
+    pub key: String,
+    /// When the entry became stale.
+    pub stale_at: Instant,
+    /// How long the entry may be served while stale.
+    pub ttl: Duration,
+}
+
+impl StaleCacheEntry {
+    /// Returns `true` if the stale-while-revalidate grace period has not yet
+    /// expired (i.e., the entry may still be served).
+    pub fn is_still_servable(&self) -> bool {
+        self.stale_at.elapsed() < self.ttl
+    }
+}
+
+impl InvalidationManager {
+    /// Soft-purge `key`: register it as stale for `ttl` duration.
+    ///
+    /// Returns `true` if the entry was newly registered (or refreshed);
+    /// `false` if `ttl` is zero (no-op).
+    pub fn soft_purge(&mut self, key: &str, ttl: Duration) -> bool {
+        if ttl.is_zero() {
+            return false;
+        }
+        self.stale_entries.insert(
+            key.to_string(),
+            StaleCacheEntry {
+                key: key.to_string(),
+                stale_at: Instant::now(),
+                ttl,
+            },
+        );
+        true
+    }
+
+    /// Returns `true` if `key` is currently tracked as stale (and within its
+    /// TTL window).
+    pub fn is_stale(&self, key: &str) -> bool {
+        self.stale_entries
+            .get(key)
+            .map(|e| e.is_still_servable())
+            .unwrap_or(false)
+    }
+
+    /// Return a reference to the [`StaleCacheEntry`] for `key` if it exists
+    /// **and** is still within its grace period, otherwise `None`.
+    pub fn serve_while_stale(&self, key: &str) -> Option<&StaleCacheEntry> {
+        self.stale_entries
+            .get(key)
+            .filter(|e| e.is_still_servable())
     }
 }
 
@@ -1576,5 +1648,68 @@ mod tests {
         // Tag scope matches() returns true (tag filtering is metadata-based)
         let scope = InvalidationScope::Tag(vec!["x".to_string()]);
         assert!(scope.matches("/anything"));
+    }
+
+    // ── SoftPurge / StaleCacheEntry on InvalidationManager ───────────────────
+
+    #[test]
+    fn test_soft_purge_marks_entry_stale() {
+        let mut mgr = InvalidationManager::new(100);
+        let ttl = Duration::from_secs(60);
+        let inserted = mgr.soft_purge("/video/clip.mp4", ttl);
+        assert!(inserted, "soft_purge should return true for non-zero TTL");
+        assert!(mgr.is_stale("/video/clip.mp4"), "entry should be stale");
+    }
+
+    #[test]
+    fn test_soft_purge_zero_ttl_is_noop() {
+        let mut mgr = InvalidationManager::new(100);
+        let inserted = mgr.soft_purge("/image/logo.png", Duration::ZERO);
+        assert!(!inserted, "zero TTL should return false");
+        assert!(
+            !mgr.is_stale("/image/logo.png"),
+            "no stale entry for zero TTL"
+        );
+    }
+
+    #[test]
+    fn test_serve_while_stale_returns_entry() {
+        let mut mgr = InvalidationManager::new(100);
+        let ttl = Duration::from_secs(300);
+        mgr.soft_purge("/media/hls.m3u8", ttl);
+        let entry = mgr.serve_while_stale("/media/hls.m3u8");
+        assert!(entry.is_some(), "should serve stale entry within TTL");
+        let e = entry.expect("entry present");
+        assert_eq!(e.key, "/media/hls.m3u8");
+        assert_eq!(e.ttl, ttl);
+    }
+
+    #[test]
+    fn test_serve_while_stale_none_for_unknown_key() {
+        let mgr = InvalidationManager::new(100);
+        assert!(mgr.serve_while_stale("/nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_soft_purge_refresh_extends_window() {
+        let mut mgr = InvalidationManager::new(100);
+        mgr.soft_purge("/key", Duration::from_secs(10));
+        // Refresh with longer TTL
+        mgr.soft_purge("/key", Duration::from_secs(300));
+        let entry = mgr.serve_while_stale("/key").expect("entry");
+        assert_eq!(entry.ttl, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn test_stale_cache_entry_is_still_servable() {
+        let entry = StaleCacheEntry {
+            key: "/test".to_string(),
+            stale_at: Instant::now(),
+            ttl: Duration::from_secs(60),
+        };
+        assert!(
+            entry.is_still_servable(),
+            "freshly inserted entry should be servable"
+        );
     }
 }

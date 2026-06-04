@@ -20,18 +20,35 @@
 //! assert!(graph.node_count() >= 3);
 //! ```
 
+pub mod backpressure;
 pub mod builder;
+pub mod composition;
 pub mod conditional;
+pub mod diff;
 pub mod dot;
+pub mod dot_export;
+pub mod dynamic_reconfig;
 pub mod execution_plan;
+pub mod format_negotiation;
 pub mod graph;
+pub mod hardware_validator;
+pub mod memory_pool;
 pub mod metrics;
 pub mod node;
+pub mod optimizer;
+pub mod pipeline_debugger;
+pub mod pipeline_profiler;
+pub mod preset_library;
 pub mod profiler;
+pub mod replay;
 #[cfg(feature = "serde")]
 pub mod serialization;
+pub mod simd_scheduler;
 pub mod templates;
+#[cfg(test)]
+pub mod topo_tests;
 pub mod validation;
+pub mod zero_copy;
 
 // ── Error type ───────────────────────────────────────────────────────────────
 

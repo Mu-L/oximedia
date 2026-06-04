@@ -187,13 +187,14 @@ fn compute_dft_slice(samples: &[f32]) -> Vec<(f32, f32)> {
     (0..n)
         .map(|k| {
             let angle_step = pi2_over_n * k as f32;
-            let (re, im) = samples
-                .iter()
-                .enumerate()
-                .fold((0.0f32, 0.0f32), |(re, im), (n_idx, &x)| {
-                    let angle = angle_step * n_idx as f32;
-                    (re + x * angle.cos(), im + x * angle.sin())
-                });
+            let (re, im) =
+                samples
+                    .iter()
+                    .enumerate()
+                    .fold((0.0f32, 0.0f32), |(re, im), (n_idx, &x)| {
+                        let angle = angle_step * n_idx as f32;
+                        (re + x * angle.cos(), im + x * angle.sin())
+                    });
             (re, im)
         })
         .collect()
@@ -337,6 +338,175 @@ pub struct DetectionResult {
     pub blocks_detected: usize,
 }
 
+// ---------------------------------------------------------------------------
+// Simplified spread-spectrum API (AudioWatermarker / AudioDetector)
+// ---------------------------------------------------------------------------
+
+/// Spread factor: number of samples used per embedded bit.
+const SPREAD_FACTOR: usize = 512;
+
+/// Step a 64-bit LCG and return ±1.0.
+///
+/// Multiplier and addend from Knuth's MMIX constants.
+fn lcg_next(state: &mut u64) -> f32 {
+    *state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    // Use MSB for sign: 1 → +1.0, 0 → -1.0
+    if (*state >> 63) == 1 {
+        1.0
+    } else {
+        -1.0
+    }
+}
+
+/// Build a PN sequence of length `len` with values ±1.0 from `seed`.
+fn pn_sequence(seed: u64, len: usize) -> Vec<f32> {
+    let mut state = seed;
+    (0..len).map(|_| lcg_next(&mut state)).collect()
+}
+
+/// Simple spread-spectrum audio watermarker.
+///
+/// Each bit is embedded by additively spreading it over [`SPREAD_FACTOR`]
+/// samples using an LCG-derived ±1 PN carrier.  Detection is a simple
+/// correlation of the received block against the same carrier.
+#[derive(Debug, Clone)]
+pub struct AudioWatermarker {
+    /// Sample rate of the audio being processed.
+    pub sample_rate: u32,
+    /// Watermark strength in [0.0, 1.0].  Default 0.1.
+    pub strength: f32,
+    /// PN-sequence seed (acts as a secret key for this watermark).
+    pub pn_seed: u64,
+}
+
+impl AudioWatermarker {
+    /// Create a new watermarker.
+    #[must_use]
+    pub fn new(sample_rate: u32, strength: f32, pn_seed: u64) -> Self {
+        Self {
+            sample_rate,
+            strength: strength.clamp(0.0, 1.0),
+            pn_seed,
+        }
+    }
+
+    /// Embed a slice of bits into `samples` in-place.
+    ///
+    /// Each bit occupies one `SPREAD_FACTOR`-wide block of samples.
+    /// If `samples` is shorter than `bits.len() * SPREAD_FACTOR` then only
+    /// as many bits as fit are embedded.
+    pub fn embed(&self, samples: &mut [f32], bits: &[bool]) {
+        let mut seed = self.pn_seed;
+        for (bit_idx, &bit) in bits.iter().enumerate() {
+            let start = bit_idx * SPREAD_FACTOR;
+            if start + SPREAD_FACTOR > samples.len() {
+                break;
+            }
+            let bit_sign: f32 = if bit { 1.0 } else { -1.0 };
+            // Advance the LCG state forward for each bit's block so that
+            // successive bit-blocks use independent (but deterministic) PN chips.
+            let block_seed = seed;
+            let pn = pn_sequence(block_seed, SPREAD_FACTOR);
+            for (j, sample) in samples[start..start + SPREAD_FACTOR].iter_mut().enumerate() {
+                *sample += self.strength * bit_sign * pn[j];
+            }
+            // Advance the seed so adjacent bits use different carriers.
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+        }
+    }
+
+    /// Embed a `u64` payload (64 bits) into `samples` in-place.
+    ///
+    /// Requires at least 64 × [`SPREAD_FACTOR`] = 32 768 samples.
+    pub fn embed_payload(&self, samples: &mut [f32], payload: u64) {
+        let bits: Vec<bool> = (0..64).map(|i| (payload >> i) & 1 == 1).collect();
+        self.embed(samples, &bits);
+    }
+}
+
+/// Simple spread-spectrum audio detector (counterpart to [`AudioWatermarker`]).
+#[derive(Debug, Clone)]
+pub struct AudioDetector {
+    /// Sample rate — must match the embedder's.
+    pub sample_rate: u32,
+    /// PN-sequence seed — must match the embedder's.
+    pub pn_seed: u64,
+    /// Normalised correlation magnitude required for a positive bit decision.
+    /// Default 0.5 (relative to embedding strength).
+    pub threshold: f32,
+}
+
+impl AudioDetector {
+    /// Create a new detector.
+    #[must_use]
+    pub fn new(sample_rate: u32, pn_seed: u64, threshold: f32) -> Self {
+        Self {
+            sample_rate,
+            pn_seed,
+            threshold: threshold.clamp(0.0, 1.0),
+        }
+    }
+
+    /// Detect watermark bits from `samples`.
+    ///
+    /// Returns one `bool` per `SPREAD_FACTOR`-wide block found in `samples`.
+    /// The sign of the normalised correlation determines the bit value.
+    #[must_use]
+    pub fn detect(&self, samples: &[f32]) -> Vec<bool> {
+        let num_bits = samples.len() / SPREAD_FACTOR;
+        let mut bits = Vec::with_capacity(num_bits);
+        let mut seed = self.pn_seed;
+
+        for bit_idx in 0..num_bits {
+            let start = bit_idx * SPREAD_FACTOR;
+            let block = &samples[start..start + SPREAD_FACTOR];
+            let block_seed = seed;
+            let pn = pn_sequence(block_seed, SPREAD_FACTOR);
+
+            // Normalised correlation with the PN carrier.
+            let corr: f32 = block
+                .iter()
+                .zip(pn.iter())
+                .map(|(&s, &p)| s * p)
+                .sum::<f32>()
+                / SPREAD_FACTOR as f32;
+
+            bits.push(corr >= 0.0);
+
+            // Advance seed identically to the embedder.
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+        }
+
+        bits
+    }
+
+    /// Detect and decode a `u64` payload.
+    ///
+    /// Returns `None` if `samples` is too short to hold 64 bits.
+    #[must_use]
+    pub fn detect_payload(&self, samples: &[f32]) -> Option<u64> {
+        if samples.len() < 64 * SPREAD_FACTOR {
+            return None;
+        }
+        let bits = self.detect(samples);
+        if bits.len() < 64 {
+            return None;
+        }
+        let payload =
+            bits[..64]
+                .iter()
+                .enumerate()
+                .fold(0u64, |acc, (i, &b)| if b { acc | (1u64 << i) } else { acc });
+        Some(payload)
+    }
+}
+
 /// Watermark detector.
 ///
 /// Detects and decodes watermarks previously embedded by [`WatermarkEmbedder`].
@@ -427,7 +597,8 @@ impl WatermarkDetector {
 
         let mut pos = 0;
         while pos + block_size <= samples.len() {
-            let (detected, payload, confidence) = self.detect_block(&samples[pos..pos + block_size]);
+            let (detected, payload, confidence) =
+                self.detect_block(&samples[pos..pos + block_size]);
             total_blocks += 1;
             total_confidence += confidence;
 
@@ -633,5 +804,106 @@ mod tests {
         for &s in &samples {
             assert!(s.is_finite(), "embedded sample should be finite");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // AudioWatermarker / AudioDetector tests
+    // -----------------------------------------------------------------------
+
+    /// Embed 64 bits in 32 768 samples and verify all 64 bits are recovered.
+    #[test]
+    fn test_watermark_embed_detect_roundtrip() {
+        let wm = AudioWatermarker::new(48000, 0.1, 0xABCD_1234_5678_EF01);
+        let det = AudioDetector::new(48000, 0xABCD_1234_5678_EF01, 0.5);
+
+        // 64 bits × 512 samples/bit = 32 768 samples
+        let mut samples = vec![0.0f32; 64 * SPREAD_FACTOR];
+        let bits_in: Vec<bool> = (0..64u8).map(|i| (i & 1) == 0).collect(); // alternating
+        wm.embed(&mut samples, &bits_in);
+
+        let bits_out = det.detect(&samples);
+        assert_eq!(bits_out.len(), 64, "should recover 64 bits");
+        for (i, (a, b)) in bits_in.iter().zip(bits_out.iter()).enumerate() {
+            assert_eq!(a, b, "bit {i} mismatch");
+        }
+    }
+
+    /// Embed u64 payload 0xDEAD_BEEF and detect the same value.
+    #[test]
+    fn test_watermark_payload_roundtrip() {
+        let payload_in: u64 = 0xDEAD_BEEF;
+        let seed: u64 = 0x0102_0304_0506_0708;
+
+        let wm = AudioWatermarker::new(44100, 0.1, seed);
+        let det = AudioDetector::new(44100, seed, 0.5);
+
+        // Use silence (zeros) so the only signal is the watermark.
+        let mut samples = vec![0.0f32; 64 * SPREAD_FACTOR];
+        wm.embed_payload(&mut samples, payload_in);
+
+        let payload_out = det.detect_payload(&samples);
+        assert_eq!(payload_out, Some(payload_in), "payload round-trip failed");
+    }
+
+    /// Verify that embedding introduces < 30 dB SNR degradation.
+    /// With strength 0.02 the watermark energy is ~31 dB below a 0 dBFS sine.
+    #[test]
+    fn test_watermark_low_distortion() {
+        let strength = 0.02f32;
+        let wm = AudioWatermarker::new(48000, strength, 0xFEED_C0DE_CAFE_BABE);
+
+        // 0 dBFS sine wave
+        let n = 64 * SPREAD_FACTOR;
+        let original: Vec<f32> = (0..n)
+            .map(|i| (i as f32 * 2.0 * std::f32::consts::PI * 440.0 / 48000.0).sin())
+            .collect();
+        let mut watermarked = original.clone();
+
+        let bits: Vec<bool> = (0..64).map(|i| (i & 1) == 0).collect();
+        wm.embed(&mut watermarked, &bits);
+
+        // Signal power
+        let signal_power: f32 = original.iter().map(|&x| x * x).sum::<f32>() / n as f32;
+        // Noise power (difference)
+        let noise_power: f32 = original
+            .iter()
+            .zip(watermarked.iter())
+            .map(|(&o, &w)| (o - w) * (o - w))
+            .sum::<f32>()
+            / n as f32;
+
+        let snr_db = 10.0 * (signal_power / noise_power.max(1e-12)).log10();
+        assert!(
+            snr_db > 30.0,
+            "SNR {snr_db:.1} dB should be > 30 dB (inaudible)"
+        );
+    }
+
+    /// Verify that the maximum absolute sample deviation is < strength * 1.5.
+    #[test]
+    fn test_watermark_invisible_to_ear() {
+        let strength = 0.1f32;
+        let wm = AudioWatermarker::new(48000, strength, 0x1234_5678_9ABC_DEF0);
+
+        let n = 64 * SPREAD_FACTOR;
+        let original: Vec<f32> = (0..n)
+            .map(|i| (i as f32 * 2.0 * std::f32::consts::PI * 1000.0 / 48000.0).sin())
+            .collect();
+        let mut watermarked = original.clone();
+
+        let bits: Vec<bool> = (0..64).map(|i| (i % 3) != 0).collect();
+        wm.embed(&mut watermarked, &bits);
+
+        let max_dev = original
+            .iter()
+            .zip(watermarked.iter())
+            .map(|(&o, &w)| (o - w).abs())
+            .fold(0.0f32, f32::max);
+
+        assert!(
+            max_dev < strength * 1.5,
+            "max deviation {max_dev} should be < strength * 1.5 = {}",
+            strength * 1.5
+        );
     }
 }

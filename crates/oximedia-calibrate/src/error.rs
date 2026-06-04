@@ -100,6 +100,14 @@ pub enum CalibrationError {
     #[error("Calibration verification failed: {0}")]
     VerificationFailed(String),
 
+    /// Invalid measurement value.
+    #[error("Invalid measurement: {0}")]
+    InvalidMeasurement(String),
+
+    /// Numerical instability during calibration.
+    #[error("Numerical instability: {0}")]
+    NumericalInstability(String),
+
     /// I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

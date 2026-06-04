@@ -372,9 +372,17 @@ fn choose_outcome(
                 format!(
                     "LastWriteWins: {} edit (clock {}) supersedes {} edit (clock {}).",
                     winner,
-                    if winner == "incoming" { incoming.clock } else { existing.clock },
+                    if winner == "incoming" {
+                        incoming.clock
+                    } else {
+                        existing.clock
+                    },
                     loser,
-                    if loser == "existing" { existing.clock } else { incoming.clock },
+                    if loser == "existing" {
+                        existing.clock
+                    } else {
+                        incoming.clock
+                    },
                 ),
             )
         }
@@ -390,9 +398,17 @@ fn choose_outcome(
                 format!(
                     "FirstWriteWins: {} edit (clock {}) takes precedence over {} edit (clock {}).",
                     winner,
-                    if winner == "existing" { existing.clock } else { incoming.clock },
+                    if winner == "existing" {
+                        existing.clock
+                    } else {
+                        incoming.clock
+                    },
                     loser,
-                    if loser == "incoming" { incoming.clock } else { existing.clock },
+                    if loser == "incoming" {
+                        incoming.clock
+                    } else {
+                        existing.clock
+                    },
                 ),
             )
         }
@@ -458,7 +474,10 @@ fn choose_outcome(
                     existing_priority,
                     incoming_priority,
                 );
-                (outcome, format!("RolePriority tie-break via LastWriteWins — {}", rec))
+                (
+                    outcome,
+                    format!("RolePriority tie-break via LastWriteWins — {}", rec),
+                )
             }
         }
     }
@@ -519,11 +538,7 @@ impl PolicyEngine {
     /// [`ConflictReport`] is generated for the first conflict and returned.
     /// The edit is applied to the detector only when the outcome is
     /// `IncomingWins` or `Merged`.
-    pub fn submit(
-        &mut self,
-        incoming: EditDescriptor,
-        now_ms: u64,
-    ) -> Option<ConflictReport> {
+    pub fn submit(&mut self, incoming: EditDescriptor, now_ms: u64) -> Option<ConflictReport> {
         let conflicts = self.detector.detect(&incoming);
 
         if conflicts.is_empty() {
@@ -582,10 +597,7 @@ impl PolicyEngine {
     /// All reports that still need manual review.
     #[must_use]
     pub fn pending_reviews(&self) -> Vec<&ConflictReport> {
-        self.reports
-            .iter()
-            .filter(|r| r.needs_review())
-            .collect()
+        self.reports.iter().filter(|r| r.needs_review()).collect()
     }
 
     /// Total number of conflicts detected so far.
@@ -846,7 +858,10 @@ mod tests {
             .expect("conflict expected");
 
         let summary = report.summary();
-        assert!(summary.contains("LastWriteWins"), "should contain policy name");
+        assert!(
+            summary.contains("LastWriteWins"),
+            "should contain policy name"
+        );
         assert!(summary.contains("audio"), "should contain track id");
         assert!(summary.contains("IncomingWins"), "should contain outcome");
     }

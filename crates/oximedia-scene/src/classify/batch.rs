@@ -423,4 +423,81 @@ mod tests {
         assert!(classifier.config().classify_content);
         assert_eq!(classifier.config().parallel_threshold, 42);
     }
+
+    // 11. Temporal consistency — near-identical frames should not flicker
+    //
+    // We generate 10 frames that are almost identical (uniform warm-orange
+    // colour with ±1 luma noise) and run them through the sequential batch
+    // classifier.  Because all frames share the same dominant visual
+    // characteristic the most-common scene label should appear in at least
+    // 9 out of 10 frames (≥ 90% consistency).
+    //
+    // The sequential path (parallel_threshold > 10) is used to avoid any
+    // rayon-induced non-determinism.
+    #[test]
+    fn test_classification_temporal_consistency() {
+        use std::collections::HashMap;
+
+        const W: usize = 32;
+        const H: usize = 32;
+        const N: usize = 10;
+        // ≥90% of frames must share the dominant label
+        const MIN_DOMINANT_FRACTION: usize = 9;
+
+        // Base frame: warm orange (high R, mid G, low B) → consistently
+        // classified as Indoor/Day/Urban/Portrait (low sky, high structure).
+        let base_r: u8 = 200;
+        let base_g: u8 = 140;
+        let base_b: u8 = 80;
+
+        // Build N frames with tiny ±1 noise on each pixel to simulate real
+        // near-identical content (e.g. static camera on a single scene).
+        let frames_data: Vec<Vec<u8>> = (0..N)
+            .map(|frame_idx| {
+                let mut data = vec![0u8; W * H * 3];
+                for (i, chunk) in data.chunks_mut(3).enumerate() {
+                    // Deterministic "noise": alternate +0/+1 based on pixel
+                    // position and frame index so every frame differs slightly.
+                    let noise = ((i + frame_idx) % 3) as u8;
+                    chunk[0] = base_r.saturating_add(noise);
+                    chunk[1] = base_g.saturating_add(noise);
+                    chunk[2] = base_b;
+                }
+                data
+            })
+            .collect();
+
+        // Force sequential path to keep results deterministic.
+        let config = BatchConfig {
+            parallel_threshold: N + 1, // always sequential for N frames
+            ..BatchConfig::default()
+        };
+        let classifier = BatchClassifier::with_config(config);
+
+        let frames: Vec<FrameRef<'_>> =
+            frames_data.iter().map(|d| FrameRef::new(d, W, H)).collect();
+
+        let results = classifier
+            .classify_batch(&frames)
+            .expect("batch classification should succeed");
+
+        assert_eq!(results.len(), N, "all frames should produce a result");
+
+        // Count scene-type label occurrences.
+        let mut label_counts: HashMap<String, usize> = HashMap::new();
+        for r in &results {
+            if let Some(scene) = r.scene_type {
+                *label_counts.entry(format!("{scene:?}")).or_insert(0) += 1;
+            }
+        }
+
+        // Find the dominant label count.
+        let dominant_count = label_counts.values().copied().max().unwrap_or(0);
+
+        assert!(
+            dominant_count >= MIN_DOMINANT_FRACTION,
+            "dominant label should appear in >= {MIN_DOMINANT_FRACTION}/{N} frames \
+             (no flicker), got {dominant_count} — label counts: {label_counts:?}"
+        );
+    }
 }

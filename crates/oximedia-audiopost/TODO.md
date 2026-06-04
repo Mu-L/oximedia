@@ -37,6 +37,12 @@
   - **Files:** `crates/oximedia-audiopost/src/metering.rs`
   - **Tests:** `tests/true_peak.rs` — 0 dBFS sine at 1 kHz with 0.5-sample phase offset → true peak ≥0 dBTP (within 0.1 dB)
   - **Risk:** FIR coefficients must be precomputed; runtime is 4× sample count
+- [x] Implement `restoration::declick` and `restoration::denoise` (Boll 1979 spectral subtraction + Wiener) (completed 2026-05-29)
+  - **Goal:** `restoration::declick` removes impulsive noise (clicks/pops) via AR-LPC interpolation. `restoration::denoise` reduces broadband noise via spectral subtraction + Wiener post-filter.
+  - **Design:** declick: sliding 1-ms energy ratio detection (3σ threshold), AR-LPC order-32 interpolation across corrupted span, configurable polarity preservation. denoise: STFT overlap-add (Hann window, 1024 FFT, 50% overlap), noise floor via temporal-mean + cross-bin median (tone-robust), `|S(k)| = max(|Y(k)| - α·|N(k)|, β·|Y(k)|)` (α=1.0–4.0 SNR-adaptive, β=0.002), Wiener post-filter `H(k) = S(k)²/(S(k)²+N(k)²)`. OxiFFT for all FFT ops. Per-frame DC removal prevents biased noise from leaking through denoiser.
+  - **Files:** `src/restoration.rs` (added `ArLpcDeclickConfig`, `Declicker`, `levinson_durbin`, `DenoiseConfig`, `Denoiser`)
+  - **Tests:** 873/873 pass; `declick_removes_impulses` (energy >99% preserved), `denoise_reduces_noise` (SNR >30 dB, >+10 dB improvement from 21.8 dB baseline)
+  - **Deviation:** Spec called for first-N-frame bootstrap noise accumulation; that fails on continuous-tone test (no noise-only prefix). Used two-pass temporal-mean + cross-bin median estimator instead.
 
 ## New Features
 - [x] Add `spectral_editor` module to lib.rs exports (declared at lib.rs line 95)
@@ -53,17 +59,17 @@
 - [x] Add M/S (Mid-Side) encoding/decoding processor in `effects` (verified 2026-05-16; src/effects.rs:676 MidSideProcessor)
 
 ## Performance
-- [ ] Add SIMD-accelerated sample processing for `mixing::ChannelStrip` gain/pan operations
-- [ ] Implement lock-free ring buffer for real-time audio routing in `bus_routing`
-- [ ] Add block-based FFT processing with overlap-add in `effects` to reduce per-sample overhead
-- [ ] Use SIMD for loudness gating calculation in `loudness` (K-weighted filter + gate)
-- [ ] Pre-compute and cache reverb impulse response FFTs in `reverb_profile`
+- [x] Add SIMD-accelerated sample processing for `mixing::ChannelStrip` gain/pan operations (verified 2026-05-29; src/mixing.rs:307 apply_simd)
+- [x] Implement lock-free ring buffer for real-time audio routing in `bus_routing` (verified 2026-05-29; src/realtime/ring.rs:220 lines)
+- [x] Add block-based FFT processing with overlap-add in `effects` to reduce per-sample overhead (verified 2026-05-29; src/dsp/block_fft.rs:280 lines)
+- [x] Use SIMD for loudness gating calculation in `loudness` (K-weighted filter + gate) (verified 2026-05-31; src/loudness.rs — explicit AVX2+FMA / NEON intrinsics via `#[target_feature]` dispatch in `simd_mean_sq_avx2`, `simd_mean_sq_neon`, `simd_mean_sq_dispatch`)
+- [x] Pre-compute and cache reverb impulse response FFTs in `reverb_profile` (verified 2026-05-29; src/reverb_profile.rs:444 ir_spectrum cached on load)
 
 ## Testing
-- [ ] Add integration test for complete ADR workflow: session create, cue add, record, sync
-- [ ] Add property-based tests for `loudness` module against known EBU R128 reference signals
-- [ ] Test `stem_export` round-trip: create stems, export, re-import, verify sample accuracy
-- [ ] Add stress test for `mixing::MixingConsole` with 128+ channels
+- [x] Add integration test for complete ADR workflow: session create, cue add, record, sync (verified: take_manager.rs:857 test_adr_workflow_create_session_add_cues_record_sync)
+- [x] Add property-based tests for `loudness` module against known EBU R128 reference signals (verified 2026-05-31; src/loudness.rs — proptest suite: prop_loudness_gain_shifts_lufs, prop_silence_is_neg_infinity, prop_appended_silence_invariance, test_997hz_0dbfs_sine_integrated_lufs)
+- [x] Test `stem_export` round-trip: create stems, export, re-import, verify sample accuracy (verified 2026-05-31; src/stems.rs — StemSet::export/import + test_stem_export_import_roundtrip)
+- [x] Add stress test for `mixing::MixingConsole` with 128+ channels (verified 2026-05-31; src/mixing.rs — test_mixing_console_128_channels_stress, serial-latency group)
 - [x] Test `restoration` noise reduction with synthetic noise profiles (planned 2026-05-04)
   - **Goal:** Declick (transient detection + interpolation) and denoise (spectral subtraction + Wiener)
   - **Design:** Declick: detect samples where first-difference > N×MAD (N=8); replace click region with cubic-spline interpolation over ±50 surrounding samples. Denoise (Boll 1979): estimate noise PSD from quietest 5% of frames; subtract α·noisePSD (α=2.0), floor at β·noisePSD (β=0.05); Wiener gain = signalPSD/(signalPSD+noisePSD) post-processing. OxiFFT STFT: 1024-pt, 50% overlap, Hann window.
@@ -75,3 +81,16 @@
 - [ ] Add architecture diagram showing signal flow through `pipeline` module
 - [ ] Document supported loudness standards and compliance levels in `loudness` module
 - [ ] Add examples for `broadcast_delivery` showing typical delivery spec configurations
+
+## 0.1.8 Wave 4 follow-up (added 2026-05-29 by /ultra)
+
+- [x] Split `restoration.rs` (1997 lines) via splitrs + add SPSC ring buffer, block-FFT overlap-add helper, SIMD ChannelStrip gain/pan (planned 2026-05-29)
+  - **Goal:** `restoration.rs` is at 1997/2000 lines (3 lines margin). Split first, then add DSP infrastructure for real-time audio routing and efficient spectral processing.
+  - **Design:**
+    1. **splitrs** `src/restoration.rs` into: `restoration/mod.rs` (re-exports), `restoration/spectral.rs` (SpectralNoiseReducer/HissRemover/HumRemover/SpectralRepair/SpectralSubtractionConfig/spectral_subtract ~600 LoC), `restoration/declick.rs` (ClickRemover/VinylClickRemover/DeclickConfig/declick/ArLpcDeclickConfig/Declicker/levinson_durbin ~900 LoC), `restoration/stereo.rs` (PhaseCorrector/StereoEnhancer/Declipper ~270 LoC), `restoration/denoise.rs` (DenoiseConfig/Denoiser ~250 LoC). Re-export everything via `pub use spectral::*; pub use declick::*; pub use stereo::*; pub use denoise::*` from `mod.rs`.
+    2. **SPSC ring buffer** `src/realtime/ring.rs`: `AudioRingBuffer { data: Vec<f32>, capacity: usize, head: AtomicUsize, tail: AtomicUsize }`. `push_slice/pop_slice` return count written/read. `AtomicUsize` with `Acquire/Release`. Capacity must be power-of-two. No alloc in hot path.
+    3. **Block FFT** `src/dsp/block_fft.rs`: `BlockFftProcessor { fft_size, hop, window, overlap_buf }`. `process(&mut input, &mut output, spectral_fn: FnMut(&mut [Complex<f32>]))` using `oxifft::ComplexFft<f32>`. Hann/Hamming/Kaiser windows. Wire into `restoration/denoise.rs` Denoiser — replace inline STFT loop with `BlockFftProcessor::process`.
+    4. **SIMD ChannelStrip** in `src/mixing.rs`: AVX2 path (`#[cfg(target_arch = "x86_64")]` + `is_x86_feature_detected!("avx2")`): 8-sample batches via `_mm256_loadu_ps` + `_mm256_mul_ps` + `_mm256_fmadd_ps`. NEON path (`#[cfg(target_arch = "aarch64")]`): `vmulq_f32` + `vfmaq_f32`. Scalar fallback always present.
+  - **Files:** `crates/oximedia-audiopost/src/restoration/` (new dir, 5 files), `crates/oximedia-audiopost/src/realtime/ring.rs` (new), `crates/oximedia-audiopost/src/dsp/block_fft.rs` (new), `crates/oximedia-audiopost/src/mixing.rs` (SIMD additions)
+  - **Tests:** `test_restoration_split_compiles` (existing tests pass unchanged), `test_ring_buffer_push_pop_correctness`, `test_ring_buffer_wraparound`, `test_ring_buffer_thread_safety` (1 producer + 1 consumer, 10 MB throughput, checksum), `test_block_fft_processor_identity` (pass-through < -100 dBFS RMS error), `test_block_fft_processor_lowpass`, `test_channel_strip_simd_matches_scalar` (±1e-6), `test_channel_strip_simd_speedup` (informational)
+  - **Risk:** splitrs module path layouts must preserve public API. SIMD `is_x86_feature_detected!` dispatch only inside `#[cfg(target_arch = "x86_64")]` blocks.

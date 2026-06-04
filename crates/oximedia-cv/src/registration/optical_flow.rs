@@ -52,7 +52,7 @@ pub fn register_optical_flow(
     }
 
     if flow_x.is_empty() {
-        return Err(CvError::computation("no flow vectors computed"));
+        return Err(CvError::matrix_error("no flow vectors computed"));
     }
 
     // Estimate transform from flow vectors

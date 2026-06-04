@@ -332,35 +332,19 @@ impl WcagCaptionChecker {
 // ── Criterion constructors ────────────────────────────────────────────────────
 
 fn criterion_122() -> WcagCriterion {
-    WcagCriterion::new(
-        "1.2.2",
-        "Captions (Prerecorded)",
-        WcagLevel::A,
-    )
+    WcagCriterion::new("1.2.2", "Captions (Prerecorded)", WcagLevel::A)
 }
 
 fn criterion_143() -> WcagCriterion {
-    WcagCriterion::new(
-        "1.4.3",
-        "Contrast (Minimum)",
-        WcagLevel::AA,
-    )
+    WcagCriterion::new("1.4.3", "Contrast (Minimum)", WcagLevel::AA)
 }
 
 fn criterion_146() -> WcagCriterion {
-    WcagCriterion::new(
-        "1.4.6",
-        "Contrast (Enhanced)",
-        WcagLevel::AAA,
-    )
+    WcagCriterion::new("1.4.6", "Contrast (Enhanced)", WcagLevel::AAA)
 }
 
 fn criterion_126() -> WcagCriterion {
-    WcagCriterion::new(
-        "1.2.6",
-        "Sign Language (Prerecorded)",
-        WcagLevel::AAA,
-    )
+    WcagCriterion::new("1.2.6", "Sign Language (Prerecorded)", WcagLevel::AAA)
 }
 
 fn criterion_reading_speed() -> WcagCriterion {
@@ -435,14 +419,12 @@ mod tests {
 
     // Helper: high-contrast white-on-black spec
     fn high_contrast_spec(text: &str, duration_ms: u64) -> CaptionSpec {
-        CaptionSpec::new(text, duration_ms)
-            .with_colors([255, 255, 255], [0, 0, 0])
+        CaptionSpec::new(text, duration_ms).with_colors([255, 255, 255], [0, 0, 0])
     }
 
     // Helper: low-contrast similar-grey spec
     fn low_contrast_spec(text: &str, duration_ms: u64) -> CaptionSpec {
-        CaptionSpec::new(text, duration_ms)
-            .with_colors([150, 150, 150], [160, 160, 160])
+        CaptionSpec::new(text, duration_ms).with_colors([150, 150, 150], [160, 160, 160])
     }
 
     // 1. High contrast (21:1) passes 1.4.3 at AA level
@@ -450,10 +432,15 @@ mod tests {
     fn test_high_contrast_passes_143() {
         let spec = high_contrast_spec("Hello world", 3000);
         let result = checker().check(&spec, WcagLevel::AA);
-        let violated_ids: Vec<&str> = result.violations.iter()
+        let violated_ids: Vec<&str> = result
+            .violations
+            .iter()
             .map(|v| v.criterion.id.as_str())
             .collect();
-        assert!(!violated_ids.contains(&"1.4.3"), "1.4.3 should pass for white-on-black");
+        assert!(
+            !violated_ids.contains(&"1.4.3"),
+            "1.4.3 should pass for white-on-black"
+        );
     }
 
     // 2. Low contrast fails 1.4.3 at AA level
@@ -461,10 +448,15 @@ mod tests {
     fn test_low_contrast_fails_143() {
         let spec = low_contrast_spec("Hello world", 3000);
         let result = checker().check(&spec, WcagLevel::AA);
-        let violated_ids: Vec<&str> = result.violations.iter()
+        let violated_ids: Vec<&str> = result
+            .violations
+            .iter()
             .map(|v| v.criterion.id.as_str())
             .collect();
-        assert!(violated_ids.contains(&"1.4.3"), "1.4.3 should fail for low contrast");
+        assert!(
+            violated_ids.contains(&"1.4.3"),
+            "1.4.3 should fail for low contrast"
+        );
     }
 
     // 3. White-on-black passes 1.4.6 (enhanced contrast, AAA)
@@ -472,27 +464,31 @@ mod tests {
     fn test_high_contrast_passes_146_at_aaa() {
         let spec = high_contrast_spec("Hello world", 3000);
         let result = checker().check(&spec, WcagLevel::AAA);
-        let violated_ids: Vec<&str> = result.violations.iter()
+        let violated_ids: Vec<&str> = result
+            .violations
+            .iter()
             .map(|v| v.criterion.id.as_str())
             .collect();
-        assert!(!violated_ids.contains(&"1.4.6"), "1.4.6 should pass for white-on-black");
+        assert!(
+            !violated_ids.contains(&"1.4.6"),
+            "1.4.6 should pass for white-on-black"
+        );
     }
 
     // 4. Medium contrast (e.g. ~5:1) passes 1.4.3 but fails 1.4.6
     #[test]
     fn test_medium_contrast_passes_aa_fails_aaa() {
         // #767676 on white gives ~4.54:1
-        let spec = CaptionSpec::new("Hello", 3000)
-            .with_colors([118, 118, 118], [255, 255, 255]);
+        let spec = CaptionSpec::new("Hello", 3000).with_colors([118, 118, 118], [255, 255, 255]);
         let result = checker().check(&spec, WcagLevel::AAA);
 
-        let violated_ids: Vec<&str> = result.violations.iter()
+        let violated_ids: Vec<&str> = result
+            .violations
+            .iter()
             .map(|v| v.criterion.id.as_str())
             .collect();
 
-        let passed_ids: Vec<&str> = result.passed.iter()
-            .map(|c| c.id.as_str())
-            .collect();
+        let passed_ids: Vec<&str> = result.passed.iter().map(|c| c.id.as_str()).collect();
 
         assert!(!violated_ids.contains(&"1.4.3"), "should pass 1.4.3 at AA");
         assert!(violated_ids.contains(&"1.4.6"), "should fail 1.4.6 at AAA");
@@ -504,7 +500,9 @@ mod tests {
     fn test_no_sign_language_fails_126_at_aaa() {
         let spec = high_contrast_spec("Hello", 3000);
         let result = checker().check(&spec, WcagLevel::AAA);
-        let violated_ids: Vec<&str> = result.violations.iter()
+        let violated_ids: Vec<&str> = result
+            .violations
+            .iter()
             .map(|v| v.criterion.id.as_str())
             .collect();
         assert!(violated_ids.contains(&"1.2.6"));
@@ -515,7 +513,9 @@ mod tests {
     fn test_with_sign_language_passes_126() {
         let spec = high_contrast_spec("Hello", 3000).with_sign_language();
         let result = checker().check(&spec, WcagLevel::AAA);
-        let violated_ids: Vec<&str> = result.violations.iter()
+        let violated_ids: Vec<&str> = result
+            .violations
+            .iter()
             .map(|v| v.criterion.id.as_str())
             .collect();
         assert!(!violated_ids.contains(&"1.2.6"));
@@ -528,9 +528,14 @@ mod tests {
         let text = "word ".repeat(100);
         let spec = high_contrast_spec(text.trim(), 5_000);
         let result = checker().check(&spec, WcagLevel::AA);
-        let has_speed_warning = result.violations.iter()
+        let has_speed_warning = result
+            .violations
+            .iter()
             .any(|v| v.criterion.id == "advisory" && v.severity == Severity::Warning);
-        assert!(has_speed_warning, "Should warn about excessive reading speed");
+        assert!(
+            has_speed_warning,
+            "Should warn about excessive reading speed"
+        );
     }
 
     // 8. Normal reading speed passes the advisory check
@@ -540,9 +545,14 @@ mod tests {
         let text = "The quick brown fox jumps over the lazy dog in";
         let spec = high_contrast_spec(text, 4_000);
         let result = checker().check(&spec, WcagLevel::AA);
-        let speed_violation = result.violations.iter()
+        let speed_violation = result
+            .violations
+            .iter()
             .any(|v| v.criterion.id == "advisory");
-        assert!(!speed_violation, "Normal reading speed should not produce a violation");
+        assert!(
+            !speed_violation,
+            "Normal reading speed should not produce a violation"
+        );
     }
 
     // 9. Empty text fails 1.2.2
@@ -550,7 +560,9 @@ mod tests {
     fn test_empty_text_fails_122() {
         let spec = CaptionSpec::new("", 3000);
         let result = checker().check(&spec, WcagLevel::A);
-        let violated_ids: Vec<&str> = result.violations.iter()
+        let violated_ids: Vec<&str> = result
+            .violations
+            .iter()
             .map(|v| v.criterion.id.as_str())
             .collect();
         assert!(violated_ids.contains(&"1.2.2"));
@@ -569,16 +581,21 @@ mod tests {
     // 11. Score is 1.0 when everything passes
     #[test]
     fn test_perfect_score_all_pass() {
-        let spec = high_contrast_spec("Hello world caption text", 5_000)
-            .with_sign_language();
+        let spec = high_contrast_spec("Hello world caption text", 5_000).with_sign_language();
         let result = checker().check(&spec, WcagLevel::AAA);
         // Only fails if something unexpected is violated
         if result.violations.is_empty() {
-            assert!((result.score - 1.0).abs() < 1e-6, "Score should be 1.0 when no violations");
+            assert!(
+                (result.score - 1.0).abs() < 1e-6,
+                "Score should be 1.0 when no violations"
+            );
         } else {
             // Print violations for debugging in case criteria change
             for v in &result.violations {
-                eprintln!("Unexpected violation: {} — {}", v.criterion.id, v.description);
+                eprintln!(
+                    "Unexpected violation: {} — {}",
+                    v.criterion.id, v.description
+                );
             }
         }
     }
@@ -603,7 +620,10 @@ mod tests {
         let text = "word ".repeat(100);
         let spec = high_contrast_spec(text.trim(), 3_000);
         let result = checker().check(&spec, WcagLevel::AA);
-        let has_error = result.violations.iter().any(|v| v.severity == Severity::Error);
+        let has_error = result
+            .violations
+            .iter()
+            .any(|v| v.severity == Severity::Error);
         assert_eq!(result.is_compliant(), !has_error);
     }
 }

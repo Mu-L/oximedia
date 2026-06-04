@@ -47,6 +47,8 @@ pub mod asrun;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod automation;
 pub mod branding;
+/// Scheduled branding overlay management (bugs, watermarks, end-boards).
+pub mod branding_inserter;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod bxf;
 pub mod catchup;
@@ -57,10 +59,16 @@ pub mod channel;
 pub mod channel_config;
 pub mod clip_store;
 pub mod compliance_ingest;
+/// Automated compliance recording scheduler with retention policy enforcement.
+pub mod compliance_recorder;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod content;
+/// Frame-accurate cue point triggering for broadcast automation.
+pub mod cue_trigger;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod device;
+/// Emergency Alert System (EAS/SAME) support.
+pub mod emergency_alert;
 pub mod event_log;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod failover;
@@ -71,8 +79,16 @@ pub mod frame_trim;
 /// Automatic gap detection and filler content insertion.
 pub mod gap_filler;
 pub mod graphics;
+/// Playout health monitoring (dropped frames, late segments).
+pub mod health;
 pub mod highlight_automation;
+/// HLS manifest generation for catchup / VOD platform export.
+pub mod hls_catchup;
 pub mod ingest;
+/// Minimal-contention SPSC ring buffer for inter-thread frame passing.
+pub mod lockfree_frame_ring;
+/// Template-based lower-third generation for broadcast graphics overlays.
+pub mod lower_third;
 /// Signal routing from programme sources to SDI/IP/RTMP/file targets.
 pub mod media_router_playout;
 pub mod monitoring;
@@ -94,8 +110,14 @@ pub mod preflight;
 /// PTP (Precision Time Protocol) clock source for sub-microsecond synchronisation.
 pub mod ptp_clock;
 pub mod rundown;
+/// Rundown editor with insert, delete, reorder, split, merge, and undo/redo.
+pub mod rundown_editor;
+/// Automated highlight clip extraction using scene analysis.
+pub mod scene_highlight;
 /// Time-blocked schedule management for broadcast playout.
 pub mod schedule_block;
+/// Playlist-to-schedule conversion for broadcast playout.
+pub mod schedule_convert;
 /// Time-slot schedule grid with booking, availability, and overlap queries.
 pub mod schedule_slot;
 pub mod scheduler;

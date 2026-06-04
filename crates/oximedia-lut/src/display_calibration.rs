@@ -270,11 +270,7 @@ impl DisplayCalibrator {
         for i in 0..size {
             let x = i as f64 / scale;
             // Linearise with measured gamma, then re-encode with target gamma
-            let linear = if x <= 0.0 {
-                0.0
-            } else {
-                x.powf(gamma)
-            };
+            let linear = if x <= 0.0 { 0.0 } else { x.powf(gamma) };
             let encoded = if linear <= 0.0 {
                 0.0
             } else {
@@ -308,8 +304,7 @@ impl DisplayCalibrator {
         for ri in 0..size {
             for gi in 0..size {
                 for bi in 0..size {
-                    let rgb_device: Rgb =
-                        [ri as f64 / scale, gi as f64 / scale, bi as f64 / scale];
+                    let rgb_device: Rgb = [ri as f64 / scale, gi as f64 / scale, bi as f64 / scale];
                     let rgb_corrected = apply_correction(&rgb_device, &correction_matrix, gamma);
                     lut.push(rgb_corrected);
                 }
@@ -338,9 +333,10 @@ impl DisplayCalibrator {
     /// Compute the measured white-point XYZ from the `[1,1,1]` patch if present.
     #[must_use]
     pub fn measured_white(&self) -> Option<[f64; 3]> {
-        self.patches.iter().find(|p| {
-            p.rgb[0] > 0.99 && p.rgb[1] > 0.99 && p.rgb[2] > 0.99
-        }).map(|p| p.xyz)
+        self.patches
+            .iter()
+            .find(|p| p.rgb[0] > 0.99 && p.rgb[1] > 0.99 && p.rgb[2] > 0.99)
+            .map(|p| p.xyz)
     }
 
     /// Compute the chromatic error (ΔE₂₀₀₀ approximation) of the white point.
@@ -563,9 +559,21 @@ mod tests {
         let calibrator = DisplayCalibrator::new(ideal_patches(), CalibrationTarget::D65Srgb);
         let lut = calibrator.generate_3d_lut(3).expect("should succeed");
         for entry in &lut {
-            assert!(entry[0] >= 0.0 && entry[0] <= 1.0, "R out of range: {}", entry[0]);
-            assert!(entry[1] >= 0.0 && entry[1] <= 1.0, "G out of range: {}", entry[1]);
-            assert!(entry[2] >= 0.0 && entry[2] <= 1.0, "B out of range: {}", entry[2]);
+            assert!(
+                entry[0] >= 0.0 && entry[0] <= 1.0,
+                "R out of range: {}",
+                entry[0]
+            );
+            assert!(
+                entry[1] >= 0.0 && entry[1] <= 1.0,
+                "G out of range: {}",
+                entry[1]
+            );
+            assert!(
+                entry[2] >= 0.0 && entry[2] <= 1.0,
+                "B out of range: {}",
+                entry[2]
+            );
         }
     }
 
@@ -580,9 +588,10 @@ mod tests {
 
     #[test]
     fn test_measured_white_absent() {
-        let patches = vec![
-            CalibrationPatch::new([1.0, 0.0, 0.0], [0.412, 0.213, 0.019]),
-        ];
+        let patches = vec![CalibrationPatch::new(
+            [1.0, 0.0, 0.0],
+            [0.412, 0.213, 0.019],
+        )];
         let calibrator = DisplayCalibrator::new(patches, CalibrationTarget::D65Srgb);
         assert!(calibrator.measured_white().is_none());
     }

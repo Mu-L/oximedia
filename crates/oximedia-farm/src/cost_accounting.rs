@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Farm cost accounting — per-job CPU/GPU hours, billing-period aggregation,
 //! and cost anomaly detection.
 //!
@@ -444,7 +443,12 @@ pub struct JobProfile {
 impl JobProfile {
     /// Create a CPU-only profile.
     #[must_use]
-    pub fn cpu_only(cpu_cores: f64, memory_gb: f64, estimated_duration: Duration, job_type: JobType) -> Self {
+    pub fn cpu_only(
+        cpu_cores: f64,
+        memory_gb: f64,
+        estimated_duration: Duration,
+        job_type: JobType,
+    ) -> Self {
         Self {
             cpu_cores,
             gpu_devices: 0.0,
@@ -679,7 +683,11 @@ impl JobCostEstimator {
                 }
             })
             .collect();
-        per_type.sort_by(|a, b| b.spend.partial_cmp(&a.spend).unwrap_or(std::cmp::Ordering::Equal));
+        per_type.sort_by(|a, b| {
+            b.spend
+                .partial_cmp(&a.spend)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         CostReport {
             total_spend,
@@ -774,10 +782,20 @@ mod tests {
     fn test_aggregation_by_job_type() {
         let mut ledger = CostLedger::new();
         for _ in 0..3 {
-            ledger.record(make_usage(JobId::new(), JobType::VideoTranscode, "w1", 60.0));
+            ledger.record(make_usage(
+                JobId::new(),
+                JobType::VideoTranscode,
+                "w1",
+                60.0,
+            ));
         }
         for _ in 0..2 {
-            ledger.record(make_usage(JobId::new(), JobType::AudioTranscode, "w1", 30.0));
+            ledger.record(make_usage(
+                JobId::new(),
+                JobType::AudioTranscode,
+                "w1",
+                30.0,
+            ));
         }
         let by_type = ledger.cost_by_job_type();
         assert!(by_type.contains_key("VideoTranscode"));
@@ -790,7 +808,12 @@ mod tests {
         let mut ledger = CostLedger::new();
         for i in 0..4u64 {
             let worker = if i % 2 == 0 { "w1" } else { "w2" };
-            ledger.record(make_usage(JobId::new(), JobType::VideoTranscode, worker, 60.0));
+            ledger.record(make_usage(
+                JobId::new(),
+                JobType::VideoTranscode,
+                worker,
+                60.0,
+            ));
         }
         let by_worker = ledger.cost_by_worker();
         assert_eq!(by_worker.len(), 2);
@@ -820,7 +843,12 @@ mod tests {
     fn test_billing_period_excludes_outside() {
         let mut ledger = CostLedger::new();
         for _ in 0..3 {
-            ledger.record(make_usage(JobId::new(), JobType::VideoTranscode, "w1", 60.0));
+            ledger.record(make_usage(
+                JobId::new(),
+                JobType::VideoTranscode,
+                "w1",
+                60.0,
+            ));
         }
         // Use a window far in the past — nothing should match.
         let summary = ledger.billing_period_summary(0, 1);
@@ -833,11 +861,20 @@ mod tests {
         let mut ledger = CostLedger::with_rates(CostRates::default(), 2.0);
         // Record 15 cheap jobs.
         for _ in 0..15 {
-            ledger.record(make_usage(JobId::new(), JobType::VideoTranscode, "w1", 10.0));
+            ledger.record(make_usage(
+                JobId::new(),
+                JobType::VideoTranscode,
+                "w1",
+                10.0,
+            ));
         }
         // Record one extremely expensive job.
-        let (_, anomaly) =
-            ledger.record(make_usage(JobId::new(), JobType::VideoTranscode, "w1", 100_000.0));
+        let (_, anomaly) = ledger.record(make_usage(
+            JobId::new(),
+            JobType::VideoTranscode,
+            "w1",
+            100_000.0,
+        ));
         assert!(
             anomaly.is_some(),
             "expensive job should be flagged as anomaly"
@@ -907,7 +944,13 @@ mod tests {
     }
 
     fn gpu_profile(secs: u64) -> JobProfile {
-        JobProfile::gpu(1.0, 1.0, 4.0, Duration::from_secs(secs), JobType::VideoTranscode)
+        JobProfile::gpu(
+            1.0,
+            1.0,
+            4.0,
+            Duration::from_secs(secs),
+            JobType::VideoTranscode,
+        )
     }
 
     #[test]
@@ -930,7 +973,10 @@ mod tests {
     fn test_check_budget_no_limit_returns_none() {
         let est = simple_estimator();
         let profile = cpu_profile(10_000);
-        assert!(est.check_budget(&profile).is_none(), "no budget configured → no alert");
+        assert!(
+            est.check_budget(&profile).is_none(),
+            "no budget configured → no alert"
+        );
     }
 
     #[test]
@@ -1026,7 +1072,8 @@ mod tests {
 
     #[test]
     fn test_job_profile_cpu_only_has_no_gpu() {
-        let profile = JobProfile::cpu_only(4.0, 8.0, Duration::from_secs(60), JobType::AudioTranscode);
+        let profile =
+            JobProfile::cpu_only(4.0, 8.0, Duration::from_secs(60), JobType::AudioTranscode);
         assert_eq!(profile.gpu_devices, 0.0);
         assert_eq!(profile.cpu_cores, 4.0);
     }

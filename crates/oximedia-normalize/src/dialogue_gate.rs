@@ -312,10 +312,8 @@ impl DialogueGateMeasurer {
     /// Create a new measurer.
     pub fn new(config: DialogueGateConfig) -> NormalizeResult<Self> {
         config.validate()?;
-        let block_len_samples =
-            ((BLOCK_LEN_S * config.sample_rate).ceil() as usize).max(1);
-        let block_step_samples =
-            ((BLOCK_STEP_S * config.sample_rate).ceil() as usize).max(1);
+        let block_len_samples = ((BLOCK_LEN_S * config.sample_rate).ceil() as usize).max(1);
+        let block_step_samples = ((BLOCK_STEP_S * config.sample_rate).ceil() as usize).max(1);
         Ok(Self {
             config,
             sample_buf: Vec::new(),
@@ -385,15 +383,15 @@ impl DialogueGateMeasurer {
         // mono level (already downmixed).
         let mean_sq = mean_square_loudness(block, 1);
 
-        self.blocks.push(DialogueBlock { mean_sq, is_dialogue });
+        self.blocks.push(DialogueBlock {
+            mean_sq,
+            is_dialogue,
+        });
     }
 
     /// Compute integrated loudness using BS.1770-4 absolute + relative gates,
     /// restricted to dialogue blocks.
-    fn compute_gated_lufs(
-        blocks: &[DialogueBlock],
-        dialogue_only: bool,
-    ) -> (f64, usize) {
+    fn compute_gated_lufs(blocks: &[DialogueBlock], dialogue_only: bool) -> (f64, usize) {
         let candidate_blocks: Vec<&DialogueBlock> = if dialogue_only {
             blocks.iter().filter(|b| b.is_dialogue).collect()
         } else {
@@ -451,8 +449,7 @@ impl DialogueGateMeasurer {
         let dialogue_count = self.blocks.iter().filter(|b| b.is_dialogue).count();
         let dialogue_ratio = dialogue_count as f64 / total_blocks as f64;
 
-        let (integrated_lufs, gated_dialogue_blocks) =
-            Self::compute_gated_lufs(&self.blocks, true);
+        let (integrated_lufs, gated_dialogue_blocks) = Self::compute_gated_lufs(&self.blocks, true);
 
         let (ungated_lufs, _) = Self::compute_gated_lufs(&self.blocks, false);
 
@@ -499,9 +496,7 @@ mod tests {
 
     fn sine_wave(freq_hz: f32, sample_rate: f32, num_samples: usize, amplitude: f32) -> Vec<f32> {
         (0..num_samples)
-            .map(|i| {
-                amplitude * (std::f32::consts::TAU * freq_hz * i as f32 / sample_rate).sin()
-            })
+            .map(|i| amplitude * (std::f32::consts::TAU * freq_hz * i as f32 / sample_rate).sin())
             .collect()
     }
 
@@ -575,13 +570,8 @@ mod tests {
         let sample_rate = 48_000.0_f32;
         let n = (0.5 * sample_rate) as usize; // 500 ms block (mono)
         let block = sine_wave(1000.0, sample_rate, n, 0.5);
-        let classified = classify_dialogue_block(
-            &block,
-            f64::from(sample_rate),
-            0.30,
-            300.0,
-            3200.0,
-        );
+        let classified =
+            classify_dialogue_block(&block, f64::from(sample_rate), 0.30, 300.0, 3200.0);
         assert!(classified, "1 kHz tone should be classified as dialogue");
     }
 
@@ -591,14 +581,12 @@ mod tests {
         let sample_rate = 48_000.0_f32;
         let n = (0.4 * sample_rate) as usize;
         let block = sine_wave(60.0, sample_rate, n, 0.5);
-        let classified = classify_dialogue_block(
-            &block,
-            f64::from(sample_rate),
-            0.30,
-            300.0,
-            3200.0,
+        let classified =
+            classify_dialogue_block(&block, f64::from(sample_rate), 0.30, 300.0, 3200.0);
+        assert!(
+            !classified,
+            "60 Hz tone should not be classified as dialogue"
         );
-        assert!(!classified, "60 Hz tone should not be classified as dialogue");
     }
 
     #[test]

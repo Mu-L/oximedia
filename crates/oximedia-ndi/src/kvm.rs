@@ -220,9 +220,8 @@ pub fn encode_kvm_event(event: &KvmEvent) -> String {
 ///
 /// Returns `Err` if the XML cannot be parsed or the event type is unknown.
 pub fn decode_kvm_event(xml: &str) -> Result<KvmEvent> {
-    let event_type = extract_attr(xml, "type").ok_or_else(|| {
-        NdiError::Protocol("KVM: missing 'type' attribute".to_string())
-    })?;
+    let event_type = extract_attr(xml, "type")
+        .ok_or_else(|| NdiError::Protocol("KVM: missing 'type' attribute".to_string()))?;
 
     match event_type.as_str() {
         "key" => {

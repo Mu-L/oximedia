@@ -53,7 +53,11 @@ pub struct ByteRange {
 impl ByteRange {
     /// Create a new byte range.
     pub fn new(start: u64, end: u64) -> Self {
-        let (s, e) = if start <= end { (start, end) } else { (end, start) };
+        let (s, e) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
         Self { start: s, end: e }
     }
 
@@ -324,21 +328,14 @@ impl ProxyStreamingServer {
 
         // Check concurrent limit
         if self.max_concurrent > 0 {
-            let active = self
-                .sessions
-                .values()
-                .filter(|s| !s.is_terminal())
-                .count();
+            let active = self.sessions.values().filter(|s| !s.is_terminal()).count();
             if active >= self.max_concurrent {
                 return Err("max concurrent sessions reached".to_string());
             }
         }
 
         let effective_range = range.unwrap_or_else(|| proxy.full_range());
-        let chunk_count = proxy
-            .full_range()
-            .chunks(proxy.chunk_size)
-            .len();
+        let chunk_count = proxy.full_range().chunks(proxy.chunk_size).len();
 
         let session_id = format!("sess_{}", self.next_session_id);
         self.next_session_id += 1;
@@ -423,10 +420,7 @@ impl ProxyStreamingServer {
 
     /// Number of active (non-terminal) sessions.
     pub fn active_session_count(&self) -> usize {
-        self.sessions
-            .values()
-            .filter(|s| !s.is_terminal())
-            .count()
+        self.sessions.values().filter(|s| !s.is_terminal()).count()
     }
 
     /// Total bytes served.

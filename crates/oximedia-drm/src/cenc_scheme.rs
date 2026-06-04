@@ -295,7 +295,11 @@ static CENC_DESC: SchemeDescriptor = SchemeDescriptor {
     cipher_mode: CipherMode::AesCtr,
     iv_size: 8,
     uses_pattern: false,
-    supported_by: &[DrmSystem::Widevine, DrmSystem::PlayReady, DrmSystem::ClearKey],
+    supported_by: &[
+        DrmSystem::Widevine,
+        DrmSystem::PlayReady,
+        DrmSystem::ClearKey,
+    ],
 };
 
 static CBC1_DESC: SchemeDescriptor = SchemeDescriptor {
@@ -313,7 +317,11 @@ static CENS_DESC: SchemeDescriptor = SchemeDescriptor {
     cipher_mode: CipherMode::AesCtr,
     iv_size: 8,
     uses_pattern: true,
-    supported_by: &[DrmSystem::Widevine, DrmSystem::PlayReady, DrmSystem::ClearKey],
+    supported_by: &[
+        DrmSystem::Widevine,
+        DrmSystem::PlayReady,
+        DrmSystem::ClearKey,
+    ],
 };
 
 static CBCS_DESC: SchemeDescriptor = SchemeDescriptor {
@@ -410,11 +418,16 @@ impl CencSchemeSelector {
 
     /// Return all schemes supported by every DRM system in `drm_systems`.
     pub fn compatible_schemes(&self, drm_systems: &[DrmSystem]) -> Vec<CencScheme> {
-        [CencScheme::Cenc, CencScheme::Cbc1, CencScheme::Cens, CencScheme::Cbcs]
-            .iter()
-            .copied()
-            .filter(|&s| drm_systems.iter().all(|&d| s.supported_by(d)))
-            .collect()
+        [
+            CencScheme::Cenc,
+            CencScheme::Cbc1,
+            CencScheme::Cens,
+            CencScheme::Cbcs,
+        ]
+        .iter()
+        .copied()
+        .filter(|&s| drm_systems.iter().all(|&d| s.supported_by(d)))
+        .collect()
     }
 
     /// Validate that `iv` has the correct length for `scheme`.
@@ -452,9 +465,18 @@ mod tests {
 
     #[test]
     fn test_from_fourcc_valid() {
-        assert_eq!(CencScheme::from_fourcc("cenc").expect("cenc"), CencScheme::Cenc);
-        assert_eq!(CencScheme::from_fourcc("CBCS").expect("cbcs"), CencScheme::Cbcs);
-        assert_eq!(CencScheme::from_fourcc("CbC1").expect("cbc1"), CencScheme::Cbc1);
+        assert_eq!(
+            CencScheme::from_fourcc("cenc").expect("cenc"),
+            CencScheme::Cenc
+        );
+        assert_eq!(
+            CencScheme::from_fourcc("CBCS").expect("cbcs"),
+            CencScheme::Cbcs
+        );
+        assert_eq!(
+            CencScheme::from_fourcc("CbC1").expect("cbc1"),
+            CencScheme::Cbc1
+        );
     }
 
     #[test]
@@ -540,13 +562,16 @@ mod tests {
     fn test_subsample_pattern_encrypted_fraction() {
         let p = SubsamplePattern::cmaf_video(); // 1:9
         let frac = p.encrypted_fraction();
-        assert!((frac - 0.1).abs() < 1e-10, "fraction should be 0.1, got {frac}");
+        assert!(
+            (frac - 0.1).abs() < 1e-10,
+            "fraction should be 0.1, got {frac}"
+        );
     }
 
     #[test]
     fn test_subsample_pattern_encrypted_blocks() {
         let p = SubsamplePattern::cmaf_video(); // 1:9 → period = 10
-        // 30 blocks → 3 full periods → 3 encrypted blocks
+                                                // 30 blocks → 3 full periods → 3 encrypted blocks
         assert_eq!(p.encrypted_blocks(30), 3);
         // 25 blocks → 2 full periods (20) + 5 remainder → 2 + 1 = 3
         assert_eq!(p.encrypted_blocks(25), 3);
@@ -598,7 +623,11 @@ mod tests {
     fn test_selector_widevine_only_full_gives_cenc() {
         let sel = CencSchemeSelector::new();
         let scheme = sel
-            .recommend(&[DrmSystem::Widevine], CodecClass::Avc, EncryptionCoverage::Full)
+            .recommend(
+                &[DrmSystem::Widevine],
+                CodecClass::Avc,
+                EncryptionCoverage::Full,
+            )
             .expect("recommend");
         assert_eq!(scheme, CencScheme::Cenc);
     }

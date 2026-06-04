@@ -207,12 +207,7 @@ impl DvXmlExporter {
         );
 
         // Total frames
-        push_tag(
-            &mut out,
-            "TotalFrames",
-            &doc.total_frames.to_string(),
-            2,
-        );
+        push_tag(&mut out, "TotalFrames", &doc.total_frames.to_string(), 2);
 
         // Shots
         out.push_str("  <Shots>\n");
@@ -230,12 +225,7 @@ impl DvXmlExporter {
                 out.push_str("      <Level2Entries>\n");
                 for l2 in &shot.l2_entries {
                     out.push_str("        <L2Entry>\n");
-                    push_tag(
-                        &mut out,
-                        "TargetMaxPQ",
-                        &l2.target_max_pq.to_string(),
-                        10,
-                    );
+                    push_tag(&mut out, "TargetMaxPQ", &l2.target_max_pq.to_string(), 10);
                     push_tag(&mut out, "TrimSlope", &format_f32(l2.trim_slope), 10);
                     push_tag(&mut out, "TrimOffset", &format_f32(l2.trim_offset), 10);
                     push_tag(&mut out, "TrimPower", &format_f32(l2.trim_power), 10);
@@ -270,8 +260,8 @@ impl DvXmlParser {
         let version = DvXmlVersion::from_str(&version_str)?;
 
         let frame_rate = parse_frame_rate(xml)?;
-        let total_frames = parse_u64_tag(xml, "TotalFrames")
-            .map_err(|e| DvXmlError::ParseError(e.to_string()))?;
+        let total_frames =
+            parse_u64_tag(xml, "TotalFrames").map_err(|e| DvXmlError::ParseError(e.to_string()))?;
 
         let shots = parse_shots(xml)?;
 
@@ -328,7 +318,9 @@ fn extract_attr(xml: &str, tag: &str, attr: &str) -> Option<String> {
     let attr_pos = tag_content.find(&needle)?;
     let value_start = attr_pos + needle.len();
     let value_end = tag_content[value_start..].find('"')?;
-    Some(xml_unescape(&tag_content[value_start..value_start + value_end]))
+    Some(xml_unescape(
+        &tag_content[value_start..value_start + value_end],
+    ))
 }
 
 /// Extract text content of the first `<tag>…</tag>` within `xml`.
@@ -342,18 +334,18 @@ fn extract_tag_text(xml: &str, tag: &str) -> Option<String> {
 
 fn parse_u64_tag(xml: &str, tag: &str) -> Result<u64, DvXmlError> {
     match extract_tag_text(xml, tag) {
-        Some(s) => s.parse::<u64>().map_err(|e| {
-            DvXmlError::ParseError(format!("invalid <{tag}> u64 value '{s}': {e}"))
-        }),
+        Some(s) => s
+            .parse::<u64>()
+            .map_err(|e| DvXmlError::ParseError(format!("invalid <{tag}> u64 value '{s}': {e}"))),
         None => Ok(0),
     }
 }
 
 fn parse_f32_tag(xml: &str, tag: &str) -> Result<f32, DvXmlError> {
     match extract_tag_text(xml, tag) {
-        Some(s) => s.parse::<f32>().map_err(|e| {
-            DvXmlError::ParseError(format!("invalid <{tag}> f32 value '{s}': {e}"))
-        }),
+        Some(s) => s
+            .parse::<f32>()
+            .map_err(|e| DvXmlError::ParseError(format!("invalid <{tag}> f32 value '{s}': {e}"))),
         None => Ok(0.0),
     }
 }
@@ -388,12 +380,10 @@ fn parse_l2_entries(block: &str) -> Result<Vec<DvL2Entry>, DvXmlError> {
         let entry_block = &block[abs..abs + end_rel + "</L2Entry>".len()];
 
         let target_max_pq = match extract_tag_text(entry_block, "TargetMaxPQ") {
-            Some(s) => s.parse::<u16>().map_err(|e| {
-                DvXmlError::ParseError(format!("invalid TargetMaxPQ '{s}': {e}"))
-            })?,
-            None => {
-                return Err(DvXmlError::MissingField("L2Entry/TargetMaxPQ".to_string()))
-            }
+            Some(s) => s
+                .parse::<u16>()
+                .map_err(|e| DvXmlError::ParseError(format!("invalid TargetMaxPQ '{s}': {e}")))?,
+            None => return Err(DvXmlError::MissingField("L2Entry/TargetMaxPQ".to_string())),
         };
 
         entries.push(DvL2Entry {
@@ -544,11 +534,7 @@ mod tests {
         let shot = &parsed.shots[0];
         assert!((shot.l1_max - 0.58).abs() < 1e-5, "l1_max={}", shot.l1_max);
         assert!((shot.l1_min - 0.001).abs() < 1e-5, "l1_min={}", shot.l1_min);
-        assert!(
-            (shot.l1_mid - 0.12).abs() < 1e-5,
-            "l1_mid={}",
-            shot.l1_mid
-        );
+        assert!((shot.l1_mid - 0.12).abs() < 1e-5, "l1_mid={}", shot.l1_mid);
     }
 
     #[test]
@@ -566,7 +552,11 @@ mod tests {
         let parsed = DvXmlParser::from_xml(&xml).expect("parse should succeed");
         let l2 = &parsed.shots[0].l2_entries[1];
         assert_eq!(l2.target_max_pq, 3079);
-        assert!((l2.trim_slope - 0.9).abs() < 1e-5, "slope={}", l2.trim_slope);
+        assert!(
+            (l2.trim_slope - 0.9).abs() < 1e-5,
+            "slope={}",
+            l2.trim_slope
+        );
         assert!(
             (l2.trim_offset - 0.05).abs() < 1e-5,
             "offset={}",

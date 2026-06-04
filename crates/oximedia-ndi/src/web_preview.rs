@@ -311,9 +311,7 @@ pub struct WebPreviewServer {
 impl WebPreviewServer {
     /// Create a new preview server (does not start listening).
     pub fn new(config: PreviewConfig) -> Self {
-        let broadcaster = Arc::new(RwLock::new(MjpegBroadcaster::new(
-            config.ring_buffer_size,
-        )));
+        let broadcaster = Arc::new(RwLock::new(MjpegBroadcaster::new(config.ring_buffer_size)));
         Self {
             config,
             broadcaster,
@@ -340,9 +338,19 @@ impl WebPreviewServer {
         sequence: u64,
     ) -> Option<()> {
         let cfg = &self.config;
-        let small = downscale_rgb(pixels, src_width, src_height, cfg.preview_width, cfg.preview_height);
-        let jpeg =
-            encode_jpeg_rgb(&small, cfg.preview_width, cfg.preview_height, cfg.jpeg_quality)?;
+        let small = downscale_rgb(
+            pixels,
+            src_width,
+            src_height,
+            cfg.preview_width,
+            cfg.preview_height,
+        );
+        let jpeg = encode_jpeg_rgb(
+            &small,
+            cfg.preview_width,
+            cfg.preview_height,
+            cfg.jpeg_quality,
+        )?;
 
         let frame = JpegFrame {
             width: cfg.preview_width,
@@ -497,7 +505,12 @@ mod tests {
         assert_eq!(bc.len(), 2);
         assert_eq!(bc.dropped_frames(), 1);
         // Latest should be seq=3
-        assert_eq!(bc.latest().expect("latest frame should exist after push").sequence, 3);
+        assert_eq!(
+            bc.latest()
+                .expect("latest frame should exist after push")
+                .sequence,
+            3
+        );
     }
 
     #[test]
@@ -514,12 +527,15 @@ mod tests {
     #[test]
     fn test_downscale_rgb_basic() {
         // 4x4 red image downscaled to 2x2
-        let src = vec![255u8, 0, 0; 4 * 4];
+        let src: Vec<u8> = std::iter::repeat([255u8, 0u8, 0u8])
+            .take(4 * 4)
+            .flatten()
+            .collect();
         let dst = downscale_rgb(&src, 4, 4, 2, 2);
         assert_eq!(dst.len(), 2 * 2 * 3);
         assert_eq!(dst[0], 255); // R channel preserved
-        assert_eq!(dst[1], 0);   // G
-        assert_eq!(dst[2], 0);   // B
+        assert_eq!(dst[1], 0); // G
+        assert_eq!(dst[2], 0); // B
     }
 
     #[test]

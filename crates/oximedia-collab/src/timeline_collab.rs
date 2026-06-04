@@ -236,10 +236,10 @@ pub struct TimelineCollabConfig {
 impl Default for TimelineCollabConfig {
     fn default() -> Self {
         Self {
-            claim_ttl_ms: 30_000,         // 30 s
+            claim_ttl_ms: 30_000, // 30 s
             max_claims: 256,
             max_attribution_history: 10_000,
-            cursor_stale_ms: 60_000,       // 1 min
+            cursor_stale_ms: 60_000, // 1 min
         }
     }
 }
@@ -284,7 +284,11 @@ impl Inner {
 
     /// Find all existing claims that overlap with `region` for users *other*
     /// than `requester`.
-    fn overlapping_claims(&self, region: &TimelineRegion, requester: Uuid) -> Vec<&RegionOwnership> {
+    fn overlapping_claims(
+        &self,
+        region: &TimelineRegion,
+        requester: Uuid,
+    ) -> Vec<&RegionOwnership> {
         self.claims
             .values()
             .filter(|c| c.owner_id != requester && c.region.overlaps(region))
@@ -375,12 +379,10 @@ impl TimelineCollabManager {
         let mut inner = self.inner.write();
         match inner.claims.get(&claim_id) {
             None => Ok(()), // already expired or never existed — idempotent
-            Some(c) if c.owner_id != user_id => {
-                Err(CollabError::PermissionDenied(format!(
-                    "claim {claim_id} belongs to user {}, not {user_id}",
-                    c.owner_id
-                )))
-            }
+            Some(c) if c.owner_id != user_id => Err(CollabError::PermissionDenied(format!(
+                "claim {claim_id} belongs to user {}, not {user_id}",
+                c.owner_id
+            ))),
             Some(_) => {
                 inner.claims.remove(&claim_id);
                 Ok(())
@@ -526,9 +528,7 @@ impl TimelineCollabManager {
             .attributions
             .iter()
             .filter(|a| {
-                a.region.track == track
-                    && a.region.start_ms < end_ms
-                    && a.region.end_ms > start_ms
+                a.region.track == track && a.region.start_ms < end_ms && a.region.end_ms > start_ms
             })
             .cloned()
             .collect()
@@ -647,7 +647,8 @@ mod tests {
             .expect("claim_region should succeed");
 
         assert_eq!(mgr.claim_count(now()), 1);
-        mgr.release_claim(claim_id, alice()).expect("release_claim by owner should succeed");
+        mgr.release_claim(claim_id, alice())
+            .expect("release_claim by owner should succeed");
         assert_eq!(mgr.claim_count(now()), 0);
     }
 
@@ -696,7 +697,14 @@ mod tests {
     #[test]
     fn test_cursor_update_and_retrieval() {
         let mgr = TimelineCollabManager::new();
-        mgr.update_cursor(alice(), "Alice", Some("video/0".into()), 12_000, false, now());
+        mgr.update_cursor(
+            alice(),
+            "Alice",
+            Some("video/0".into()),
+            12_000,
+            false,
+            now(),
+        );
         mgr.update_cursor(bob(), "Bob", None, 5_000, true, now());
 
         let cursors = mgr.cursors(now());
@@ -720,7 +728,8 @@ mod tests {
         assert_eq!(history[0].id, attr_id);
         assert!(!history[0].reverted);
 
-        mgr.mark_reverted(attr_id).expect("mark_reverted should succeed for existing attribution");
+        mgr.mark_reverted(attr_id)
+            .expect("mark_reverted should succeed for existing attribution");
         let history2 = mgr.attribution_history("audio/L", 0, 10_000);
         assert!(history2[0].reverted);
     }

@@ -210,7 +210,12 @@ impl TwoWayCrossover {
     pub fn new(crossover_hz: f32, sample_rate: f32) -> Self {
         let lp = Lr4Filter::lowpass(crossover_hz, sample_rate);
         let hp = Lr4Filter::highpass(crossover_hz, sample_rate);
-        Self { crossover_hz, sample_rate, lp, hp }
+        Self {
+            crossover_hz,
+            sample_rate,
+            lp,
+            hp,
+        }
     }
 
     /// Process a single sample, returning `(low, high)`.
@@ -435,7 +440,12 @@ mod tests {
         let mut xover = ThreeWayCrossover::new(200.0, 5_000.0, FS);
         let signal = gen_sine(2_000.0, 512);
         let bands = xover.process_block(&signal);
-        for &s in bands.low.iter().chain(bands.mid.iter()).chain(bands.high.iter()) {
+        for &s in bands
+            .low
+            .iter()
+            .chain(bands.mid.iter())
+            .chain(bands.high.iter())
+        {
             assert!(s.is_finite(), "output must be finite");
         }
     }
@@ -498,8 +508,14 @@ mod tests {
             let (l, h) = xover_sample.process_sample(x);
             let diff_l = (l - bands.low[i]).abs();
             let diff_h = (h - bands.high[i]).abs();
-            assert!(diff_l < 1e-7, "sample-by-sample low mismatch at {i}: {diff_l}");
-            assert!(diff_h < 1e-7, "sample-by-sample high mismatch at {i}: {diff_h}");
+            assert!(
+                diff_l < 1e-7,
+                "sample-by-sample low mismatch at {i}: {diff_l}"
+            );
+            assert!(
+                diff_h < 1e-7,
+                "sample-by-sample high mismatch at {i}: {diff_h}"
+            );
         }
     }
 }

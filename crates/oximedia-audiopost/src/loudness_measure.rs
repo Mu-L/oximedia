@@ -73,7 +73,10 @@ impl LoudnessMeasurement {
 
         if block_ms.is_empty() {
             // Signal too short for a full block — measure the whole buffer
-            let ms: f64 = filtered.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>()
+            let ms: f64 = filtered
+                .iter()
+                .map(|&x| (x as f64) * (x as f64))
+                .sum::<f64>()
                 / filtered.len() as f64;
             return Self::ms_to_lufs(ms) as f32;
         }
@@ -81,7 +84,11 @@ impl LoudnessMeasurement {
         // ── Stage 3: Absolute gate — –70 LUFS ────────────────────────────────
         // –70 LUFS → mean-square threshold
         let abs_threshold = 10f64.powf((-70.0_f64 - 0.691) / 10.0);
-        let gated_abs: Vec<f64> = block_ms.iter().copied().filter(|&ms| ms > abs_threshold).collect();
+        let gated_abs: Vec<f64> = block_ms
+            .iter()
+            .copied()
+            .filter(|&ms| ms > abs_threshold)
+            .collect();
 
         if gated_abs.is_empty() {
             return f32::NEG_INFINITY;
@@ -200,15 +207,17 @@ mod tests {
         let n = (sr as f32 * duration_secs) as usize;
         (0..n)
             .map(|i| {
-                amplitude
-                    * (2.0 * std::f32::consts::PI * freq_hz * i as f32 / sr as f32).sin()
+                amplitude * (2.0 * std::f32::consts::PI * freq_hz * i as f32 / sr as f32).sin()
             })
             .collect()
     }
 
     #[test]
     fn empty_input_returns_neg_infinity() {
-        assert_eq!(LoudnessMeasurement::compute_lufs(&[], SR), f32::NEG_INFINITY);
+        assert_eq!(
+            LoudnessMeasurement::compute_lufs(&[], SR),
+            f32::NEG_INFINITY
+        );
     }
 
     #[test]
@@ -267,7 +276,10 @@ mod tests {
     #[test]
     fn zero_sample_rate_returns_neg_infinity() {
         let samples = vec![0.5f32; 1000];
-        assert_eq!(LoudnessMeasurement::compute_lufs(&samples, 0), f32::NEG_INFINITY);
+        assert_eq!(
+            LoudnessMeasurement::compute_lufs(&samples, 0),
+            f32::NEG_INFINITY
+        );
     }
 
     #[test]

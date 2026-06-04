@@ -10,7 +10,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Database schema version.
-const SCHEMA_VERSION: i32 = 1;
+///
+/// Version history:
+/// - 1: initial schema
+/// - 2: adds `file_mtime INTEGER` and `file_size INTEGER` to `media_files`
+const SCHEMA_VERSION: i32 = 2;
 
 /// Database manager for media catalog.
 #[derive(Clone)]
@@ -70,12 +74,55 @@ impl Database {
             })
             .ok();
 
-        if version.is_none() {
-            self.create_tables(&conn)?;
-            conn.execute(
-                "INSERT INTO schema_version (version) VALUES (?1)",
-                params![SCHEMA_VERSION],
-            )?;
+        match version {
+            None => {
+                // Fresh database — create all tables at the current schema version.
+                self.create_tables(&conn)?;
+                conn.execute(
+                    "INSERT INTO schema_version (version) VALUES (?1)",
+                    params![SCHEMA_VERSION],
+                )?;
+            }
+            Some(v) if v < 2 => {
+                // Migrate from schema version 1 → 2: add incremental-scan columns.
+                self.migrate_v1_to_v2(&conn)?;
+                conn.execute(
+                    "UPDATE schema_version SET version = ?1",
+                    params![SCHEMA_VERSION],
+                )?;
+            }
+            _ => {
+                // Already at the current version — nothing to do.
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check whether `col_name` exists in `media_files` by querying PRAGMA.
+    fn column_exists(conn: &rusqlite::Connection, col_name: &str) -> ConformResult<bool> {
+        let mut stmt = conn.prepare("PRAGMA table_info(media_files)")?;
+        let names: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(names.iter().any(|n| n == col_name))
+    }
+
+    /// Migrate from schema version 1 to version 2.
+    ///
+    /// Adds `file_mtime INTEGER` and `file_size INTEGER` columns to the
+    /// `media_files` table.  Both columns use `ALTER TABLE … ADD COLUMN`
+    /// which is safe on SQLite — existing rows get `NULL` for the new columns.
+    fn migrate_v1_to_v2(&self, conn: &rusqlite::Connection) -> ConformResult<()> {
+        // `ALTER TABLE … ADD COLUMN` silently succeeds if the column already
+        // exists on some SQLite builds, but errors on standard builds.  We
+        // check first using `PRAGMA table_info` to be safe.
+        if !Self::column_exists(conn, "file_mtime")? {
+            conn.execute("ALTER TABLE media_files ADD COLUMN file_mtime INTEGER", [])?;
+        }
+
+        if !Self::column_exists(conn, "file_size")? {
+            conn.execute("ALTER TABLE media_files ADD COLUMN file_size INTEGER", [])?;
         }
 
         Ok(())
@@ -83,7 +130,7 @@ impl Database {
 
     /// Create database tables.
     fn create_tables(&self, conn: &rusqlite::Connection) -> ConformResult<()> {
-        // Media files table
+        // Media files table — schema version 2 includes file_mtime / file_size.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS media_files (
                 id TEXT PRIMARY KEY,
@@ -98,7 +145,9 @@ impl Database {
                 md5 TEXT,
                 xxhash TEXT,
                 metadata TEXT,
-                cataloged_at TEXT NOT NULL
+                cataloged_at TEXT NOT NULL,
+                file_mtime INTEGER,
+                file_size INTEGER
             )",
             [],
         )?;
@@ -304,6 +353,55 @@ impl Database {
         Ok(())
     }
 
+    // ── Incremental scan helpers ───────────────────────────────────────────────
+
+    /// Check whether the catalog already has an up-to-date entry for `path`.
+    ///
+    /// Returns `true` iff the catalog contains a row whose `path`, `file_size`,
+    /// and `file_mtime` all match the supplied values — meaning the file has
+    /// not changed since it was last ingested.
+    ///
+    /// A return value of `false` means either the file is absent from the
+    /// catalog or its size / mtime differs from the stored values.
+    ///
+    /// `mtime` is expressed as Unix seconds (u64).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub fn has_unchanged(&self, path: &Path, size: u64, mtime: u64) -> ConformResult<bool> {
+        let conn = self.pool.get()?;
+        let path_str = path.to_string_lossy();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM media_files
+             WHERE path = ?1
+               AND file_size = ?2
+               AND file_mtime = ?3",
+            params![path_str.as_ref(), size as i64, mtime as i64],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Record or refresh the `file_mtime` and `file_size` for a path already
+    /// present in the catalog.
+    ///
+    /// This is called after ingesting a media file so that subsequent calls to
+    /// `has_unchanged` can skip re-processing it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the update fails.
+    pub fn update_mtime(&self, path: &Path, size: u64, mtime: u64) -> ConformResult<()> {
+        let conn = self.pool.get()?;
+        let path_str = path.to_string_lossy();
+        conn.execute(
+            "UPDATE media_files SET file_mtime = ?1, file_size = ?2 WHERE path = ?3",
+            params![mtime as i64, size as i64, path_str.as_ref()],
+        )?;
+        Ok(())
+    }
+
     /// Create a new conform session.
     ///
     /// # Errors
@@ -466,5 +564,73 @@ mod tests {
             .expect("test expectation failed");
         db.update_session_status(&session_id, "completed")
             .expect("update_session_status should succeed");
+    }
+
+    // ── Incremental scan tests ─────────────────────────────────────────────────
+
+    /// An unchanged file (same path, size, mtime) must be recognised as
+    /// unchanged so the scan can skip re-ingesting it.
+    #[test]
+    fn test_incremental_scan_skips_unchanged_file() {
+        let db = Database::in_memory().expect("in-memory db must open");
+        let path = PathBuf::from("/media/project/A001C001.mov");
+        let size: u64 = 1_234_567;
+        let mtime: u64 = 1_717_200_000; // arbitrary Unix timestamp
+
+        // Before any insertion has_unchanged must return false
+        assert!(
+            !db.has_unchanged(&path, size, mtime)
+                .expect("has_unchanged must not error"),
+            "file not yet cataloged must return false"
+        );
+
+        // Ingest the file and record its mtime
+        let mut media = MediaFile::new(path.clone());
+        media.size = Some(size);
+        db.add_media_file(&media)
+            .expect("add_media_file must succeed");
+        db.update_mtime(&path, size, mtime)
+            .expect("update_mtime must succeed");
+
+        // Now has_unchanged must return true
+        assert!(
+            db.has_unchanged(&path, size, mtime)
+                .expect("has_unchanged must not error"),
+            "unchanged file must be recognised as unchanged after ingest"
+        );
+    }
+
+    /// When the mtime is bumped the catalog entry is stale and the file must
+    /// be re-ingested (has_unchanged returns false for the new mtime).
+    #[test]
+    fn test_incremental_scan_reingests_on_mtime_bump() {
+        let db = Database::in_memory().expect("in-memory db must open");
+        let path = PathBuf::from("/media/project/B002C002.mxf");
+        let size: u64 = 9_876_543;
+        let mtime_old: u64 = 1_717_200_000;
+        let mtime_new: u64 = mtime_old + 60; // file was modified 60 s later
+
+        // Ingest with the original mtime
+        let mut media = MediaFile::new(path.clone());
+        media.size = Some(size);
+        db.add_media_file(&media)
+            .expect("add_media_file must succeed");
+        db.update_mtime(&path, size, mtime_old)
+            .expect("update_mtime must succeed");
+
+        // Confirm the old mtime is recognised as unchanged
+        assert!(
+            db.has_unchanged(&path, size, mtime_old)
+                .expect("has_unchanged must not error"),
+            "old mtime must be recognised as unchanged"
+        );
+
+        // Bump the mtime — the catalog has the old mtime so has_unchanged must
+        // return false, signalling that re-ingest is required.
+        assert!(
+            !db.has_unchanged(&path, size, mtime_new)
+                .expect("has_unchanged must not error"),
+            "bumped mtime must NOT be recognised as unchanged (re-ingest required)"
+        );
     }
 }

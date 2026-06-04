@@ -15,11 +15,11 @@
 //! for motion estimation accuracy (sub-pixel precision is not required at this stage).
 
 use crate::error::{StabilizeError, StabilizeResult};
-use crate::motion::tracker::MotionTracker;
 use crate::motion::estimate::MotionEstimator;
+use crate::motion::tracker::MotionTracker;
 use crate::motion::trajectory::Trajectory;
 use crate::smooth::filter::TrajectorySmoother;
-use crate::transform::calculate::{TransformCalculator, StabilizationTransform};
+use crate::transform::calculate::{StabilizationTransform, TransformCalculator};
 use crate::warp::apply::FrameWarper;
 use crate::{Frame, StabilizationMode};
 use scirs2_core::ndarray::Array2;
@@ -126,11 +126,7 @@ pub fn downscale(data: &Array2<u8>, scale: f64) -> Array2<u8> {
                     count += 1;
                 }
             }
-            out[[dy, dx]] = if count > 0 {
-                (sum / count) as u8
-            } else {
-                0
-            };
+            out[[dy, dx]] = sum.checked_div(count).unwrap_or(0) as u8;
         }
     }
 
@@ -211,8 +207,7 @@ pub fn stabilize_preview(
     let trajectory = Trajectory::from_models(&models)?;
 
     // 4. Smooth the preview trajectory.
-    let mut smoother =
-        TrajectorySmoother::new(config.smoothing_window, config.smoothing_strength);
+    let mut smoother = TrajectorySmoother::new(config.smoothing_window, config.smoothing_strength);
     let smoothed = smoother.smooth(&trajectory)?;
 
     // 5. Compute preview corrective transforms.

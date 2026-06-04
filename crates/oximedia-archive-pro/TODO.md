@@ -13,7 +13,7 @@
 - [x] Implement Merkle tree verification in `checksum/tree` for efficient partial verification
 - [x] Add PREMIS rights metadata support in `metadata/premis` (access restrictions, license info)
 - [x] Implement METS structural map generation in `metadata/mets` for complex multi-file objects (verified 2026-05-16; src/metadata/mets.rs:421 build_auto_structural_map, MetsDiv, test_mets_structural_map_generation:528)
-- [ ] Add `format_validator` support for TIFF, DPX, and OpenEXR validation rules (partial 2026-05-16: format_validator.rs:52 FormatFamily::Tiff with magic bytes; DPX and OpenEXR variants missing)
+- [x] Add `format_validator` support for TIFF, DPX, and OpenEXR validation rules (completed 2026-06-01: format_validator.rs FormatFamily::Dpx/OpenExr added; magic bytes, detect_format, validate_magic dual-endian DPX; tests: test_dpx_magic_detected, test_exr_magic_detected)
 - [x] Implement `cold_storage` tier management with automated warm-up and cool-down transitions
 - [x] Add `disaster_recovery` plan validation: verify backup completeness and recoverability
 - [x] Implement `provenance_chain` cryptographic signing for tamper-evident audit trails
@@ -21,18 +21,18 @@
 ## New Features
 - [x] Add Dublin Core metadata support in `metadata` alongside PREMIS/METS
 - [x] Implement IIIF (International Image Interoperability Framework) manifest generation (verified 2026-05-16; src/iiif_manifest.rs:121 IiifManifest, IiifManifestBuilder:190, Presentation API 3.0:3, 512 lines)
-- [ ] Add DataCite DOI metadata generation for archived research media (verified-open 2026-05-16: no DataCite/datacite module in archive-pro sources; dublin_core.rs mentions doi as identifier field only)
-- [ ] Implement automated format migration triggers based on `risk/monitor` alerts (verified-open 2026-05-16: risk/monitor.rs has RiskMonitor/MonitoringReport but no auto_trigger/MigrationTrigger wired to format_migration)
+- [x] Add DataCite DOI metadata generation for archived research media (completed 2026-06-02: src/datacite.rs DataCiteResource struct per DataCite 4.x schema; to_xml()+to_json()+parse_xml() round-trip stable; registered in lib.rs; tests: test_datacite_round_trip_xml, test_datacite_xml_has_required_fields, test_datacite_json_keys, test_datacite_xml_escape, test_datacite_minimal_roundtrip, test_datacite_creator_optional_fields)
+- [x] Implement automated format migration triggers based on `risk/monitor` alerts (completed 2026-06-02: src/risk/migration_trigger.rs MigrationTriggerPolicy {risk_threshold, on_obsolete_format, format_targets}; evaluate(&MonitoringReport)->Vec<MigrationPlan> pure decision logic; tests: test_migration_trigger_fires_above_threshold, test_migration_trigger_no_fire_below_threshold, test_migration_trigger_correct_target_format, test_migration_trigger_default_target_format, test_migration_trigger_idempotent, test_migration_trigger_policy_clamps_threshold, test_migration_trigger_empty_report_no_plans)
 - [x] Add geographic replication support with consistency verification in `replication_verify` (verified 2026-05-16; src/replication_verify.rs:12 ReplicaLocation, FileReplicaInfo.evaluate:98, ReplicationVerifier:182, consistency_percent:172, 451 lines)
 - [x] Implement `deaccession` workflow with approval chain and audit logging (verified 2026-05-16; src/deaccession.rs:106 DeaccessionRequest, DeaccessionStatus Approved/UnderReview/Executing:60, approve/reject:187, 488 lines)
 - [x] Add preservation cost estimation in `archive_stats` (storage growth, migration cost projections) (verified 2026-05-16; src/cost_estimator.rs:322 PreservationCostEstimator, CostEstimatorConfig:287, default_25_year:516, 609 lines)
 - [x] Implement LOCKSS/CLOCKSS-compatible package generation for distributed preservation (verified 2026-05-16; src/lockss_package.rs:1 LockssPackage, LockssNetwork::Lockss/Clockss:22-25, ArchivalUnit:39, 514 lines)
-- [ ] Add `metadata_crosswalk` support for PBCore (public broadcasting metadata standard) (verified-open 2026-05-16: metadata_crosswalk.rs has MetadataCrosswalk/crosswalk rules framework but no PBCore-specific schema or mappings)
+- [x] Add `metadata_crosswalk` support for PBCore (public broadcasting metadata standard) (completed 2026-06-02: src/metadata_crosswalk.rs MetadataScheme::PbCore+Internal variants added; pbcore_to_internal_crosswalk()+internal_to_pbcore_crosswalk() builder fns with 10 bidirectional rules each; tests: test_pbcore_crosswalk_to_internal, test_pbcore_crosswalk_round_trip, test_pbcore_crosswalk_rule_count, test_pbcore_essence_track_type_mapping, test_pbcore_scheme_namespace)
 
 ## Performance
 - [x] Parallelize BagIt manifest generation with rayon in `package/bagit` for large bags
-- [ ] Implement streaming TAR creation in `package/tar` (avoid buffering entire archive in memory)
-- [ ] Add concurrent checksum verification across multiple algorithms in `checksum/verify`
+- [x] Implement streaming TAR creation in `package/tar` (completed 2026-06-01: StreamingTarWriter<W: Write> + build_tar_header; tests: test_streaming_tar_round_trip, test_streaming_tar_bytes_written)
+- [x] Add concurrent checksum verification across multiple algorithms in `checksum/verify`
 - [ ] Optimize `walkdir` traversal with early filtering by file extension in `ingest`
 - [ ] Use zero-copy XML writing in `metadata/premis` and `metadata/mets` via quick-xml streaming
 

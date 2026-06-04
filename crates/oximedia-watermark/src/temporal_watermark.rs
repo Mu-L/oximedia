@@ -199,7 +199,11 @@ impl TemporalDetector {
                 count += 1;
             }
 
-            let avg_corr = if count > 0 { total_corr / count as f64 } else { 0.0 };
+            let avg_corr = if count > 0 {
+                total_corr / count as f64
+            } else {
+                0.0
+            };
 
             // Positive correlation → spread_bit = 1, negative → spread_bit = 0.
             let spread_bit = avg_corr > 0.0;
@@ -447,7 +451,9 @@ mod tests {
         let encoded = codec.encode(payload).expect("encode");
         let expected_bits = encoded.len() * 8;
 
-        let extracted = detector.detect(&watermarked, expected_bits).expect("detect");
+        let extracted = detector
+            .detect(&watermarked, expected_bits)
+            .expect("detect");
         assert_eq!(extracted, payload.as_slice());
     }
 

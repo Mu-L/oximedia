@@ -274,9 +274,7 @@ impl ClipFaceIndex {
         let mut clip_identity_sums: HashMap<String, HashMap<String, (f32, u32)>> = HashMap::new();
 
         for entry in &self.entries {
-            let cell = clip_identity_sums
-                .entry(entry.clip_id.clone())
-                .or_default();
+            let cell = clip_identity_sums.entry(entry.clip_id.clone()).or_default();
             for (label, centroid) in &self.gallery {
                 let sim = cosine_similarity(&entry.embedding, centroid);
                 if sim >= min_similarity {
@@ -350,7 +348,9 @@ mod tests {
         idx.add_identity("bob".to_string(), vec![0.0, 1.0, 0.0, 0.0]);
 
         let probe_alice = vec![0.99_f32, 0.01, 0.0, 0.0];
-        let (label, sim) = idx.nearest_identity(&probe_alice, 0.5).expect("should match");
+        let (label, sim) = idx
+            .nearest_identity(&probe_alice, 0.5)
+            .expect("should match");
         assert_eq!(label, "alice");
         assert!(sim > 0.9);
     }
@@ -435,12 +435,18 @@ mod tests {
         idx.add_identity("alice".to_string(), vec![1.0, 0.0]);
         idx.add_identity("bob".to_string(), vec![0.0, 1.0]);
         idx.add_face(FaceEntry {
-            clip_id: "c1".to_string(), frame_number: 0,
-            bounding_box: (0,0,0,0), embedding: vec![1.0, 0.0], confidence: 0.9,
+            clip_id: "c1".to_string(),
+            frame_number: 0,
+            bounding_box: (0, 0, 0, 0),
+            embedding: vec![1.0, 0.0],
+            confidence: 0.9,
         });
         idx.add_face(FaceEntry {
-            clip_id: "c2".to_string(), frame_number: 0,
-            bounding_box: (0,0,0,0), embedding: vec![0.0, 1.0], confidence: 0.9,
+            clip_id: "c2".to_string(),
+            frame_number: 0,
+            bounding_box: (0, 0, 0, 0),
+            embedding: vec![0.0, 1.0],
+            confidence: 0.9,
         });
         let groups = idx.group_clips_by_identity(0.9);
         let alice_clips = groups.get("alice").cloned().unwrap_or_default();
@@ -453,16 +459,25 @@ mod tests {
     fn test_entries_for_clip() {
         let mut idx = ClipFaceIndex::new(2);
         idx.add_face(FaceEntry {
-            clip_id: "clip-x".to_string(), frame_number: 1,
-            bounding_box: (0,0,0,0), embedding: vec![1.0, 0.0], confidence: 0.8,
+            clip_id: "clip-x".to_string(),
+            frame_number: 1,
+            bounding_box: (0, 0, 0, 0),
+            embedding: vec![1.0, 0.0],
+            confidence: 0.8,
         });
         idx.add_face(FaceEntry {
-            clip_id: "clip-x".to_string(), frame_number: 2,
-            bounding_box: (0,0,0,0), embedding: vec![0.9, 0.1], confidence: 0.8,
+            clip_id: "clip-x".to_string(),
+            frame_number: 2,
+            bounding_box: (0, 0, 0, 0),
+            embedding: vec![0.9, 0.1],
+            confidence: 0.8,
         });
         idx.add_face(FaceEntry {
-            clip_id: "clip-y".to_string(), frame_number: 0,
-            bounding_box: (0,0,0,0), embedding: vec![0.0, 1.0], confidence: 0.8,
+            clip_id: "clip-y".to_string(),
+            frame_number: 0,
+            bounding_box: (0, 0, 0, 0),
+            embedding: vec![0.0, 1.0],
+            confidence: 0.8,
         });
         assert_eq!(idx.entries_for_clip("clip-x").len(), 2);
         assert_eq!(idx.entries_for_clip("clip-y").len(), 1);

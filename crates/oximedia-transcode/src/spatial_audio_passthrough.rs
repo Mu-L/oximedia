@@ -432,10 +432,7 @@ impl SpatialAudioPlanner {
     /// # Errors
     ///
     /// Returns [`TranscodeError::InvalidInput`] if `streams` is empty.
-    pub fn plan(
-        &self,
-        streams: Vec<SpatialAudioStreamDescriptor>,
-    ) -> Result<SpatialAudioPlan> {
+    pub fn plan(&self, streams: Vec<SpatialAudioStreamDescriptor>) -> Result<SpatialAudioPlan> {
         if streams.is_empty() {
             return Err(TranscodeError::InvalidInput(
                 "no spatial audio streams provided to planner".to_string(),
@@ -452,10 +449,7 @@ impl SpatialAudioPlanner {
 
     /// Decides the action for a single stream.
     fn plan_stream(&self, stream: SpatialAudioStreamDescriptor) -> SpatialAudioAction {
-        let container_ok = self
-            .config
-            .output_container
-            .supports_codec(stream.codec);
+        let container_ok = self.config.output_container.supports_codec(stream.codec);
 
         if container_ok && self.config.prefer_passthrough {
             let reason = if self.config.verbose_reasons {
@@ -580,7 +574,8 @@ impl DownmixSpec {
     ///
     /// Returns [`TranscodeError::InvalidInput`] if bit depth or sample rate are out of range.
     pub fn validate(&self) -> Result<()> {
-        if self.output_bit_depth != 16 && self.output_bit_depth != 24 && self.output_bit_depth != 32 {
+        if self.output_bit_depth != 16 && self.output_bit_depth != 24 && self.output_bit_depth != 32
+        {
             return Err(TranscodeError::InvalidInput(format!(
                 "invalid bit depth {}; must be 16, 24, or 32",
                 self.output_bit_depth
@@ -630,7 +625,10 @@ mod tests {
     #[test]
     fn test_codec_max_audio_objects() {
         assert_eq!(SpatialAudioCodec::EAc3Joc.max_audio_objects(), Some(128));
-        assert_eq!(SpatialAudioCodec::MpegH3dAudio.max_audio_objects(), Some(24));
+        assert_eq!(
+            SpatialAudioCodec::MpegH3dAudio.max_audio_objects(),
+            Some(24)
+        );
         assert_eq!(SpatialAudioCodec::Ambisonics.max_audio_objects(), None);
         assert_eq!(SpatialAudioCodec::PcmChannelBed.max_audio_objects(), None);
     }

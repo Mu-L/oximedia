@@ -442,7 +442,10 @@ mod tests {
         let mut q = RenderQueue::with_concurrency(1);
         let id1 = q.enqueue("j1", sample_output());
         let _id2 = q.enqueue("j2", sample_output());
-        q.get_mut(id1).expect("get_mut should succeed").start().expect("test expectation failed");
+        q.get_mut(id1)
+            .expect("get_mut should succeed")
+            .start()
+            .expect("test expectation failed");
         assert!(q.next_runnable().is_none());
     }
 
@@ -451,8 +454,14 @@ mod tests {
         let mut q = RenderQueue::new();
         let id1 = q.enqueue("j1", sample_output());
         let _id2 = q.enqueue("j2", sample_output());
-        q.get_mut(id1).expect("get_mut should succeed").start().expect("test expectation failed");
-        q.get_mut(id1).expect("get_mut should succeed").complete().expect("test expectation failed");
+        q.get_mut(id1)
+            .expect("get_mut should succeed")
+            .start()
+            .expect("test expectation failed");
+        q.get_mut(id1)
+            .expect("get_mut should succeed")
+            .complete()
+            .expect("test expectation failed");
         let purged = q.purge_completed();
         assert_eq!(purged, 1);
         assert_eq!(q.len(), 1);
@@ -463,7 +472,10 @@ mod tests {
         let mut q = RenderQueue::new();
         let id1 = q.enqueue("j1", sample_output());
         let _id2 = q.enqueue("j2", sample_output());
-        q.get_mut(id1).expect("get_mut should succeed").start().expect("test expectation failed");
+        q.get_mut(id1)
+            .expect("get_mut should succeed")
+            .start()
+            .expect("test expectation failed");
         let s = q.stats();
         assert_eq!(s.running, 1);
         assert_eq!(s.queued, 1);

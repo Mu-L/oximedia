@@ -121,6 +121,7 @@
 #![allow(clippy::struct_field_names)]
 #![allow(dead_code)]
 
+pub mod audio_reactive;
 pub mod blur_kernel;
 pub mod chroma_key;
 pub mod chromatic_aberration;
@@ -128,10 +129,12 @@ pub mod color_grade;
 pub mod color_grading;
 /// Color look-up table application for VFX colour grading.
 pub mod color_lut;
+pub mod color_management;
 pub mod compositing;
 pub mod deform_mesh;
 pub mod depth_of_field;
 pub mod distortion;
+pub mod draft_preview;
 /// Edge detection filters (Sobel, Prewitt, Laplacian, Roberts).
 pub mod edge_detect;
 /// Additional compositing and image effects.
@@ -143,7 +146,9 @@ pub mod frame_pool;
 pub mod generator;
 /// Digital glitch effects (RGB shift, scanlines, block displacement, noise).
 pub mod glitch;
+pub mod gpu_backend;
 pub mod grade_pipeline;
+pub mod grain;
 /// Heat and atmospheric distortion effect.
 pub mod heat_distort;
 pub mod keying;
@@ -159,19 +164,24 @@ pub mod noise_field;
 pub mod parallax;
 /// Multi-channel parameter tracks for Vec2/Vec3/Color keyframe animation.
 pub mod param_track;
+pub mod param_track_cache;
 pub mod particle;
 pub mod particle_fx;
 pub mod particle_sim;
 pub mod presets;
 /// Render pass sequencing for multi-pass VFX compositing.
 pub mod render_pass;
+pub mod retro_film;
 pub mod ripple;
 pub mod rotoscoping;
 pub mod shape;
+/// SIMD-accelerated pixel fill, blend, and lerp operations.
+pub mod simd_pixel;
 pub mod style;
 pub mod text;
 /// Tile-based parallel processing helpers for VideoEffect chains.
 pub mod tile_processor;
+pub mod tilt_shift;
 pub mod time;
 pub mod tracking;
 pub mod trail_effect;

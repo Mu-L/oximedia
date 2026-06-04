@@ -60,11 +60,7 @@ impl ProxyCleanupScheduler {
     /// Filter a list of `(id, created_ts)` pairs, returning only those that
     /// have expired given `now_ts`.
     #[must_use]
-    pub fn filter_expired<'a, T: Copy>(
-        &self,
-        entries: &'a [(T, u64)],
-        now_ts: u64,
-    ) -> Vec<T> {
+    pub fn filter_expired<'a, T: Copy>(&self, entries: &'a [(T, u64)], now_ts: u64) -> Vec<T> {
         entries
             .iter()
             .filter_map(|(id, ts)| {
@@ -140,9 +136,9 @@ mod tests {
         let sched = ProxyCleanupScheduler::new(7);
         let now = DAY * 10;
         let entries: Vec<(u32, u64)> = vec![
-            (1, 0),          // created at day 0 — expired (10 days ago)
-            (2, DAY * 8),    // created 2 days ago — not expired
-            (3, DAY * 1),    // created 9 days ago — expired
+            (1, 0),       // created at day 0 — expired (10 days ago)
+            (2, DAY * 8), // created 2 days ago — not expired
+            (3, DAY * 1), // created 9 days ago — expired
         ];
         let expired = sched.filter_expired(&entries, now);
         assert!(expired.contains(&1));

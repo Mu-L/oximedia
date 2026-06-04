@@ -2,8 +2,15 @@
 //!
 //! Provides abstractions for rendering captions to different output surfaces,
 //! configuring font metrics, safe-area margins, and background styling.
+//!
+//! # Batch Parallel Rendering
+//!
+//! For burn-in export of large caption tracks, use [`render_captions_batch_parallel`]
+//! which processes each [`CaptionFrame`] independently via Rayon's work-stealing
+//! thread pool.  The per-frame work is pure layout arithmetic (no shared mutable
+//! state), so parallelism is always safe.
 
-#![allow(dead_code)]
+use rayon::prelude::*;
 
 /// Output surface to which captions are rendered.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -251,6 +258,97 @@ impl CaptionRenderer {
     pub fn is_burned_in(&self) -> bool {
         self.config.target.is_burned_in()
     }
+
+    /// Renders a single caption frame (all its lines) in a stateless, allocation-minimal way.
+    ///
+    /// This is the per-frame work unit used by [`render_captions_batch_parallel`].
+    /// It is deliberately free of any interior mutability so that it may be called
+    /// concurrently from multiple Rayon threads without synchronisation overhead.
+    #[must_use]
+    pub fn render_single_caption(&self, frame: &CaptionFrame) -> RenderedCaptionBatch {
+        let lines: Vec<&str> = frame.lines.iter().map(String::as_str).collect();
+        let captions = self.render_lines(&lines);
+        RenderedCaptionBatch {
+            frame_index: frame.frame_index,
+            timestamp_ms: frame.timestamp_ms,
+            captions,
+        }
+    }
+}
+
+// ============================================================================
+// Batch parallel rendering
+// ============================================================================
+
+/// A captioned video frame descriptor used as input to batch rendering.
+///
+/// Each `CaptionFrame` carries the frame's index in the sequence, its
+/// presentation timestamp, and the lines of text to be composited.
+#[derive(Debug, Clone)]
+pub struct CaptionFrame {
+    /// Zero-based index of the frame in the export sequence.
+    pub frame_index: usize,
+    /// Presentation timestamp in milliseconds.
+    pub timestamp_ms: u64,
+    /// Caption lines for this frame (at most `CaptionRenderConfig::max_rows` are used).
+    pub lines: Vec<String>,
+}
+
+impl CaptionFrame {
+    /// Creates a new `CaptionFrame`.
+    #[must_use]
+    pub fn new(frame_index: usize, timestamp_ms: u64, lines: Vec<String>) -> Self {
+        Self {
+            frame_index,
+            timestamp_ms,
+            lines,
+        }
+    }
+}
+
+/// The rendering result for a single [`CaptionFrame`].
+#[derive(Debug, Clone)]
+pub struct RenderedCaptionBatch {
+    /// Frame index matching the input [`CaptionFrame::frame_index`].
+    pub frame_index: usize,
+    /// Presentation timestamp matching [`CaptionFrame::timestamp_ms`].
+    pub timestamp_ms: u64,
+    /// Per-row rendering output, in row order.
+    pub captions: Vec<RenderedCaption>,
+}
+
+/// Renders a batch of caption frames in parallel using Rayon's global thread pool.
+///
+/// The output `Vec` preserves the same order as the input `captions` slice.
+/// Each frame is processed by [`CaptionRenderer::render_single_caption`]; no
+/// shared mutable state is accessed.
+///
+/// # Example
+///
+/// ```rust
+/// use oximedia_captions::caption_renderer::{
+///     CaptionFrame, CaptionRenderConfig, CaptionRenderer, render_captions_batch_parallel,
+/// };
+///
+/// let config = CaptionRenderConfig::default();
+/// let renderer = CaptionRenderer::new(config);
+/// let frames = vec![
+///     CaptionFrame::new(0, 0,    vec!["Hello".to_string()]),
+///     CaptionFrame::new(1, 1000, vec!["World".to_string()]),
+/// ];
+/// let results = render_captions_batch_parallel(&frames, &renderer);
+/// assert_eq!(results.len(), 2);
+/// assert_eq!(results[0].frame_index, 0);
+/// ```
+#[must_use]
+pub fn render_captions_batch_parallel(
+    captions: &[CaptionFrame],
+    renderer: &CaptionRenderer,
+) -> Vec<RenderedCaptionBatch> {
+    captions
+        .par_iter()
+        .map(|frame| renderer.render_single_caption(frame))
+        .collect()
 }
 
 #[cfg(test)]
@@ -367,5 +465,93 @@ mod tests {
         new_cfg.font_size_pt = 48.0;
         renderer.set_config(new_cfg);
         assert!((renderer.config().font_size_pt - 48.0).abs() < 1e-6);
+    }
+
+    // -----------------------------------------------------------------------
+    // Batch parallel rendering tests
+    // -----------------------------------------------------------------------
+
+    fn make_frames(count: usize) -> Vec<CaptionFrame> {
+        (0..count)
+            .map(|i| {
+                CaptionFrame::new(
+                    i,
+                    (i as u64) * 1000,
+                    vec![format!("Caption line {i}"), format!("Row 2 for {i}")],
+                )
+            })
+            .collect()
+    }
+
+    /// Parallel and sequential rendering must produce identical output.
+    #[test]
+    fn test_parallel_render_matches_sequential() {
+        let renderer = CaptionRenderer::new(CaptionRenderConfig::default());
+        let frames = make_frames(50);
+
+        // Sequential reference.
+        let sequential: Vec<RenderedCaptionBatch> = frames
+            .iter()
+            .map(|f| renderer.render_single_caption(f))
+            .collect();
+
+        // Parallel under test.
+        let parallel = render_captions_batch_parallel(&frames, &renderer);
+
+        assert_eq!(sequential.len(), parallel.len());
+        for (seq, par) in sequential.iter().zip(parallel.iter()) {
+            assert_eq!(seq.frame_index, par.frame_index, "frame_index mismatch");
+            assert_eq!(seq.timestamp_ms, par.timestamp_ms, "timestamp_ms mismatch");
+            assert_eq!(
+                seq.captions.len(),
+                par.captions.len(),
+                "captions count mismatch for frame {}",
+                seq.frame_index
+            );
+            for (sc, pc) in seq.captions.iter().zip(par.captions.iter()) {
+                assert_eq!(sc.text, pc.text, "text mismatch");
+                assert!((sc.x - pc.x).abs() < 1e-6, "x mismatch");
+                assert!((sc.y - pc.y).abs() < 1e-6, "y mismatch");
+                assert_eq!(sc.color, pc.color, "color mismatch");
+            }
+        }
+    }
+
+    /// Empty frame list returns an empty result without panicking.
+    #[test]
+    fn test_parallel_render_empty_input() {
+        let renderer = CaptionRenderer::new(CaptionRenderConfig::default());
+        let result = render_captions_batch_parallel(&[], &renderer);
+        assert!(result.is_empty());
+    }
+
+    /// Output is ordered by frame_index (matches input order even if rayon reorders).
+    #[test]
+    fn test_parallel_render_output_order() {
+        let renderer = CaptionRenderer::new(CaptionRenderConfig::default());
+        let frames = make_frames(20);
+        let result = render_captions_batch_parallel(&frames, &renderer);
+        for (i, batch) in result.iter().enumerate() {
+            assert_eq!(batch.frame_index, i, "output order must match input order");
+        }
+    }
+
+    /// `render_single_caption` respects `max_rows` limit.
+    #[test]
+    fn test_render_single_caption_max_rows() {
+        let mut cfg = CaptionRenderConfig::default();
+        cfg.max_rows = 2;
+        let renderer = CaptionRenderer::new(cfg);
+        let frame = CaptionFrame::new(
+            0,
+            0,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        );
+        let batch = renderer.render_single_caption(&frame);
+        assert_eq!(
+            batch.captions.len(),
+            2,
+            "max_rows=2 must truncate to 2 captions"
+        );
     }
 }

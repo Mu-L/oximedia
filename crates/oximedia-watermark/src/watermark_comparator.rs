@@ -260,11 +260,7 @@ impl WatermarkComparator {
     }
 
     // Internal: compare against a single record.
-    fn compare_single(
-        &self,
-        extracted: &[u8],
-        record: &PayloadRecord,
-    ) -> Option<ComparisonMatch> {
+    fn compare_single(&self, extracted: &[u8], record: &PayloadRecord) -> Option<ComparisonMatch> {
         let stored = &record.payload;
         let hamming = hamming_distance_bytes(extracted, stored);
         let max_bits = extracted.len().max(stored.len()) * 8;
@@ -282,11 +278,13 @@ impl WatermarkComparator {
         // based on how far BER is below max_ber.
         let normalised_ber = if self.config.max_ber > 0.0 {
             ber / self.config.max_ber
+        } else if ber == 0.0 {
+            0.0
         } else {
-            if ber == 0.0 { 0.0 } else { 1.0 }
+            1.0
         };
-        let confidence = self.config.ber_weight * (1.0 - normalised_ber)
-            + (1.0 - self.config.ber_weight);
+        let confidence =
+            self.config.ber_weight * (1.0 - normalised_ber) + (1.0 - self.config.ber_weight);
         let confidence = confidence.clamp(0.0, 1.0);
 
         let is_accepted = ber <= self.config.max_ber;
@@ -360,7 +358,13 @@ mod tests {
         let cmp = WatermarkComparator::default_comparator();
         let result = cmp.compare(b"hello", &db);
         assert!(result.is_identified);
-        assert_eq!(result.best_match.expect("exact match should have best_match").bit_error_rate, 0.0);
+        assert_eq!(
+            result
+                .best_match
+                .expect("exact match should have best_match")
+                .bit_error_rate,
+            0.0
+        );
     }
 
     #[test]
@@ -469,7 +473,9 @@ mod tests {
         let db = make_db_with_payloads(&[b"perfect"]);
         let cmp = WatermarkComparator::default_comparator();
         let result = cmp.compare(b"perfect", &db);
-        let best = result.best_match.expect("exact match should produce best_match");
+        let best = result
+            .best_match
+            .expect("exact match should produce best_match");
         assert!(
             (best.confidence - 1.0).abs() < 1e-9,
             "Confidence should be 1.0 for exact match, got {}",
@@ -511,8 +517,7 @@ mod tests {
 
     #[test]
     fn test_payload_record_with_notes() {
-        let rec = PayloadRecord::new(1, b"data", "owner", "algo")
-            .with_notes("some note");
+        let rec = PayloadRecord::new(1, b"data", "owner", "algo").with_notes("some note");
         assert!(rec.notes.is_some());
         assert_eq!(rec.notes.expect("notes should be present"), "some note");
     }

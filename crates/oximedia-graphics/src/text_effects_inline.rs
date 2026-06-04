@@ -215,7 +215,14 @@ pub fn render_shadow(
     let blurred = blur_alpha_buffer(&shifted, width, height, config.blur_sigma);
 
     // Step 3: composite onto pixels.
-    composite_color_mask(pixels, &blurred, width, height, config.color, config.opacity);
+    composite_color_mask(
+        pixels,
+        &blurred,
+        width,
+        height,
+        config.color,
+        config.opacity,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -367,7 +374,10 @@ mod tests {
         // Exactly one non-transparent pixel at (6, 6)
         let target = (6 * w + 6) as usize;
         let nonzero_count = (0..len).filter(|&i| pixels[i * 4 + 3] > 0).count();
-        assert_eq!(nonzero_count, 1, "hard shadow should produce exactly one pixel");
+        assert_eq!(
+            nonzero_count, 1,
+            "hard shadow should produce exactly one pixel"
+        );
         assert!(pixels[target * 4 + 3] > 0);
     }
 
@@ -505,16 +515,16 @@ mod tests {
             for x in 8..12u32 {
                 let idx = (y * w + x) as usize;
                 assert_eq!(
-                    pixels[idx * 4 + 3], 0,
+                    pixels[idx * 4 + 3],
+                    0,
                     "behind_fill interior at ({},{}) should remain transparent",
-                    x, y
+                    x,
+                    y
                 );
             }
         }
         // But surrounding ring should have content.
-        let ring_count = (0..len)
-            .filter(|&i| pixels[i * 4 + 3] > 0)
-            .count();
+        let ring_count = (0..len).filter(|&i| pixels[i * 4 + 3] > 0).count();
         assert!(ring_count > 0, "ring should have visible pixels");
     }
 

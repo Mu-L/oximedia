@@ -4,12 +4,12 @@
 //! configuration recommendations accordingly.  Because `sqlx` does not expose
 //! live pool-resize APIs, this module provides:
 //!
-//! * [`PoolMetrics`] – snapshot of current pool utilisation.
-//! * [`LoadSampler`] – sliding-window sampler that records request arrivals and
+//! * `PoolMetrics` – snapshot of current pool utilisation.
+//! * `LoadSampler` – sliding-window sampler that records request arrivals and
 //!   completions so the tuner has an accurate concurrency reading.
-//! * [`PoolTuner`] – adaptive tuner that computes recommended `min_connections`
-//!   and `max_connections` values and emits [`TuningRecommendation`]s.
-//! * [`PoolConfig`] – recommended configuration value-object that callers can
+//! * `PoolTuner` – adaptive tuner that computes recommended `min_connections`
+//!   and `max_connections` values and emits `TuningRecommendation`s.
+//! * `PoolConfig` – recommended configuration value-object that callers can
 //!   apply when (re-)creating the pool.
 
 use std::collections::VecDeque;
@@ -349,9 +349,7 @@ impl PoolTuner {
         let (new_min, new_max) = match self.strategy {
             TuningStrategy::Conservative => (current.min_connections, current.max_connections),
             TuningStrategy::Balanced => self.balanced_sizing(metrics, concurrency, peak, mean),
-            TuningStrategy::Aggressive => {
-                self.aggressive_sizing(metrics, concurrency, peak, mean)
-            }
+            TuningStrategy::Aggressive => self.aggressive_sizing(metrics, concurrency, peak, mean),
         };
 
         let new_min = new_min.clamp(self.absolute_min, self.absolute_max);
@@ -560,7 +558,7 @@ mod tests {
             sampler.request_finished();
         }
         let peak_after = sampler.peak_concurrency();
-        assert!(peak_after >= 0); // Window may still hold old samples.
+        let _ = peak_after; // Window may still hold old samples; just verify no panic.
     }
 
     #[test]
@@ -668,8 +666,14 @@ mod tests {
         }
         let rec = tuner.evaluate(&m);
         tuner.apply(&rec);
-        assert_eq!(tuner.current_config().max_connections, rec.config.max_connections);
-        assert_eq!(tuner.current_config().min_connections, rec.config.min_connections);
+        assert_eq!(
+            tuner.current_config().max_connections,
+            rec.config.max_connections
+        );
+        assert_eq!(
+            tuner.current_config().min_connections,
+            rec.config.min_connections
+        );
     }
 
     #[test]

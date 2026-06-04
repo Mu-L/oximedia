@@ -93,19 +93,13 @@ impl HpssResult {
     /// Compute the total harmonic energy.
     #[must_use]
     pub fn total_harmonic_energy(&self) -> f64 {
-        self.harmonic
-            .iter()
-            .flat_map(|row| row.iter())
-            .sum()
+        self.harmonic.iter().flat_map(|row| row.iter()).sum()
     }
 
     /// Compute the total percussive energy.
     #[must_use]
     pub fn total_percussive_energy(&self) -> f64 {
-        self.percussive
-            .iter()
-            .flat_map(|row| row.iter())
-            .sum()
+        self.percussive.iter().flat_map(|row| row.iter()).sum()
     }
 }
 
@@ -191,12 +185,7 @@ impl HpssSeparator {
     }
 
     /// Median filter along the time axis for each frequency bin.
-    fn median_filter_time(
-        &self,
-        spec: &[Vec<f64>],
-        n_freq: usize,
-        n_time: usize,
-    ) -> Vec<Vec<f64>> {
+    fn median_filter_time(&self, spec: &[Vec<f64>], n_freq: usize, n_time: usize) -> Vec<Vec<f64>> {
         let half = self.config.harmonic_kernel / 2;
         let mut out = vec![vec![0.0; n_time]; n_freq];
         for f in 0..n_freq {
@@ -210,12 +199,7 @@ impl HpssSeparator {
     }
 
     /// Median filter along the frequency axis for each time frame.
-    fn median_filter_freq(
-        &self,
-        spec: &[Vec<f64>],
-        n_freq: usize,
-        n_time: usize,
-    ) -> Vec<Vec<f64>> {
+    fn median_filter_freq(&self, spec: &[Vec<f64>], n_freq: usize, n_time: usize) -> Vec<Vec<f64>> {
         let half = self.config.percussive_kernel / 2;
         let mut out = vec![vec![0.0; n_time]; n_freq];
         for t in 0..n_time {
@@ -343,8 +327,7 @@ mod tests {
         let spec = vec![vec![2.0; 4]; 3];
         let result = sep.separate(&spec);
         let original_energy: f64 = spec.iter().flat_map(|r| r.iter()).sum();
-        let separated_energy =
-            result.total_harmonic_energy() + result.total_percussive_energy();
+        let separated_energy = result.total_harmonic_energy() + result.total_percussive_energy();
         assert!((original_energy - separated_energy).abs() < 0.5);
     }
 

@@ -34,7 +34,11 @@ pub enum EditOp {
     /// Swap items at the two indices.
     Swap { a: usize, b: usize },
     /// Replace item at `index` with a new value (captures prior state).
-    Replace { index: usize, before: RundownItem, after: RundownItem },
+    Replace {
+        index: usize,
+        before: RundownItem,
+        after: RundownItem,
+    },
     /// Batch of sub-operations committed together (e.g. merge / split).
     Batch(Vec<EditOp>),
 }
@@ -51,7 +55,10 @@ pub enum EditorError {
     /// The two items specified for a merge are not adjacent.
     NotAdjacent(u32, u32),
     /// The split offset exceeds the item's planned duration.
-    SplitOffsetExceedsDuration { offset_secs: f32, duration_secs: f32 },
+    SplitOffsetExceedsDuration {
+        offset_secs: f32,
+        duration_secs: f32,
+    },
     /// An operation was applied to an empty rundown.
     EmptyRundown,
     /// The undo/redo stack is empty.
@@ -68,7 +75,10 @@ impl std::fmt::Display for EditorError {
             Self::IdNotFound(id) => write!(f, "item ID {id} not found in rundown"),
             Self::IndexOutOfBounds(i) => write!(f, "index {i} is out of bounds"),
             Self::NotAdjacent(a, b) => write!(f, "items {a} and {b} are not adjacent"),
-            Self::SplitOffsetExceedsDuration { offset_secs, duration_secs } => write!(
+            Self::SplitOffsetExceedsDuration {
+                offset_secs,
+                duration_secs,
+            } => write!(
                 f,
                 "split offset {offset_secs}s exceeds item duration {duration_secs}s"
             ),
@@ -259,7 +269,10 @@ impl RundownEditor {
     pub fn insert_at(&mut self, index: usize, item: RundownItem) -> Result<(), EditorError> {
         self.check_insert_index(index)?;
         self.check_no_duplicate_id(item.id)?;
-        let op = EditOp::Insert { index, item: item.clone() };
+        let op = EditOp::Insert {
+            index,
+            item: item.clone(),
+        };
         self.rundown.items.insert(index, item);
         self.push_undo(op);
         Ok(())
@@ -289,15 +302,16 @@ impl RundownEditor {
     pub fn remove_at(&mut self, index: usize) -> Result<RundownItem, EditorError> {
         self.check_item_index(index)?;
         let item = self.rundown.items.remove(index);
-        self.push_undo(EditOp::Remove { index, item: item.clone() });
+        self.push_undo(EditOp::Remove {
+            index,
+            item: item.clone(),
+        });
         Ok(item)
     }
 
     /// Remove the item with the given `id`.
     pub fn remove_by_id(&mut self, id: u32) -> Result<RundownItem, EditorError> {
-        let index = self
-            .position_of(id)
-            .ok_or(EditorError::IdNotFound(id))?;
+        let index = self.position_of(id).ok_or(EditorError::IdNotFound(id))?;
         self.remove_at(index)
     }
 
@@ -352,8 +366,12 @@ impl RundownEditor {
 
     /// Swap the positions of the two items identified by `id_a` and `id_b`.
     pub fn swap_by_id(&mut self, id_a: u32, id_b: u32) -> Result<(), EditorError> {
-        let a = self.position_of(id_a).ok_or(EditorError::IdNotFound(id_a))?;
-        let b = self.position_of(id_b).ok_or(EditorError::IdNotFound(id_b))?;
+        let a = self
+            .position_of(id_a)
+            .ok_or(EditorError::IdNotFound(id_a))?;
+        let b = self
+            .position_of(id_b)
+            .ok_or(EditorError::IdNotFound(id_b))?;
         if a == b {
             return Ok(());
         }
@@ -407,8 +425,15 @@ impl RundownEditor {
         self.rundown.items.insert(index + 1, second);
 
         self.push_undo(EditOp::Batch(vec![
-            EditOp::Replace { index, before, after: after_first },
-            EditOp::Insert { index: index + 1, item: after_second },
+            EditOp::Replace {
+                index,
+                before,
+                after: after_first,
+            },
+            EditOp::Insert {
+                index: index + 1,
+                item: after_second,
+            },
         ]));
 
         Ok((id, second_id))
@@ -423,8 +448,12 @@ impl RundownEditor {
     /// Actual durations are summed if both are present; otherwise the merged
     /// item's actual duration is cleared.
     pub fn merge(&mut self, id_a: u32, id_b: u32) -> Result<u32, EditorError> {
-        let a = self.position_of(id_a).ok_or(EditorError::IdNotFound(id_a))?;
-        let b = self.position_of(id_b).ok_or(EditorError::IdNotFound(id_b))?;
+        let a = self
+            .position_of(id_a)
+            .ok_or(EditorError::IdNotFound(id_a))?;
+        let b = self
+            .position_of(id_b)
+            .ok_or(EditorError::IdNotFound(id_b))?;
 
         if b != a + 1 {
             return Err(EditorError::NotAdjacent(id_a, id_b));
@@ -456,8 +485,15 @@ impl RundownEditor {
         self.rundown.items[a] = merged;
 
         self.push_undo(EditOp::Batch(vec![
-            EditOp::Replace { index: a, before: before_a, after: after_merged },
-            EditOp::Remove { index: b, item: before_b },
+            EditOp::Replace {
+                index: a,
+                before: before_a,
+                after: after_merged,
+            },
+            EditOp::Remove {
+                index: b,
+                item: before_b,
+            },
         ]));
 
         Ok(id_a)
@@ -476,7 +512,8 @@ impl RundownEditor {
 
         for item in &self.rundown.items {
             let actual = item.actual_duration_secs.unwrap_or(item.duration_secs);
-            let deviation = item.actual_duration_secs
+            let deviation = item
+                .actual_duration_secs
                 .map(|a| a - item.duration_secs)
                 .unwrap_or(0.0);
 
@@ -510,7 +547,12 @@ impl RundownEditor {
     ///
     /// `elapsed_secs` is the number of seconds already transmitted.
     pub fn remaining_secs(&self, elapsed_secs: f32) -> f32 {
-        let total = self.rundown.items.iter().map(|i| i.duration_secs).sum::<f32>();
+        let total = self
+            .rundown
+            .items
+            .iter()
+            .map(|i| i.duration_secs)
+            .sum::<f32>();
         (total - elapsed_secs).max(0.0)
     }
 
@@ -741,8 +783,18 @@ mod tests {
         // First part keeps original ID
         assert_eq!(id_a, 4);
         // Durations should sum to original
-        let a = ed.rundown().items.iter().find(|i| i.id == id_a).expect("first part");
-        let b = ed.rundown().items.iter().find(|i| i.id == id_b).expect("second part");
+        let a = ed
+            .rundown()
+            .items
+            .iter()
+            .find(|i| i.id == id_a)
+            .expect("first part");
+        let b = ed
+            .rundown()
+            .items
+            .iter()
+            .find(|i| i.id == id_b)
+            .expect("second part");
         assert!((a.duration_secs - 90.0).abs() < 0.001);
         assert!((b.duration_secs - 90.0).abs() < 0.001);
     }
@@ -752,7 +804,10 @@ mod tests {
         let mut ed = RundownEditor::new(make_rundown());
         // offset == duration → error
         let result = ed.split(4, 180.0);
-        assert!(matches!(result, Err(EditorError::SplitOffsetExceedsDuration { .. })));
+        assert!(matches!(
+            result,
+            Err(EditorError::SplitOffsetExceedsDuration { .. })
+        ));
     }
 
     // ── Merge ─────────────────────────────────────────────────────────────────

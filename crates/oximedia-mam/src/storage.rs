@@ -1540,16 +1540,20 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&root).await;
     }
 
+    // When the `s3` feature is enabled the AWS SDK is initialised during
+    // `from_uri`; on macOS the TLS certificate loader panics ("could not load
+    // platform certs") when the keychain is unavailable (CI, --all-features
+    // runs, sandboxed environments).  The real-credential path is already
+    // covered by the `#[ignore]` test below, so we only run this test when the
+    // `s3` feature is off and the call exercises the pure-Rust local-shadow.
+    #[cfg(not(feature = "s3"))]
     #[tokio::test]
     async fn test_mam_storage_s3_uri_local_shadow_roundtrip() {
-        // Without the `s3` feature this routes to the temp-dir local shadow;
-        // with the feature enabled the test simply skips (no credentials).
+        // Without the `s3` feature this routes to the temp-dir local shadow.
         let storage = MamStorage::from_uri("s3://oximedia-s9-test/assets")
             .await
             .expect("s3 uri yields a storage handle");
-        if storage.has_cloud_backend() {
-            return; // real backend active — skip the offline assertion
-        }
+        assert!(!storage.has_cloud_backend(), "expected local-shadow mode");
         storage
             .put("doc/x.txt", b"shadow-bytes")
             .await

@@ -343,7 +343,9 @@ where
 mod tests {
     use super::*;
 
-    fn make_cache(cap: usize) -> WriteThroughCache<String, Vec<u8>, InMemoryStore<String, Vec<u8>>> {
+    fn make_cache(
+        cap: usize,
+    ) -> WriteThroughCache<String, Vec<u8>, InMemoryStore<String, Vec<u8>>> {
         let store = InMemoryStore::new();
         WriteThroughCache::new(cap, store)
     }

@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Talkback and communication system for studio monitoring.
 //!
 //! Provides a professional talkback system for communication between
@@ -41,7 +40,6 @@ impl TalkbackZone {
 
     /// Returns the effective gain (0.0 if disabled).
     #[must_use]
-    #[allow(clippy::cast_precision_loss)]
     pub fn effective_gain(&self) -> f32 {
         if self.enabled {
             self.gain.clamp(0.0, 1.0)

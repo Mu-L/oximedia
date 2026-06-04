@@ -543,7 +543,7 @@ impl VideoDecoder for H263Decoder {
     }
 
     fn dimensions(&self) -> Option<(u32, u32)> {
-        self.width.and_then(|w| self.height.map(|h| (w, h)))
+        self.width.zip(self.height)
     }
 }
 

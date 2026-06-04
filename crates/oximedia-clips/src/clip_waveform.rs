@@ -6,13 +6,40 @@
 //! sample value (normalised to `[-1.0, 1.0]`) observed in the corresponding
 //! audio segment.
 //!
-//! # Synthetic testing
+//! # File-based waveform generation
 //!
-//! The generator works on `f32` samples supplied directly by the caller so
-//! that unit tests can pass synthetic audio without touching the filesystem.
-//! A production wrapper reading from an actual audio file path is provided
-//! by `ClipWaveformGenerator::from_file` (feature-gated behind `#[cfg(not(target_arch = "wasm32"))]`
-//! because it performs blocking I/O).
+//! On non-WASM targets, `ClipWaveformGenerator::generate` decodes an audio
+//! file from disk and computes the waveform directly from the decoded PCM
+//! samples.  Supported formats:
+//!
+//! - **WAV** (RIFF/WAVE): 8/16/24/32-bit integer PCM and 32/64-bit IEEE float,
+//!   mono and multi-channel.
+//! - **MP3**: MPEG-1/2 Layer I/II/III (patents expired 2017).  Requires the
+//!   `audio-decode` feature (default on).
+//! - **Ogg/Opus** and **Ogg/Vorbis**: Decoded via `OggDemuxer` + the matching
+//!   `OpusDecoder`/`VorbisDecoder`.  Requires the `audio-decode` feature.
+//! - **FLAC**: Decoded via `FlacDemuxer` + `FlacDecoder`.  Requires the
+//!   `audio-decode` feature.
+//! - **Matroska/MKA** (`.mka`, `.mkv`): Decoded via `MatroskaDemuxer`.
+//!   Requires the `audio-decode` feature.
+//!
+//! Multi-channel audio is downmixed to mono by per-frame averaging.
+//!
+//! Sample-rate conversion is *not* performed: the per-pixel bucketing
+//! is driven by the file's intrinsic sample rate, not by
+//! `ClipWaveformGenerator::sample_rate` (which is used only by the
+//! `generate_from_samples` API for caller-supplied buffers).  Skipping
+//! resampling keeps the waveform faithful to the source recording and
+//! avoids unnecessary CPU cost — `pixels_per_second` is a *display*
+//! resolution and does not depend on the audio rate.
+//!
+//! Unsupported formats, missing files, or decoder errors yield an empty
+//! `WaveformData` (`is_empty() == true`) rather than panicking, so callers
+//! can fall back to a placeholder render without exception handling.
+//!
+//! On WASM targets the file API returns an empty waveform because direct
+//! filesystem access is not available; callers should use
+//! `generate_from_samples` after fetching PCM out-of-band.
 
 #![allow(dead_code)]
 
@@ -31,6 +58,20 @@ pub struct WaveformData {
 }
 
 impl WaveformData {
+    /// Construct an empty `WaveformData` for the given pixel resolution.
+    ///
+    /// Used as the fallback when file decoding fails (unsupported format,
+    /// missing file, decoder error).  Callers can detect this case via
+    /// [`Self::is_empty`].
+    #[must_use]
+    pub fn empty(pixels_per_second: f32) -> Self {
+        Self {
+            peaks: Vec::new(),
+            duration_secs: 0.0,
+            pixels_per_second,
+        }
+    }
+
     /// Returns the number of pixel columns.
     #[must_use]
     pub fn width(&self) -> usize {
@@ -224,39 +265,676 @@ impl ClipWaveformGenerator {
         }
     }
 
-    /// Stub for file-based generation.
+    /// Decode an audio file and compute its waveform.
     ///
-    /// In production this would decode the audio file and call
-    /// `generate_from_samples`.  Here it returns a synthetic waveform based
-    /// on the file's metadata so that non-WASM targets compile cleanly without
-    /// requiring an audio decoder dependency.
+    /// Detects the file format by extension, decodes the PCM payload to `f32`
+    /// samples (normalised to `[-1.0, 1.0]`), downmixes multi-channel audio to
+    /// mono by per-frame averaging, then delegates to `generate_from_samples`
+    /// using the file's intrinsic sample rate.
+    ///
+    /// Supported formats (on non-WASM targets):
+    /// - WAV/WAVE (always available)
+    /// - MP3 (requires `audio-decode` feature, default on)
+    /// - Ogg/Opus, Ogg/Vorbis (requires `audio-decode` feature)
+    /// - FLAC (requires `audio-decode` feature)
+    /// - Matroska/MKA (requires `audio-decode` feature)
+    ///
+    /// Returns an empty `WaveformData` (`is_empty() == true`) on any of:
+    ///
+    /// * File-not-found or other I/O error.
+    /// * Malformed container header or unsupported sample format.
+    /// * `pixels_per_second <= 0.0`.
+    ///
+    /// The function never panics regardless of file contents.  Sample rate
+    /// conversion is intentionally skipped — see the module-level docs.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn generate(&self, audio_path: &Path, pixels_per_second: f32) -> WaveformData {
-        // Synthetic: derive duration from file name hash for determinism.
-        let name_hash: u64 = audio_path
-            .to_string_lossy()
-            .bytes()
-            .fold(0u64, |acc, b| acc.wrapping_add(u64::from(b)));
+        if pixels_per_second <= 0.0 {
+            return WaveformData::empty(pixels_per_second);
+        }
 
-        let duration_secs = 5.0 + (name_hash % 55) as f64;
-        let total_samples = (duration_secs * self.sample_rate) as usize;
+        // Detect format from file extension.
+        let ext = audio_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase());
 
-        // Produce a synthetic sine-ish pattern.
-        let samples: Vec<f32> = (0..total_samples)
-            .map(|i| {
-                let t = i as f32 / self.sample_rate as f32;
-                (t * 440.0 * std::f32::consts::TAU).sin() * 0.5
-            })
-            .collect();
+        match ext.as_deref() {
+            Some("mp3") => {
+                #[cfg(feature = "audio-decode")]
+                {
+                    return self.generate_mp3(audio_path, pixels_per_second);
+                }
+                #[cfg(not(feature = "audio-decode"))]
+                {
+                    return WaveformData::empty(pixels_per_second);
+                }
+            }
+            Some("ogg" | "opus" | "oga") => {
+                #[cfg(feature = "audio-decode")]
+                {
+                    return self.generate_ogg(audio_path, pixels_per_second);
+                }
+                #[cfg(not(feature = "audio-decode"))]
+                {
+                    return WaveformData::empty(pixels_per_second);
+                }
+            }
+            Some("flac") => {
+                #[cfg(feature = "audio-decode")]
+                {
+                    return self.generate_flac(audio_path, pixels_per_second);
+                }
+                #[cfg(not(feature = "audio-decode"))]
+                {
+                    return WaveformData::empty(pixels_per_second);
+                }
+            }
+            Some("mka" | "mkv") => {
+                #[cfg(feature = "audio-decode")]
+                {
+                    return self.generate_matroska(audio_path, pixels_per_second);
+                }
+                #[cfg(not(feature = "audio-decode"))]
+                {
+                    return WaveformData::empty(pixels_per_second);
+                }
+            }
+            _ => {}
+        }
 
-        self.generate_from_samples(&samples, pixels_per_second)
+        // Fall through to WAV decode for `.wav`, unknown extensions, or magic-based detection.
+        self.generate_wav(audio_path, pixels_per_second)
     }
+
+    /// Decode a WAV file and return mono f32 samples via `generate_from_samples`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn generate_wav(&self, audio_path: &Path, pixels_per_second: f32) -> WaveformData {
+        let file = match std::fs::File::open(audio_path) {
+            Ok(f) => f,
+            Err(_) => return WaveformData::empty(pixels_per_second),
+        };
+        let buf_reader = std::io::BufReader::new(file);
+
+        let mut wav_reader = match oximedia_audio::wav::WavReader::new(buf_reader) {
+            Ok(r) => r,
+            Err(_) => return WaveformData::empty(pixels_per_second),
+        };
+
+        let spec = wav_reader.spec();
+        if spec.channels == 0 || spec.sample_rate == 0 {
+            return WaveformData::empty(pixels_per_second);
+        }
+
+        let interleaved = match wav_reader.read_samples_f32() {
+            Ok(s) => s,
+            Err(_) => return WaveformData::empty(pixels_per_second),
+        };
+
+        if interleaved.is_empty() {
+            return WaveformData::empty(pixels_per_second);
+        }
+
+        // Downmix to mono. WAV samples are interleaved frame-by-frame:
+        // [c0_f0, c1_f0, …, cN-1_f0, c0_f1, c1_f1, …].
+        let channels = usize::from(spec.channels);
+        let mono = downmix_interleaved_to_mono(&interleaved, channels);
+
+        // Use the file's intrinsic sample rate for accurate duration and
+        // bucketing.  Self's configured rate is irrelevant here.
+        let local_generator = Self::new(f64::from(spec.sample_rate));
+        local_generator.generate_from_samples(&mono, pixels_per_second)
+    }
+
+    /// Decode an MP3 file using `Mp3Decoder` and compute its waveform.
+    ///
+    /// # Note on tokio runtime
+    ///
+    /// This method creates a single-threaded tokio `Runtime` per call to drive
+    /// the async demuxer.  The overhead is acceptable for waveform generation
+    /// (a one-shot operation) but callers that already live inside an async
+    /// context should ensure they are not blocking an async executor thread.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "audio-decode"))]
+    fn generate_mp3(&self, audio_path: &Path, pixels_per_second: f32) -> WaveformData {
+        use oximedia_audio::{AudioDecoder, Mp3Decoder};
+        use oximedia_io::FileSource;
+
+        let path = audio_path.to_path_buf();
+
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(r) => r,
+            Err(_) => return WaveformData::empty(pixels_per_second),
+        };
+
+        let decode_result: Result<(Vec<f32>, u32), Box<dyn std::error::Error + Send + Sync>> = rt
+            .block_on(async move {
+                // MP3 is a self-synchronising frame-based bitstream. Feed the
+                // entire file as one packet to the decoder.
+                let source = FileSource::open(&path).await?;
+                let data = read_source_to_vec(source).await?;
+
+                let mut decoder = Mp3Decoder::default();
+
+                // Feed all data in one packet.
+                decoder
+                    .send_packet(&data, 0)
+                    .map_err(|e| format!("mp3 send_packet: {e}"))?;
+
+                let mut mono_samples: Vec<f32> = Vec::new();
+                let mut sample_rate: u32 = 44100;
+
+                loop {
+                    match decoder.receive_frame() {
+                        Ok(Some(frame)) => {
+                            if frame.sample_rate > 0 {
+                                sample_rate = frame.sample_rate;
+                            }
+                            let channels = frame.channels.count();
+                            let frame_mono = audio_frame_to_mono_f32(&frame, channels)?;
+                            mono_samples.extend_from_slice(&frame_mono);
+                        }
+                        Ok(None) => break,
+                        Err(oximedia_audio::AudioError::NeedMoreData) => break,
+                        Err(oximedia_audio::AudioError::Eof) => break,
+                        Err(e) => return Err(format!("mp3 receive_frame: {e}").into()),
+                    }
+                }
+
+                Ok((mono_samples, sample_rate))
+            });
+
+        match decode_result {
+            Ok((mono, sr)) if !mono.is_empty() => {
+                let local_gen = Self::new(f64::from(sr));
+                local_gen.generate_from_samples(&mono, pixels_per_second)
+            }
+            _ => WaveformData::empty(pixels_per_second),
+        }
+    }
+
+    /// Decode an Ogg file (Opus or Vorbis) and compute its waveform.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "audio-decode"))]
+    fn generate_ogg(&self, audio_path: &Path, pixels_per_second: f32) -> WaveformData {
+        use oximedia_audio::{AudioDecoder, AudioDecoderConfig};
+        use oximedia_container::demux::{Demuxer, OggDemuxer};
+        use oximedia_core::CodecId;
+        use oximedia_io::FileSource;
+
+        let path = audio_path.to_path_buf();
+
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(r) => r,
+            Err(_) => return WaveformData::empty(pixels_per_second),
+        };
+
+        let decode_result: Result<(Vec<f32>, u32), Box<dyn std::error::Error + Send + Sync>> = rt
+            .block_on(async move {
+                let source = FileSource::open(&path).await?;
+                let mut demuxer = OggDemuxer::new(source);
+                demuxer.probe().await?;
+
+                let streams = demuxer.streams().to_vec();
+                let audio_stream = streams
+                    .iter()
+                    .find(|s| s.is_audio())
+                    .ok_or("no audio stream in ogg")?;
+
+                let codec = audio_stream.codec;
+                let sample_rate = audio_stream.codec_params.sample_rate.unwrap_or(48000);
+                let channels = audio_stream.codec_params.channels.unwrap_or(2);
+                let extradata = audio_stream.codec_params.extradata.clone();
+
+                let config = AudioDecoderConfig {
+                    codec,
+                    sample_rate,
+                    channels,
+                    extradata: extradata.map(|b| b.to_vec()),
+                };
+
+                let mut decoder: Box<dyn AudioDecoder> = match codec {
+                    CodecId::Opus => {
+                        let dec = oximedia_audio::OpusDecoder::new(&config)
+                            .map_err(|e| format!("opus decoder: {e}"))?;
+                        Box::new(dec)
+                    }
+                    CodecId::Vorbis => {
+                        let dec = oximedia_audio::VorbisDecoder::new(&config)
+                            .map_err(|e| format!("vorbis decoder: {e}"))?;
+                        Box::new(dec)
+                    }
+                    _ => return Err(format!("unsupported ogg codec: {codec:?}").into()),
+                };
+
+                let audio_stream_idx = audio_stream.index;
+                let mut mono_samples: Vec<f32> = Vec::new();
+                let mut detected_rate = sample_rate;
+
+                loop {
+                    match demuxer.read_packet().await {
+                        Ok(pkt) if pkt.stream_index == audio_stream_idx => {
+                            decoder
+                                .send_packet(&pkt.data, pkt.pts())
+                                .map_err(|e| format!("ogg send_packet: {e}"))?;
+
+                            loop {
+                                match decoder.receive_frame() {
+                                    Ok(Some(frame)) => {
+                                        if frame.sample_rate > 0 {
+                                            detected_rate = frame.sample_rate;
+                                        }
+                                        let ch = frame.channels.count();
+                                        let frame_mono = audio_frame_to_mono_f32(&frame, ch)?;
+                                        mono_samples.extend_from_slice(&frame_mono);
+                                    }
+                                    Ok(None) => break,
+                                    Err(oximedia_audio::AudioError::NeedMoreData) => break,
+                                    Err(e) => return Err(format!("ogg receive_frame: {e}").into()),
+                                }
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) if e.is_eof() => break,
+                        Err(e) => return Err(format!("ogg read_packet: {e}").into()),
+                    }
+                }
+
+                Ok((mono_samples, detected_rate))
+            });
+
+        match decode_result {
+            Ok((mono, sr)) if !mono.is_empty() => {
+                let local_gen = Self::new(f64::from(sr));
+                local_gen.generate_from_samples(&mono, pixels_per_second)
+            }
+            _ => WaveformData::empty(pixels_per_second),
+        }
+    }
+
+    /// Decode a FLAC file and compute its waveform.
+    ///
+    /// # Note on decoder stub
+    ///
+    /// The `FlacDecoder` audio codec is currently a stub implementation that
+    /// returns `Ok(None)` from `receive_frame()`.  As a result, this path
+    /// will return an empty `WaveformData` until the decoder is fully
+    /// implemented.  The demuxer and codec wiring are correct and ready for
+    /// when the decoder is completed.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "audio-decode"))]
+    fn generate_flac(&self, audio_path: &Path, pixels_per_second: f32) -> WaveformData {
+        use oximedia_audio::{AudioDecoder, AudioDecoderConfig, FlacDecoder};
+        use oximedia_container::demux::{Demuxer, FlacDemuxer};
+        use oximedia_core::CodecId;
+        use oximedia_io::FileSource;
+
+        let path = audio_path.to_path_buf();
+
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(r) => r,
+            Err(_) => return WaveformData::empty(pixels_per_second),
+        };
+
+        let decode_result: Result<(Vec<f32>, u32), Box<dyn std::error::Error + Send + Sync>> = rt
+            .block_on(async move {
+                let source = FileSource::open(&path).await?;
+                let mut demuxer = FlacDemuxer::new(source);
+                demuxer.probe().await?;
+
+                let streams = demuxer.streams().to_vec();
+                let audio_stream = streams
+                    .iter()
+                    .find(|s| s.is_audio())
+                    .ok_or("no audio stream in flac")?;
+
+                let sample_rate = audio_stream.codec_params.sample_rate.unwrap_or(44100);
+                let channels = audio_stream.codec_params.channels.unwrap_or(1);
+                let extradata = audio_stream.codec_params.extradata.clone();
+
+                let config = AudioDecoderConfig {
+                    codec: CodecId::Flac,
+                    sample_rate,
+                    channels,
+                    extradata: extradata.map(|b| b.to_vec()),
+                };
+                let mut decoder =
+                    FlacDecoder::new(&config).map_err(|e| format!("flac decoder init: {e}"))?;
+
+                let audio_stream_idx = audio_stream.index;
+                let mut mono_samples: Vec<f32> = Vec::new();
+                let mut detected_rate = sample_rate;
+
+                loop {
+                    match demuxer.read_packet().await {
+                        Ok(pkt) if pkt.stream_index == audio_stream_idx => {
+                            decoder
+                                .send_packet(&pkt.data, pkt.pts())
+                                .map_err(|e| format!("flac send_packet: {e}"))?;
+
+                            loop {
+                                match decoder.receive_frame() {
+                                    Ok(Some(frame)) => {
+                                        if frame.sample_rate > 0 {
+                                            detected_rate = frame.sample_rate;
+                                        }
+                                        let ch = frame.channels.count();
+                                        let frame_mono = audio_frame_to_mono_f32(&frame, ch)?;
+                                        mono_samples.extend_from_slice(&frame_mono);
+                                    }
+                                    Ok(None) => break,
+                                    Err(oximedia_audio::AudioError::NeedMoreData) => break,
+                                    Err(e) => return Err(format!("flac receive_frame: {e}").into()),
+                                }
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) if e.is_eof() => break,
+                        Err(e) => return Err(format!("flac read_packet: {e}").into()),
+                    }
+                }
+
+                Ok((mono_samples, detected_rate))
+            });
+
+        match decode_result {
+            Ok((mono, sr)) if !mono.is_empty() => {
+                let local_gen = Self::new(f64::from(sr));
+                local_gen.generate_from_samples(&mono, pixels_per_second)
+            }
+            _ => WaveformData::empty(pixels_per_second),
+        }
+    }
+
+    /// Decode a Matroska (MKV/MKA) file and compute its waveform.
+    ///
+    /// Dispatches to the appropriate audio decoder based on the codec ID
+    /// of the first audio stream found.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "audio-decode"))]
+    fn generate_matroska(&self, audio_path: &Path, pixels_per_second: f32) -> WaveformData {
+        use oximedia_audio::{AudioDecoder, AudioDecoderConfig};
+        use oximedia_container::demux::{Demuxer, MatroskaDemuxer};
+        use oximedia_core::CodecId;
+        use oximedia_io::FileSource;
+
+        let path = audio_path.to_path_buf();
+
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(r) => r,
+            Err(_) => return WaveformData::empty(pixels_per_second),
+        };
+
+        let decode_result: Result<(Vec<f32>, u32), Box<dyn std::error::Error + Send + Sync>> = rt
+            .block_on(async move {
+                let source = FileSource::open(&path).await?;
+                let mut demuxer = MatroskaDemuxer::new(source);
+                demuxer.probe().await?;
+
+                let streams = demuxer.streams().to_vec();
+                let audio_stream = streams
+                    .iter()
+                    .find(|s| s.is_audio())
+                    .ok_or("no audio stream in matroska")?;
+
+                let codec = audio_stream.codec;
+                let sample_rate = audio_stream.codec_params.sample_rate.unwrap_or(48000);
+                let channels = audio_stream.codec_params.channels.unwrap_or(2);
+                let extradata = audio_stream.codec_params.extradata.clone();
+
+                let config = AudioDecoderConfig {
+                    codec,
+                    sample_rate,
+                    channels,
+                    extradata: extradata.map(|b| b.to_vec()),
+                };
+
+                let mut decoder: Box<dyn AudioDecoder> = match codec {
+                    CodecId::Opus => {
+                        let dec = oximedia_audio::OpusDecoder::new(&config)
+                            .map_err(|e| format!("opus decoder: {e}"))?;
+                        Box::new(dec)
+                    }
+                    CodecId::Vorbis => {
+                        let dec = oximedia_audio::VorbisDecoder::new(&config)
+                            .map_err(|e| format!("vorbis decoder: {e}"))?;
+                        Box::new(dec)
+                    }
+                    CodecId::Flac => {
+                        let dec = oximedia_audio::FlacDecoder::new(&config)
+                            .map_err(|e| format!("flac decoder: {e}"))?;
+                        Box::new(dec)
+                    }
+                    CodecId::Mp3 => Box::new(oximedia_audio::Mp3Decoder::default()),
+                    _ => return Err(format!("unsupported matroska codec: {codec:?}").into()),
+                };
+
+                let audio_stream_idx = audio_stream.index;
+                let mut mono_samples: Vec<f32> = Vec::new();
+                let mut detected_rate = sample_rate;
+
+                loop {
+                    match demuxer.read_packet().await {
+                        Ok(pkt) if pkt.stream_index == audio_stream_idx => {
+                            decoder
+                                .send_packet(&pkt.data, pkt.pts())
+                                .map_err(|e| format!("matroska send_packet: {e}"))?;
+
+                            loop {
+                                match decoder.receive_frame() {
+                                    Ok(Some(frame)) => {
+                                        if frame.sample_rate > 0 {
+                                            detected_rate = frame.sample_rate;
+                                        }
+                                        let ch = frame.channels.count();
+                                        let frame_mono = audio_frame_to_mono_f32(&frame, ch)?;
+                                        mono_samples.extend_from_slice(&frame_mono);
+                                    }
+                                    Ok(None) => break,
+                                    Err(oximedia_audio::AudioError::NeedMoreData) => break,
+                                    Err(e) => {
+                                        return Err(format!("matroska receive_frame: {e}").into())
+                                    }
+                                }
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) if e.is_eof() => break,
+                        Err(e) => return Err(format!("matroska read_packet: {e}").into()),
+                    }
+                }
+
+                Ok((mono_samples, detected_rate))
+            });
+
+        match decode_result {
+            Ok((mono, sr)) if !mono.is_empty() => {
+                let local_gen = Self::new(f64::from(sr));
+                local_gen.generate_from_samples(&mono, pixels_per_second)
+            }
+            _ => WaveformData::empty(pixels_per_second),
+        }
+    }
+
+    /// Decode an audio file and compute its waveform (WASM stub).
+    ///
+    /// Filesystem decoding is not available on WebAssembly; callers should
+    /// fetch and decode audio out-of-band, then use `generate_from_samples`.
+    /// This entry point exists so that the same API signature is exposed on
+    /// every target — it always returns an empty `WaveformData`.
+    #[cfg(target_arch = "wasm32")]
+    pub fn generate(&self, _audio_path: &Path, pixels_per_second: f32) -> WaveformData {
+        WaveformData::empty(pixels_per_second)
+    }
+}
+
+/// Downmix interleaved multi-channel PCM to mono by averaging across channels.
+///
+/// If `channels == 1` or `channels == 0`, the input is returned as-is.
+#[cfg(not(target_arch = "wasm32"))]
+fn downmix_interleaved_to_mono(interleaved: &[f32], channels: usize) -> Vec<f32> {
+    if channels <= 1 {
+        return interleaved.to_vec();
+    }
+    let frame_count = interleaved.len() / channels;
+    let mut out = Vec::with_capacity(frame_count);
+    let inv = 1.0_f32 / channels as f32;
+    for frame in interleaved.chunks_exact(channels) {
+        let sum: f32 = frame.iter().copied().sum();
+        out.push(sum * inv);
+    }
+    out
+}
+
+/// Convert an `AudioFrame` to interleaved mono `f32` samples.
+///
+/// Handles the `Interleaved` and `Planar` buffer layouts and the common
+/// integer sample formats (U8, S16, S32, S24, F32, F64).
+///
+/// Returns an error string (for propagation via `Box<dyn Error>`) if the
+/// format is not recognised.
+#[cfg(all(not(target_arch = "wasm32"), feature = "audio-decode"))]
+fn audio_frame_to_mono_f32(
+    frame: &oximedia_audio::AudioFrame,
+    channels: usize,
+) -> Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
+    use oximedia_audio::AudioBuffer;
+
+    let ch = channels.max(1);
+
+    let interleaved: Vec<f32> = match &frame.samples {
+        AudioBuffer::Interleaved(data) => bytes_to_f32_interleaved(data, frame.format)?,
+        AudioBuffer::Planar(planes) => {
+            // Collect all planes, convert each to f32, then interleave.
+            let plane_count = planes.len().max(1);
+            let samples_per_plane = if planes.is_empty() {
+                0
+            } else {
+                let bps = frame.format.bytes_per_sample();
+                planes[0].len().checked_div(bps).unwrap_or(0)
+            };
+            let mut out = vec![0.0_f32; samples_per_plane * plane_count];
+            for (p_idx, plane) in planes.iter().enumerate() {
+                let plane_f32 = bytes_to_f32_interleaved(plane, frame.format)?;
+                for (s_idx, &s) in plane_f32.iter().enumerate() {
+                    // Interleave: out[s_idx * plane_count + p_idx]
+                    let dst = s_idx * plane_count + p_idx;
+                    if dst < out.len() {
+                        out[dst] = s;
+                    }
+                }
+            }
+            out
+        }
+    };
+
+    // Downmix to mono.
+    Ok(downmix_interleaved_to_mono(&interleaved, ch))
+}
+
+/// Convert a byte slice in the given `SampleFormat` to normalised `f32` samples.
+#[cfg(all(not(target_arch = "wasm32"), feature = "audio-decode"))]
+fn bytes_to_f32_interleaved(
+    data: &[u8],
+    format: oximedia_core::SampleFormat,
+) -> Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
+    use oximedia_core::SampleFormat;
+
+    let bps = format.bytes_per_sample();
+    if bps == 0 || data.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sample_count = data.len() / bps;
+    let mut out = Vec::with_capacity(sample_count);
+
+    match format {
+        SampleFormat::U8 => {
+            for &b in data.iter().take(sample_count) {
+                out.push((f32::from(b) - 128.0) / 128.0);
+            }
+        }
+        SampleFormat::S16 | SampleFormat::S16p => {
+            for chunk in data.chunks_exact(2) {
+                let v = i16::from_le_bytes([chunk[0], chunk[1]]);
+                out.push(f32::from(v) / 32768.0);
+            }
+        }
+        SampleFormat::S24 | SampleFormat::S24p => {
+            for chunk in data.chunks_exact(3) {
+                let raw = (i32::from(chunk[0]))
+                    | (i32::from(chunk[1]) << 8)
+                    | (i32::from(chunk[2]) << 16);
+                let signed = if raw & 0x80_0000 != 0 {
+                    raw | !0xFF_FFFF
+                } else {
+                    raw
+                };
+                #[allow(clippy::cast_precision_loss)]
+                out.push(signed as f32 / 8_388_607.0);
+            }
+        }
+        SampleFormat::S32 | SampleFormat::S32p => {
+            for chunk in data.chunks_exact(4) {
+                let v = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                #[allow(clippy::cast_precision_loss)]
+                out.push(v as f32 / 2_147_483_647.0);
+            }
+        }
+        SampleFormat::F32 | SampleFormat::F32p => {
+            for chunk in data.chunks_exact(4) {
+                out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+            }
+        }
+        SampleFormat::F64 | SampleFormat::F64p => {
+            for chunk in data.chunks_exact(8) {
+                let v = f64::from_le_bytes([
+                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+                ]);
+                #[allow(clippy::cast_possible_truncation)]
+                out.push(v as f32);
+            }
+        }
+        // Guard against future variants added to the non-exhaustive enum.
+        _ => {
+            return Err(format!("unsupported sample format: {format:?}").into());
+        }
+    }
+
+    Ok(out)
+}
+
+/// Read an entire `MediaSource` into a `Vec<u8>`.
+///
+/// Used for feeding raw bitstream data (e.g. MP3) to a packet-based decoder.
+#[cfg(all(not(target_arch = "wasm32"), feature = "audio-decode"))]
+async fn read_source_to_vec(
+    mut source: oximedia_io::FileSource,
+) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    use oximedia_io::MediaSource;
+
+    let mut buf = Vec::new();
+    let mut tmp = vec![0u8; 65536];
+    loop {
+        let n = source.read(&mut tmp).await?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+    }
+    Ok(buf)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn sine_samples(hz: f32, sample_rate: f64, duration_secs: f64) -> Vec<f32> {
         let n = (sample_rate * duration_secs) as usize;
@@ -347,13 +1025,312 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn test_generate_from_file_produces_nonempty_waveform() {
+    fn test_generate_from_missing_file_returns_empty() {
         let gen = ClipWaveformGenerator::new(48000.0);
-        let path = PathBuf::from("/synthetic/audio.wav");
+        // A path that almost certainly does not exist on any host filesystem.
+        let mut path = std::env::temp_dir();
+        path.push("oximedia_clips_definitely_missing_waveform_input.wav");
+        // Ensure it really is absent.
+        let _ = std::fs::remove_file(&path);
         let wd = gen.generate(&path, 100.0);
-        assert!(!wd.is_empty());
-        assert!(wd.duration_secs > 0.0);
+        assert!(wd.is_empty());
+        assert_eq!(wd.duration_secs, 0.0);
+        assert!((wd.pixels_per_second - 100.0).abs() < f32::EPSILON);
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_generate_from_non_wav_file_returns_empty() {
+        let mut path = std::env::temp_dir();
+        path.push("oximedia_clips_not_a_wav.bin");
+        // Random non-RIFF bytes.
+        std::fs::write(&path, b"this is not a wav file at all").expect("write tmp file");
+
+        let gen = ClipWaveformGenerator::new(48000.0);
+        let wd = gen.generate(&path, 100.0);
+
+        let _ = std::fs::remove_file(&path);
+        assert!(wd.is_empty());
+        assert_eq!(wd.duration_secs, 0.0);
+    }
+
+    /// Writes a one-second 440 Hz sine WAV (mono, 16-bit, 16 kHz) to `path`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn write_test_wav_mono_16k(
+        path: &std::path::Path,
+        freq_hz: f32,
+        duration_secs: f32,
+    ) -> std::io::Result<()> {
+        use oximedia_audio::wav::{WavSpec, WavWriter};
+        use std::fs::File;
+        use std::io::BufWriter;
+
+        let spec = WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            float: false,
+        };
+        let sample_count = (16_000.0_f32 * duration_secs) as usize;
+
+        let file = File::create(path)?;
+        let writer = BufWriter::new(file);
+        let mut wav = WavWriter::new(writer, spec);
+
+        for i in 0..sample_count {
+            let t = i as f32 / 16_000.0_f32;
+            let s = (t * freq_hz * std::f32::consts::TAU).sin() * 0.8;
+            wav.write_sample_f32(s)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        wav.finalize()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_generate_from_real_wav_file() {
+        let mut path = std::env::temp_dir();
+        path.push("oximedia_clips_test_sine_440_mono.wav");
+        let _ = std::fs::remove_file(&path);
+        write_test_wav_mono_16k(&path, 440.0, 1.0).expect("write wav");
+
+        // The configured sample rate is irrelevant on this code path — the
+        // file's intrinsic 16 kHz rate drives bucketing.  Use a different
+        // value to prove that.
+        let gen = ClipWaveformGenerator::new(48_000.0);
+        let wd = gen.generate(&path, 100.0);
+
+        // Cleanup before any assertion can fail.
+        let _ = std::fs::remove_file(&path);
+
+        assert!(!wd.is_empty(), "decoded waveform should not be empty");
+        // One second of audio at 100 px/sec → ~100 pixel columns.
+        assert!(
+            wd.width() >= 95 && wd.width() <= 105,
+            "expected ~100 pixels, got {}",
+            wd.width()
+        );
+        assert!(
+            (wd.duration_secs - 1.0).abs() < 0.05,
+            "expected ~1.0 s, got {}",
+            wd.duration_secs
+        );
+        assert!((wd.pixels_per_second - 100.0).abs() < f32::EPSILON);
+
+        // Peak amplitude of a 0.8-scaled sine should be near 0.8.
+        let peak = wd.peak_amplitude();
+        assert!(
+            peak > 0.6 && peak <= 1.0 + 1e-4,
+            "peak_amplitude={peak} outside expected band"
+        );
+
+        // The waveform must oscillate above and below zero (not DC).
+        let mut has_pos = false;
+        let mut has_neg = false;
+        for (lo, hi) in &wd.peaks {
+            if *hi > 0.1 {
+                has_pos = true;
+            }
+            if *lo < -0.1 {
+                has_neg = true;
+            }
+            assert!(lo <= hi);
+            if has_pos && has_neg {
+                break;
+            }
+        }
+        assert!(has_pos, "sine should produce positive peaks");
+        assert!(has_neg, "sine should produce negative peaks");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_generate_from_real_wav_stereo_downmix() {
+        use oximedia_audio::wav::{WavSpec, WavWriter};
+        use std::fs::File;
+        use std::io::BufWriter;
+
+        let mut path = std::env::temp_dir();
+        path.push("oximedia_clips_test_sine_stereo.wav");
+        let _ = std::fs::remove_file(&path);
+
+        // Stereo 16-bit/22.05 kHz, 0.5 s.  Left channel = sine, right
+        // channel = inverted sine → after averaging, downmix is silence,
+        // which is a strong correctness signal for the downmixer.
+        let spec = WavSpec {
+            channels: 2,
+            sample_rate: 22_050,
+            bits_per_sample: 16,
+            float: false,
+        };
+        let file = File::create(&path).expect("create wav");
+        let writer = BufWriter::new(file);
+        let mut wav = WavWriter::new(writer, spec);
+
+        let sample_count = (22_050.0_f32 * 0.5) as usize;
+        for i in 0..sample_count {
+            let t = i as f32 / 22_050.0_f32;
+            let left = (t * 440.0 * std::f32::consts::TAU).sin() * 0.5;
+            wav.write_sample_f32(left).expect("write left");
+            wav.write_sample_f32(-left).expect("write right"); // anti-phase
+        }
+        wav.finalize().expect("finalize");
+
+        let gen = ClipWaveformGenerator::new(48_000.0);
+        let wd = gen.generate(&path, 50.0);
+
+        let _ = std::fs::remove_file(&path);
+
+        assert!(!wd.is_empty(), "stereo decode should yield non-empty data");
+        // 0.5 s × 50 px/s → ~25 pixels.
+        assert!(
+            wd.width() >= 20 && wd.width() <= 30,
+            "expected ~25 pixels, got {}",
+            wd.width()
+        );
+        assert!((wd.duration_secs - 0.5).abs() < 0.05);
+        // Anti-phase L/R averages to ~0 → peak amplitude should be tiny.
+        let peak = wd.peak_amplitude();
+        assert!(
+            peak < 0.05,
+            "downmix of anti-phase stereo should be near silence, got {peak}"
+        );
+    }
+
+    // ---- audio-decode dispatch tests ----
+
+    /// Helper: write a minimal WAV file and verify `generate()` dispatches to
+    /// the WAV path correctly via extension-based routing.
+    ///
+    /// This is also the primary "plumbing compiles" smoke test for the new
+    /// format-dispatch code that runs on every target.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_wav_dispatch_still_works_after_format_routing() {
+        let mut path = std::env::temp_dir();
+        path.push("oximedia_clips_dispatch_smoke_test.wav");
+        let _ = std::fs::remove_file(&path);
+        write_test_wav_mono_16k(&path, 220.0, 0.5).expect("write wav");
+
+        let gen = ClipWaveformGenerator::new(48_000.0);
+        let wd = gen.generate(&path, 100.0);
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            !wd.is_empty(),
+            "WAV dispatch must still produce waveform data"
+        );
+        assert!(
+            wd.width() >= 40 && wd.width() <= 60,
+            "0.5 s @ 100 px/s → ~50 px"
+        );
+    }
+
+    /// `generate()` with a missing MP3 path must return empty without panic.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "audio-decode"))]
+    #[test]
+    fn test_mp3_missing_file_returns_empty() {
+        let mut path = std::env::temp_dir();
+        path.push("oximedia_clips_definitely_missing.mp3");
+        let _ = std::fs::remove_file(&path);
+
+        let gen = ClipWaveformGenerator::new(48_000.0);
+        let wd = gen.generate(&path, 100.0);
+        assert!(wd.is_empty(), "missing mp3 should return empty waveform");
+    }
+
+    /// `generate()` with a corrupted/empty .ogg file must return empty without panic.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "audio-decode"))]
+    #[test]
+    fn test_ogg_corrupted_returns_empty() {
+        let mut path = std::env::temp_dir();
+        path.push("oximedia_clips_corrupted.ogg");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, b"not an ogg file").expect("write tmp");
+
+        let gen = ClipWaveformGenerator::new(48_000.0);
+        let wd = gen.generate(&path, 100.0);
+        let _ = std::fs::remove_file(&path);
+
+        assert!(wd.is_empty(), "corrupted ogg should return empty waveform");
+    }
+
+    /// `generate()` with a corrupted/empty .flac file must return empty without panic.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "audio-decode"))]
+    #[test]
+    fn test_flac_corrupted_returns_empty() {
+        let mut path = std::env::temp_dir();
+        path.push("oximedia_clips_corrupted.flac");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, b"not a flac file").expect("write tmp");
+
+        let gen = ClipWaveformGenerator::new(48_000.0);
+        let wd = gen.generate(&path, 100.0);
+        let _ = std::fs::remove_file(&path);
+
+        assert!(wd.is_empty(), "corrupted flac should return empty waveform");
+    }
+
+    /// `generate()` with a corrupted/empty .mka file must return empty without panic.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "audio-decode"))]
+    #[test]
+    fn test_mka_corrupted_returns_empty() {
+        let mut path = std::env::temp_dir();
+        path.push("oximedia_clips_corrupted.mka");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, b"not a matroska file").expect("write tmp");
+
+        let gen = ClipWaveformGenerator::new(48_000.0);
+        let wd = gen.generate(&path, 100.0);
+        let _ = std::fs::remove_file(&path);
+
+        assert!(wd.is_empty(), "corrupted mka should return empty waveform");
+    }
+
+    /// Verify `downmix_interleaved_to_mono` correctly averages stereo to mono.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_downmix_interleaved_stereo_averages_channels() {
+        // Stereo frames: [L=1.0, R=-1.0] → mono should be 0.0.
+        let stereo: Vec<f32> = (0..10).flat_map(|_| [1.0f32, -1.0f32]).collect();
+        let mono = downmix_interleaved_to_mono(&stereo, 2);
+        assert_eq!(mono.len(), 10);
+        for s in &mono {
+            assert!(
+                s.abs() < f32::EPSILON,
+                "anti-phase stereo should cancel: {s}"
+            );
+        }
+    }
+
+    /// Verify mono pass-through in `downmix_interleaved_to_mono`.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_downmix_mono_passthrough() {
+        let samples = vec![0.5f32; 20];
+        let out = downmix_interleaved_to_mono(&samples, 1);
+        assert_eq!(out, samples);
+    }
+
+    // NOTE: Real FLAC/Opus/Vorbis synthetic-file tests are not included because:
+    //
+    // (a) `FlacDecoder` and `VorbisDecoder` are stub implementations that return
+    //     `Ok(None)` from `receive_frame()` — they will yield empty waveforms until
+    //     the codec decoders are fully implemented.
+    //
+    // (b) `OpusDecoder` is functional but constructing a valid Ogg/Opus bitstream
+    //     (with identification, comment, and audio pages in correct Ogg page framing)
+    //     without a muxer is involved; the `OggMuxer` exists but requires an
+    //     async context and full header negotiation.
+    //
+    // (c) MP3 encoding is not exposed in `oximedia-audio` so synthesising a test
+    //     MP3 file requires external tooling.
+    //
+    // The error-path tests above (corrupted/missing files) confirm the new dispatch
+    // code compiles and runs without panic for all four formats.  The WAV fallback
+    // test confirms that the format-routing logic does not regress the working path.
 
     // ---- WaveformThumbnail tests ----
 

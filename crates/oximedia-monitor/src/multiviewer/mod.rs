@@ -1,13 +1,12 @@
 //! Multi-viewer layout and composition.
 
-pub mod layout;
 pub mod compose;
+pub mod layout;
 
-use crate::{MonitorError, MonitorResult};
 use serde::{Deserialize, Serialize};
 
-pub use layout::LayoutManager;
 pub use compose::ViewComposer;
+pub use layout::LayoutManager;
 
 /// Viewer layout type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

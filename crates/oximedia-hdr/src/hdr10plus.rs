@@ -8,8 +8,6 @@
 //! with 8-bit precision (values 0–255 mapped to the PQ code word range 0–1).
 //! Luma is derived using the Rec. 2020 coefficients Kr=0.2627, Kb=0.0593.
 
-#![allow(dead_code)]
-
 use crate::color_volume::Hdr10PlusMetadata;
 use crate::transfer_function::pq_eotf;
 
@@ -57,11 +55,12 @@ impl Hdr10PlusFrameAnalyzer {
     /// `min_display_mastering_luminance`, and `max_content_light_level` set
     /// to the computed max, avg, and min luminance values (in nits).
     #[must_use]
-    #[allow(clippy::cast_precision_loss)]
     pub fn analyze(&self, frame: &[u8], w: u32, h: u32) -> Hdr10PlusMetadata {
-        let pixel_count = (w as usize) * (h as usize);
+        let pixel_count = usize::try_from(w)
+            .unwrap_or(0)
+            .saturating_mul(usize::try_from(h).unwrap_or(0));
 
-        // Determine bytes-per-pixel
+        // Determine bytes-per-pixel: 4 for RGBA, 3 for RGB.
         let total = frame.len();
         let stride = if pixel_count == 0 {
             3
@@ -74,7 +73,8 @@ impl Hdr10PlusFrameAnalyzer {
         let mut max_nits = 0.0f32;
         let mut min_nits = f32::MAX;
         let mut sum_nits = 0.0f64;
-        let mut count = 0u64;
+        // u32 is sufficient: max frame size ~4 billion pixels, fits u32 exactly.
+        let mut count = 0u32;
 
         for p in 0..pixel_count {
             let base = p * stride;
@@ -82,9 +82,9 @@ impl Hdr10PlusFrameAnalyzer {
                 break;
             }
 
-            let r = frame[base] as f64 / 255.0;
-            let g = frame[base + 1] as f64 / 255.0;
-            let b = frame[base + 2] as f64 / 255.0;
+            let r = f64::from(frame[base]) / 255.0;
+            let g = f64::from(frame[base + 1]) / 255.0;
+            let b = f64::from(frame[base + 2]) / 255.0;
 
             // PQ EOTF: signal [0,1] → linear [0,1] where 1.0 = 10 000 nits
             let r_lin = pq_eotf(r).unwrap_or(0.0);
@@ -96,6 +96,7 @@ impl Hdr10PlusFrameAnalyzer {
             const KG: f64 = 0.6780;
             const KB: f64 = 0.0593;
             let luma = KR * r_lin + KG * g_lin + KB * b_lin;
+            // f64→f32 truncation is intentional: nits fit comfortably in f32 range.
             let nits = (luma * 10_000.0) as f32;
 
             if nits > max_nits {
@@ -104,31 +105,31 @@ impl Hdr10PlusFrameAnalyzer {
             if nits < min_nits {
                 min_nits = nits;
             }
-            sum_nits += nits as f64;
-            count += 1;
+            sum_nits += f64::from(nits);
+            count = count.saturating_add(1);
         }
 
         let (max_nits, _min_nits, avg_nits) = if count == 0 {
             (0.0f32, 0.0f32, 0.0f32)
         } else {
-            (
-                max_nits,
-                min_nits,
-                (sum_nits / count as f64) as f32,
-            )
+            // u32→f64 is lossless (f64 has 53-bit mantissa, u32 fits exactly).
+            let avg = (sum_nits / f64::from(count)) as f32;
+            (max_nits, min_nits, avg)
         };
 
         // Map to the actual Hdr10PlusMetadata fields:
-        // - maxscl[0..2] → max R,G,B channel luminance (nits as u32)
-        // - average_maxrgb → average MaxRGB (nits as u32)
+        // - maxscl[0..2] → max R,G,B channel luminance (nits rounded to u32)
+        // - average_maxrgb → average MaxRGB (nits rounded to u32)
         // - target_system_display_max_luminance → max_nits rounded
+        let max_nits_u32 = max_nits.round() as u32;
+        let avg_nits_u32 = avg_nits.round() as u32;
         Hdr10PlusMetadata {
             system_start_code: 0x3C,
             application_version: 1,
             num_windows: 1,
-            target_system_display_max_luminance: max_nits as u32,
-            maxscl: [max_nits as u32, max_nits as u32, max_nits as u32],
-            average_maxrgb: avg_nits as u32,
+            target_system_display_max_luminance: max_nits_u32,
+            maxscl: [max_nits_u32, max_nits_u32, max_nits_u32],
+            average_maxrgb: avg_nits_u32,
         }
     }
 }
@@ -198,8 +199,7 @@ mod tests {
         let frame = vec![180u8; 8 * 8 * 3];
         let meta = a.analyze(&frame, 8, 8);
         // For uniform frame max ≈ avg
-        let diff = (meta.target_system_display_max_luminance as i64)
-            - (meta.average_maxrgb as i64);
+        let diff = (meta.target_system_display_max_luminance as i64) - (meta.average_maxrgb as i64);
         assert!(diff.abs() <= 1, "uniform frame: max ≈ avg, diff={diff}");
     }
 }

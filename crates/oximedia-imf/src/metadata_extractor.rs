@@ -50,7 +50,10 @@ impl PackageMetadata {
     #[must_use]
     pub fn to_json(&self) -> String {
         let mut s = String::from("{\n");
-        s.push_str(&format!("  \"packagePath\": {},\n", jstr(&self.package_path)));
+        s.push_str(&format!(
+            "  \"packagePath\": {},\n",
+            jstr(&self.package_path)
+        ));
         if let Some(ref id) = self.package_id {
             s.push_str(&format!("  \"packageId\": {},\n", jstr(id)));
         }
@@ -63,13 +66,19 @@ impl PackageMetadata {
         s.push_str(&format!("  \"cplCount\": {},\n", self.cpl_count));
         s.push_str(&format!("  \"pklCount\": {},\n", self.pkl_count));
         s.push_str(&format!("  \"mxfCount\": {},\n", self.mxf_count));
-        s.push_str(&format!("  \"totalSizeBytes\": {},\n", self.total_size_bytes));
+        s.push_str(&format!(
+            "  \"totalSizeBytes\": {},\n",
+            self.total_size_bytes
+        ));
         s.push_str("  \"assets\": [\n");
         for (i, a) in self.assets.iter().enumerate() {
             let comma = if i + 1 < self.assets.len() { "," } else { "" };
             s.push_str(&format!(
                 "    {{\"filename\": {}, \"extension\": {}, \"sizeBytes\": {}}}{}\n",
-                jstr(&a.filename), jstr(&a.extension), a.size_bytes, comma
+                jstr(&a.filename),
+                jstr(&a.extension),
+                a.size_bytes,
+                comma
             ));
         }
         s.push_str("  ]\n}\n");
@@ -79,7 +88,10 @@ impl PackageMetadata {
     #[must_use]
     pub fn to_xml(&self) -> String {
         let mut s = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<PackageMetadata>\n");
-        s.push_str(&format!("  <PackagePath>{}</PackagePath>\n", xe(&self.package_path)));
+        s.push_str(&format!(
+            "  <PackagePath>{}</PackagePath>\n",
+            xe(&self.package_path)
+        ));
         if let Some(ref id) = self.package_id {
             s.push_str(&format!("  <PackageId>{}</PackageId>\n", xe(id)));
         }
@@ -92,12 +104,17 @@ impl PackageMetadata {
         s.push_str(&format!("  <CplCount>{}</CplCount>\n", self.cpl_count));
         s.push_str(&format!("  <PklCount>{}</PklCount>\n", self.pkl_count));
         s.push_str(&format!("  <MxfCount>{}</MxfCount>\n", self.mxf_count));
-        s.push_str(&format!("  <TotalSizeBytes>{}</TotalSizeBytes>\n", self.total_size_bytes));
+        s.push_str(&format!(
+            "  <TotalSizeBytes>{}</TotalSizeBytes>\n",
+            self.total_size_bytes
+        ));
         s.push_str("  <Assets>\n");
         for a in &self.assets {
             s.push_str(&format!(
                 "    <Asset filename=\"{}\" extension=\"{}\" sizeBytes=\"{}\"/>\n",
-                xa(&a.filename), xa(&a.extension), a.size_bytes
+                xa(&a.filename),
+                xa(&a.extension),
+                a.size_bytes
             ));
         }
         s.push_str("  </Assets>\n</PackageMetadata>\n");
@@ -131,7 +148,8 @@ impl MetadataExtractor {
         let pkg_path = pkg_path.as_ref();
         if !pkg_path.exists() || !pkg_path.is_dir() {
             return Err(ImfError::InvalidPackage(format!(
-                "Not a valid directory: {}", pkg_path.display()
+                "Not a valid directory: {}",
+                pkg_path.display()
             )));
         }
 
@@ -152,23 +170,40 @@ impl MetadataExtractor {
         let entries = std::fs::read_dir(pkg_path).map_err(|e| ImfError::Other(e.to_string()))?;
         for entry in entries.flatten() {
             let fp = entry.path();
-            if !fp.is_file() { continue; }
-            let filename = fp.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            let extension = fp.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+            if !fp.is_file() {
+                continue;
+            }
+            let filename = fp
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let extension = fp
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
             let size_bytes = fp.metadata().map(|m| m.len()).unwrap_or(0);
 
             match extension.as_str() {
                 "xml" => {
                     let upper = filename.to_uppercase();
-                    if upper.starts_with("CPL") { meta.cpl_count += 1; }
-                    else if upper.starts_with("PKL") { meta.pkl_count += 1; }
+                    if upper.starts_with("CPL") {
+                        meta.cpl_count += 1;
+                    } else if upper.starts_with("PKL") {
+                        meta.pkl_count += 1;
+                    }
                 }
-                "mxf" => { meta.mxf_count += 1; }
+                "mxf" => {
+                    meta.mxf_count += 1;
+                }
                 _ => {}
             }
 
             meta.total_size_bytes += size_bytes;
-            meta.assets.push(AssetMeta { filename, size_bytes, extension });
+            meta.assets.push(AssetMeta {
+                filename,
+                size_bytes,
+                extension,
+            });
         }
 
         meta.assets.sort_by(|a, b| a.filename.cmp(&b.filename));
@@ -180,9 +215,13 @@ fn jstr(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 fn xe(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
-fn xa(s: &str) -> String { xe(s).replace('"', "&quot;") }
+fn xa(s: &str) -> String {
+    xe(s).replace('"', "&quot;")
+}
 
 fn extract_attr(xml: &str, key: &str) -> Option<String> {
     let pat = format!("{key}=\"");
@@ -198,8 +237,11 @@ mod tests {
     fn make_pkg(suffix: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("oximedia_me_{suffix}"));
         std::fs::create_dir_all(&dir).ok();
-        std::fs::write(dir.join("ASSETMAP.xml"),
-            r#"<AssetMap Id="urn:uuid:abc123" Creator="Suite" IssueDate="2024-01-01"/>"#).ok();
+        std::fs::write(
+            dir.join("ASSETMAP.xml"),
+            r#"<AssetMap Id="urn:uuid:abc123" Creator="Suite" IssueDate="2024-01-01"/>"#,
+        )
+        .ok();
         std::fs::write(dir.join("PKL_001.xml"), b"<PackingList/>").ok();
         std::fs::write(dir.join("CPL_001.xml"), b"<CompositionPlaylist/>").ok();
         std::fs::write(dir.join("video.mxf"), b"fake mxf").ok();

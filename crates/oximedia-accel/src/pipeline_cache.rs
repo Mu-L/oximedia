@@ -270,7 +270,7 @@ impl PipelineCache {
         let count_bytes: [u8; 4] = data
             .get(pos..pos + 4)
             .and_then(|s| s.try_into().ok())
-            .ok_or_else(|| AccelError::BufferSizeMismatch {
+            .ok_or(AccelError::BufferSizeMismatch {
                 expected: 4,
                 actual: data.len(),
             })?;
@@ -350,7 +350,9 @@ mod tests {
     fn test_pipeline_cache_insert_and_get() {
         let mut cache = PipelineCache::new(10);
         let desc = make_desc("scale");
-        cache.insert(desc.clone(), make_blob(1)).expect("insert should succeed");
+        cache
+            .insert(desc.clone(), make_blob(1))
+            .expect("insert should succeed");
         let entry = cache.get(&desc).expect("entry should exist");
         assert_eq!(entry.blob[0], 1);
     }
@@ -367,7 +369,9 @@ mod tests {
     fn test_pipeline_cache_hit_count() {
         let mut cache = PipelineCache::new(10);
         let desc = make_desc("scale");
-        cache.insert(desc.clone(), make_blob(7)).expect("insert should succeed");
+        cache
+            .insert(desc.clone(), make_blob(7))
+            .expect("insert should succeed");
         cache.get(&desc);
         cache.get(&desc);
         let stats = cache.stats();
@@ -393,7 +397,9 @@ mod tests {
     fn test_pipeline_cache_remove() {
         let mut cache = PipelineCache::new(10);
         let desc = make_desc("scale");
-        cache.insert(desc.clone(), make_blob(1)).expect("insert should succeed");
+        cache
+            .insert(desc.clone(), make_blob(1))
+            .expect("insert should succeed");
         assert!(cache.remove(&desc));
         assert!(!cache.remove(&desc)); // double-remove returns false
         assert!(cache.is_empty());
@@ -402,8 +408,12 @@ mod tests {
     #[test]
     fn test_pipeline_cache_clear() {
         let mut cache = PipelineCache::new(10);
-        cache.insert(make_desc("a"), make_blob(1)).expect("insert a");
-        cache.insert(make_desc("b"), make_blob(2)).expect("insert b");
+        cache
+            .insert(make_desc("a"), make_blob(1))
+            .expect("insert a");
+        cache
+            .insert(make_desc("b"), make_blob(2))
+            .expect("insert b");
         cache.clear();
         assert!(cache.is_empty());
         assert_eq!(cache.stats().total_blob_bytes, 0);
@@ -420,8 +430,12 @@ mod tests {
     #[test]
     fn test_pipeline_cache_export_import_roundtrip() {
         let mut cache = PipelineCache::new(10);
-        cache.insert(make_desc("s1"), make_blob(0xAA)).expect("insert s1");
-        cache.insert(make_desc("s2"), make_blob(0xBB)).expect("insert s2");
+        cache
+            .insert(make_desc("s1"), make_blob(0xAA))
+            .expect("insert s1");
+        cache
+            .insert(make_desc("s2"), make_blob(0xBB))
+            .expect("insert s2");
 
         let blob = cache.export().expect("export should succeed");
 

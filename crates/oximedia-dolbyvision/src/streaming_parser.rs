@@ -4,7 +4,7 @@
 //! bytes and emits complete [`DolbyVisionRpu`] objects as they become available,
 //! without requiring the caller to buffer entire frames in advance.
 
-use crate::{parser, DolbyVisionError, DolbyVisionRpu, Result};
+use crate::{parser, DolbyVisionError, DolbyVisionRpu};
 
 /// State machine for the streaming NAL unit parser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,7 +125,7 @@ impl StreamingRpuParser {
 
     /// Flush any buffered NAL unit data as a final RPU.
     ///
-    /// Call this after the last [`push`] to emit any RPU whose NAL unit was
+    /// Call this after the last `push` to emit any RPU whose NAL unit was
     /// not yet terminated by a subsequent start code.
     pub fn flush(&mut self) {
         if !self.buffer.is_empty() {

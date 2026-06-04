@@ -49,7 +49,11 @@ impl FrequencyBand {
     /// Create a new frequency band.
     #[must_use]
     pub fn new(low_hz: f64, high_hz: f64, label: impl Into<String>) -> Self {
-        Self { low_hz, high_hz, label: label.into() }
+        Self {
+            low_hz,
+            high_hz,
+            label: label.into(),
+        }
     }
 }
 
@@ -246,11 +250,8 @@ impl SpectralAnalyzer {
         let centroid_hz = spectral_centroid(&magnitudes, &self.bin_freqs);
         let spread_hz = spectral_spread(&magnitudes, &self.bin_freqs, centroid_hz);
         let flatness = spectral_flatness(&magnitudes);
-        let rolloff_hz = spectral_rolloff(
-            &magnitudes,
-            &self.bin_freqs,
-            self.config.rolloff_threshold,
-        );
+        let rolloff_hz =
+            spectral_rolloff(&magnitudes, &self.bin_freqs, self.config.rolloff_threshold);
         let spectral_rms = spectral_rms_value(&magnitudes);
         let band_rms = compute_band_rms(&magnitudes, &self.bin_freqs, &self.config.bands);
 
@@ -331,7 +332,11 @@ fn compute_magnitudes(windowed: &[f64]) -> Vec<f64> {
 fn spectral_centroid(mags: &[f64], freqs: &[f64]) -> f64 {
     let num: f64 = mags.iter().zip(freqs).map(|(m, f)| m * f).sum();
     let den: f64 = mags.iter().sum();
-    if den > 1e-12 { num / den } else { 0.0 }
+    if den > 1e-12 {
+        num / den
+    } else {
+        0.0
+    }
 }
 
 /// Spectral spread (standard deviation around centroid).
@@ -398,11 +403,7 @@ fn spectral_rms_value(mags: &[f64]) -> f64 {
 }
 
 /// Per-band RMS from magnitude spectrum.
-fn compute_band_rms(
-    mags: &[f64],
-    freqs: &[f64],
-    bands: &[FrequencyBand],
-) -> Vec<BandRms> {
+fn compute_band_rms(mags: &[f64], freqs: &[f64], bands: &[FrequencyBand]) -> Vec<BandRms> {
     bands
         .iter()
         .map(|band| {
@@ -478,10 +479,8 @@ mod tests {
     #[test]
     fn test_sine_centroid_near_frequency() {
         // 1 kHz sine at 48 kHz → centroid should be close to 1000 Hz.
-        let mut analyzer = SpectralAnalyzer::new(
-            SpectralAnalysisConfig::new(48_000, 2048, 1024),
-        )
-        .expect("valid");
+        let mut analyzer =
+            SpectralAnalyzer::new(SpectralAnalysisConfig::new(48_000, 2048, 1024)).expect("valid");
         let freq_hz = 1_000.0_f32;
         let sr = 48_000.0_f32;
         let samples: Vec<f32> = (0..2048)

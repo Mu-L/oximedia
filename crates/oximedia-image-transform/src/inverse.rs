@@ -73,11 +73,7 @@ pub fn invert_transform(m: &TransformMatrix) -> Option<TransformMatrix> {
     let itx = -(ia * tx + ib * ty);
     let ity = -(ic * tx + id * ty);
 
-    Some(TransformMatrix([
-        ia, ib, itx,
-        ic, id, ity,
-        0.0, 0.0, 1.0,
-    ]))
+    Some(TransformMatrix([ia, ib, itx, ic, id, ity, 0.0, 0.0, 1.0]))
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +109,11 @@ mod tests {
         let m = TransformMatrix::identity();
         let inv = invert_transform(&m).expect("identity is invertible");
         let product = compose_transforms(&m, &inv);
-        assert!(is_identity(&product), "I * I⁻¹ should be I, got {:?}", product);
+        assert!(
+            is_identity(&product),
+            "I * I⁻¹ should be I, got {:?}",
+            product
+        );
     }
 
     #[test]

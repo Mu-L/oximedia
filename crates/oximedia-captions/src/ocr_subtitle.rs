@@ -165,8 +165,7 @@ impl BitmapRegion {
         let binary = self.binarise(threshold);
         (0..self.height)
             .map(|row| {
-                binary[row as usize * self.width as usize
-                    ..(row + 1) as usize * self.width as usize]
+                binary[row as usize * self.width as usize..(row + 1) as usize * self.width as usize]
                     .iter()
                     .map(|&p| u32::from(p / 255))
                     .sum()
@@ -210,8 +209,16 @@ pub fn connected_components(
             if binary[idx(col, row)] != foreground {
                 continue;
             }
-            let top = if row > 0 { labels[idx(col, row - 1)] } else { 0 };
-            let left = if col > 0 { labels[idx(col - 1, row)] } else { 0 };
+            let top = if row > 0 {
+                labels[idx(col, row - 1)]
+            } else {
+                0
+            };
+            let left = if col > 0 {
+                labels[idx(col - 1, row)]
+            } else {
+                0
+            };
 
             let label = match (top != 0, left != 0) {
                 (false, false) => {
@@ -255,11 +262,13 @@ pub fn connected_components(
 
     let mut components: Vec<ConnectedComponent> = bboxes
         .into_iter()
-        .map(|(label, (min_x, min_y, max_x, max_y, count))| ConnectedComponent {
-            label,
-            bbox: BoundingBox::new(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1),
-            pixel_count: count,
-        })
+        .map(
+            |(label, (min_x, min_y, max_x, max_y, count))| ConnectedComponent {
+                label,
+                bbox: BoundingBox::new(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1),
+                pixel_count: count,
+            },
+        )
         .collect();
     components.sort_by_key(|c| (c.bbox.y, c.bbox.x));
     components
@@ -434,8 +443,7 @@ impl OcrEngine {
     #[must_use]
     pub fn process(&self, region: &BitmapRegion) -> OcrResult {
         let binary = region.binarise(self.config.binarise_threshold);
-        let mut components =
-            connected_components(&binary, region.width, region.height, 255);
+        let mut components = connected_components(&binary, region.width, region.height, 255);
 
         // Filter by area
         components.retain(|c| {
@@ -454,7 +462,11 @@ impl OcrEngine {
             let min_x = line_comps.iter().map(|c| c.bbox.x).min().unwrap_or(0);
             let min_y = line_comps.iter().map(|c| c.bbox.y).min().unwrap_or(0);
             let max_x = line_comps.iter().map(|c| c.bbox.right()).max().unwrap_or(0);
-            let max_y = line_comps.iter().map(|c| c.bbox.bottom()).max().unwrap_or(0);
+            let max_y = line_comps
+                .iter()
+                .map(|c| c.bbox.bottom())
+                .max()
+                .unwrap_or(0);
             let bbox = BoundingBox::new(min_x, min_y, max_x - min_x, max_y - min_y);
 
             // Placeholder character recognition: map each component to '█' or use
@@ -558,11 +570,8 @@ impl OcrEngine {
         // Consistent heights → likely real text
         let heights: Vec<f32> = comps.iter().map(|c| c.bbox.height as f32).collect();
         let mean_h = heights.iter().sum::<f32>() / heights.len() as f32;
-        let variance = heights
-            .iter()
-            .map(|h| (h - mean_h).powi(2))
-            .sum::<f32>()
-            / heights.len() as f32;
+        let variance =
+            heights.iter().map(|h| (h - mean_h).powi(2)).sum::<f32>() / heights.len() as f32;
         let std_dev = variance.sqrt();
         let cv = if mean_h > 0.0 { std_dev / mean_h } else { 1.0 };
         // Lower coefficient of variation → higher confidence
@@ -765,7 +774,14 @@ mod tests {
         let config = OcrConfig::default();
         let regions = vec![
             BitmapRegion::new(4, 4, vec![0u8; 16], BitmapSubtitleFormat::Pgs, 0, 1000),
-            BitmapRegion::new(4, 4, vec![0u8; 16], BitmapSubtitleFormat::VobSub, 1000, 1000),
+            BitmapRegion::new(
+                4,
+                4,
+                vec![0u8; 16],
+                BitmapSubtitleFormat::VobSub,
+                1000,
+                1000,
+            ),
         ];
         let results = process_batch(&regions, &config);
         assert_eq!(results.len(), 2);

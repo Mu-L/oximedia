@@ -172,8 +172,7 @@ pub fn surround71_to_51(audio_71: &[f32]) -> Result<Vec<f32>, String> {
 
     for frame in audio_71.chunks_exact(8) {
         let (l, r, c, lfe, lss, rss, lrs, rrs) = (
-            frame[0], frame[1], frame[2], frame[3],
-            frame[4], frame[5], frame[6], frame[7],
+            frame[0], frame[1], frame[2], frame[3], frame[4], frame[5], frame[6], frame[7],
         );
         // L, R, C, LFE unchanged; fold rear surround into side surround
         out51.push(l);
@@ -238,16 +237,11 @@ pub fn fold_channels(
             surround71_to_51(input).and_then(|s51| surround51_to_stereo(&s51))
         }
 
-        (ChannelLayout::Surround71, ChannelLayout::Mono) => {
-            surround71_to_51(input)
-                .and_then(|s51| surround51_to_stereo(&s51))
-                .map(|s| stereo_to_mono(&s))
-        }
+        (ChannelLayout::Surround71, ChannelLayout::Mono) => surround71_to_51(input)
+            .and_then(|s51| surround51_to_stereo(&s51))
+            .map(|s| stereo_to_mono(&s)),
 
-        _ => Err(format!(
-            "Unsupported fold: {:?} → {:?}",
-            from, to
-        )),
+        _ => Err(format!("Unsupported fold: {:?} → {:?}", from, to)),
     }
 }
 
@@ -297,10 +291,10 @@ pub fn unfold_channels(
             for frame in input.chunks_exact(2) {
                 out.push(frame[0]); // L
                 out.push(frame[1]); // R
-                out.push(0.0);      // C
-                out.push(0.0);      // LFE
-                out.push(0.0);      // Ls
-                out.push(0.0);      // Rs
+                out.push(0.0); // C
+                out.push(0.0); // LFE
+                out.push(0.0); // Ls
+                out.push(0.0); // Rs
             }
             Ok(out)
         }
@@ -310,10 +304,7 @@ pub fn unfold_channels(
             unfold_channels(&stereo, &ChannelLayout::Stereo, &ChannelLayout::Surround51)
         }
 
-        _ => Err(format!(
-            "Unsupported unfold: {:?} → {:?}",
-            from, to
-        )),
+        _ => Err(format!("Unsupported unfold: {:?} → {:?}", from, to)),
     }
 }
 
@@ -345,7 +336,8 @@ mod tests {
             let r = stereo[i * 2 + 1];
             assert!(
                 (l - mono[i]).abs() < 1e-6 && (r - mono[i]).abs() < 1e-6,
-                "frame {i}: L={l}, R={r}, mono={}", mono[i]
+                "frame {i}: L={l}, R={r}, mono={}",
+                mono[i]
             );
         }
     }
@@ -361,11 +353,13 @@ mod tests {
         let expected_r = 0.0 + K * 1.0 + K * 0.0;
         assert!(
             (stereo[0] - expected_l).abs() < 1e-5,
-            "L' expected {expected_l}, got {}", stereo[0]
+            "L' expected {expected_l}, got {}",
+            stereo[0]
         );
         assert!(
             (stereo[1] - expected_r).abs() < 1e-5,
-            "R' expected {expected_r}, got {}", stereo[1]
+            "R' expected {expected_r}, got {}",
+            stereo[1]
         );
     }
 
@@ -387,11 +381,13 @@ mod tests {
         let expected_rs = 0.3 + K * 0.2;
         assert!(
             (out[4] - expected_ls).abs() < 1e-5,
-            "Ls' expected {expected_ls}, got {}", out[4]
+            "Ls' expected {expected_ls}, got {}",
+            out[4]
         );
         assert!(
             (out[5] - expected_rs).abs() < 1e-5,
-            "Rs' expected {expected_rs}, got {}", out[5]
+            "Rs' expected {expected_rs}, got {}",
+            out[5]
         );
     }
 
@@ -418,15 +414,18 @@ mod tests {
         let out = fold_channels(&frame, &ChannelLayout::Surround51, &ChannelLayout::Stereo)
             .expect("5.1→stereo");
         assert_eq!(out.len(), 2);
-        assert!((out[0] - 1.0).abs() < 1e-5, "L' should be 1.0, got {}", out[0]);
+        assert!(
+            (out[0] - 1.0).abs() < 1e-5,
+            "L' should be 1.0, got {}",
+            out[0]
+        );
         assert!(out[1].abs() < 1e-5, "R' should be 0.0, got {}", out[1]);
     }
 
     #[test]
     fn test_unfold_channels_mono_to_stereo() {
         let mono = vec![0.7_f32];
-        let out =
-            unfold_channels(&mono, &ChannelLayout::Mono, &ChannelLayout::Stereo).expect("ok");
+        let out = unfold_channels(&mono, &ChannelLayout::Mono, &ChannelLayout::Stereo).expect("ok");
         assert_eq!(out.len(), 2);
         assert!((out[0] - 0.7).abs() < 1e-6);
         assert!((out[1] - 0.7).abs() < 1e-6);
@@ -435,9 +434,8 @@ mod tests {
     #[test]
     fn test_unfold_channels_stereo_to_51() {
         let stereo = vec![0.5_f32, 0.3];
-        let out =
-            unfold_channels(&stereo, &ChannelLayout::Stereo, &ChannelLayout::Surround51)
-                .expect("ok");
+        let out = unfold_channels(&stereo, &ChannelLayout::Stereo, &ChannelLayout::Surround51)
+            .expect("ok");
         assert_eq!(out.len(), 6);
         assert!((out[0] - 0.5).abs() < 1e-6, "L channel");
         assert!((out[1] - 0.3).abs() < 1e-6, "R channel");
@@ -450,8 +448,11 @@ mod tests {
     #[test]
     fn test_fold_channels_bad_length() {
         // 5 samples for 6-channel 5.1 → should error
-        let result =
-            fold_channels(&[0.0_f32; 5], &ChannelLayout::Surround51, &ChannelLayout::Stereo);
+        let result = fold_channels(
+            &[0.0_f32; 5],
+            &ChannelLayout::Surround51,
+            &ChannelLayout::Stereo,
+        );
         assert!(result.is_err(), "Odd length should produce an error");
     }
 

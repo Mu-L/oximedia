@@ -92,8 +92,7 @@ impl FieldDataType {
                 // Require at minimum the date portion
                 let date_part = value.split('T').next().unwrap_or("");
                 let parts: Vec<&str> = date_part.splitn(3, '-').collect();
-                parts.len() == 3
-                    && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
+                parts.len() == 3 && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
             }
             Self::Uri => value.contains("://") && !value.is_empty(),
             Self::Email => value.contains('@') && value.contains('.'),
@@ -145,20 +144,16 @@ impl FieldConstraint {
     /// Returns a `String` describing the violated constraint.
     pub fn check(&self, field_name: &str, value: Option<&str>) -> Result<(), String> {
         match self {
-            Self::Required => {
-                match value {
-                    None | Some("") => Err(format!("Field '{field_name}' is required")),
-                    _ => Ok(()),
+            Self::Required => match value {
+                None | Some("") => Err(format!("Field '{field_name}' is required")),
+                _ => Ok(()),
+            },
+            Self::NotBlank => match value {
+                Some(v) if v.trim().is_empty() => {
+                    Err(format!("Field '{field_name}' must not be blank"))
                 }
-            }
-            Self::NotBlank => {
-                match value {
-                    Some(v) if v.trim().is_empty() => {
-                        Err(format!("Field '{field_name}' must not be blank"))
-                    }
-                    _ => Ok(()),
-                }
-            }
+                _ => Ok(()),
+            },
             Self::MinLength(min) => {
                 if let Some(v) = value {
                     if v.len() < *min {
@@ -185,9 +180,7 @@ impl FieldConstraint {
                 if let Some(v) = value {
                     if let Ok(n) = v.trim().parse::<f64>() {
                         if n < *min {
-                            return Err(format!(
-                                "Field '{field_name}' must be ≥ {min} (got {n})"
-                            ));
+                            return Err(format!("Field '{field_name}' must be ≥ {min} (got {n})"));
                         }
                     }
                 }
@@ -197,9 +190,7 @@ impl FieldConstraint {
                 if let Some(v) = value {
                     if let Ok(n) = v.trim().parse::<f64>() {
                         if n > *max {
-                            return Err(format!(
-                                "Field '{field_name}' must be ≤ {max} (got {n})"
-                            ));
+                            return Err(format!("Field '{field_name}' must be ≤ {max} (got {n})"));
                         }
                     }
                 }
@@ -250,7 +241,11 @@ pub struct FieldSchema {
 impl FieldSchema {
     /// Create a new field schema.
     #[must_use]
-    pub fn new(name: impl Into<String>, label: impl Into<String>, data_type: FieldDataType) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        label: impl Into<String>,
+        data_type: FieldDataType,
+    ) -> Self {
         Self {
             name: name.into(),
             label: label.into(),
@@ -379,11 +374,7 @@ pub struct MetadataSchema {
 impl MetadataSchema {
     /// Create a new empty schema.
     #[must_use]
-    pub fn new(
-        name: impl Into<String>,
-        label: impl Into<String>,
-        created_by: Uuid,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, label: impl Into<String>, created_by: Uuid) -> Self {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
@@ -399,7 +390,12 @@ impl MetadataSchema {
     }
 
     /// Add or replace a field definition.  Bumps the schema version.
-    pub fn upsert_field(&mut self, field: FieldSchema, changed_by: Uuid, summary: impl Into<String>) {
+    pub fn upsert_field(
+        &mut self,
+        field: FieldSchema,
+        changed_by: Uuid,
+        summary: impl Into<String>,
+    ) {
         self.fields.insert(field.name.clone(), field);
         self.current_version += 1;
         self.version_history.push(SchemaVersion::new(
@@ -410,7 +406,12 @@ impl MetadataSchema {
     }
 
     /// Remove a field by name.  Returns `true` if the field existed.
-    pub fn remove_field(&mut self, field_name: &str, changed_by: Uuid, summary: impl Into<String>) -> bool {
+    pub fn remove_field(
+        &mut self,
+        field_name: &str,
+        changed_by: Uuid,
+        summary: impl Into<String>,
+    ) -> bool {
         let removed = self.fields.remove(field_name).is_some();
         if removed {
             self.current_version += 1;
@@ -472,7 +473,10 @@ impl MetadataSchema {
             }
         }
 
-        ValidationResult { errors, unknown_fields: unknown }
+        ValidationResult {
+            errors,
+            unknown_fields: unknown,
+        }
     }
 }
 
@@ -698,7 +702,9 @@ mod tests {
         metadata.insert("surprise_field".into(), "value".into());
 
         let result = schema.validate(&metadata);
-        assert!(result.unknown_fields.contains(&"surprise_field".to_string()));
+        assert!(result
+            .unknown_fields
+            .contains(&"surprise_field".to_string()));
     }
 
     #[test]

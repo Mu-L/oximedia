@@ -56,13 +56,31 @@ impl WorkItem {
     /// Creates a new `WorkItem`.
     #[must_use]
     pub fn new(id: u64, kind: WorkItemKind, width: u32, height: u32) -> Self {
-        Self { id, kind, width, height, priority: 0 }
+        Self {
+            id,
+            kind,
+            width,
+            height,
+            priority: 0,
+        }
     }
 
     /// Creates a new `WorkItem` with an explicit priority.
     #[must_use]
-    pub fn with_priority(id: u64, kind: WorkItemKind, width: u32, height: u32, priority: u8) -> Self {
-        Self { id, kind, width, height, priority }
+    pub fn with_priority(
+        id: u64,
+        kind: WorkItemKind,
+        width: u32,
+        height: u32,
+        priority: u8,
+    ) -> Self {
+        Self {
+            id,
+            kind,
+            width,
+            height,
+            priority,
+        }
     }
 
     /// Estimates the number of cycles required to process this work item.
@@ -239,7 +257,7 @@ mod tests {
     fn test_batch_total_cycles() {
         let mut batch = WorkItemBatch::new();
         batch.add(make_item(1, WorkItemKind::Transfer, 10, 10)); // 200
-        batch.add(make_item(2, WorkItemKind::Compute, 10, 10));  // 800
+        batch.add(make_item(2, WorkItemKind::Compute, 10, 10)); // 800
         assert_eq!(batch.total_cycles(), 1000);
     }
 

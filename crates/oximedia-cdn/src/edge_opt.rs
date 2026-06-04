@@ -1,7 +1,7 @@
 //! Edge bandwidth optimisation — select the most appropriate format for a
 //! given client bitrate.
 //!
-//! [`EdgeBandwidthOptimizer`] accepts a client's measured downlink bandwidth
+//! `EdgeBandwidthOptimizer` accepts a client's measured downlink bandwidth
 //! and a list of `(format_name, required_bitrate_kbps)` pairs, then returns
 //! the name of the best format the client can receive without buffering.
 

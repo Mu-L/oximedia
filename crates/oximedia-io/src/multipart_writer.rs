@@ -284,10 +284,7 @@ impl MultipartWriter {
             .temp_dir
             .clone()
             .unwrap_or_else(std::env::temp_dir);
-        let temp_path = temp_dir.join(format!(
-            "oximedia_mpart_{}.bin",
-            id
-        ));
+        let temp_path = temp_dir.join(format!("oximedia_mpart_{}.bin", id));
 
         let mut file = std::fs::File::create(&temp_path)?;
         file.write_all(data)?;
@@ -334,7 +331,10 @@ impl MultipartWriter {
     /// # Errors
     ///
     /// Returns an error if any part is not complete, or if assembly fails.
-    pub fn finalize(&mut self, destination: impl AsRef<Path>) -> MultipartWriterResult<MultipartResult> {
+    pub fn finalize(
+        &mut self,
+        destination: impl AsRef<Path>,
+    ) -> MultipartWriterResult<MultipartResult> {
         if !self.all_parts_complete() {
             return Err(MultipartError::Assembly(
                 "not all parts are complete".to_string(),
@@ -349,9 +349,8 @@ impl MultipartWriter {
         for (id, info) in &self.parts {
             etags.push(info.etag.clone());
             if let Some(temp_path) = self.temp_paths.get(id) {
-                let chunk = std::fs::read(temp_path).map_err(|e| {
-                    MultipartError::Assembly(format!("reading part {id}: {e}"))
-                })?;
+                let chunk = std::fs::read(temp_path)
+                    .map_err(|e| MultipartError::Assembly(format!("reading part {id}: {e}")))?;
                 out.write_all(&chunk)?;
                 total_bytes += chunk.len() as u64;
             }

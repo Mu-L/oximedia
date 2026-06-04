@@ -151,9 +151,7 @@ impl SceneSearchBridge {
                     .to_string();
 
                 SearchResultItem {
-                    asset_id: meta
-                        .and_then(|m| m.asset_id)
-                        .unwrap_or_else(Uuid::new_v4),
+                    asset_id: meta.and_then(|m| m.asset_id).unwrap_or_else(Uuid::new_v4),
                     score: r.confidence,
                     title: meta.and_then(|m| m.title.clone()),
                     description: Some(format!(
@@ -275,7 +273,11 @@ mod tests {
         );
         bridge.add_scene(
             "doc3".to_string(),
-            vec!["car".to_string(), "person".to_string(), "outdoor".to_string()],
+            vec![
+                "car".to_string(),
+                "person".to_string(),
+                "outdoor".to_string(),
+            ],
         );
         bridge
     }
@@ -341,7 +343,10 @@ mod tests {
         let items = bridge.search(&filter);
         assert_eq!(items.len(), 1);
         let desc = items[0].description.as_deref().unwrap_or("");
-        assert!(desc.contains("sofa"), "description should mention matched label");
+        assert!(
+            desc.contains("sofa"),
+            "description should mention matched label"
+        );
     }
 
     // ── Metadata enrichment ───────────────────────────────────────────────

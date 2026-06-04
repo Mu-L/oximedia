@@ -6,7 +6,7 @@ Professional video-over-IP protocol for OxiMedia — a patent-free alternative t
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.7 — 2026-05-16 — 623 tests
+Version: 0.1.8 — 2026-05-29 — 623 tests
 
 ## Features
 
@@ -53,7 +53,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-videoip = "0.1.7"
+oximedia-videoip = "0.1.8"
 ```
 
 ### Broadcasting a Video Stream

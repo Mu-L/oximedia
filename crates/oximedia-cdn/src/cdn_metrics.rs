@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 // ─── CdnMetrics ───────────────────────────────────────────────────────────────
 
@@ -422,6 +422,108 @@ impl Default for MetricsRegistry {
     }
 }
 
+// ─── Per-content-type CDN metrics ────────────────────────────────────────────
+
+/// Broad content category for per-type CDN metrics breakdown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ContentCategory {
+    /// Video segments, MP4, MPEG-TS, etc.
+    Video,
+    /// Audio-only segments, MP3, AAC, Opus, etc.
+    Audio,
+    /// Image assets (JPEG, PNG, WebP, AVIF, …).
+    Image,
+    /// HLS/DASH manifest files (.m3u8, .mpd).
+    Manifest,
+    /// Anything that does not fit the above categories.
+    Other,
+}
+
+/// Aggregate metrics for a single [`ContentCategory`].
+///
+/// All counters are plain `u64` (no atomics) — the owning
+/// [`ContentTypeMetricsStore`] guards concurrent access with an `RwLock`.
+#[derive(Debug, Default, Clone)]
+pub struct ContentTypeMetrics {
+    /// Number of cache hits for this category.
+    pub hits: u64,
+    /// Number of cache misses for this category.
+    pub misses: u64,
+    /// Total bytes served for this category.
+    pub bytes_served: u64,
+    /// Running sum of time-to-first-byte values (ms) — divide by
+    /// `hits + misses` to obtain the mean.
+    pub ttfb_sum_ms: f64,
+    /// Number of TTFB samples included in `ttfb_sum_ms`.
+    pub ttfb_count: u64,
+}
+
+impl ContentTypeMetrics {
+    /// Average TTFB in milliseconds, or `0.0` when no samples exist.
+    pub fn avg_ttfb_ms(&self) -> f64 {
+        if self.ttfb_count == 0 {
+            0.0
+        } else {
+            self.ttfb_sum_ms / self.ttfb_count as f64
+        }
+    }
+}
+
+/// Thread-safe store for per-[`ContentCategory`] CDN metrics.
+///
+/// An `RwLock<HashMap<…>>` is used so that multiple readers can access
+/// aggregate statistics concurrently while writes are serialised.
+#[derive(Debug, Default)]
+pub struct ContentTypeMetricsStore {
+    inner: RwLock<HashMap<ContentCategory, ContentTypeMetrics>>,
+}
+
+impl ContentTypeMetricsStore {
+    /// Create an empty store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a CDN request for the given content category.
+    ///
+    /// - `hit` — `true` for a cache hit, `false` for a miss.
+    /// - `bytes` — bytes delivered to the client.
+    /// - `ttfb_ms` — time to first byte in milliseconds.
+    pub fn record_request(&self, category: ContentCategory, hit: bool, bytes: u64, ttfb_ms: f64) {
+        if let Ok(mut guard) = self.inner.write() {
+            let entry = guard.entry(category).or_default();
+            if hit {
+                entry.hits += 1;
+            } else {
+                entry.misses += 1;
+            }
+            entry.bytes_served += bytes;
+            entry.ttfb_sum_ms += ttfb_ms;
+            entry.ttfb_count += 1;
+        }
+    }
+
+    /// Return a clone of the metrics for a specific category, or a zeroed
+    /// [`ContentTypeMetrics`] if no requests have been recorded yet.
+    pub fn get(&self, category: ContentCategory) -> ContentTypeMetrics {
+        self.inner
+            .read()
+            .ok()
+            .and_then(|g| g.get(&category).cloned())
+            .unwrap_or_default()
+    }
+
+    /// Return a snapshot of all categories that have recorded at least one
+    /// request.
+    pub fn snapshot(&self) -> HashMap<ContentCategory, ContentTypeMetrics> {
+        self.inner
+            .read()
+            .ok()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -669,5 +771,68 @@ mod tests {
             errors: 0,
         };
         assert!((snap.total_bandwidth_gb() - 2.0).abs() < 1e-9);
+    }
+
+    // ── ContentTypeMetricsStore ───────────────────────────────────────────────
+
+    // 21. record_request tracks hits and misses per category
+    #[test]
+    fn test_content_type_record_request_hit_miss() {
+        let store = ContentTypeMetricsStore::new();
+        store.record_request(ContentCategory::Video, true, 1_000_000, 20.0);
+        store.record_request(ContentCategory::Video, false, 500_000, 80.0);
+        let m = store.get(ContentCategory::Video);
+        assert_eq!(m.hits, 1);
+        assert_eq!(m.misses, 1);
+        assert_eq!(m.bytes_served, 1_500_000);
+    }
+
+    // 22. avg_ttfb_ms computes running average correctly
+    #[test]
+    fn test_content_type_avg_ttfb() {
+        let store = ContentTypeMetricsStore::new();
+        store.record_request(ContentCategory::Audio, true, 0, 10.0);
+        store.record_request(ContentCategory::Audio, true, 0, 20.0);
+        store.record_request(ContentCategory::Audio, false, 0, 30.0);
+        let m = store.get(ContentCategory::Audio);
+        // avg = (10 + 20 + 30) / 3 = 20.0
+        assert!(
+            (m.avg_ttfb_ms() - 20.0).abs() < 1e-9,
+            "avg={}",
+            m.avg_ttfb_ms()
+        );
+    }
+
+    // 23. Multiple categories are tracked independently
+    #[test]
+    fn test_content_type_multiple_categories() {
+        let store = ContentTypeMetricsStore::new();
+        store.record_request(ContentCategory::Image, true, 50_000, 5.0);
+        store.record_request(ContentCategory::Manifest, false, 1_200, 3.0);
+        let img = store.get(ContentCategory::Image);
+        let mfst = store.get(ContentCategory::Manifest);
+        assert_eq!(img.hits, 1);
+        assert_eq!(img.misses, 0);
+        assert_eq!(mfst.hits, 0);
+        assert_eq!(mfst.misses, 1);
+    }
+
+    // 24. snapshot returns all recorded categories
+    #[test]
+    fn test_content_type_snapshot() {
+        let store = ContentTypeMetricsStore::new();
+        store.record_request(ContentCategory::Video, true, 0, 0.0);
+        store.record_request(ContentCategory::Other, false, 0, 0.0);
+        let snap = store.snapshot();
+        assert!(snap.contains_key(&ContentCategory::Video));
+        assert!(snap.contains_key(&ContentCategory::Other));
+        assert!(!snap.contains_key(&ContentCategory::Audio));
+    }
+
+    // 25. Zero avg_ttfb_ms for untouched category
+    #[test]
+    fn test_content_type_zero_avg_ttfb_empty() {
+        let m = ContentTypeMetrics::default();
+        assert!((m.avg_ttfb_ms() - 0.0).abs() < 1e-15);
     }
 }

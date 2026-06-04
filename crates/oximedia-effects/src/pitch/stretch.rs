@@ -46,6 +46,8 @@ impl TimeStretcher {
 }
 
 impl AudioEffect for TimeStretcher {
+    const EFFECT_ID: &'static str = "time_stretcher";
+
     fn process_sample(&mut self, input: f32) -> f32 {
         self.delay.write(input);
 

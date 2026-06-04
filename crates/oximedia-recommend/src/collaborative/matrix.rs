@@ -215,6 +215,11 @@ pub struct LatentFactorModel {
     total_ratings: u64,
     /// Running sum of all ratings (for incremental mean)
     rating_sum: f64,
+    /// Precomputed per-user embedding cache (user_idx → factor row).
+    ///
+    /// Populated by [`LatentFactorModel::precompute_user_embeddings`] and
+    /// cleared whenever the model is retrained.
+    user_embedding_cache: Option<HashMap<usize, Vec<f32>>>,
 }
 
 impl LatentFactorModel {
@@ -229,7 +234,105 @@ impl LatentFactorModel {
             item_bias: Vec::new(),
             total_ratings: 0,
             rating_sum: 0.0,
+            user_embedding_cache: None,
         }
+    }
+
+    /// Number of users currently tracked by this model.
+    #[must_use]
+    pub fn num_users(&self) -> usize {
+        self.user_factors.nrows()
+    }
+
+    /// Number of items currently tracked by this model.
+    #[must_use]
+    pub fn num_items(&self) -> usize {
+        self.item_factors.nrows()
+    }
+
+    /// Extract the embedding (factor row) for a user.
+    #[must_use]
+    fn user_factors_row(&self, user_idx: usize) -> Vec<f32> {
+        self.user_factors.row_vec(user_idx)
+    }
+
+    /// Extract the embedding (factor row) for an item.
+    #[must_use]
+    fn item_factors_row(&self, item_idx: usize) -> Vec<f32> {
+        self.item_factors.row_vec(item_idx)
+    }
+
+    /// Precompute and cache every user's embedding row.
+    ///
+    /// After calling this, [`Self::recommend_precomputed`] can serve
+    /// top-k recommendations with a single cache lookup + dot products.
+    /// The cache is invalidated automatically when the model is retrained
+    /// (see [`CollaborativeEngine::retrain`]).
+    pub fn precompute_user_embeddings(&mut self) {
+        let mut cache = HashMap::with_capacity(self.user_factors.nrows());
+        for user_idx in 0..self.user_factors.nrows() {
+            cache.insert(user_idx, self.user_factors_row(user_idx));
+        }
+        self.user_embedding_cache = Some(cache);
+    }
+
+    /// Recommend the top-`top_k` item indices for a user using the precomputed
+    /// embedding cache.
+    ///
+    /// Returns an empty vec if `user_idx` is not in the cache.
+    ///
+    /// # Errors (panics)
+    ///
+    /// Panics with a clear message if [`Self::precompute_user_embeddings`] has
+    /// not been called yet — this is an explicit programming-model violation
+    /// rather than a runtime error that callers are expected to handle silently.
+    #[must_use]
+    pub fn recommend_precomputed(&self, user_idx: usize, top_k: usize) -> Vec<usize> {
+        let cache = self
+            .user_embedding_cache
+            .as_ref()
+            .expect("call precompute_user_embeddings() before recommend_precomputed()");
+
+        let user_vec = match cache.get(&user_idx) {
+            Some(v) => v,
+            None => return vec![],
+        };
+
+        let num_items = self.item_factors.nrows();
+        let mut scores: Vec<(usize, f32)> = (0..num_items)
+            .map(|item_idx| {
+                let item_vec = self.item_factors_row(item_idx);
+                let dot: f32 = user_vec
+                    .iter()
+                    .zip(item_vec.iter())
+                    .map(|(a, b)| a * b)
+                    .sum();
+                let bu = self.user_bias.get(user_idx).copied().unwrap_or(0.0);
+                let bi = self.item_bias.get(item_idx).copied().unwrap_or(0.0);
+                let score = self.global_mean + bu + bi + dot;
+                (item_idx, score)
+            })
+            .collect();
+
+        scores.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal));
+        scores.into_iter().take(top_k).map(|(i, _)| i).collect()
+    }
+
+    /// Recommend top-`top_k` items for `user_idx` using the on-demand (non-cached) path.
+    ///
+    /// This is equivalent to [`Self::recommend_precomputed`] but always re-reads from
+    /// the factor matrices.  Use it to cross-validate the cache.
+    #[must_use]
+    pub fn recommend_on_demand(&self, user_idx: usize, top_k: usize) -> Vec<usize> {
+        if user_idx >= self.user_factors.nrows() {
+            return vec![];
+        }
+        let num_items = self.item_factors.nrows();
+        let mut scores: Vec<(usize, f32)> = (0..num_items)
+            .map(|item_idx| (item_idx, self.predict(user_idx, item_idx)))
+            .collect();
+        scores.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal));
+        scores.into_iter().take(top_k).map(|(i, _)| i).collect()
     }
 
     /// Ensure user row exists, expanding factors if needed.
@@ -439,6 +542,7 @@ impl CollaborativeEngine {
 
         let num_factors = self.mf_config.num_factors;
         self.factor_model = LatentFactorModel::new(num_factors);
+        // Cache is implicitly cleared by replacing the entire model above.
 
         // Collect all non-zero ratings
         let mut observations: Vec<(usize, usize, f32)> = Vec::new();
@@ -745,5 +849,93 @@ mod tests {
 
         assert_eq!(engine.matrix.get_rating(u, i1), Some(5.0));
         assert_eq!(engine.matrix.get_rating(u, i2), Some(2.0));
+    }
+
+    // ---- Precomputed embedding tests ----
+
+    /// Build a small engine trained on 3 users × 4 items.
+    fn build_small_engine() -> CollaborativeEngine {
+        let config = IncrementalMfConfig {
+            num_factors: 4,
+            learning_rate: 0.05,
+            regularization: 0.01,
+            update_iterations: 1,
+        };
+        let mut engine = CollaborativeEngine::with_mf_config(config);
+
+        let u0 = Uuid::from_u128(0x1000);
+        let u1 = Uuid::from_u128(0x2000);
+        let u2 = Uuid::from_u128(0x3000);
+        let i0 = Uuid::from_u128(0xA000);
+        let i1 = Uuid::from_u128(0xB000);
+        let i2 = Uuid::from_u128(0xC000);
+        let i3 = Uuid::from_u128(0xD000);
+
+        engine.matrix.set_rating(u0, i0, 5.0);
+        engine.matrix.set_rating(u0, i1, 3.0);
+        engine.matrix.set_rating(u1, i1, 4.0);
+        engine.matrix.set_rating(u1, i2, 2.0);
+        engine.matrix.set_rating(u2, i0, 1.0);
+        engine.matrix.set_rating(u2, i3, 5.0);
+
+        engine
+            .retrain(30)
+            .expect("retrain must not fail on non-empty matrix");
+        engine
+    }
+
+    #[test]
+    fn test_precomputed_recommend_matches_on_demand() {
+        let mut engine = build_small_engine();
+        let model = &mut engine.factor_model;
+
+        // Ensure there is at least one user to query.
+        if model.num_users() == 0 {
+            return;
+        }
+
+        model.precompute_user_embeddings();
+
+        // Compare top-3 recommendations from both paths for every user.
+        let num_users = model.num_users();
+        for user_idx in 0..num_users {
+            let precomputed = model.recommend_precomputed(user_idx, 3);
+            let on_demand = model.recommend_on_demand(user_idx, 3);
+            assert_eq!(
+                precomputed, on_demand,
+                "precomputed and on-demand must agree for user {user_idx}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cache_invalidated_after_refit() {
+        let mut engine = build_small_engine();
+
+        // Precompute embeddings so the cache is populated.
+        engine.factor_model.precompute_user_embeddings();
+        assert!(
+            engine.factor_model.user_embedding_cache.is_some(),
+            "cache must be Some after precompute"
+        );
+
+        // Retrain — this replaces the whole LatentFactorModel, clearing the cache.
+        engine
+            .retrain(5)
+            .expect("retrain should succeed on non-empty matrix");
+        assert!(
+            engine.factor_model.user_embedding_cache.is_none(),
+            "cache must be None after retrain"
+        );
+    }
+
+    #[test]
+    fn test_precompute_returns_empty_for_unknown_user() {
+        let mut engine = build_small_engine();
+        engine.factor_model.precompute_user_embeddings();
+
+        // user index 9999 is well outside any trained range.
+        let result = engine.factor_model.recommend_precomputed(9999, 5);
+        assert!(result.is_empty(), "unknown user should return empty vec");
     }
 }

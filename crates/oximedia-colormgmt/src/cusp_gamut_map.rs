@@ -203,7 +203,11 @@ impl CuspMapper {
         let c_compressed = compress_chroma(c_in, c_boundary, self.threshold, self.rolloff);
 
         // Also compress lightness toward cusp proportionally
-        let compress_ratio = if c_in > 1e-9 { c_compressed / c_in } else { 1.0 };
+        let compress_ratio = if c_in > 1e-9 {
+            c_compressed / c_in
+        } else {
+            1.0
+        };
         let j_compressed = j_in + (1.0 - compress_ratio) * (cusp.j_cusp - j_in) * 0.5;
 
         let mut app_out = app.clone();
@@ -522,10 +526,7 @@ mod tests {
         // c_in well within safe zone
         let c_in = 30.0; // 30/50 = 0.6 < 0.8
         let result = compress_chroma(c_in, c_boundary, threshold, rolloff);
-        assert!(
-            (result - c_in).abs() < 1e-9,
-            "in-gamut should be unchanged"
-        );
+        assert!((result - c_in).abs() < 1e-9, "in-gamut should be unchanged");
     }
 
     #[test]

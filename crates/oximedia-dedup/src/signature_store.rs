@@ -493,9 +493,8 @@ mod tests {
 
     #[test]
     fn test_expired_entry_not_returned() {
-        let mut store = SignatureStore::with_config(
-            StoreConfig::default().with_ttl(Duration::from_millis(0)),
-        );
+        let mut store =
+            SignatureStore::with_config(StoreConfig::default().with_ttl(Duration::from_millis(0)));
         store.insert("expired".to_string(), vec![1], 100);
         // With 0ms TTL, the entry should be expired immediately (or within the test)
         // We use a sleep-free approach: the TTL is 0, so elapsed > 0 => expired

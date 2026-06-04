@@ -179,9 +179,7 @@ impl FarmMetrics {
     #[must_use]
     pub fn max(&self, metric_name: &str, window_secs: u64, now_secs: u64) -> Option<f64> {
         let pts = self.window_points(metric_name, window_secs, now_secs);
-        pts.iter()
-            .map(|p| p.value)
-            .reduce(f64::max)
+        pts.iter().map(|p| p.value).reduce(f64::max)
     }
 
     /// Return the minimum observation within the trailing `window_secs`-second
@@ -191,9 +189,7 @@ impl FarmMetrics {
     #[must_use]
     pub fn min(&self, metric_name: &str, window_secs: u64, now_secs: u64) -> Option<f64> {
         let pts = self.window_points(metric_name, window_secs, now_secs);
-        pts.iter()
-            .map(|p| p.value)
-            .reduce(f64::min)
+        pts.iter().map(|p| p.value).reduce(f64::min)
     }
 
     /// Count the number of observations within the trailing `window_secs`-second
@@ -284,7 +280,8 @@ impl FarmMetrics {
             .average(METRIC_WORKER_UTILIZATION, window_secs, now_secs)
             .unwrap_or(0.0);
 
-        let efficiency_pct = ((1.0 - avg_failure_rate) * avg_utilization * 100.0).clamp(0.0, 100.0) as f32;
+        let efficiency_pct =
+            ((1.0 - avg_failure_rate) * avg_utilization * 100.0).clamp(0.0, 100.0) as f32;
 
         FarmReport {
             generated_at_secs: now_secs,
@@ -382,7 +379,7 @@ mod tests {
         fm.record(pt(1, METRIC_TASKS_PER_SECOND, 5.0));
         fm.record(pt(5, METRIC_TASKS_PER_SECOND, 12.0));
         fm.record(pt(3, METRIC_TASKS_PER_SECOND, 8.0)); // out-of-order insert
-        // After sort, latest is ts=5 → 12.0
+                                                        // After sort, latest is ts=5 → 12.0
         assert_eq!(fm.latest(METRIC_TASKS_PER_SECOND), Some(12.0));
     }
 
@@ -397,7 +394,10 @@ mod tests {
         // now=90, window=50 → points at ts 40,50,60,70,80,90 → values 4,5,6,7,8,9
         let avg = fm.average(METRIC_QUEUE_DEPTH, 50, 90).expect("some");
         let expected = (4.0 + 5.0 + 6.0 + 7.0 + 8.0 + 9.0) / 6.0;
-        assert!((avg - expected).abs() < 1e-9, "avg={avg} expected={expected}");
+        assert!(
+            (avg - expected).abs() < 1e-9,
+            "avg={avg} expected={expected}"
+        );
     }
 
     #[test]
@@ -495,7 +495,11 @@ mod tests {
 
         // Record 5 task durations (each task completion emits one point).
         for i in 0..5u64 {
-            fm.record(pt(now - 50 + i * 10, METRIC_TASK_DURATION_SECS, 10.0 + i as f64));
+            fm.record(pt(
+                now - 50 + i * 10,
+                METRIC_TASK_DURATION_SECS,
+                10.0 + i as f64,
+            ));
         }
 
         // Record worker utilization.
@@ -513,8 +517,12 @@ mod tests {
         assert_eq!(report.total_tasks_failed, 0);
         assert!((report.avg_task_duration_secs - 12.0).abs() < 1e-9);
         assert_eq!(report.peak_workers_used, 0); // max(0.8,0.6,0.7) → floor to 0
-        // efficiency = (1-0) * avg(0.8,0.6,0.7) * 100 = 70
-        assert!((report.efficiency_pct - 70.0).abs() < 0.01, "eff={}", report.efficiency_pct);
+                                                 // efficiency = (1-0) * avg(0.8,0.6,0.7) * 100 = 70
+        assert!(
+            (report.efficiency_pct - 70.0).abs() < 0.01,
+            "eff={}",
+            report.efficiency_pct
+        );
     }
 
     #[test]
@@ -532,8 +540,12 @@ mod tests {
 
         assert_eq!(report.total_tasks_completed, 10);
         assert_eq!(report.total_tasks_failed, 2); // 10 * 0.2
-        // efficiency = (1-0.2) * 0.5 * 100 = 40
-        assert!((report.efficiency_pct - 40.0).abs() < 0.01, "eff={}", report.efficiency_pct);
+                                                  // efficiency = (1-0.2) * 0.5 * 100 = 40
+        assert!(
+            (report.efficiency_pct - 40.0).abs() < 0.01,
+            "eff={}",
+            report.efficiency_pct
+        );
     }
 
     #[test]
@@ -565,9 +577,9 @@ mod tests {
     fn test_windowed_query_exact_boundary() {
         let mut fm = FarmMetrics::new();
         // Points at ts exactly on the boundary.
-        fm.record(pt(50, METRIC_QUEUE_DEPTH, 1.0));  // cutoff = 50
+        fm.record(pt(50, METRIC_QUEUE_DEPTH, 1.0)); // cutoff = 50
         fm.record(pt(100, METRIC_QUEUE_DEPTH, 2.0)); // now = 100
-        // window=50, now=100 → cutoff=50 → both points included
+                                                     // window=50, now=100 → cutoff=50 → both points included
         let avg = fm.average(METRIC_QUEUE_DEPTH, 50, 100).expect("some");
         assert!((avg - 1.5).abs() < 1e-9, "avg={avg}");
     }

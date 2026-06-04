@@ -60,7 +60,9 @@ pub fn normalize_cache_key(url: &str) -> String {
         let after_host_start = after_scheme + 3;
         let after_host = &path_lower[after_host_start..];
         // Root path: the only '/' is the very first character of the path.
-        after_host.find('/').map_or(false, |p| after_host[p..].len() == 1)
+        after_host
+            .find('/')
+            .map_or(false, |p| after_host[p..].len() == 1)
     } else {
         path_lower == "/"
     };

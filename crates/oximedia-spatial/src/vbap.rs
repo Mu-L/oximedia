@@ -1273,6 +1273,123 @@ mod tests {
         assert!(!panner.triplets.is_empty());
     }
 
+    // ── VBAP gain matrix cache tests ─────────────────────────────────────────
+    //
+    // The triangulation (Delaunay) and inverse matrices are computed once at
+    // construction time and cached in `VbapPanner3d::triplets` and
+    // `VbapPanner3d::matrices`.  The `pan()` method only reads these fields;
+    // it never re-triangulates.  The tests below verify:
+    //
+    //   1. Reproducibility  — two identical `pan()` calls give bitwise-equal output.
+    //   2. Correctness       — cached result equals the result from a freshly-built
+    //                          panner (i.e. re-triangulating from scratch gives the same gains).
+
+    #[test]
+    fn test_vbap_cache_reproducible_2d() {
+        // Two calls to `pan()` with the same azimuth on a 2D panner must give
+        // identical results (no mutable state in `pan()`).
+        let panner = VbapPanner::new(five_speaker_ring()).expect("ok");
+
+        for az in [0.0_f32, 30.0, 75.0, 110.0, 180.0, 260.0, 315.0] {
+            let g1 = panner.pan(az);
+            let g2 = panner.pan(az);
+            assert_eq!(
+                g1, g2,
+                "2D pan({az}) should be bitwise reproducible: {g1:?} vs {g2:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_vbap_cache_reproducible_3d() {
+        // Two calls to `pan()` with the same (az, el) on a 3D panner must give
+        // identical results.
+        let panner = VbapPanner3d::new(build_cube_speakers()).expect("ok");
+
+        let test_positions = [
+            (0.0_f32, 0.0_f32),
+            (45.0, 20.0),
+            (135.0, -15.0),
+            (270.0, 35.0),
+            (310.0, -30.0),
+        ];
+        for (az, el) in test_positions {
+            let g1 = panner.pan(az, el);
+            let g2 = panner.pan(az, el);
+            assert_eq!(g1, g2, "3D pan({az},{el}) should be bitwise reproducible");
+        }
+    }
+
+    #[test]
+    fn test_vbap_cache_correct_2d_vs_fresh_panner() {
+        // The gains from the cached panner must match those from a fresh panner
+        // built with identical speaker data.  Verifies that the cached matrices
+        // produce the same result as re-computing them.
+        let speakers = five_speaker_ring();
+        let panner_a = VbapPanner::new(speakers.clone()).expect("ok");
+        let panner_b = VbapPanner::new(speakers).expect("ok");
+
+        for az in (0..360).step_by(5).map(|i| i as f32) {
+            let ga = panner_a.pan(az);
+            let gb = panner_b.pan(az);
+            for (i, (&a, &b)) in ga.iter().zip(gb.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() < 1e-6,
+                    "2D cache correct: az={az}, spk={i}: a={a}, b={b}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_vbap_cache_correct_3d_vs_fresh_panner() {
+        // Same correctness test for the 3D panner.
+        let speakers = irregular_speakers();
+        let panner_a = VbapPanner3d::new(speakers.clone()).expect("ok");
+        let panner_b = VbapPanner3d::new(speakers).expect("ok");
+
+        let test_positions: Vec<(f32, f32)> = (0..100)
+            .map(|i| {
+                let az = (i as f32 * 3.6) % 360.0;
+                let el = ((i as f32 * 1.8).sin() * 30.0) as f32;
+                (az, el)
+            })
+            .collect();
+
+        for (az, el) in &test_positions {
+            let ga = panner_a.pan(*az, *el);
+            let gb = panner_b.pan(*az, *el);
+            for (i, (&a, &b)) in ga.iter().zip(gb.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() < 1e-6,
+                    "3D cache correct: az={az}, el={el}, spk={i}: a={a}, b={b}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_vbap_cache_matrices_pre_computed_at_construction() {
+        // The panner's matrices field must be non-empty after construction,
+        // confirming that pre-computation happened at `new()` time.
+        let panner_2d = VbapPanner::new(five_speaker_ring()).expect("ok");
+        assert!(
+            !panner_2d.matrices.is_empty(),
+            "2D panner matrices must be pre-computed at construction"
+        );
+
+        let panner_3d = VbapPanner3d::new(build_cube_speakers()).expect("ok");
+        assert!(
+            !panner_3d.matrices.is_empty(),
+            "3D panner matrices must be pre-computed at construction"
+        );
+        assert_eq!(
+            panner_3d.triplets.len(),
+            panner_3d.matrices.len(),
+            "Number of triplets must equal number of cached inverse matrices"
+        );
+    }
+
     #[test]
     fn test_spherical_delaunay_basic() {
         // Four points forming a tetrahedron — should produce some triangles.

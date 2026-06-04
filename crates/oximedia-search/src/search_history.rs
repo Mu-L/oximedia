@@ -84,10 +84,7 @@ impl SearchHistory {
         qs.avg_results = (prev_total + entry.result_count as f64) / qs.count as f64;
 
         // Store in per-user list.
-        self.entries
-            .entry(entry.user_id)
-            .or_default()
-            .push(entry);
+        self.entries.entry(entry.user_id).or_default().push(entry);
     }
 
     /// Return the N most recent queries for a given user (newest first).
@@ -118,7 +115,11 @@ impl SearchHistory {
             .filter(|(k, _)| k.starts_with(&lower))
             .collect();
         results.sort_by(|a, b| b.1.count.cmp(&a.1.count));
-        results.into_iter().take(limit).map(|(k, _)| k.clone()).collect()
+        results
+            .into_iter()
+            .take(limit)
+            .map(|(k, _)| k.clone())
+            .collect()
     }
 
     /// Return the top-N most-executed queries globally.

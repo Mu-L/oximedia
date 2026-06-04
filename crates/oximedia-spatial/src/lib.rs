@@ -51,16 +51,35 @@ pub enum SpatialError {
 
 // ─── Modules ──────────────────────────────────────────────────────────────────
 
+pub mod acoustic_raytracer;
+pub mod adm_bwf;
 pub mod ambisonics;
+pub mod ambisonics_rotation;
 pub mod binaural;
 pub mod binauralizer;
+pub mod cross_talk_cancellation;
 pub mod dbap;
+pub mod distance_attenuation;
+pub mod doppler;
 pub mod head_tracking;
 pub mod hoa_decoder;
+pub mod imu_fusion;
+pub mod loudness_map;
+pub mod near_field;
+pub mod near_field_compensation;
 pub mod object_audio;
+pub mod occlusion;
+pub mod partitioned_convolution;
 pub mod reverb;
+pub mod reverb_tail_analyzer;
 pub mod room_simulation;
 pub mod spatial_audio_format;
+pub mod spatial_capture;
+pub mod speaker_placement;
 pub mod vbap;
 pub mod wave_field;
 pub mod zone_control;
+
+// ─── Re-exports ───────────────────────────────────────────────────────────────
+
+pub use head_tracking::{cached_rotation_matrix, compute_rotation_matrix};

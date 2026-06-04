@@ -13,9 +13,9 @@
 - [x] Extend `optimization.rs` with automatic filter fusion (merge adjacent compatible nodes) (verified 2026-05-16; src/optimization.rs:225 NodeFusionPass)
 - [x] Add backpressure mechanism to `data_flow.rs` to prevent memory exhaustion on slow sinks (verified 2026-05-16; src/data_flow.rs:120 BackpressurePolicy enum, coordinator:138)
 - [x] Implement frame format negotiation between connected ports in `port.rs` (verified 2026-05-16; src/port.rs:47 PortFormat enum with Video/Audio/Data variants)
-- [ ] Add dynamic graph reconfiguration (hot-swap nodes) without rebuilding the entire graph (verified-open 2026-05-16: no hot_swap or dynamic reconfiguration in graph sources)
-- [ ] Extend `graph_stats.rs` with latency histograms per node and per edge (verified-open 2026-05-16: no latency histogram in graph_stats.rs)
-- [ ] Add error recovery / retry semantics to `processing_graph.rs` for transient failures (verified-open 2026-05-16: no retry/error recovery in processing_graph.rs)
+- [x] Add dynamic graph reconfiguration (hot-swap nodes) without rebuilding the entire graph (hot_swap.rs done)
+- [x] Extend `graph_stats.rs` with latency histograms per node and per edge (LatencyHistogram 32 log₂ buckets, O(1) record; 2026-05-30)
+- [x] Add error recovery / retry semantics to `processing_graph.rs` for transient failures (RetryPolicy exponential backoff, TransientError trait; 2026-05-30)
 - [x] Implement `node_cache.rs` with LRU eviction policy and configurable cache size limits (verified 2026-05-16; src/node_cache.rs:115 NodeCache, lru fn:144)
 - [x] Add graph snapshot/restore for checkpoint-based processing in `serialize.rs` (verified 2026-05-16; src/graph_evaluator.rs:405 GraphStatsSnapshot)
 
@@ -31,11 +31,11 @@
 - [x] Implement async graph execution mode using tokio tasks for I/O-bound source/sink nodes (verified 2026-05-16; src/async_exec.rs:65 AsyncExecutor with tokio tasks)
 
 ## Performance
-- [ ] Add SIMD-accelerated frame copy in `frame.rs` for large video buffers
-- [ ] Implement zero-copy frame passing between compatible adjacent nodes
-- [ ] Add memory pool pre-allocation in `FramePool` based on graph topology analysis
-- [ ] Profile and optimize `topological.rs` sort for large graphs (>1000 nodes)
-- [ ] Add lock-free ring buffers for inter-node frame passing in `port_buffer.rs`
+- [x] Add SIMD-accelerated frame copy in `frame.rs` for large video buffers (AVX2 auto-vectorization; 2026-05-30)
+- [x] Implement zero-copy frame passing between compatible adjacent nodes (SharedFrame done)
+- [x] Add memory pool pre-allocation in `FramePool` based on graph topology analysis (FramePoolConfig done)
+- [x] Profile and optimize `topological.rs` sort for large graphs (>1000 nodes) (FastTopoSorter done)
+- [x] Add lock-free ring buffers for inter-node frame passing in `port_buffer.rs` (SpscRingBuffer; AtomicUsize head/tail; lock_free_ring.rs 287L; 2026-05-30)
 
 ## Testing
 - [ ] Add integration tests for complex multi-branch graph topologies (diamond, fan-out/fan-in)

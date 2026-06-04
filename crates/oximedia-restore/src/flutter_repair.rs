@@ -4,6 +4,99 @@
 //! (6–100 Hz) variations.  Both create pitch modulation that degrades
 //! perceived quality.  This module provides detection via short-time
 //! autocorrelation and correction via time-domain resampling.
+//!
+//! This module also provides pilot-tone (bias-tone) detection via FFT-based
+//! peak finding in the 3–4 kHz range, allowing automatic reference frequency
+//! determination for wow/flutter correction.
+
+use oxifft::Complex;
+
+// ---------------------------------------------------------------------------
+// Pilot-tone detection
+// ---------------------------------------------------------------------------
+
+/// Detect the dominant pilot-tone (bias-tone) frequency in the range 3–4 kHz.
+///
+/// Returns the detected frequency in Hz, or `None` if no sustained narrow-band
+/// peak is found above the noise floor.
+///
+/// A typical analog tape recorder uses a pilot tone (or "bias tone") in the
+/// 3–4 kHz range to allow servo-based wow/flutter measurement.  This function
+/// locates the strongest narrow peak in that range and checks its prominence
+/// above the local spectral mean.
+///
+/// # Arguments
+///
+/// * `samples`     - Mono audio samples (at least 4096 samples required).
+/// * `sample_rate` - Sample rate in Hz.
+///
+/// # Returns
+///
+/// The estimated pilot-tone frequency in Hz, or `None` if no prominent peak
+/// is found.
+#[must_use]
+pub fn detect_pilot_tone(samples: &[f32], sample_rate: u32) -> Option<f32> {
+    if samples.len() < 4096 {
+        return None;
+    }
+
+    // Choose FFT size: largest power-of-two up to 65536.
+    let n = samples.len().next_power_of_two().min(65_536);
+    // Use a Hann-windowed slice for spectral leakage reduction.
+    let window_len = n.min(samples.len());
+
+    let input: Vec<Complex<f32>> = (0..window_len)
+        .map(|i| {
+            // Hann window
+            let w = 0.5_f32
+                * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (window_len - 1) as f32).cos());
+            Complex::new(samples[i] * w, 0.0)
+        })
+        .chain((window_len..n).map(|_| Complex::new(0.0_f32, 0.0_f32)))
+        .collect();
+
+    let fft_out = oxifft::fft(&input);
+
+    // Only the positive-frequency bins are meaningful (0 .. n/2).
+    let bin_width = sample_rate as f64 / n as f64;
+    let lo_bin = (3000.0 / bin_width) as usize;
+    let hi_bin = ((4000.0 / bin_width) as usize).min(fft_out.len() / 2);
+
+    if lo_bin >= hi_bin {
+        return None;
+    }
+
+    // Find the peak magnitude bin in [lo_bin, hi_bin).
+    let (peak_rel_idx, peak_mag) = fft_out[lo_bin..hi_bin]
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let mag = ((c.re as f64).powi(2) + (c.im as f64).powi(2)).sqrt() as f32;
+            (i, mag)
+        })
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
+
+    let peak_bin = lo_bin + peak_rel_idx;
+
+    // Compute local mean magnitude in the 3–4 kHz band.
+    let local_mean: f32 = fft_out[lo_bin..hi_bin]
+        .iter()
+        .map(|c| ((c.re as f64).powi(2) + (c.im as f64).powi(2)).sqrt() as f32)
+        .sum::<f32>()
+        / (hi_bin - lo_bin) as f32;
+
+    // The peak must be at least 10× the local mean to qualify as a sustained
+    // narrow-band pilot tone (filters out broadband noise).
+    if local_mean < f32::EPSILON || peak_mag < local_mean * 10.0 {
+        return None;
+    }
+
+    Some(peak_bin as f32 * bin_width as f32)
+}
+
+// ---------------------------------------------------------------------------
+// Core data types
+// ---------------------------------------------------------------------------
 
 /// Measures of wow and flutter for a recording.
 #[derive(Debug, Clone)]
@@ -198,6 +291,85 @@ mod tests {
         (0..n)
             .map(|i| (2.0 * PI * freq_hz * i as f32 / sr).sin())
             .collect()
+    }
+
+    // -------------------------------------------------------------------
+    // Pilot-tone detection tests
+    // -------------------------------------------------------------------
+
+    /// A pure 3150 Hz sine wave in mild white noise must return ~3150 Hz (±10 Hz).
+    #[test]
+    fn test_detect_pilot_tone_pure_sine() {
+        use rand::RngExt;
+        let sr = 44100_u32;
+        // 65536 samples guarantees bin width < 1 Hz → fine resolution
+        let n = 65536_usize;
+        let mut signal = sine(3150.0, sr, n);
+
+        // Add mild white noise at amplitude 0.01 (SNR ≈ 40 dB vs unit sine)
+        let mut rng = rand::rng();
+        for s in signal.iter_mut() {
+            *s += rng.random_range(-0.01_f32..0.01_f32);
+        }
+
+        let detected = detect_pilot_tone(&signal, sr);
+        assert!(
+            detected.is_some(),
+            "should detect pilot tone in 3150 Hz + noise signal"
+        );
+        let freq = detected.expect("checked above");
+        assert!(
+            (freq - 3150.0).abs() < 10.0,
+            "detected {freq} Hz, expected 3150 Hz ± 10 Hz"
+        );
+    }
+
+    /// Broadband white noise has no dominant narrow peak → `None`.
+    #[test]
+    fn test_detect_pilot_tone_no_peak() {
+        use rand::RngExt;
+        let sr = 44100_u32;
+        let n = 65536_usize;
+        let mut rng = rand::rng();
+        let noise: Vec<f32> = (0..n)
+            .map(|_| rng.random_range(-1.0_f32..1.0_f32))
+            .collect();
+
+        let result = detect_pilot_tone(&noise, sr);
+        assert!(
+            result.is_none(),
+            "broadband noise should not trigger pilot-tone detection"
+        );
+    }
+
+    /// Auto-detecting on a 3150 Hz pilot signal should return roughly the same
+    /// reference frequency as manually passing 3150.0.
+    #[test]
+    fn test_wow_corrector_auto_detect_matches_manual() {
+        use rand::RngExt;
+        let sr = 44100_u32;
+        let n = 65536_usize;
+        let mut signal = sine(3150.0, sr, n);
+        let mut rng = rand::rng();
+        for s in signal.iter_mut() {
+            *s += rng.random_range(-0.01_f32..0.01_f32);
+        }
+
+        let manual_ref = 3150.0_f32;
+        let auto_ref = detect_pilot_tone(&signal, sr).expect("auto-detect must find 3150 Hz pilot");
+
+        // Both references must agree within 10 Hz.
+        assert!(
+            (auto_ref - manual_ref).abs() < 10.0,
+            "auto={auto_ref} Hz, manual={manual_ref} Hz — should agree within 10 Hz"
+        );
+    }
+
+    /// Input shorter than 4096 samples returns `None`.
+    #[test]
+    fn test_detect_pilot_tone_too_short() {
+        let samples = sine(3150.0, 44100, 100);
+        assert!(detect_pilot_tone(&samples, 44100).is_none());
     }
 
     #[test]

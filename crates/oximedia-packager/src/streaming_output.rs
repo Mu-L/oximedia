@@ -216,7 +216,11 @@ impl SegmentStream {
 
                 // Non-fatal: log and continue if the write fails.
                 if let Err(e) = write_segment_to_disk(&path, &data, pre_alloc).await {
-                    tracing::warn!("SegmentStream: failed to write segment to {:?}: {}", path, e);
+                    tracing::warn!(
+                        "SegmentStream: failed to write segment to {:?}: {}",
+                        path,
+                        e
+                    );
                 }
             }
         }
@@ -244,6 +248,44 @@ impl SegmentStream {
     pub fn segments_received(&self) -> u64 {
         self.segments_received
     }
+}
+
+// ---------------------------------------------------------------------------
+// File pre-allocation helper (public API)
+// ---------------------------------------------------------------------------
+
+/// Pre-allocate `expected_bytes` of disk space at `path` using [`std::fs::File::set_len`].
+///
+/// Pre-allocation reduces filesystem fragmentation for large segment files by
+/// reserving a contiguous extent before write.  The operation is best-effort:
+/// on platforms or filesystems where `set_len` does not guarantee physical
+/// pre-allocation the call still succeeds, and callers must never rely on the
+/// file containing valid data at those offsets before writing.
+///
+/// The function creates the file (truncating any existing content) and then
+/// sets the file length.  The file is closed immediately; callers open it
+/// independently for writing.
+///
+/// # Errors
+///
+/// Returns `Err` if the file cannot be created or `set_len` fails.  Callers
+/// should treat this as a soft failure — fall back to writing without
+/// pre-allocation.
+pub fn pre_allocate_file(path: &std::path::Path, expected_bytes: u64) -> std::io::Result<()> {
+    use std::fs::OpenOptions;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)?;
+
+    file.set_len(expected_bytes)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -395,16 +437,10 @@ mod tests {
         let (_stream, tx) = SegmentStream::new(config);
 
         // With depth 2, both sends should succeed.
-        assert!(tx
-            .try_send(ProducedSegment::media(0, vec![], 0.0))
-            .is_ok());
-        assert!(tx
-            .try_send(ProducedSegment::media(1, vec![], 0.0))
-            .is_ok());
+        assert!(tx.try_send(ProducedSegment::media(0, vec![], 0.0)).is_ok());
+        assert!(tx.try_send(ProducedSegment::media(1, vec![], 0.0)).is_ok());
         // Third send should fail (full).
-        assert!(tx
-            .try_send(ProducedSegment::media(2, vec![], 0.0))
-            .is_err());
+        assert!(tx.try_send(ProducedSegment::media(2, vec![], 0.0)).is_err());
     }
 
     #[tokio::test]
@@ -436,5 +472,80 @@ mod tests {
 
         // Cleanup.
         let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // pre_allocate_file tests
+    // -----------------------------------------------------------------------
+
+    /// Pre-allocating a new file must create it with the correct size.
+    #[test]
+    fn test_pre_allocate_file_creates_correct_size() {
+        let path =
+            std::env::temp_dir().join(format!("oximedia_prealloc_{}.bin", std::process::id()));
+
+        let expected = 4096u64;
+        pre_allocate_file(&path, expected).expect("pre_allocate_file must succeed");
+
+        let meta = std::fs::metadata(&path).expect("file must exist after pre-allocation");
+        assert_eq!(
+            meta.len(),
+            expected,
+            "pre-allocated file must have the requested size"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Pre-allocating with size 0 is valid — creates an empty file.
+    #[test]
+    fn test_pre_allocate_file_zero_size() {
+        let path =
+            std::env::temp_dir().join(format!("oximedia_prealloc_zero_{}.bin", std::process::id()));
+
+        pre_allocate_file(&path, 0).expect("pre_allocate_file with size 0 must succeed");
+
+        let meta = std::fs::metadata(&path).expect("file must exist");
+        assert_eq!(meta.len(), 0);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Pre-allocating over an existing file must truncate it to the new size.
+    #[test]
+    fn test_pre_allocate_file_truncates_existing() {
+        let path = std::env::temp_dir().join(format!(
+            "oximedia_prealloc_trunc_{}.bin",
+            std::process::id()
+        ));
+
+        // Write some initial data (larger than the new allocation).
+        std::fs::write(&path, vec![0xABu8; 8192]).expect("write initial data");
+
+        // Pre-allocate to a smaller size — must truncate.
+        pre_allocate_file(&path, 1024).expect("pre_allocate_file truncate must succeed");
+
+        let meta = std::fs::metadata(&path).expect("file must exist");
+        assert_eq!(meta.len(), 1024, "file must be truncated to 1024 bytes");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Pre-allocating inside a non-existent parent directory must create the
+    /// parent first, then pre-allocate the file.
+    #[test]
+    fn test_pre_allocate_file_creates_parent_dir() {
+        let dir =
+            std::env::temp_dir().join(format!("oximedia_prealloc_dir_{}", std::process::id()));
+        let path = dir.join("segment.ts");
+
+        pre_allocate_file(&path, 512).expect("pre_allocate_file must create parent dir");
+
+        assert!(dir.exists(), "parent directory must be created");
+        let meta = std::fs::metadata(&path).expect("file must exist");
+        assert_eq!(meta.len(), 512);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
     }
 }

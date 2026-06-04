@@ -299,6 +299,8 @@ impl LookaheadLimiter {
 }
 
 impl crate::AudioEffect for LookaheadLimiter {
+    const EFFECT_ID: &'static str = "dynamics_lookahead_limiter";
+
     fn process_sample(&mut self, input: f32) -> f32 {
         let processed = self.process_one(input);
         let wet = self.wet_mix;

@@ -136,6 +136,47 @@ impl<'a> BitReader<'a> {
             return Ok(0);
         }
 
+        // Fast path: byte-aligned read for multiples of 8 bits.
+        // When bit_pos == 0 the reader is on a byte boundary; if n is a
+        // multiple of 8 and enough bytes remain we can use from_be_bytes
+        // instead of iterating bit-by-bit (up to 8× fewer iterations).
+        if self.bit_pos == 0 && n % 8 == 0 {
+            let num_bytes = usize::from(n / 8);
+            if self.byte_pos + num_bytes <= self.data.len() {
+                let slice = &self.data[self.byte_pos..self.byte_pos + num_bytes];
+                let value = match num_bytes {
+                    1 => u64::from(slice[0]),
+                    2 => {
+                        let arr: [u8; 2] = [slice[0], slice[1]];
+                        u64::from(u16::from_be_bytes(arr))
+                    }
+                    4 => {
+                        let arr: [u8; 4] = [slice[0], slice[1], slice[2], slice[3]];
+                        u64::from(u32::from_be_bytes(arr))
+                    }
+                    8 => {
+                        let arr: [u8; 8] = [
+                            slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6],
+                            slice[7],
+                        ];
+                        u64::from_be_bytes(arr)
+                    }
+                    // For other multiples-of-8 (3, 5, 6, 7 bytes) use a
+                    // loop over whole bytes — still avoids per-bit branching.
+                    _ => {
+                        let mut v = 0u64;
+                        for &byte in slice {
+                            v = (v << 8) | u64::from(byte);
+                        }
+                        v
+                    }
+                };
+                self.byte_pos += num_bytes;
+                return Ok(value);
+            }
+        }
+
+        // Slow path: unaligned or non-multiple-of-8 — bit-by-bit loop.
         let mut value = 0u64;
         for _ in 0..n {
             value = (value << 1) | u64::from(self.read_bit()?);
@@ -870,6 +911,71 @@ mod tests {
 
         let result = reader.read_bit();
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Batch extraction tests (fast-path for aligned byte-multiple reads)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_batch_read_u16_aligned() {
+        let data = [0xAB_u8, 0xCD];
+        // Fast path: read_u16 (16 bits, aligned)
+        let mut r_fast = BitReader::new(&data);
+        let fast = r_fast.read_u16().expect("read_u16 should succeed");
+
+        // Slow path reference: new reader, then bit-by-bit via read_bits
+        let mut r_slow = BitReader::new(&data);
+        let slow = r_slow.read_bits(16).expect("read_bits(16) should succeed") as u16;
+
+        assert_eq!(fast, slow);
+        assert_eq!(fast, 0xABCD);
+    }
+
+    #[test]
+    fn test_batch_read_u32_aligned() {
+        let data = [0x12_u8, 0x34, 0x56, 0x78];
+        let mut r_fast = BitReader::new(&data);
+        let fast = r_fast.read_u32().expect("read_u32 should succeed");
+
+        let mut r_slow = BitReader::new(&data);
+        let slow = r_slow.read_bits(32).expect("read_bits(32) should succeed") as u32;
+
+        assert_eq!(fast, slow);
+        assert_eq!(fast, 0x1234_5678);
+    }
+
+    #[test]
+    fn test_batch_read_u64_aligned() {
+        let data = [0x01_u8, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        let mut r_fast = BitReader::new(&data);
+        let fast = r_fast.read_u64().expect("read_u64 should succeed");
+
+        let mut r_slow = BitReader::new(&data);
+        let slow = r_slow.read_bits(64).expect("read_bits(64) should succeed");
+
+        assert_eq!(fast, slow);
+        assert_eq!(fast, 0x0102_0304_0506_0708);
+    }
+
+    #[test]
+    fn test_batch_read_unaligned_fallback() {
+        // After reading 1 bit (bit_pos=1), reading 8 bits must fall back to
+        // the slow path and produce the same result as reading two raw bits
+        // across a byte boundary.
+        let data = [0b1010_1010_u8, 0b1100_1100];
+
+        // Reference: bit-by-bit reader from scratch
+        let mut r_ref = BitReader::new(&data);
+        r_ref.read_bit().expect("skip first bit");
+        let expected = r_ref.read_bits(8).expect("read_bits(8) reference");
+
+        // Fast-path candidate (should fall through to slow path since bit_pos!=0)
+        let mut r_test = BitReader::new(&data);
+        r_test.read_bit().expect("skip first bit");
+        let actual = r_test.read_bits(8).expect("read_bits(8) fast-path");
+
+        assert_eq!(actual, expected);
     }
 
     /// Regression test for GitHub issue #15.

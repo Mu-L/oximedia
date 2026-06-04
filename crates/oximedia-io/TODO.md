@@ -35,10 +35,25 @@
 ## Performance
 - [x] Add vectored I/O (readv/writev) support to `scatter_gather.rs` for reduced syscall overhead (verified 2026-05-16; src/scatter_gather.rs:1 vectored I/O primitives, ReadVec/test_readvec:237)
 - [x] Implement direct I/O (O_DIRECT) option in `aligned_io.rs` for bypassing OS page cache (verified 2026-05-16; src/aligned_io.rs:7 O_DIRECT modeling, alignment-aware:100)
-- [ ] Add zero-copy sendfile/splice support in `copy_engine.rs` on Linux (verified-open 2026-05-16: no sendfile/splice in copy_engine.rs)
-- [ ] Optimize `BitReader` for batch bit extraction (read 32/64 bits at a time from buffer) (verified-open 2026-05-16: not yet implemented)
+- [x] Add zero-copy sendfile/splice support in `copy_engine.rs` on Linux (planned 2026-06-01)
+  - **Goal:** Add `CopyMode::ZeroCopy` that uses kernel-accelerated I/O without any new dependencies.
+  - **Design:** `src/copy_engine.rs:14` `CopyMode` enum has Buffered/Sparse/Chunked — no zero-copy path. Add `CopyMode::ZeroCopy` arm in `run()` at :120 using `std::io::copy(&mut File::open(src)?, &mut File::create(dst)?)` — on Linux std auto-selects `copy_file_range`/`sendfile` internally; portable fallback elsewhere. **No new dep — 100% Pure Rust.** (Raw `libc::splice` deferred as a feature-gated follow-up.)
+  - **Files:** `src/copy_engine.rs`, `TODO.md`.
+  - **Tests:** ZeroCopy produces byte-identical output to Buffered on a temp file (`std::env::temp_dir()`); empty-file case; `CopyMode::ZeroCopy.to_string()` roundtrip.
+  - **Risk:** none for the `std::io::copy` path — it is always safe and portable; the kernel optimization is transparent.
+- [x] Optimize `BitReader` for batch bit extraction (read 32/64 bits at a time from buffer) (planned 2026-06-01)
+  - **Goal:** Eliminate the per-bit loop in `read_bits`/`read_u16`/`read_u32`/`read_u64` to reduce iteration count from N bits to N/8 byte operations.
+  - **Design:** `src/bits/reader.rs:128` `read_bits` currently loops bit-by-bit; `read_u16/u32/u64` at :188/:210/:231 all funnel through it (64 iterations for a u64). Add a byte-aligned fast path: when `bit_pos==0` && `n%8==0` && enough bytes remain, read directly via `u32::from_be_bytes`/`u64::from_be_bytes` from `data[byte_pos..]`. For unaligned reads, refill a `u64` accumulator and shift out `n` bits at once. Preserve exact MSB-first semantics throughout.
+  - **Files:** `src/bits/reader.rs`, `TODO.md`.
+  - **Tests:** batch read == bit-by-bit read for aligned + unaligned cases, all of u16/u32/u64; edge bits at buffer boundary; keep file < 2000 lines (currently 898).
+  - **Risk:** endianness and partial-byte edge cases at buffer boundary — assert batch vs slow path on a comprehensive sweep.
 - [x] Add io_uring support as an optional backend for `async_io.rs` on Linux (verified 2026-05-16; src/async_io.rs:149 io_uring/IOCP/kqueue data structures modeled)
-- [ ] Implement double-buffered reading in `buffered_io.rs` for overlapped I/O and processing (verified-open 2026-05-16: not yet implemented)
+- [x] Implement double-buffered reading in `buffered_io.rs` for overlapped I/O and processing (planned 2026-06-01)
+  - **Goal:** Let the caller process one buffer while the background thread fills the next, eliminating I/O stalls.
+  - **Design:** `src/buffered_io.rs` (405L) has `BufferPool`/`ReadAheadBuffer`/`CoalescingWriter` but no overlapped reader. Add `DoubleBufferedReader<R: Read + Send>` owning two heap buffers; a `std::thread` fills the back buffer while the caller consumes the front, swapping via `std::sync::mpsc` channel + `Mutex`/`Condvar` (std only, no crossbeam). On EOF the background thread signals done; `read()` drains the remaining buffer then returns 0.
+  - **Files:** `src/buffered_io.rs`, `TODO.md`.
+  - **Tests:** `DoubleBufferedReader` yields the same byte stream as a plain `Read` impl; partial final buffer; empty file; buffer larger than source; thread join must not drop the last buffer.
+  - **Risk:** thread-join on drop must flush remaining bytes; test EOF mid-buffer.
 
 ## Testing
 - [ ] Add tests for `write_journal.rs` crash recovery by simulating interrupted writes

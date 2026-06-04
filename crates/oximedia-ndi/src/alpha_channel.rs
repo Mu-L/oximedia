@@ -74,13 +74,7 @@ impl AlphaFrame {
     ///
     /// `pixels` must have at least `width * height * 3` bytes (RGB).
     /// `alpha` must have exactly `width * height` bytes.
-    pub fn new(
-        width: u32,
-        height: u32,
-        pixels: Vec<u8>,
-        alpha: Vec<u8>,
-        mode: AlphaMode,
-    ) -> Self {
+    pub fn new(width: u32, height: u32, pixels: Vec<u8>, alpha: Vec<u8>, mode: AlphaMode) -> Self {
         Self {
             width,
             height,
@@ -155,10 +149,8 @@ impl AlphaFrame {
             let base = i * 3;
             if base + 2 < self.pixels.len() {
                 self.pixels[base] = (f32::from(self.pixels[base]) * inv).min(255.0) as u8;
-                self.pixels[base + 1] =
-                    (f32::from(self.pixels[base + 1]) * inv).min(255.0) as u8;
-                self.pixels[base + 2] =
-                    (f32::from(self.pixels[base + 2]) * inv).min(255.0) as u8;
+                self.pixels[base + 1] = (f32::from(self.pixels[base + 1]) * inv).min(255.0) as u8;
+                self.pixels[base + 2] = (f32::from(self.pixels[base + 2]) * inv).min(255.0) as u8;
             }
         }
         self.mode = AlphaMode::Straight;
@@ -278,13 +270,7 @@ mod tests {
 
     fn make_rgb_frame(w: u32, h: u32, fill: u8, alpha: u8) -> AlphaFrame {
         let n = (w * h) as usize;
-        AlphaFrame::new(
-            w,
-            h,
-            vec![fill; n * 3],
-            vec![alpha; n],
-            AlphaMode::Straight,
-        )
+        AlphaFrame::new(w, h, vec![fill; n * 3], vec![alpha; n], AlphaMode::Straight)
     }
 
     #[test]
@@ -348,8 +334,7 @@ mod tests {
     #[test]
     fn test_premultiply_full_alpha_no_change() {
         let orig = vec![100u8, 150, 200];
-        let mut frame =
-            AlphaFrame::new(1, 1, orig.clone(), vec![255], AlphaMode::Straight);
+        let mut frame = AlphaFrame::new(1, 1, orig.clone(), vec![255], AlphaMode::Straight);
         frame.premultiply();
         assert_eq!(frame.pixels[0], 100);
         assert_eq!(frame.pixels[1], 150);
@@ -369,8 +354,7 @@ mod tests {
     fn test_unpremultiply_roundtrip() {
         // Start with straight, premultiply, then unpremultiply — should be close to original
         let orig = vec![200u8, 100, 50];
-        let mut frame =
-            AlphaFrame::new(1, 1, orig.clone(), vec![200], AlphaMode::Straight);
+        let mut frame = AlphaFrame::new(1, 1, orig.clone(), vec![200], AlphaMode::Straight);
         frame.premultiply();
         frame.unpremultiply();
         // Allow ±2 rounding error

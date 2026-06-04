@@ -13,8 +13,13 @@ use std::io::Write;
 use std::path::PathBuf;
 
 /// Create a temp file containing `data`; return its path.
+///
+/// The filename embeds the current process ID so that concurrent test runs
+/// (e.g. under `cargo nextest`) cannot collide on the same path even when the
+/// test is momentarily not in the `serial-latency` group.
 fn temp_file(name: &str, data: &[u8]) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("oximedia_mmap_test_{}", name));
+    let pid = std::process::id();
+    let path = std::env::temp_dir().join(format!("oximedia_mmap_test_{}_{}", name, pid));
     let mut f = std::fs::File::create(&path).expect("create temp file");
     f.write_all(data).expect("write temp file");
     path

@@ -128,7 +128,12 @@ pub fn flat_to_davinci_cube(data: &[f32], size: usize, title: &str) -> String {
 ///
 /// `.cube` string or empty string if channel lengths differ or are zero.
 #[must_use]
-pub fn channels_to_davinci_cube_1d(r_lut: &[f32], g_lut: &[f32], b_lut: &[f32], title: &str) -> String {
+pub fn channels_to_davinci_cube_1d(
+    r_lut: &[f32],
+    g_lut: &[f32],
+    b_lut: &[f32],
+    title: &str,
+) -> String {
     let size = r_lut.len();
     if size == 0 || g_lut.len() != size || b_lut.len() != size {
         return String::new();
@@ -186,9 +191,15 @@ mod tests {
         let arr = identity_3d_array();
         let output = to_davinci_cube(&arr, 33);
         // The type [[[f32;3];33];33] gives us 33×33 outer entries, each one RGB triplet.
-        let data_lines = output.lines().filter(|l| {
-            l.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
-        }).count();
+        let data_lines = output
+            .lines()
+            .filter(|l| {
+                l.chars()
+                    .next()
+                    .map(|c| c.is_ascii_digit())
+                    .unwrap_or(false)
+            })
+            .count();
         assert_eq!(data_lines, 33 * 33);
     }
 
@@ -237,7 +248,12 @@ mod tests {
         assert!(output.contains("LUT_3D_SIZE 3"));
         let data_lines: Vec<&str> = output
             .lines()
-            .filter(|l| l.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false))
+            .filter(|l| {
+                l.chars()
+                    .next()
+                    .map(|c| c.is_ascii_digit())
+                    .unwrap_or(false)
+            })
             .collect();
         assert_eq!(data_lines.len(), size * size * size);
     }
@@ -257,7 +273,12 @@ mod tests {
         assert!(output.contains("LUT_1D_SIZE 8"));
         let data_lines: Vec<&str> = output
             .lines()
-            .filter(|l| l.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false))
+            .filter(|l| {
+                l.chars()
+                    .next()
+                    .map(|c| c.is_ascii_digit())
+                    .unwrap_or(false)
+            })
             .collect();
         assert_eq!(data_lines.len(), n);
     }

@@ -334,6 +334,9 @@
 
 pub mod atsc;
 pub mod ballistics;
+pub mod bs2051_weights;
+pub mod bs2132;
+pub mod clip_counter;
 pub mod correlation;
 pub mod dr_meter;
 pub mod dynamics;
@@ -342,11 +345,13 @@ pub mod ebu_r128_impl;
 pub mod filters;
 pub mod gating;
 pub mod k_weighting;
+pub mod leq;
 pub mod lkfs;
 pub mod loudness_gate;
 pub mod loudness_history;
 pub mod m_s_meter;
 pub mod meter_type_config;
+pub mod ms_ssim;
 pub mod octave_bands;
 pub mod peak;
 pub mod phase;
@@ -355,14 +360,19 @@ pub mod ppm;
 pub mod range;
 pub mod render;
 pub mod report;
+pub mod rms_envelope;
+pub mod silence_detect;
 pub mod spectral_balance;
 pub mod spectral_energy;
 pub mod spectrum;
 pub mod spectrum_bands;
+pub mod true_peak_meter;
 pub mod truepeak;
 pub mod video_color;
 pub mod video_luminance;
 pub mod video_quality;
+pub mod vmaf_estimate;
+pub mod vmaf_features;
 pub mod vu_meter;
 
 /// Backward-compatibility aliases for merged modules.
@@ -385,6 +395,10 @@ pub mod meter_bridge;
 pub mod loudness_trend;
 pub mod noise_floor;
 pub mod stereo_balance;
+
+// Wave 16 modules
+pub mod k_weight_simd;
+pub mod temporal_noise;
 
 use oximedia_core::types::SampleFormat;
 use thiserror::Error;
@@ -411,7 +425,8 @@ pub use render::{
 };
 pub use report::{ComplianceReport, LoudnessReport, MeteringReport};
 pub use spectrum::{
-    OctaveBand, OctaveBandAnalyzer, SpectrumAnalyzer, WeightingCurve, WindowFunction,
+    CachedSpectrumAnalyzer, OctaveBand, OctaveBandAnalyzer, SpectrumAnalyzer, WeightingCurve,
+    WindowFunction,
 };
 pub use truepeak::{TruePeak, TruePeakDetector};
 pub use video_color::{

@@ -216,9 +216,7 @@ pub struct FrameStats {
 /// Compute frame statistics for a batch of raw luma planes.
 ///
 /// Each input is `(width, height, luma_plane_data)`.
-pub fn batch_frame_stats(
-    frames: &[(u32, u32, Vec<u8>)],
-) -> BatchResult<FrameStats> {
+pub fn batch_frame_stats(frames: &[(u32, u32, Vec<u8>)]) -> BatchResult<FrameStats> {
     let results: Vec<(usize, Result<FrameStats, String>)> = frames
         .iter()
         .enumerate()
@@ -297,8 +295,7 @@ fn detect_format_from_magic(data: &[u8]) -> Option<DetectedFormat> {
     }
 
     // Matroska / WebM: starts with EBML header 0x1A 0x45 0xDF 0xA3
-    if data.len() >= 4 && data[0] == 0x1A && data[1] == 0x45 && data[2] == 0xDF && data[3] == 0xA3
-    {
+    if data.len() >= 4 && data[0] == 0x1A && data[1] == 0x45 && data[2] == 0xDF && data[3] == 0xA3 {
         return Some(DetectedFormat {
             format_name: "mkv".to_string(),
             mime_type: Some("video/x-matroska".to_string()),
@@ -524,8 +521,7 @@ mod tests {
 
     #[test]
     fn test_batch_result_from_results_all_ok() {
-        let data: Vec<(usize, Result<u64, String>)> =
-            vec![(0, Ok(1)), (1, Ok(2)), (2, Ok(3))];
+        let data: Vec<(usize, Result<u64, String>)> = vec![(0, Ok(1)), (1, Ok(2)), (2, Ok(3))];
         let r = BatchResult::from_results(data);
         assert_eq!(r.total, 3);
         assert_eq!(r.succeeded, 3);
@@ -549,8 +545,7 @@ mod tests {
 
     #[test]
     fn test_batch_result_summary() {
-        let data: Vec<(usize, Result<u32, String>)> =
-            vec![(0, Ok(1)), (1, Err("x".into()))];
+        let data: Vec<(usize, Result<u32, String>)> = vec![(0, Ok(1)), (1, Err("x".into()))];
         let r = BatchResult::from_results(data);
         let s = r.summary();
         assert!(s.contains("1/2 succeeded"));
@@ -699,9 +694,7 @@ mod tests {
     #[test]
     fn test_batch_audio_stats_sine() {
         // Simple sine-like samples
-        let samples: Vec<f32> = (0..1000)
-            .map(|i| (i as f32 * 0.01).sin() * 0.5)
-            .collect();
+        let samples: Vec<f32> = (0..1000).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
         let r = batch_audio_stats(&[samples]);
         assert!(r.all_succeeded());
         let stats = r.items[0].value.as_ref().expect("should succeed");
@@ -744,10 +737,7 @@ mod tests {
             .with_tag("job", "test");
         assert_eq!(cfg.max_items, 100);
         assert!(!cfg.continue_on_error);
-        assert_eq!(
-            cfg.tags.get("job").expect("should have tag"),
-            "test"
-        );
+        assert_eq!(cfg.tags.get("job").expect("should have tag"), "test");
     }
 
     #[test]

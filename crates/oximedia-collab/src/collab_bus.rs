@@ -66,11 +66,7 @@ pub struct BusEvent {
 impl BusEvent {
     /// Build a new `BusEvent` with `Normal` priority and the current wall-clock
     /// time derived from [`std::time::SystemTime`].
-    pub fn new(
-        id: u64,
-        topic: impl Into<String>,
-        payload: serde_json::Value,
-    ) -> Self {
+    pub fn new(id: u64, topic: impl Into<String>, payload: serde_json::Value) -> Self {
         let timestamp_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -350,21 +346,13 @@ impl CollabBus {
     /// Convenience: build and publish a simple event in one call.
     ///
     /// Returns the number of subscribers the event was delivered to.
-    pub fn emit(
-        &self,
-        topic: impl Into<String>,
-        payload: serde_json::Value,
-    ) -> usize {
+    pub fn emit(&self, topic: impl Into<String>, payload: serde_json::Value) -> usize {
         let event = BusEvent::new(0, topic, payload);
         self.publish(event)
     }
 
     /// Convenience: emit a `High`-priority event.
-    pub fn emit_high(
-        &self,
-        topic: impl Into<String>,
-        payload: serde_json::Value,
-    ) -> usize {
+    pub fn emit_high(&self, topic: impl Into<String>, payload: serde_json::Value) -> usize {
         let event = BusEvent::new(0, topic, payload).with_priority(EventPriority::High);
         self.publish(event)
     }
@@ -440,7 +428,10 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    fn make_collector() -> (Arc<Mutex<Vec<BusEvent>>>, impl Fn(BusEvent) + Send + Sync + 'static) {
+    fn make_collector() -> (
+        Arc<Mutex<Vec<BusEvent>>>,
+        impl Fn(BusEvent) + Send + Sync + 'static,
+    ) {
         let collected: Arc<Mutex<Vec<BusEvent>>> = Arc::new(Mutex::new(Vec::new()));
         let c2 = collected.clone();
         let cb = move |ev: BusEvent| {

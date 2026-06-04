@@ -336,10 +336,7 @@ impl SimilarityMatrix {
     /// - [`SimilarityError::EmptyCorpus`] if `vectors` is empty.
     /// - Propagates [`SimilarityError`] from the chosen similarity metric if
     ///   any pair fails (e.g. dimension mismatch, zero norm).
-    pub fn compute(
-        vectors: &[FeatureVector],
-        mode: SimilarityMode,
-    ) -> SimilarityResult<Self> {
+    pub fn compute(vectors: &[FeatureVector], mode: SimilarityMode) -> SimilarityResult<Self> {
         if vectors.is_empty() {
             return Err(SimilarityError::EmptyCorpus);
         }
@@ -357,9 +354,9 @@ impl SimilarityMatrix {
                         row[j] = 1.0;
                     } else {
                         let sim = match mode {
-                            SimilarityMode::Cosine => cos
-                                .compute(&vectors[i], &vectors[j])
-                                .unwrap_or(0.0),
+                            SimilarityMode::Cosine => {
+                                cos.compute(&vectors[i], &vectors[j]).unwrap_or(0.0)
+                            }
                             SimilarityMode::EmdSimilarity => {
                                 let d = emd
                                     .normalized(vectors[i].as_slice(), vectors[j].as_slice())
@@ -480,7 +477,11 @@ impl AudioSimilaritySearch {
         }
 
         // Sort descending by score
-        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         hits.truncate(k);
         Ok(hits)
     }
@@ -611,7 +612,10 @@ mod tests {
         let b = vec![1.0, 2.0, 3.0];
         let emd_calc = EarthMoverDistance;
         let err = emd_calc.compute(&a, &b).unwrap_err();
-        assert!(matches!(err, SimilarityError::HistogramLengthMismatch { .. }));
+        assert!(matches!(
+            err,
+            SimilarityError::HistogramLengthMismatch { .. }
+        ));
     }
 
     // ── SimilarityMatrix ──────────────────────────────────────────────────────
@@ -623,8 +627,8 @@ mod tests {
             fv(vec![0.0, 1.0, 0.0]),
             fv(vec![0.0, 0.0, 1.0]),
         ];
-        let mat = SimilarityMatrix::compute(&vectors, SimilarityMode::Cosine)
-            .expect("should succeed");
+        let mat =
+            SimilarityMatrix::compute(&vectors, SimilarityMode::Cosine).expect("should succeed");
         for i in 0..3 {
             assert!(
                 (mat.get(i, i).expect("in bounds") - 1.0).abs() < 1e-10,
@@ -640,8 +644,8 @@ mod tests {
             fv(vec![4.0, 5.0, 6.0]),
             fv(vec![7.0, 8.0, 9.0]),
         ];
-        let mat = SimilarityMatrix::compute(&vectors, SimilarityMode::Cosine)
-            .expect("should succeed");
+        let mat =
+            SimilarityMatrix::compute(&vectors, SimilarityMode::Cosine).expect("should succeed");
         for i in 0..3 {
             for j in 0..3 {
                 let a = mat.get(i, j).expect("in bounds");
@@ -664,8 +668,8 @@ mod tests {
             fv(vec![1.0, 1.0]),
             fv(vec![-1.0, 0.0]),
         ];
-        let search = AudioSimilaritySearch::new(corpus, SimilarityMode::Cosine)
-            .expect("should succeed");
+        let search =
+            AudioSimilaritySearch::new(corpus, SimilarityMode::Cosine).expect("should succeed");
         let query = fv(vec![1.0, 0.0]);
         let hits = search.search(&query, 2, None).expect("should succeed");
         assert_eq!(hits.len(), 2, "should return exactly 2 results");
@@ -679,14 +683,18 @@ mod tests {
             fv(vec![1.0, 0.0]),
             fv(vec![0.0, 1.0]), // orthogonal to query
         ];
-        let search = AudioSimilaritySearch::new(corpus, SimilarityMode::Cosine)
-            .expect("should succeed");
+        let search =
+            AudioSimilaritySearch::new(corpus, SimilarityMode::Cosine).expect("should succeed");
         let query = fv(vec![1.0, 0.0]);
         // Only accept similarity > 0.5
         let hits = search
             .search(&query, 10, Some(0.5))
             .expect("should succeed");
-        assert_eq!(hits.len(), 1, "only the identical vector should pass the threshold");
+        assert_eq!(
+            hits.len(),
+            1,
+            "only the identical vector should pass the threshold"
+        );
         assert_eq!(hits[0].index, 0);
     }
 
@@ -699,8 +707,8 @@ mod tests {
     #[test]
     fn test_search_zero_k_error() {
         let corpus = vec![fv(vec![1.0, 2.0])];
-        let search = AudioSimilaritySearch::new(corpus, SimilarityMode::Cosine)
-            .expect("should succeed");
+        let search =
+            AudioSimilaritySearch::new(corpus, SimilarityMode::Cosine).expect("should succeed");
         let query = fv(vec![1.0, 2.0]);
         let err = search.search(&query, 0, None).unwrap_err();
         assert!(matches!(err, SimilarityError::ZeroTopK));

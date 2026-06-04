@@ -366,7 +366,11 @@ mod tests {
         let mut hist = LevelHistogram::new(default_config());
         hist.process(&[1.0_f32; 10]);
         let stats = hist.statistics();
-        assert!((stats.peak_db - 0.0).abs() < 0.01, "peak = {}", stats.peak_db);
+        assert!(
+            (stats.peak_db - 0.0).abs() < 0.01,
+            "peak = {}",
+            stats.peak_db
+        );
     }
 
     // 4. Half-scale signal has peak near -6 dBFS.

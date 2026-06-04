@@ -26,12 +26,12 @@
 - [x] Implement `edge_directed_interpolation` module (NEDI-like) for improved diagonal edge rendering (verified 2026-05-16; src/edge_directed_interpolation.rs:271 lines)
 
 ## Performance
-- [ ] Add SIMD intrinsics for `bicubic` and `lanczos` horizontal/vertical filter passes
-- [ ] Implement rayon parallel row processing in `VideoScaler` for multi-core scaling
-- [ ] Add tile-based processing in `tile` with cache-line-friendly memory access patterns
-- [ ] Optimize `ewa_resample` by precomputing filter weight tables for common scale factors
-- [ ] Add in-place scaling in `resampler` to avoid intermediate buffer allocations
-- [ ] Implement ring-buffer row caching in vertical filter passes to minimize memory footprint
+- [x] Add SIMD intrinsics for `bicubic` and `lanczos` horizontal/vertical filter passes (Wave 14, bicubic.rs + lanczos.rs via simd_interp.rs:255/312)
+- [x] Implement rayon parallel row processing in `VideoScaler` for multi-core scaling (already implemented at parallel_scale.rs:137/173/212, Wave 14 verified)
+- [x] Add tile-based processing in `tile` with cache-line-friendly memory access patterns (Wave 20 Slice B, 2026-06-02; src/tile.rs scale_tiled+scale_reference, bit-exact vs reference, rayon par_iter over tiles, 7 tests: downscale/upscale/RGBA/edge-tiles/zero-size/single-pixel-tile/output-size)
+- [x] Optimize `ewa_resample` by precomputing filter weight tables for common scale factors (already implemented at ewa_resample.rs:329 FilterWeightTable, Wave 14 verified)
+- [x] Add in-place scaling in `resampler` to avoid intermediate buffer allocations (Wave 14, resampler.rs resize_in_place)
+- [x] Implement ring-buffer row caching in vertical filter passes to minimize memory footprint (already implemented at ring_buffer_cache.rs:42 RowRingBuffer, Wave 14 verified)
 
 ## Testing
 - [ ] Add PSNR/SSIM quality regression tests comparing scaling output against reference implementations

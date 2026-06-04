@@ -290,8 +290,8 @@ impl AdaptivePolicy {
     /// Returns an error if the configuration is invalid.
     pub fn new(config: AdaptiveConfig) -> Result<AdaptivePolicy, AdaptiveError> {
         config.validate()?;
-        let initial_capacity = config.min_capacity
-            + (config.max_capacity - config.min_capacity) / 2;
+        let initial_capacity =
+            config.min_capacity + (config.max_capacity - config.min_capacity) / 2;
         let window = RollingWindow::new(config.window_size);
         Ok(Self {
             config,
@@ -422,8 +422,8 @@ impl AdaptivePolicy {
         self.total_misses = 0;
         self.adjustments_made = 0;
         self.history.clear();
-        self.current_capacity = self.config.min_capacity
-            + (self.config.max_capacity - self.config.min_capacity) / 2;
+        self.current_capacity =
+            self.config.min_capacity + (self.config.max_capacity - self.config.min_capacity) / 2;
     }
 
     // ── Internals ────────────────────────────────────────────────────────────
@@ -759,10 +759,7 @@ mod tests {
             let _ = policy.record_miss();
         }
         let rate = policy.lifetime_hit_rate();
-        assert!(
-            (rate - 0.7).abs() < 1e-9,
-            "expected 0.7, got {rate}"
-        );
+        assert!((rate - 0.7).abs() < 1e-9, "expected 0.7, got {rate}");
     }
 
     // 16. adjustment history records entries
@@ -786,12 +783,10 @@ mod tests {
     #[test]
     fn test_with_initial_capacity_clamps() {
         let cfg = default_config(); // min=8, max=256
-        let p1 = AdaptivePolicy::with_initial_capacity(cfg.clone(), 2)
-            .expect("valid");
+        let p1 = AdaptivePolicy::with_initial_capacity(cfg.clone(), 2).expect("valid");
         assert_eq!(p1.current_capacity(), 8, "should clamp to min");
 
-        let p2 = AdaptivePolicy::with_initial_capacity(cfg, 9999)
-            .expect("valid");
+        let p2 = AdaptivePolicy::with_initial_capacity(cfg, 9999).expect("valid");
         assert_eq!(p2.current_capacity(), 256, "should clamp to max");
     }
 

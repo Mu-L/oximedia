@@ -142,9 +142,11 @@ impl FrameRecord {
     /// Returns the phase that consumed the most time.
     #[must_use]
     pub fn dominant_phase(&self) -> Option<&PhaseEntry> {
-        self.phases
-            .iter()
-            .max_by(|a, b| a.duration_ms.partial_cmp(&b.duration_ms).unwrap_or(std::cmp::Ordering::Equal))
+        self.phases.iter().max_by(|a, b| {
+            a.duration_ms
+                .partial_cmp(&b.duration_ms)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     }
 
     /// Returns true if this frame's dominant phase consumed more than `threshold`
@@ -347,9 +349,7 @@ impl FrameBudgetTracker {
             durations.push(frame.total_ms);
 
             for phase in &frame.phases {
-                let entry = phase_sums
-                    .entry(phase.name.clone())
-                    .or_insert((0.0, 0));
+                let entry = phase_sums.entry(phase.name.clone()).or_insert((0.0, 0));
                 entry.0 += phase.duration_ms;
                 entry.1 += 1;
             }
@@ -463,7 +463,11 @@ mod tests {
         FrameBudgetTracker::new(FrameBudgetConfig::for_fps(60.0))
     }
 
-    fn record_frame(tracker: &mut FrameBudgetTracker, id: u64, phases: &[(&str, f64)]) -> FrameRecord {
+    fn record_frame(
+        tracker: &mut FrameBudgetTracker,
+        id: u64,
+        phases: &[(&str, f64)],
+    ) -> FrameRecord {
         tracker.begin_frame(id);
         for (name, dur) in phases {
             tracker.record_phase(*name, *dur);
@@ -486,7 +490,11 @@ mod tests {
     #[test]
     fn test_under_budget_frame() {
         let mut t = make_tracker();
-        let f = record_frame(&mut t, 0, &[("decode", 3.0), ("process", 4.0), ("encode", 5.0)]);
+        let f = record_frame(
+            &mut t,
+            0,
+            &[("decode", 3.0), ("process", 4.0), ("encode", 5.0)],
+        );
         assert!(!f.over_budget);
         assert!((f.total_ms - 12.0).abs() < 0.001);
         assert!(f.slack_ms > 0.0);
@@ -495,7 +503,11 @@ mod tests {
     #[test]
     fn test_over_budget_frame() {
         let mut t = make_tracker();
-        let f = record_frame(&mut t, 1, &[("decode", 8.0), ("process", 5.0), ("encode", 6.0)]);
+        let f = record_frame(
+            &mut t,
+            1,
+            &[("decode", 8.0), ("process", 5.0), ("encode", 6.0)],
+        );
         // 8+5+6 = 19 ms > 16.667 ms
         assert!(f.over_budget);
         assert!(f.slack_ms < 0.0);
@@ -524,7 +536,7 @@ mod tests {
     fn test_stats_over_budget_count() {
         let mut t = make_tracker();
         record_frame(&mut t, 0, &[("decode", 20.0)]); // over
-        record_frame(&mut t, 1, &[("decode", 5.0)]);  // under
+        record_frame(&mut t, 1, &[("decode", 5.0)]); // under
         record_frame(&mut t, 2, &[("decode", 18.0)]); // over
         let stats = t.stats().expect("non-empty");
         assert_eq!(stats.over_budget_count, 2);

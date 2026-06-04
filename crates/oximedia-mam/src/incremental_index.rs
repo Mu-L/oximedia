@@ -3,20 +3,20 @@
 //! Instead of tearing down and rebuilding the entire Tantivy (or compatible)
 //! index every time an asset is created, modified, or deleted, this module
 //! maintains a **write-ahead change log** (WAL) of index mutations.  A
-//! background-friendly [`IndexUpdateApplier`] drains the WAL in batches,
+//! background-friendly `IndexUpdateApplier` drains the WAL in batches,
 //! minimising I/O amplification.
 //!
 //! Key types:
 //!
-//! * [`IndexOperation`] – enum that represents add / update / delete of a
+//! * `IndexOperation` – enum that represents add / update / delete of a
 //!   single document.
-//! * [`IndexWal`] – thread-safe WAL that accumulates [`IndexOperation`]s and
+//! * `IndexWal` – thread-safe WAL that accumulates `IndexOperation`s and
 //!   tracks watermarks.
-//! * [`IndexUpdateApplier`] – drains the WAL, applies batches via the
-//!   pluggable [`IndexWriter`] trait, and records applied watermarks.
-//! * [`InMemoryIndexWriter`] – in-memory reference implementation used in
+//! * `IndexUpdateApplier` – drains the WAL, applies batches via the
+//!   pluggable `IndexWriter` trait, and records applied watermarks.
+//! * `InMemoryIndexWriter` – in-memory reference implementation used in
 //!   tests (and as a stand-in before Tantivy is wired up).
-//! * [`IndexStats`] – counters maintained by the applier.
+//! * `IndexStats` – counters maintained by the applier.
 
 use std::collections::HashMap;
 use std::sync::{
@@ -424,16 +424,12 @@ impl<W: IndexWriter> IndexUpdateApplier<W> {
 
         for entry in &entries {
             let op_result = match &entry.operation {
-                IndexOperation::Upsert(doc) => {
-                    self.writer.upsert(doc).map(|_| {
-                        self.stats.total_upserts += 1;
-                    })
-                }
-                IndexOperation::Delete { id } => {
-                    self.writer.delete(id).map(|_| {
-                        self.stats.total_deletes += 1;
-                    })
-                }
+                IndexOperation::Upsert(doc) => self.writer.upsert(doc).map(|_| {
+                    self.stats.total_upserts += 1;
+                }),
+                IndexOperation::Delete { id } => self.writer.delete(id).map(|_| {
+                    self.stats.total_deletes += 1;
+                }),
             };
 
             if let Err(_e) = op_result {

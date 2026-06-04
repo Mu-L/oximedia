@@ -266,9 +266,7 @@ impl RetryScheduler {
 /// Returns the sum of delays from attempt 1 through `n` (or until `max_attempts`).
 #[must_use]
 pub fn total_delay_estimate(policy: &BackoffPolicy, n: u32) -> Duration {
-    let limit = policy
-        .max_attempts
-        .map_or(n, |max| n.min(max));
+    let limit = policy.max_attempts.map_or(n, |max| n.min(max));
     (1..=limit)
         .filter_map(|a| policy.deterministic_delay(a))
         .fold(Duration::ZERO, |acc, d| acc + d)
@@ -475,9 +473,7 @@ mod tests {
             .with_max_attempts(10);
         let mut sched = RetryScheduler::new(policy, 12345);
         for _ in 0..20 {
-            let d = sched
-                .delay_for_attempt(1)
-                .expect("should succeed in test");
+            let d = sched.delay_for_attempt(1).expect("should succeed in test");
             assert!(d >= Duration::from_secs(1), "equal-jitter low bound");
             assert!(d <= Duration::from_secs(2), "equal-jitter high bound");
         }

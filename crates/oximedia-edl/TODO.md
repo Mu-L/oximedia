@@ -31,11 +31,26 @@
 - [x] Implement sub-frame timecode precision for high frame rate content (120fps+) (verified 2026-05-16; src/subframe.rs:7 SubFrameTimecode, 120fps support)
 
 ## Performance
-- [ ] Optimize `parser.rs` nom combinators to reduce allocations during parsing
-- [ ] Add lazy parsing mode that only parses event headers until details are accessed
-- [ ] Cache timecode-to-frames conversions in `timecode.rs` for repeated lookups
-- [ ] Optimize `edl_statistics.rs` to compute all statistics in a single pass
-- [ ] Use `SmallVec` for event comments to avoid heap allocation for common cases
+- [x] Optimize `parser.rs` nom combinators to reduce allocations during parsing (implemented `parser_opt.rs`: `EdlHeaderScan` zero-copy pre-scan, `CompactEventRef` byte-offset event refs, `detect_frame_rate_extended` for 24/25/30/50/60fps + DF/NDF variants 2026-05-31)
+- [x] Add lazy parsing mode that only parses event headers until details are accessed (implemented 2026-06-01)
+  - **Goal:** Parse event number, reel name, and in/out timecodes eagerly; defer comment, motion-effect, and extended-field parsing until the caller accesses those fields.
+  - **Design:** `LazyEvent { header: EventHeader, detail_raw: &str, detail: RefCell<Option<EventDetail>> }`; `EventDetail` resolved on first `detail()` call and cached; mirror the `oximedia-jobs` `LazyPayload<T>` `RefCell<Option<T>>` pattern.
+  - **Files:** `src/parser.rs` (add `LazyEvent` type and lazy-parse path), `TODO.md` L35
+  - **Tests:** lazy mode parses headers without touching details (verify via counter on detail parser); lazy detail resolves correctly on first access and caches (second access returns same value without re-parsing).
+  - **Risk:** borrow-checker challenge with `&str` lifetime — may need `String` raw storage instead; use `String` if needed, document the tradeoff.
+- [x] Cache timecode-to-frames conversions in `timecode.rs` for repeated lookups (implemented `tc_cache.rs`: `TimecodeCache` open-addressing 1024-slot hash table + `with_tc_cache` thread-local singleton 2026-05-31)
+- [x] Optimize `edl_statistics.rs` to compute all statistics in a single pass (implemented 2026-06-01)
+  - **Goal:** Fold all statistics (event count, per-reel counts, duration totals, transition histogram, etc.) in one iteration over events instead of multiple passes; one accumulator struct updated per event.
+  - **Design:** `StatsAccumulator` struct with all counters/maps; `accumulate(event: &EdlEvent)` updates all fields in one call; `finalize() -> EdlStatistics` computes any derived fields (e.g. averages). Keep existing `EdlStatistics` public API identical.
+  - **Files:** `src/edl_statistics.rs`, `TODO.md` L37
+  - **Tests:** single-pass stats == prior multi-pass stats on a fixture (exact agreement on every field); single-pass visits each event exactly once (via counter).
+  - **Risk:** single-pass refactor must preserve every existing statistic exactly — the agreement test is mandatory.
+- [x] Use `SmallVec` for event comments to avoid heap allocation for common cases (implemented 2026-06-01)
+  - **Goal:** Replace `Vec<String>` comments field with `SmallVec<[String; 2]>` so the common 0–2 comment case is stack-allocated.
+  - **Design:** Add `smallvec` to workspace deps if absent (latest crates.io); change the comments field type; update all construction sites.
+  - **Files:** `src/event.rs` (or wherever comments live), `Cargo.toml` (add smallvec if absent), root `Cargo.toml` workspace deps, `TODO.md` L38
+  - **Tests:** SmallVec inline path for ≤2 comments (capacity stays at inline); SmallVec spills correctly for many comments (>2 items stored correctly).
+  - **Risk:** `smallvec` may already be a workspace dep — check before adding.
 
 ## Testing
 - [ ] Add conformance tests with real-world EDL files from major NLE systems (Avid, Premiere, Resolve)

@@ -78,13 +78,13 @@ impl PremisRecord {
     #[must_use]
     pub fn to_xml(&self) -> String {
         let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-        xml.push_str("<premis:premis xmlns:premis=\"http://www.loc.gov/premis/v3\" version=\"3.0\">\n");
+        xml.push_str(
+            "<premis:premis xmlns:premis=\"http://www.loc.gov/premis/v3\" version=\"3.0\">\n",
+        );
 
         // Object element
         xml.push_str("  <premis:object xsi:type=\"premis:file\"\n");
-        xml.push_str(
-            "    xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n",
-        );
+        xml.push_str("    xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n");
         xml.push_str("    <premis:objectIdentifier>\n");
         xml.push_str("      <premis:objectIdentifierType>local</premis:objectIdentifierType>\n");
         xml.push_str(&format!(
@@ -259,10 +259,7 @@ impl BagItPackager {
     /// Create a `BagItManifest` from a slice of `(filename, content)` pairs.
     ///
     /// No files are written to disk; all outputs are returned as strings.
-    pub fn create(
-        base_dir: &str,
-        files: &[(String, Vec<u8>)],
-    ) -> crate::Result<BagItManifest> {
+    pub fn create(base_dir: &str, files: &[(String, Vec<u8>)]) -> crate::Result<BagItManifest> {
         let bagit_txt = "BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n".to_string();
 
         let mut hashes: HashMap<String, String> = HashMap::new();
@@ -514,7 +511,9 @@ impl RiskAssessor {
         } else if score > 5 {
             format!("Format '{format}' ({age_years} years old): score {score} — migration planning advised")
         } else {
-            format!("Format '{format}' ({age_years} years old): score {score} — currently acceptable")
+            format!(
+                "Format '{format}' ({age_years} years old): score {score} — currently acceptable"
+            )
         };
 
         RiskScore {
@@ -722,7 +721,10 @@ mod tests {
         let mut record = PremisRecord::new("obj-001", "2025-01-15");
         record.add_event("ingestion", "2025-01-15", "archivist@example.com");
         let xml = record.to_xml();
-        assert!(xml.contains("<premis:object"), "XML must contain <premis:object>");
+        assert!(
+            xml.contains("<premis:object"),
+            "XML must contain <premis:object>"
+        );
         assert!(xml.contains("obj-001"), "XML must contain object ID");
     }
 
@@ -776,8 +778,8 @@ mod tests {
             ("video.mkv".to_string(), b"fake video content".to_vec()),
             ("audio.flac".to_string(), b"fake audio content".to_vec()),
         ];
-        let manifest = BagItPackager::create("/archive/bag1", &files)
-            .expect("BagIt create should succeed");
+        let manifest =
+            BagItPackager::create("/archive/bag1", &files).expect("BagIt create should succeed");
 
         // manifest-sha256.txt must contain 64-hex-char SHA-256 hashes
         assert!(
@@ -801,8 +803,7 @@ mod tests {
     #[test]
     fn test_bagit_txt_version() {
         let files = vec![("f.txt".to_string(), b"content".to_vec())];
-        let manifest =
-            BagItPackager::create("/test", &files).expect("create should succeed");
+        let manifest = BagItPackager::create("/test", &files).expect("create should succeed");
         assert!(manifest.bagit_txt.contains("BagIt-Version: 1.0"));
     }
 
@@ -810,10 +811,7 @@ mod tests {
 
     #[test]
     fn test_checksum_tree_build() {
-        let files: Vec<(&str, &[u8])> = vec![
-            ("a.txt", b"hello"),
-            ("b.txt", b"world"),
-        ];
+        let files: Vec<(&str, &[u8])> = vec![("a.txt", b"hello"), ("b.txt", b"world")];
         let tree = ChecksumTree::build(&files);
         assert_eq!(tree.leaves.len(), 2);
         assert!(!tree.root_hash.is_empty());
@@ -866,7 +864,10 @@ mod tests {
     fn test_risk_score_obsolete_format_bonus() {
         let wmv = RiskAssessor::assess("wmv", 2024, 2025);
         let mkv = RiskAssessor::assess("mkv", 2024, 2025);
-        assert!(wmv.score > mkv.score, "Obsolete formats should score higher");
+        assert!(
+            wmv.score > mkv.score,
+            "Obsolete formats should score higher"
+        );
     }
 
     #[test]

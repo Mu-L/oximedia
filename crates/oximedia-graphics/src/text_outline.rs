@@ -47,7 +47,11 @@ impl GlyphMask {
     /// Returns `None` if `data.len() != width * height`.
     pub fn from_raw(data: Vec<u8>, width: u32, height: u32) -> Option<Self> {
         if data.len() == (width * height) as usize {
-            Some(Self { data, width, height })
+            Some(Self {
+                data,
+                width,
+                height,
+            })
         } else {
             None
         }
@@ -456,7 +460,10 @@ mod tests {
     #[test]
     fn test_outline_mask_interior_zero() {
         let glyph = solid_mask(5, 5);
-        let cfg = OutlineConfig { radius: 1, color: [0, 0, 0, 255] };
+        let cfg = OutlineConfig {
+            radius: 1,
+            color: [0, 0, 0, 255],
+        };
         let outline = generate_outline_mask(&glyph, &cfg);
         // Interior pixels (inside glyph) must be 0.
         assert_eq!(outline.get(2, 2), 0, "interior must not be in outline");
@@ -473,10 +480,17 @@ mod tests {
                 glyph.set(x, y, 255);
             }
         }
-        let cfg = OutlineConfig { radius: 1, color: [0, 0, 0, 255] };
+        let cfg = OutlineConfig {
+            radius: 1,
+            color: [0, 0, 0, 255],
+        };
         let outline = generate_outline_mask(&glyph, &cfg);
         // Pixel at (1, 4) is adjacent to the block → should be in outline.
-        assert_eq!(outline.get(1, 4), 255, "adjacent pixel should be in outline");
+        assert_eq!(
+            outline.get(1, 4),
+            255,
+            "adjacent pixel should be in outline"
+        );
         // Pixel at (0, 0) is far from block → should not be in outline (radius=1).
         assert_eq!(outline.get(0, 0), 0, "far corner must not be in outline");
     }
@@ -513,9 +527,17 @@ mod tests {
         };
         let shadow = generate_shadow_mask(&glyph, &sc);
         // The shadow of the pixel at (3,3) should appear at (3+2, 3+2) = (5,5).
-        assert_eq!(shadow.get(5, 5), 255, "shadow must appear at offset position");
+        assert_eq!(
+            shadow.get(5, 5),
+            255,
+            "shadow must appear at offset position"
+        );
         // Original position should be 0.
-        assert_eq!(shadow.get(3, 3), 0, "original position must not have shadow");
+        assert_eq!(
+            shadow.get(3, 3),
+            0,
+            "original position must not have shadow"
+        );
     }
 
     // 9. render_text_with_effects writes to canvas alpha channel for solid glyph.
@@ -536,7 +558,7 @@ mod tests {
     // 10. render_outline writes outline pixels.
     #[test]
     fn test_render_outline_writes_outline() {
-        let glyph = solid_mask(3, 3);
+        let _glyph = solid_mask(3, 3);
         // Canvas is 7×7; center the glyph at (2,2) by using a padded glyph.
         let mut big_glyph = GlyphMask::blank(7, 7);
         for y in 2..5_i32 {
@@ -545,12 +567,21 @@ mod tests {
             }
         }
         let mut canvas = vec![0u8; 7 * 7 * 4];
-        let cfg = OutlineConfig { radius: 1, color: [255, 0, 0, 255] };
+        let cfg = OutlineConfig {
+            radius: 1,
+            color: [255, 0, 0, 255],
+        };
         render_outline(&mut canvas, 7, 7, &big_glyph, &cfg);
         // Pixel at (1,3) should be red (outline of the 3×3 block).
         let idx = (3 * 7 + 1) * 4;
-        assert_eq!(canvas[idx], 255, "red channel must be set for outline pixel");
-        assert!(canvas[idx + 3] > 0, "outline pixel must have non-zero alpha");
+        assert_eq!(
+            canvas[idx], 255,
+            "red channel must be set for outline pixel"
+        );
+        assert!(
+            canvas[idx + 3] > 0,
+            "outline pixel must have non-zero alpha"
+        );
     }
 
     // 11. blend_over opaque src replaces dst.

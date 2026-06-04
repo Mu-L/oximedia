@@ -111,7 +111,7 @@ impl TrajectorySmoother {
         let mut result = Array1::zeros(n);
         let half = window / 2;
 
-        for i in 0..n {
+        for i in 0_usize..n {
             let start = i.saturating_sub(half);
             let end = (i + half + 1).min(n);
             let count = end - start;
@@ -129,7 +129,7 @@ impl TrajectorySmoother {
         let mut result = Array1::zeros(n);
         let half = window / 2;
 
-        for i in 0..n {
+        for i in 0_usize..n {
             let start = i.saturating_sub(half);
             let end = (i + half + 1).min(n);
             let count = end - start;
@@ -519,7 +519,7 @@ impl SavitzkyGolayFilter {
         let mut result = Array1::zeros(n);
         let half = self.window_size / 2;
 
-        for i in 0..n {
+        for i in 0_usize..n {
             let start = i.saturating_sub(half);
             let end = (i + half + 1).min(n);
 
@@ -552,7 +552,7 @@ impl MedianFilter {
         let mut result = Array1::zeros(n);
         let half = self.window_size / 2;
 
-        for i in 0..n {
+        for i in 0_usize..n {
             let start = i.saturating_sub(half);
             let end = (i + half + 1).min(n);
 

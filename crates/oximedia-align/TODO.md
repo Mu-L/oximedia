@@ -33,14 +33,19 @@
 - [x] Add motion-compensated temporal interpolation for frame rate conversion (verified 2026-05-16; src/motion_interp.rs:36 MotionInterpolator, 202 lines)
 - [x] Implement video stabilization pipeline combining `optical_flow` + `affine` + `warp` (verified 2026-05-16; src/stabilize.rs:286 stabilize_pipeline, StabilizeConfig:36, compute_corrections:202, 799 lines)
 - [x] Add network-based time sync (PTP/NTP) for distributed camera systems in `temporal` (implemented 2026-05-15: NtpConfig/TimeDelta/NtpClient::query_offset added to temporal.rs — SNTP RFC 4330 single-packet UDP exchange; tests: test_ntp_packet_parse_known_bytes, test_ntp_offset_computation_formula, test_ntp_unix_roundtrip; 650/650 tests pass)
-- [ ] Implement scene-based alignment: detect scene changes and align segments independently (verified-open 2026-05-16: no SceneAlign/scene_align/AlignSegment in align sources; scene change detection not integrated into alignment pipeline)
+- [x] Implement scene-based alignment: detect scene changes and align segments independently (implemented 2026-05-31: src/scene_align.rs — SceneAligner::detect_scenes (luma histogram L1 diff, O(n)), SceneAligner::align (DP monotone segment matching χ² cost, O(n×m)), AlignedSegment with frame_offset/confidence; 22 tests)
 
 ## Performance
 - [x] Add SIMD-accelerated Hamming distance for BRIEF descriptor matching in `features`
   — `hamming_distance_simd(a: &[u8], b: &[u8]) -> u32` using u64 popcount batching
 - [ ] Implement parallel RANSAC with early termination across rayon threads
-- [ ] Use integral images for fast feature detection in `features` (box filter acceleration)
-- [ ] Optimize `phase_correlate` FFT computation with real-valued FFT (half the complex ops)
+- [x] Use integral images for fast feature detection in `features` (box filter acceleration) (done — SAT integral image at src/features.rs)
+- [x] Optimize `phase_correlate` FFT computation with real-valued FFT (half the complex ops)
+  - **Goal:** Switch `src/phase_correlate.rs` forward transforms from full-complex `oxifft::fft/ifft` (current: real input converted to Complex<f64>) to OxiFFT real-valued `rfft`/`irfft` (N/2+1 bins, half the complex ops), per COOLJAPAN OxiFFT policy. Cross-power spectrum + inverse transform + peak-find stay identical. Result must match full-complex path within fp tolerance. (Wave 20 Slice F, 2026-06-02)
+  - **Design:** Replace the two forward FFTs of real reference/target with rfft (N/2+1 bins); compute normalized cross-power spectrum on half-spectrum; irfft back to real correlation surface. If OxiFFT lacks 2-D rFFT, use rfft row-wise + complex FFT column-wise (standard real-2D decomposition). Sub-pixel parabolic refine unchanged.
+  - **Files:** `src/phase_correlate.rs`, `TODO.md`
+  - **Tests:** rFFT estimate == full-complex estimate within tolerance on known integer shift; sub-pixel shift ±0.1px; zero-shift → peak at origin; Gaussian-noise robustness; assert against full-complex result on same input.
+  - **Done:** `oxifft::rfft`/`irfft` confirmed available (N/2+1 bins); `phase_correlate_1d` now uses rFFT; `phase_correlate_1d_full_complex` kept as private regression reference; 4 new tests added (integer-shift, sub-pixel, zero-shift, noise-robustness).
 - [ ] Add GPU acceleration path for dense optical flow in `optical_flow`
 - [ ] Cache feature descriptors across frames for temporal feature tracking
 

@@ -693,14 +693,20 @@ mod tests {
             text_present: false,
             ..sample_features()
         };
-        assert_eq!(features.content_type_hint(), ContentTypeHint::SolidOrGradient);
+        assert_eq!(
+            features.content_type_hint(),
+            ContentTypeHint::SolidOrGradient
+        );
     }
 
     #[test]
     fn test_dominant_color_temperature() {
         assert_eq!(DominantColor::Red.temperature(), ColorTemperature::Warm);
         assert_eq!(DominantColor::Blue.temperature(), ColorTemperature::Cool);
-        assert_eq!(DominantColor::Green.temperature(), ColorTemperature::Neutral);
+        assert_eq!(
+            DominantColor::Green.temperature(),
+            ColorTemperature::Neutral
+        );
     }
 
     #[test]

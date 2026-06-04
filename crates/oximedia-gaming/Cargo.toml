@@ -14,12 +14,21 @@ categories = ["multimedia", "game-engines"]
 [lints]
 workspace = true
 
+[features]
+default = []
+## Enable VP9 codec support (forwarded from oximedia-codec)
+vp9 = ["oximedia-codec/vp9"]
+## Enable AV1 codec support (forwarded from oximedia-codec)
+av1 = ["oximedia-codec/av1"]
+
 [dependencies]
 oximedia-core = { workspace = true }
 oximedia-codec = { workspace = true, default-features = true }
 oximedia-audio = { workspace = true }
 oximedia-graph = { workspace = true }
+rayon = { workspace = true }
 thiserror = { workspace = true }
+memmap2 = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }

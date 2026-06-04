@@ -265,17 +265,17 @@ impl HapticDescriptionGenerator {
                 }
                 let mut pattern = HapticPattern::new("beat-onset");
                 if self.config.lead_in {
-                    pattern
-                        .add_pulse(HapticPulse::new(0, 5, eff * 0.4, HapticWaveform::Click)
-                            .with_description("lead-in"));
+                    pattern.add_pulse(
+                        HapticPulse::new(0, 5, eff * 0.4, HapticWaveform::Click)
+                            .with_description("lead-in"),
+                    );
                     pattern.add_pulse(
                         HapticPulse::new(10, 20, eff, HapticWaveform::Thud)
                             .with_description("beat"),
                     );
                 } else {
                     pattern.add_pulse(
-                        HapticPulse::new(0, 20, eff, HapticWaveform::Thud)
-                            .with_description("beat"),
+                        HapticPulse::new(0, 20, eff, HapticWaveform::Thud).with_description("beat"),
                     );
                 }
                 pattern
@@ -360,8 +360,7 @@ impl HapticDescriptionGenerator {
                 let eff = (0.8_f32 * gain).clamp(0.0, 1.0);
                 let mut pattern = HapticPattern::new("alert");
                 pattern.add_pulse(
-                    HapticPulse::new(0, 10, eff, HapticWaveform::Click)
-                        .with_description("alert-1"),
+                    HapticPulse::new(0, 10, eff, HapticWaveform::Click).with_description("alert-1"),
                 );
                 pattern.add_pulse(
                     HapticPulse::new(20, 10, eff, HapticWaveform::Click)
@@ -390,8 +389,7 @@ impl HapticDescriptionGenerator {
                 let mut pattern = HapticPattern::new(format!("custom-{name}"));
                 if eff >= self.config.min_intensity {
                     pattern.add_pulse(
-                        HapticPulse::new(0, 40, eff, HapticWaveform::Custom)
-                            .with_description(name),
+                        HapticPulse::new(0, 40, eff, HapticWaveform::Custom).with_description(name),
                     );
                 }
                 pattern
@@ -430,7 +428,10 @@ mod tests {
     fn test_beat_onset_generates_pulse() {
         let gen = HapticDescriptionGenerator::new();
         let pattern = gen.from_event(MediaEvent::BeatOnset { intensity: 0.8 });
-        assert!(!pattern.is_empty(), "beat-onset should generate at least one pulse");
+        assert!(
+            !pattern.is_empty(),
+            "beat-onset should generate at least one pulse"
+        );
         assert!(pattern.total_duration_ms > 0);
     }
 
@@ -448,7 +449,10 @@ mod tests {
     fn test_impact_with_strong_magnitude_has_rumble() {
         let gen = HapticDescriptionGenerator::new();
         let pattern = gen.from_event(MediaEvent::ImpactEvent { magnitude: 0.9 });
-        assert!(pattern.len() >= 2, "strong impact should have main + rumble");
+        assert!(
+            pattern.len() >= 2,
+            "strong impact should have main + rumble"
+        );
     }
 
     #[test]
@@ -494,7 +498,11 @@ mod tests {
         // Should have pulses from both events
         assert!(timeline.len() >= 2);
         // Second event pulses should start at or after 500ms
-        let late_pulses: Vec<_> = timeline.pulses.iter().filter(|p| p.start_ms >= 500).collect();
+        let late_pulses: Vec<_> = timeline
+            .pulses
+            .iter()
+            .filter(|p| p.start_ms >= 500)
+            .collect();
         assert!(!late_pulses.is_empty());
     }
 

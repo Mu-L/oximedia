@@ -58,9 +58,9 @@ impl Default for OverlayConfig {
         Self {
             x: 8,
             y: 8,
-            fg_colour: [0, 255, 0, 255],   // green
-            bg_colour: [0, 0, 0, 160],      // semi-transparent black
-        scale: 1,
+            fg_colour: [0, 255, 0, 255], // green
+            bg_colour: [0, 0, 0, 160],   // semi-transparent black
+            scale: 1,
         }
     }
 }
@@ -223,13 +223,7 @@ impl DiagnosticOverlay {
     ///
     /// `frame` must be exactly `frame_w * frame_h * 4` bytes.
     /// If the dimensions are inconsistent, the frame is returned unchanged.
-    pub fn render_onto(
-        &self,
-        frame: &mut [u8],
-        frame_w: u32,
-        frame_h: u32,
-        stats: &NetworkStats,
-    ) {
+    pub fn render_onto(&self, frame: &mut [u8], frame_w: u32, frame_h: u32, stats: &NetworkStats) {
         let expected = (frame_w * frame_h * 4) as usize;
         if frame.len() != expected {
             return;
@@ -318,7 +312,10 @@ mod tests {
 
     #[test]
     fn test_overlay_height() {
-        let cfg = OverlayConfig { scale: 2, ..Default::default() };
+        let cfg = OverlayConfig {
+            scale: 2,
+            ..Default::default()
+        };
         let ov = DiagnosticOverlay::new(cfg);
         // 6 lines × (8*2 + 1) = 6 × 17 = 102
         assert_eq!(ov.overlay_height(), 102);
@@ -335,7 +332,10 @@ mod tests {
         // Known glyphs like '0'-'9' should have at least one set bit
         for c in b'0'..=b'9' {
             let g = glyph(c);
-            assert!(g.iter().any(|&r| r != 0), "glyph for '{c}' should be non-empty");
+            assert!(
+                g.iter().any(|&r| r != 0),
+                "glyph for '{c}' should be non-empty"
+            );
         }
     }
 
@@ -366,11 +366,25 @@ mod tests {
 
     #[test]
     fn test_overlay_scale2_height_doubled() {
-        let cfg1 = OverlayConfig { scale: 1, ..Default::default() };
-        let cfg2 = OverlayConfig { scale: 2, ..Default::default() };
+        // overlay_height = n_lines * (8 * scale + 1) where the +1 gap is scale-invariant.
+        // scale=1: 6 * (8 + 1) = 54; scale=2: 6 * (16 + 1) = 102.
+        // Height is NOT exactly doubled because the 1-px gap does not scale.
+        let cfg1 = OverlayConfig {
+            scale: 1,
+            ..Default::default()
+        };
+        let cfg2 = OverlayConfig {
+            scale: 2,
+            ..Default::default()
+        };
         let ov1 = DiagnosticOverlay::new(cfg1);
         let ov2 = DiagnosticOverlay::new(cfg2);
-        assert_eq!(ov2.overlay_height(), ov1.overlay_height() * 2);
+        // Verify scale=2 is taller than scale=1
+        assert!(ov2.overlay_height() > ov1.overlay_height());
+        // Verify scale=2 height matches the documented formula: 6*(16+1)=102
+        assert_eq!(ov2.overlay_height(), 102);
+        // Verify scale=1 height: 6*(8+1)=54
+        assert_eq!(ov1.overlay_height(), 54);
     }
 
     #[test]
@@ -409,8 +423,8 @@ mod tests {
     #[test]
     fn test_glyph_fallback_for_unknown_char() {
         // A character not in the match table falls back to the box glyph.
-        let g = glyph(b'@');  // '@' not in our table
-        // The fallback is [0x00, 0x7E, 0x42, ...] — non-zero.
+        let g = glyph(b'@'); // '@' not in our table
+                             // The fallback is [0x00, 0x7E, 0x42, ...] — non-zero.
         assert!(g.iter().any(|&r| r != 0));
     }
 }

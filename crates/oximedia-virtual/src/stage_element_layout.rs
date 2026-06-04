@@ -221,10 +221,7 @@ impl StageLayout {
                 let (b_min, b_max) = self.elements[j].aabb();
 
                 if aabb_overlap(&a_min, &a_max, &b_min, &b_max) {
-                    collisions.push((
-                        self.elements[i].id.clone(),
-                        self.elements[j].id.clone(),
-                    ));
+                    collisions.push((self.elements[i].id.clone(), self.elements[j].id.clone()));
                 }
             }
         }
@@ -291,7 +288,12 @@ mod tests {
     #[test]
     fn test_add_element_succeeds() {
         let mut layout = StageLayout::new();
-        let elem = make_element("led_1", ElementType::LedVolume, [0.0, 2.0, 0.0], [10.0, 4.0, 0.1]);
+        let elem = make_element(
+            "led_1",
+            ElementType::LedVolume,
+            [0.0, 2.0, 0.0],
+            [10.0, 4.0, 0.1],
+        );
         layout.add_element(elem).expect("should succeed");
         assert_eq!(layout.len(), 1);
     }
@@ -300,10 +302,20 @@ mod tests {
     fn test_add_duplicate_id_rejected() {
         let mut layout = StageLayout::new();
         layout
-            .add_element(make_element("cam", ElementType::Camera, [0.0; 3], [0.3, 0.2, 0.2]))
+            .add_element(make_element(
+                "cam",
+                ElementType::Camera,
+                [0.0; 3],
+                [0.3, 0.2, 0.2],
+            ))
             .expect("first insert ok");
         let err = layout
-            .add_element(make_element("cam", ElementType::Camera, [1.0, 0.0, 0.0], [0.3, 0.2, 0.2]))
+            .add_element(make_element(
+                "cam",
+                ElementType::Camera,
+                [1.0, 0.0, 0.0],
+                [0.3, 0.2, 0.2],
+            ))
             .expect_err("duplicate should fail");
         assert_eq!(err, StageError::DuplicateId("cam".to_owned()));
     }
@@ -322,7 +334,12 @@ mod tests {
     fn test_remove_element_succeeds() {
         let mut layout = StageLayout::new();
         layout
-            .add_element(make_element("m1", ElementType::TrackingMarker, [0.0; 3], [0.05, 0.05, 0.05]))
+            .add_element(make_element(
+                "m1",
+                ElementType::TrackingMarker,
+                [0.0; 3],
+                [0.05, 0.05, 0.05],
+            ))
             .expect("add ok");
         layout.remove_element("m1").expect("remove ok");
         assert!(layout.is_empty());
@@ -343,13 +360,28 @@ mod tests {
     fn test_find_by_type_single_type() {
         let mut layout = StageLayout::new();
         layout
-            .add_element(make_element("c1", ElementType::Camera, [0.0; 3], [0.3, 0.2, 0.2]))
+            .add_element(make_element(
+                "c1",
+                ElementType::Camera,
+                [0.0; 3],
+                [0.3, 0.2, 0.2],
+            ))
             .expect("ok");
         layout
-            .add_element(make_element("l1", ElementType::LightFixture, [1.0, 0.0, 0.0], [0.5, 0.5, 0.5]))
+            .add_element(make_element(
+                "l1",
+                ElementType::LightFixture,
+                [1.0, 0.0, 0.0],
+                [0.5, 0.5, 0.5],
+            ))
             .expect("ok");
         layout
-            .add_element(make_element("c2", ElementType::Camera, [2.0, 0.0, 0.0], [0.3, 0.2, 0.2]))
+            .add_element(make_element(
+                "c2",
+                ElementType::Camera,
+                [2.0, 0.0, 0.0],
+                [0.3, 0.2, 0.2],
+            ))
             .expect("ok");
 
         let cameras = layout.find_by_type(ElementType::Camera);
@@ -376,7 +408,12 @@ mod tests {
         // Element centred at (0,2,0) with dims (10,4,0.1)
         // AABB: min=(-5, 0, -0.05), max=(5, 4, 0.05)
         layout
-            .add_element(make_element("led", ElementType::LedVolume, [0.0, 2.0, 0.0], [10.0, 4.0, 0.1]))
+            .add_element(make_element(
+                "led",
+                ElementType::LedVolume,
+                [0.0, 2.0, 0.0],
+                [10.0, 4.0, 0.1],
+            ))
             .expect("ok");
         let (min, max) = layout.bounding_box().expect("should have bb");
         assert!((min[0] - (-5.0)).abs() < 1e-5);
@@ -390,11 +427,21 @@ mod tests {
         let mut layout = StageLayout::new();
         // Element A: centred at (0,0,0), dims (2,2,2) → AABB [-1,-1,-1]..[1,1,1]
         layout
-            .add_element(make_element("a", ElementType::PropItem, [0.0; 3], [2.0, 2.0, 2.0]))
+            .add_element(make_element(
+                "a",
+                ElementType::PropItem,
+                [0.0; 3],
+                [2.0, 2.0, 2.0],
+            ))
             .expect("ok");
         // Element B: centred at (4,0,0), dims (2,2,2) → AABB [3,-1,-1]..[5,1,1]
         layout
-            .add_element(make_element("b", ElementType::PropItem, [4.0, 0.0, 0.0], [2.0, 2.0, 2.0]))
+            .add_element(make_element(
+                "b",
+                ElementType::PropItem,
+                [4.0, 0.0, 0.0],
+                [2.0, 2.0, 2.0],
+            ))
             .expect("ok");
 
         let (min, max) = layout.bounding_box().expect("some");
@@ -411,10 +458,20 @@ mod tests {
         let mut layout = StageLayout::new();
         // Two non-overlapping cameras far apart.
         layout
-            .add_element(make_element("c1", ElementType::Camera, [0.0; 3], [0.3, 0.2, 0.2]))
+            .add_element(make_element(
+                "c1",
+                ElementType::Camera,
+                [0.0; 3],
+                [0.3, 0.2, 0.2],
+            ))
             .expect("ok");
         layout
-            .add_element(make_element("c2", ElementType::Camera, [10.0, 0.0, 0.0], [0.3, 0.2, 0.2]))
+            .add_element(make_element(
+                "c2",
+                ElementType::Camera,
+                [10.0, 0.0, 0.0],
+                [0.3, 0.2, 0.2],
+            ))
             .expect("ok");
         let collisions = layout.check_collisions();
         assert!(collisions.is_empty(), "no collisions expected");
@@ -425,10 +482,20 @@ mod tests {
         let mut layout = StageLayout::new();
         // Overlap: both elements at same position.
         layout
-            .add_element(make_element("e1", ElementType::PropItem, [0.0; 3], [1.0, 1.0, 1.0]))
+            .add_element(make_element(
+                "e1",
+                ElementType::PropItem,
+                [0.0; 3],
+                [1.0, 1.0, 1.0],
+            ))
             .expect("ok");
         layout
-            .add_element(make_element("e2", ElementType::SafetyBoundary, [0.0; 3], [1.0, 1.0, 1.0]))
+            .add_element(make_element(
+                "e2",
+                ElementType::SafetyBoundary,
+                [0.0; 3],
+                [1.0, 1.0, 1.0],
+            ))
             .expect("ok");
         let collisions = layout.check_collisions();
         assert_eq!(collisions.len(), 1, "one collision expected");
@@ -444,10 +511,20 @@ mod tests {
         // B: centre (1.5,0,0) dims (2,1,1) → AABB [0.5,-0.5,-0.5]..[2.5,0.5,0.5]
         // X overlap: 0.5..1.0 → overlapping.
         layout
-            .add_element(make_element("a", ElementType::LedVolume, [0.0; 3], [2.0, 1.0, 1.0]))
+            .add_element(make_element(
+                "a",
+                ElementType::LedVolume,
+                [0.0; 3],
+                [2.0, 1.0, 1.0],
+            ))
             .expect("ok");
         layout
-            .add_element(make_element("b", ElementType::GreenScreen, [1.5, 0.0, 0.0], [2.0, 1.0, 1.0]))
+            .add_element(make_element(
+                "b",
+                ElementType::GreenScreen,
+                [1.5, 0.0, 0.0],
+                [2.0, 1.0, 1.0],
+            ))
             .expect("ok");
         let collisions = layout.check_collisions();
         assert_eq!(collisions.len(), 1, "partial overlap should be detected");

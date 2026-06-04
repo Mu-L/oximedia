@@ -1,6 +1,6 @@
 # oximedia-image-transform
 
-![Version: 0.1.7](https://img.shields.io/badge/version-0.1.7-blue)
+![Version: 0.1.8](https://img.shields.io/badge/version-0.1.8-blue)
 ![Tests: 501](https://img.shields.io/badge/tests-501-brightgreen)
 ![Updated: 2026-05-21](https://img.shields.io/badge/updated-2026--05--21-blue)
 

@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Chapter navigation for accessibility.
 //!
 //! This module provides chapter-aware navigation for media content, enabling
@@ -181,7 +180,13 @@ impl Chapter {
 
 impl fmt::Display for Chapter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{}] {} ({}ms)", self.index + 1, self.title, self.start_ms)
+        write!(
+            f,
+            "[{}] {} ({}ms)",
+            self.index + 1,
+            self.title,
+            self.start_ms
+        )
     }
 }
 
@@ -465,8 +470,7 @@ impl ChapterNavigator {
     /// Currently selected chapter, if any.
     #[must_use]
     pub fn current(&self) -> Option<&Chapter> {
-        self.current_index
-            .and_then(|i| self.list.get_by_index(i))
+        self.current_index.and_then(|i| self.list.get_by_index(i))
     }
 
     /// Move to the chapter following the current one.
@@ -690,8 +694,8 @@ mod tests {
         let ch = Chapter::new(1, 0, "Chapter 1");
         assert_eq!(ch.announcement_title(), "Chapter 1");
 
-        let ch_with_at = Chapter::new(2, 0, "Chapter 1")
-            .with_accessible_title("Chapter 1: The Beginning");
+        let ch_with_at =
+            Chapter::new(2, 0, "Chapter 1").with_accessible_title("Chapter 1: The Beginning");
         assert_eq!(ch_with_at.announcement_title(), "Chapter 1: The Beginning");
     }
 
@@ -747,8 +751,14 @@ mod tests {
 
     #[test]
     fn test_content_type_display() {
-        assert_eq!(ChapterContentType::ContentWarning.to_string(), "Content Warning");
-        assert_eq!(ChapterContentType::ActionSequence.to_string(), "Action Sequence");
+        assert_eq!(
+            ChapterContentType::ContentWarning.to_string(),
+            "Content Warning"
+        );
+        assert_eq!(
+            ChapterContentType::ActionSequence.to_string(),
+            "Action Sequence"
+        );
         assert_eq!(ChapterContentType::Music.to_string(), "Music");
     }
 

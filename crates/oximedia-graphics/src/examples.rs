@@ -23,13 +23,14 @@ impl Examples {
         target.clear(Color::TRANSPARENT);
 
         let font_manager = FontManager::new();
-        let renderer = SoftwareRenderer::new(font_manager);
+        let mut renderer = SoftwareRenderer::new(font_manager);
 
         // Background rectangle
         let bg_rect = Rect::new(50.0, 900.0, 800.0, 120.0);
         let bg_fill = Fill::Solid(Color::new(0, 0, 0, 200));
         renderer.render_rect(&mut target, bg_rect, &bg_fill, None)?;
 
+        renderer.flush(&mut target);
         Ok(target)
     }
 
@@ -110,7 +111,7 @@ impl Examples {
     pub fn gradient_background() -> Result<RenderTarget> {
         let mut target = RenderTarget::new(1920, 1080)?;
         let font_manager = FontManager::new();
-        let renderer = SoftwareRenderer::new(font_manager);
+        let mut renderer = SoftwareRenderer::new(font_manager);
 
         let gradient = Gradient::linear(
             (0.0, 0.0),
@@ -125,6 +126,7 @@ impl Examples {
         let rect = Rect::new(0.0, 0.0, 1920.0, 1080.0);
         renderer.render_rect(&mut target, rect, &Fill::Gradient(gradient), None)?;
 
+        renderer.flush(&mut target);
         Ok(target)
     }
 
@@ -132,7 +134,7 @@ impl Examples {
     pub fn radial_gradient_example() -> Result<RenderTarget> {
         let mut target = RenderTarget::new(1920, 1080)?;
         let font_manager = FontManager::new();
-        let renderer = SoftwareRenderer::new(font_manager);
+        let mut renderer = SoftwareRenderer::new(font_manager);
 
         let gradient = Gradient::radial(
             (960.0, 540.0),
@@ -147,6 +149,7 @@ impl Examples {
         let rect = Rect::new(0.0, 0.0, 1920.0, 1080.0);
         renderer.render_rect(&mut target, rect, &Fill::Gradient(gradient), None)?;
 
+        renderer.flush(&mut target);
         Ok(target)
     }
 
@@ -215,7 +218,7 @@ impl Examples {
     pub fn multi_layer_composition() -> Result<RenderTarget> {
         let mut target = RenderTarget::new(1920, 1080)?;
         let font_manager = FontManager::new();
-        let renderer = SoftwareRenderer::new(font_manager);
+        let mut renderer = SoftwareRenderer::new(font_manager);
 
         // Layer 1: Background
         let bg_rect = Rect::new(0.0, 0.0, 1920.0, 1080.0);
@@ -246,6 +249,7 @@ impl Examples {
             Some(&Stroke::new(Color::BLUE, 3.0)),
         )?;
 
+        renderer.flush(&mut target);
         Ok(target)
     }
 
@@ -285,7 +289,7 @@ impl Examples {
     pub fn complex_sports_scoreboard() -> Result<RenderTarget> {
         let mut target = RenderTarget::new(1920, 1080)?;
         let font_manager = FontManager::new();
-        let renderer = SoftwareRenderer::new(font_manager);
+        let mut renderer = SoftwareRenderer::new(font_manager);
 
         // Main background
         let bg = Rect::new(660.0, 50.0, 600.0, 180.0);
@@ -313,6 +317,7 @@ impl Examples {
             None,
         )?;
 
+        renderer.flush(&mut target);
         Ok(target)
     }
 
@@ -322,7 +327,7 @@ impl Examples {
         target.clear(Color::TRANSPARENT);
 
         let font_manager = FontManager::new();
-        let renderer = SoftwareRenderer::new(font_manager);
+        let mut renderer = SoftwareRenderer::new(font_manager);
 
         // Temperature zones
         for i in 0..5 {
@@ -338,6 +343,7 @@ impl Examples {
             renderer.render_rect(&mut target, temp_zone, &Fill::Solid(color), None)?;
         }
 
+        renderer.flush(&mut target);
         Ok(target)
     }
 
@@ -345,7 +351,7 @@ impl Examples {
     pub fn election_results_graphic() -> Result<RenderTarget> {
         let mut target = RenderTarget::new(1920, 1080)?;
         let font_manager = FontManager::new();
-        let renderer = SoftwareRenderer::new(font_manager);
+        let mut renderer = SoftwareRenderer::new(font_manager);
 
         // Background
         let bg = Rect::new(0.0, 0.0, 1920.0, 1080.0);
@@ -368,6 +374,7 @@ impl Examples {
             None,
         )?;
 
+        renderer.flush(&mut target);
         Ok(target)
     }
 
@@ -377,7 +384,7 @@ impl Examples {
         target.clear(Color::TRANSPARENT);
 
         let font_manager = FontManager::new();
-        let renderer = SoftwareRenderer::new(font_manager);
+        let mut renderer = SoftwareRenderer::new(font_manager);
 
         // Ticker background
         let ticker_bg = Rect::new(0.0, 1020.0, 1920.0, 60.0);
@@ -388,6 +395,7 @@ impl Examples {
             None,
         )?;
 
+        renderer.flush(&mut target);
         Ok(target)
     }
 
@@ -397,7 +405,7 @@ impl Examples {
         target.clear(Color::TRANSPARENT);
 
         let font_manager = FontManager::new();
-        let renderer = SoftwareRenderer::new(font_manager);
+        let mut renderer = SoftwareRenderer::new(font_manager);
 
         // Guest name plate
         let name_plate = Rect::new(50.0, 900.0, 600.0, 150.0);
@@ -408,6 +416,7 @@ impl Examples {
             Some(&Stroke::new(Color::new(150, 100, 200, 255), 3.0)),
         )?;
 
+        renderer.flush(&mut target);
         Ok(target)
     }
 
@@ -417,7 +426,7 @@ impl Examples {
         target.clear(Color::TRANSPARENT);
 
         let font_manager = FontManager::new();
-        let renderer = SoftwareRenderer::new(font_manager);
+        let mut renderer = SoftwareRenderer::new(font_manager);
 
         // Team 1 panel
         let team1_panel = Rect::new(50.0, 50.0, 400.0, 150.0);
@@ -443,6 +452,7 @@ impl Examples {
         );
         renderer.render_rect(&mut target, team2_panel, &Fill::Gradient(gradient2), None)?;
 
+        renderer.flush(&mut target);
         Ok(target)
     }
 
@@ -452,7 +462,7 @@ impl Examples {
         target.clear(Color::TRANSPARENT);
 
         let font_manager = FontManager::new();
-        let renderer = SoftwareRenderer::new(font_manager);
+        let mut renderer = SoftwareRenderer::new(font_manager);
 
         // Timer background circle
         let timer_circle = Circle::new(960.0, 540.0, 300.0);
@@ -463,6 +473,7 @@ impl Examples {
             Some(&Stroke::new(Color::new(255, 200, 0, 255), 10.0)),
         )?;
 
+        renderer.flush(&mut target);
         Ok(target)
     }
 
@@ -472,7 +483,7 @@ impl Examples {
         target.clear(Color::TRANSPARENT);
 
         let font_manager = FontManager::new();
-        let renderer = SoftwareRenderer::new(font_manager);
+        let mut renderer = SoftwareRenderer::new(font_manager);
 
         // Alert panel
         let alert_panel = Rect::new(560.0, 400.0, 800.0, 280.0);
@@ -491,6 +502,7 @@ impl Examples {
             Some(&Stroke::new(Color::new(255, 215, 0, 255), 5.0)),
         )?;
 
+        renderer.flush(&mut target);
         Ok(target)
     }
 
@@ -498,7 +510,7 @@ impl Examples {
     pub fn poll_results_graphic() -> Result<RenderTarget> {
         let mut target = RenderTarget::new(1920, 1080)?;
         let font_manager = FontManager::new();
-        let renderer = SoftwareRenderer::new(font_manager);
+        let mut renderer = SoftwareRenderer::new(font_manager);
 
         // Background
         let bg = Rect::new(0.0, 0.0, 1920.0, 1080.0);
@@ -519,6 +531,7 @@ impl Examples {
             renderer.render_rect(&mut target, bar, &Fill::Solid(color), None)?;
         }
 
+        renderer.flush(&mut target);
         Ok(target)
     }
 
@@ -526,7 +539,7 @@ impl Examples {
     pub fn leaderboard_graphic() -> Result<RenderTarget> {
         let mut target = RenderTarget::new(1920, 1080)?;
         let font_manager = FontManager::new();
-        let renderer = SoftwareRenderer::new(font_manager);
+        let mut renderer = SoftwareRenderer::new(font_manager);
 
         // Background panel
         let panel = Rect::new(100.0, 100.0, 800.0, 800.0);
@@ -551,6 +564,7 @@ impl Examples {
             renderer.render_rect(&mut target, entry, &Fill::Solid(color), None)?;
         }
 
+        renderer.flush(&mut target);
         Ok(target)
     }
 

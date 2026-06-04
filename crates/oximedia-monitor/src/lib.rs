@@ -128,6 +128,60 @@ pub mod statsd_ingestion;
 /// W3C Trace Context propagation (traceparent/tracestate headers).
 pub mod w3c_trace_context;
 
+// ── New modules (0.1.8 orphan wiring) ─────────────────────────────────────
+/// Multi-dimensional capacity advisor with headroom and scale-up recommendations.
+pub mod capacity_advisor;
+/// Metric cardinality enforcement with configurable overflow actions.
+pub mod cardinality;
+/// Dashboard layout template system for configuring monitoring views.
+pub mod dashboard_layout;
+/// GPU metrics collection via Linux sysfs and macOS IOKit paths (non-NVIDIA).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod gpu_metrics_sysfs;
+/// Full incident lifecycle management with MTTD/MTTR analytics.
+pub mod incident_manager;
+/// Multi-tier metric downsampling with retention policies.
+pub mod metric_downsample;
+/// High-frequency time-series downsampling (LTTB, Average, MaxMin, LastValue).
+pub mod metric_downsampling;
+/// OpenTelemetry-compatible metrics export (wire-format only, no OTel SDK).
+pub mod opentelemetry_export;
+/// Seasonal decomposition for periodic anomaly detection.
+pub mod seasonal;
+/// Comprehensive SLA tracking with tier definitions and breach detection.
+pub mod sla_tracker;
+/// SQLite connection pool for concurrent metric storage access.
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
+pub mod sqlite_pool;
+/// StatsD wire-format parser (free-function API).
+pub mod statsd_parser;
+/// W3C Trace Context propagation using `traceparent`/`tracestate` headers.
+pub mod trace_context;
+/// Distributed trace export with Jaeger JSON format and tail-based sampling.
+pub mod trace_exporter;
+
+// ── Subdir modules (broadcast monitoring) ─────────────────────────────────
+/// Audio metering and monitoring (VU, PPM, loudness, phase, spectrum).
+pub mod audio;
+/// Closed caption monitoring and validation.
+pub mod cc;
+/// Broadcast compliance checking (EBU R128, SMPTE, ATSC).
+pub mod compliance;
+/// Focus peaking and assist (depends on scopes, declared after).
+pub mod focus;
+/// Multi-viewer layout and composition.
+pub mod multiviewer;
+/// Reference signal comparison (MSE, PSNR, SSIM).
+pub mod reference;
+/// Video scope monitoring (waveform, vectorscope, histogram, parade).
+pub mod scopes;
+/// Signal status and error monitoring.
+pub mod status;
+/// Technical video analysis (levels, range, gamut, cadence, sync).
+pub mod technical;
+/// Timecode monitoring and validation.
+pub mod timecode;
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use alert::AlertManager;
 pub use alert::{Alert, AlertRule, AlertSeverity};

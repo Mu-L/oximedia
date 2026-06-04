@@ -915,8 +915,7 @@ fn unquote(s: &str) -> &str {
     let s = s.trim();
     if s.len() >= 2 {
         let b = s.as_bytes();
-        if (b[0] == b'"' && b[s.len() - 1] == b'"') || (b[0] == b'\'' && b[s.len() - 1] == b'\'')
-        {
+        if (b[0] == b'"' && b[s.len() - 1] == b'"') || (b[0] == b'\'' && b[s.len() - 1] == b'\'') {
             return &s[1..s.len() - 1];
         }
     }
@@ -1001,7 +1000,10 @@ fn detect_transform_type(s: &str) -> Option<&str> {
     known.iter().find(|&&t| s.starts_with(t)).copied()
 }
 
-fn build_transform_node(ttype: &str, fields: &HashMap<String, String>) -> Option<OcioTransformNode> {
+fn build_transform_node(
+    ttype: &str,
+    fields: &HashMap<String, String>,
+) -> Option<OcioTransformNode> {
     match ttype {
         "MatrixTransform" => {
             let matrix = parse_f64_array16(fields.get("matrix").map(String::as_str).unwrap_or(""));
@@ -1013,14 +1015,30 @@ fn build_transform_node(ttype: &str, fields: &HashMap<String, String>) -> Option
             Some(OcioTransformNode::Exponent { value })
         }
         "LogAffineTransform" | "LogCameraTransform" => {
-            let log_side_slope =
-                parse_f64_array3(fields.get("log_side_slope").map(String::as_str).unwrap_or(""));
-            let log_side_offset =
-                parse_f64_array3(fields.get("log_side_offset").map(String::as_str).unwrap_or(""));
-            let lin_side_slope =
-                parse_f64_array3(fields.get("lin_side_slope").map(String::as_str).unwrap_or(""));
-            let lin_side_offset =
-                parse_f64_array3(fields.get("lin_side_offset").map(String::as_str).unwrap_or(""));
+            let log_side_slope = parse_f64_array3(
+                fields
+                    .get("log_side_slope")
+                    .map(String::as_str)
+                    .unwrap_or(""),
+            );
+            let log_side_offset = parse_f64_array3(
+                fields
+                    .get("log_side_offset")
+                    .map(String::as_str)
+                    .unwrap_or(""),
+            );
+            let lin_side_slope = parse_f64_array3(
+                fields
+                    .get("lin_side_slope")
+                    .map(String::as_str)
+                    .unwrap_or(""),
+            );
+            let lin_side_offset = parse_f64_array3(
+                fields
+                    .get("lin_side_offset")
+                    .map(String::as_str)
+                    .unwrap_or(""),
+            );
             Some(OcioTransformNode::LogAffine {
                 log_side_slope,
                 log_side_offset,
@@ -1306,14 +1324,18 @@ active_views: [Film, Raw]
     #[test]
     fn test_match_file_rule_by_pattern() {
         let cfg = parse_ocio(FULL_YAML).expect("parse");
-        let rule = cfg.match_file_rule("textures/wood.png").expect("match textures");
+        let rule = cfg
+            .match_file_rule("textures/wood.png")
+            .expect("match textures");
         assert_eq!(rule.colorspace, "sRGB");
     }
 
     #[test]
     fn test_match_file_rule_default() {
         let cfg = parse_ocio(FULL_YAML).expect("parse");
-        let rule = cfg.match_file_rule("unknown_file.jpg").expect("match default");
+        let rule = cfg
+            .match_file_rule("unknown_file.jpg")
+            .expect("match default");
         assert_eq!(rule.name, "Default");
     }
 
@@ -1386,10 +1408,7 @@ colorspaces:
         let cfg = parse_ocio(yaml).expect("parse");
         let cs = cfg.find_colorspace("Clamped").expect("cs");
         assert_eq!(cs.to_reference.len(), 1);
-        if let OcioTransformNode::Range {
-            min_in, max_in, ..
-        } = &cs.to_reference[0]
-        {
+        if let OcioTransformNode::Range { min_in, max_in, .. } = &cs.to_reference[0] {
             assert!((*min_in - 0.0).abs() < 1e-10);
             assert!((*max_in - 1.0).abs() < 1e-10);
         } else {

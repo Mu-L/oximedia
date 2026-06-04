@@ -1,17 +1,17 @@
 //! Broadcast compliance checking.
 
-pub mod ebu;
-pub mod smpte;
 pub mod atsc;
+pub mod ebu;
 pub mod report;
+pub mod smpte;
 
-use crate::{MonitorError, MonitorResult};
+use crate::MonitorResult;
 use serde::{Deserialize, Serialize};
 
-pub use ebu::EbuChecker;
-pub use smpte::SmpteChecker;
 pub use atsc::AtscChecker;
+pub use ebu::EbuChecker;
 pub use report::ComplianceReportGenerator;
+pub use smpte::SmpteChecker;
 
 /// Compliance standard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,7 +107,12 @@ impl ComplianceChecker {
     /// # Errors
     ///
     /// Returns an error if checking fails.
-    pub fn check_video_frame(&mut self, frame: &[u8], width: u32, height: u32) -> MonitorResult<()> {
+    pub fn check_video_frame(
+        &mut self,
+        frame: &[u8],
+        width: u32,
+        height: u32,
+    ) -> MonitorResult<()> {
         match self.standard {
             ComplianceStandard::EbuR128 => {
                 self.ebu_checker.check_video(frame, width, height)?;

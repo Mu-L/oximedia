@@ -287,6 +287,257 @@ impl Default for EdlParser {
     }
 }
 
+// ─── Lazy parsing types ────────────────────────────────────────────────────
+
+/// The eagerly-parsed header fields of an EDL event line.
+///
+/// These fields are cheap to compute — they only require scanning the first
+/// whitespace-delimited token group on the event line.
+#[derive(Debug, Clone)]
+pub struct EventHeader {
+    /// Event number.
+    pub number: u32,
+    /// Reel name.
+    pub reel: String,
+    /// Raw track-type string (e.g. `"V"`, `"A"`, `"AA/V"`).
+    pub track_type_raw: String,
+    /// Raw edit-type string (e.g. `"C"`, `"D"`).
+    pub edit_type_raw: String,
+}
+
+/// The lazily-parsed detail fields of an EDL event block.
+///
+/// These fields are only parsed when first accessed via
+/// [`LazyEvent::detail`].
+#[derive(Debug, Clone)]
+pub struct EventDetail {
+    /// Optional transition duration in frames.
+    pub transition_duration: Option<u32>,
+    /// Source in timecode string.
+    pub source_in_raw: String,
+    /// Source out timecode string.
+    pub source_out_raw: String,
+    /// Record in timecode string.
+    pub record_in_raw: String,
+    /// Record out timecode string.
+    pub record_out_raw: String,
+    /// Comment lines associated with this event (raw text after `*`).
+    pub comments: Vec<String>,
+}
+
+/// An EDL event whose detail fields are resolved lazily on first access.
+///
+/// The header (event number, reel, track/edit type) is parsed eagerly.
+/// The detail (timecodes, transition duration, comments) is stored as a raw
+/// string and only parsed on the first call to [`LazyEvent::detail`].
+/// Subsequent calls return the cached value — the detail parser is never
+/// invoked more than once per event.
+pub struct LazyEvent {
+    /// Eagerly parsed header fields.
+    pub header: EventHeader,
+    /// Raw unparsed rest of the event block (event line + following comment lines).
+    raw_detail: String,
+    /// Lazily resolved detail; `None` until first access.
+    detail: std::cell::RefCell<Option<EventDetail>>,
+    /// Frame rate needed by the detail parser.
+    frame_rate: EdlFrameRate,
+}
+
+impl std::fmt::Debug for LazyEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LazyEvent")
+            .field("header", &self.header)
+            .field("raw_detail", &self.raw_detail)
+            .field(
+                "detail",
+                if self.detail.borrow().is_some() {
+                    &"Some(<resolved>)"
+                } else {
+                    &"None"
+                },
+            )
+            .finish()
+    }
+}
+
+impl LazyEvent {
+    /// Access the event detail, parsing it on the first call and caching the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the raw detail cannot be parsed.
+    pub fn detail(&self) -> EdlResult<std::cell::Ref<'_, EventDetail>> {
+        // If not yet resolved, parse now and store.
+        if self.detail.borrow().is_none() {
+            let parsed = Self::parse_detail(&self.raw_detail, self.frame_rate)?;
+            *self.detail.borrow_mut() = Some(parsed);
+        }
+        // SAFETY: we just guaranteed the RefCell contains Some(…).
+        Ok(std::cell::Ref::map(self.detail.borrow(), |opt| {
+            opt.as_ref().expect("detail was just populated")
+        }))
+    }
+
+    /// Parse the raw detail string into an [`EventDetail`].
+    fn parse_detail(raw: &str, frame_rate: EdlFrameRate) -> EdlResult<EventDetail> {
+        let mut comments = Vec::new();
+        let mut event_line: Option<&str> = None;
+
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.starts_with('*') {
+                if let Some(c) = trimmed.strip_prefix('*') {
+                    comments.push(c.trim().to_string());
+                }
+            } else if event_line.is_none() {
+                event_line = Some(trimmed);
+            }
+        }
+
+        let ev_line = event_line.ok_or_else(|| EdlError::parse(0, "no event line in detail"))?;
+
+        // We only need the timecode portion of the line.  The format after the
+        // edit-type token is:  [duration] SRC_IN SRC_OUT REC_IN REC_OUT
+        // Skip the first 3 tokens (number, reel, track) and the edit-type token.
+        let tokens: Vec<&str> = ev_line.split_whitespace().collect();
+        // tokens[0] = number, [1] = reel, [2] = track, [3] = edit_type
+        // remaining tokens start at index 4
+        if tokens.len() < 8 {
+            return Err(EdlError::parse(0, "insufficient tokens on event line"));
+        }
+
+        let mut idx = 4usize;
+
+        // Optional transition duration: present when the token at `idx` is all-digits
+        // and the next tokens are timecodes.
+        let transition_duration = if tokens.get(idx).map_or(false, |t| {
+            t.chars().all(|c| c.is_ascii_digit())
+                && t.len() <= 5
+                && !t.contains(':')
+                && !t.contains(';')
+        }) && tokens.len() >= 9
+        {
+            let dur = tokens[idx]
+                .parse::<u32>()
+                .map_err(|_| EdlError::parse(0, "invalid transition duration"))?;
+            idx += 1;
+            Some(dur)
+        } else {
+            None
+        };
+
+        // We need exactly 4 timecode tokens.
+        if tokens.len() < idx + 4 {
+            return Err(EdlError::parse(0, "missing timecode tokens"));
+        }
+
+        // Validate they look like timecodes (contain ':' or ';').
+        for tc_tok in &tokens[idx..idx + 4] {
+            if !tc_tok.contains(':') && !tc_tok.contains(';') {
+                return Err(EdlError::parse(
+                    0,
+                    format!("token does not look like a timecode: {tc_tok}"),
+                ));
+            }
+        }
+
+        // Verify the frame rate is understood (parse one timecode as a check).
+        EdlTimecode::parse(tokens[idx], frame_rate)
+            .map_err(|e| EdlError::parse(0, format!("invalid source_in timecode: {e}")))?;
+
+        Ok(EventDetail {
+            transition_duration,
+            source_in_raw: tokens[idx].to_string(),
+            source_out_raw: tokens[idx + 1].to_string(),
+            record_in_raw: tokens[idx + 2].to_string(),
+            record_out_raw: tokens[idx + 3].to_string(),
+            comments,
+        })
+    }
+}
+
+/// Parse an EDL in lazy mode, returning a list of [`LazyEvent`]s.
+///
+/// Only the event header (number, reel, track, edit type) is parsed during
+/// this call.  Detail fields (timecodes, transition duration, comments) are
+/// deferred until [`LazyEvent::detail`] is called.
+///
+/// # Errors
+///
+/// Returns an error if the input cannot be scanned for headers.
+pub fn parse_lazy(input: &str, frame_rate: EdlFrameRate) -> EdlResult<Vec<LazyEvent>> {
+    let mut events: Vec<LazyEvent> = Vec::new();
+    let mut current_header: Option<EventHeader> = None;
+    let mut current_raw_lines: Vec<&str> = Vec::new();
+
+    for line in input.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // TITLE / FCM header lines — skip silently
+        if trimmed.starts_with("TITLE:") || trimmed.starts_with("FCM:") {
+            continue;
+        }
+
+        // Comment line: belongs to the current event block
+        if trimmed.starts_with('*') {
+            current_raw_lines.push(line);
+            continue;
+        }
+
+        // Check if this line starts with an event number (digit-first)
+        if trimmed.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+            // Flush the previous event (if any)
+            if let Some(header) = current_header.take() {
+                let raw_detail = current_raw_lines.join("\n");
+                current_raw_lines.clear();
+                events.push(LazyEvent {
+                    header,
+                    raw_detail,
+                    detail: std::cell::RefCell::new(None),
+                    frame_rate,
+                });
+            }
+
+            // Parse the header eagerly (number + reel + track + edit_type only)
+            let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+            if tokens.len() >= 4 {
+                let number = tokens[0]
+                    .parse::<u32>()
+                    .map_err(|_| EdlError::parse(0, "invalid event number"))?;
+                current_header = Some(EventHeader {
+                    number,
+                    reel: tokens[1].to_string(),
+                    track_type_raw: tokens[2].to_string(),
+                    edit_type_raw: tokens[3].to_string(),
+                });
+                current_raw_lines.push(line);
+            }
+        }
+    }
+
+    // Flush the last event
+    if let Some(header) = current_header {
+        let raw_detail = current_raw_lines.join("\n");
+        events.push(LazyEvent {
+            header,
+            raw_detail,
+            detail: std::cell::RefCell::new(None),
+            frame_rate,
+        });
+    }
+
+    Ok(events)
+}
+
+// ─── Frame rate parsing helper ─────────────────────────────────────────────
+
 /// Parse frame rate from FCM line.
 #[allow(dead_code)]
 fn parse_fcm(input: &str) -> EdlResult<EdlFrameRate> {
@@ -415,5 +666,96 @@ FCM: DROP FRAME
 
         assert_eq!(edl.events.len(), 1);
         assert_eq!(edl.events[0].clip_name, Some("test_clip.mov".to_string()));
+    }
+
+    const LAZY_SAMPLE_EDL: &str = "\
+TITLE: Lazy Sample\n\
+FCM: DROP FRAME\n\
+\n\
+001  A001     V     C        01:00:00;00 01:00:05;00 01:00:00;00 01:00:05;00\n\
+* FROM CLIP NAME: shot001.mov\n\
+\n\
+002  A002     V     D    030 01:00:05;00 01:00:10;00 01:00:05;00 01:00:10;00\n\
+* FROM CLIP NAME: shot002.mov\n\
+* Generic comment\n\
+\n\
+003  B001     V     C        01:00:10;00 01:00:15;00 01:00:10;00 01:00:15;00\n";
+
+    /// Accessing only the `.header` fields of lazy events must NOT invoke the
+    /// detail parser.  We verify this by tracking the detail borrow count.
+    #[test]
+    fn test_lazy_parse_headers_only() {
+        let events = parse_lazy(LAZY_SAMPLE_EDL, EdlFrameRate::Fps2997DF)
+            .expect("parse_lazy should succeed");
+
+        assert_eq!(events.len(), 3);
+
+        // Access only header fields — detail must remain unparsed
+        for ev in &events {
+            let _ = ev.header.number;
+            let _ = &ev.header.reel;
+            let _ = &ev.header.track_type_raw;
+            let _ = &ev.header.edit_type_raw;
+        }
+
+        // Confirm that no detail has been resolved yet
+        for ev in &events {
+            assert!(
+                ev.detail.borrow().is_none(),
+                "detail should not have been parsed when accessing only header fields"
+            );
+        }
+
+        // Check header values are correct
+        assert_eq!(events[0].header.number, 1);
+        assert_eq!(events[0].header.reel, "A001");
+        assert_eq!(events[1].header.number, 2);
+        assert_eq!(events[1].header.reel, "A002");
+        assert_eq!(events[2].header.number, 3);
+        assert_eq!(events[2].header.reel, "B001");
+    }
+
+    /// Accessing `.detail()` should parse the raw block and cache it;
+    /// a second call must return the same data without re-invoking the parser.
+    #[test]
+    fn test_lazy_detail_resolves() {
+        let events = parse_lazy(LAZY_SAMPLE_EDL, EdlFrameRate::Fps2997DF)
+            .expect("parse_lazy should succeed");
+
+        assert_eq!(events.len(), 3);
+
+        // Before any detail access, nothing is cached
+        assert!(events[0].detail.borrow().is_none());
+
+        // First access — triggers parsing
+        {
+            let detail = events[0].detail().expect("detail should resolve");
+            assert_eq!(detail.source_in_raw, "01:00:00;00");
+            assert_eq!(detail.source_out_raw, "01:00:05;00");
+            assert_eq!(detail.record_in_raw, "01:00:00;00");
+            assert_eq!(detail.record_out_raw, "01:00:05;00");
+            assert!(detail.transition_duration.is_none());
+            assert_eq!(detail.comments.len(), 1);
+            assert!(detail.comments[0].contains("shot001"));
+        }
+
+        // After first access, detail is cached
+        assert!(events[0].detail.borrow().is_some());
+
+        // Second access — must return the same data (caching verified by
+        // the fact that the RefCell still holds a single Some value)
+        {
+            let detail2 = events[0]
+                .detail()
+                .expect("detail should resolve on second call");
+            assert_eq!(detail2.source_in_raw, "01:00:00;00");
+        }
+
+        // Event 2 has a transition duration
+        {
+            let detail2 = events[1].detail().expect("event 2 detail should resolve");
+            assert_eq!(detail2.transition_duration, Some(30));
+            assert_eq!(detail2.comments.len(), 2);
+        }
     }
 }

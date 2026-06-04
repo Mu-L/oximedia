@@ -49,13 +49,18 @@
 #![allow(clippy::cast_lossless)]
 
 pub mod ai_tagging;
+pub mod bin;
 pub mod bin_organizer;
 pub mod camera_metadata;
 pub mod clip;
+pub mod clip_ai_tag;
 pub mod clip_audit;
 pub mod clip_bin;
+pub mod clip_collaboration;
 pub mod clip_compare;
 pub mod clip_export;
+pub mod clip_face_index;
+pub mod clip_favorites;
 pub mod clip_fingerprint;
 pub mod clip_history;
 pub mod clip_merge;
@@ -63,9 +68,12 @@ pub mod clip_metadata;
 pub mod clip_playlist;
 pub mod clip_relations;
 pub mod clip_relations_bidirectional;
+pub mod clip_scene_detect;
 pub mod clip_search;
 pub mod clip_tag;
 pub mod clip_timeline;
+pub mod clip_transcode_status;
+pub mod clip_versioning;
 pub mod clip_waveform;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod database;
@@ -76,16 +84,19 @@ pub mod import;
 pub mod logging;
 pub mod marker;
 pub mod note;
+pub mod offline;
 pub mod proxy;
 pub mod proxy_link;
 pub mod proxy_meta;
 pub mod rating;
+pub mod rating_store;
 pub mod search;
 pub mod storyboard;
 pub mod subclip;
 pub mod sync;
 pub mod take;
 pub mod trim;
+pub mod usage;
 pub mod version;
 
 mod error;

@@ -73,8 +73,7 @@ pub fn check_gpu_status() -> GpuStatus {
     {
         // Probe wgpu for an adapter.  We intentionally do *not* cache the
         // adapter here — the real pipeline creation happens elsewhere.
-        let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
 
         // `enumerate_adapters` returns a Future in wgpu 29.x.
         let adapters: Vec<_> =
@@ -159,19 +158,18 @@ fn try_gpu_gaussian_blur(pixels: &mut [u8], width: u32, height: u32, sigma: f32)
         return false;
     }
 
-    let (device, queue) = match pollster::block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor {
+    let (device, queue) =
+        match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("oximedia-graphics gaussian"),
             required_features,
             required_limits: wgpu::Limits::downlevel_defaults(),
             memory_hints: wgpu::MemoryHints::default(),
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
             trace: wgpu::Trace::Off,
-        },
-    )) {
-        Ok(pair) => pair,
-        Err(_) => return false,
-    };
+        })) {
+            Ok(pair) => pair,
+            Err(_) => return false,
+        };
 
     // ── 2. Create textures ───────────────────────────────────────────────────
     // The WGSL shader:
@@ -457,9 +455,7 @@ fn try_gpu_gaussian_blur(pixels: &mut [u8], width: u32, height: u32, sigma: f32)
         for row in 0..(height as usize) {
             let src_start = row * aligned_row;
             let dst_start = row * raw_row;
-            if src_start + raw_row <= src_bytes.len()
-                && dst_start + raw_row <= pixels.len()
-            {
+            if src_start + raw_row <= src_bytes.len() && dst_start + raw_row <= pixels.len() {
                 pixels[dst_start..dst_start + raw_row]
                     .copy_from_slice(&src_bytes[src_start..src_start + raw_row]);
             }
@@ -949,7 +945,10 @@ mod tests {
         dispatch_gaussian_blur(&mut pixels, w, h, 2.0, &cfg);
 
         // Output must not be all-zero.
-        assert!(pixels.iter().any(|&v| v != 0), "output should not be all-zero");
+        assert!(
+            pixels.iter().any(|&v| v != 0),
+            "output should not be all-zero"
+        );
     }
 
     #[test]
@@ -962,7 +961,10 @@ mod tests {
         let cfg = GpuComputeConfig::default();
         dispatch_gaussian_blur(&mut pixels, w, h, 2.0, &cfg);
 
-        assert!(pixels.iter().any(|&v| v != 0), "output should not be all-zero");
+        assert!(
+            pixels.iter().any(|&v| v != 0),
+            "output should not be all-zero"
+        );
     }
 
     #[test]

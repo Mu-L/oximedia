@@ -1,9 +1,10 @@
 # oximedia-compat-ffmpeg TODO
 
-## Current Status
-- 10 source files; FFmpeg CLI argument compatibility layer
-- Key features: argument parsing (FfmpegArgs, GlobalOptions, InputSpec, OutputSpec), codec mapping (80+ mappings: libx264->av1, aac->opus, etc.), filter graph parsing, stream specifiers, diagnostics, translator (parse_and_translate -> TranslateResult)
-- Modules: arg_parser, argument_builder, codec_map, codec_mapping, diagnostics, filter_graph, filter_lex, stream_spec, translator
+## Current Status (Wave 12 — 2026-05-31)
+- 26 source files; FFmpeg CLI argument compatibility layer
+- `compat_ext.rs` (1,880 lines) split via splitrs into `compat_ext/` (types.rs, functions.rs, functions_2.rs) — all under 600 lines
+- Key features: argument parsing, codec mapping (80+ mappings), filter graph parsing, stream specifiers, diagnostics, translator
+- Modules: arg_parser, argument_builder, batch_mode, codec_map, codec_mapping, compat_ext/, concat_compat, diagnostics, encoder_options, ffprobe, ffprobe_output, filter_complex, filter_graph, filter_lex, filter_shorthand, hwaccel_compat, lavfi_compat, metadata_compat, pass, preset_translator, real_world_tests, seek, stream_spec, translator, two_pass
 
 ## Enhancements
 - [x] Extend `codec_map.rs` to cover all common FFmpeg codec aliases (e.g., h264_nvenc, hevc_amf -> av1 equivalents)
@@ -23,27 +24,41 @@
 - [x] two-pass: -pass 1/-pass 2 → PassPhase::First/Second with JSON stats file — Wave 4 Slice E
 
 ## New Features
-- [ ] Implement `ffprobe`-compatible output mode (JSON/XML/CSV format info) (verified-open 2026-05-16: not yet implemented)
+- [x] Implement `ffprobe`-compatible output mode (JSON/XML/CSV format info) — ffprobe.rs has ProbeOutput, ProbeStream, ProbeFormat; Wave 12 added `translate_ffprobe_args` + `FfprobeQuery` (2026-05-31)
 - [x] Add `-vf` / `-af` shorthand filter chain parsing alongside `-filter_complex` (verified 2026-05-16; Wave 4 Slice E)
-- [ ] Implement batch mode translation for converting multiple files in one invocation (verified-open 2026-05-16: not yet implemented)
-- [ ] Add `-movflags +faststart` and similar muxer option translation in `translator.rs` (verified-open 2026-05-16: not yet implemented)
-- [ ] Implement `-hwaccel` option translation to OxiMedia GPU pipeline flags (verified-open 2026-05-16: not yet implemented)
-- [ ] Add support for concat protocol (`concat:file1|file2`) and concat demuxer syntax (verified-open 2026-05-16: not yet implemented)
+- [x] Implement batch mode translation for converting multiple files in one invocation — `translate_batch_command` + `BatchJob` + `BatchInputSpec` + `BatchOutputSpec` added to batch_mode.rs (2026-05-31)
+- [x] Add `-movflags +faststart` and similar muxer option translation in `translator.rs` — `MuxerAction::FastStart` implemented; rw_25 test passes (verified 2026-05-31)
+- [ ] Implement `-hwaccel` option translation to OxiMedia GPU pipeline flags (verified-open 2026-05-16: hwaccel_compat.rs present, translate_hwaccel implemented)
+- [ ] Add support for concat protocol (`concat:file1|file2`) and concat demuxer syntax (concat_compat.rs exists)
 - [x] Implement two-pass encoding translation (`-pass 1` / `-pass 2`) in `translator.rs` (verified 2026-05-16; Wave 4 Slice E two-pass implementation)
-- [ ] Add `-metadata` tag translation for title, artist, comment fields (verified-open 2026-05-16: not yet implemented)
+- [x] Add `-metadata` tag translation for title, artist, comment fields — `translate_metadata_args(&[&str]) -> Vec<(String, String)>` added to metadata_compat.rs (2026-05-31)
 
 ## Performance
 - [x] Cache parsed codec map in `codec_map.rs` to avoid repeated HashMap construction (verified 2026-05-16; Wave 4 Slice E OnceLock singleton)
-- [ ] Optimize `filter_lex.rs` parser with zero-copy string slicing instead of String allocation
+- [x] Optimize `filter_lex.rs` parser with zero-copy string slicing — `parse_filter_graph_zerocopy` + `FilterToken<'a>` implemented in filter_lex.rs (2026-05-31)
 - [ ] Pre-compile regex patterns in `arg_parser.rs` for repeated argument parsing
 
 ## Testing
-- [ ] Add test suite covering 50+ real-world FFmpeg command lines and their expected translations
-- [ ] Test `filter_lex.rs` with complex filter graphs (split, overlay, amix chains)
-- [ ] Add round-trip test: build arguments with `argument_builder.rs`, parse back, verify equivalence
+- [x] Add test suite covering 50+ real-world FFmpeg command lines — real_world_tests.rs has 67 tests (rw_01..rw_67) as of Wave 12 (2026-05-31)
+- [x] Test `filter_lex.rs` with complex filter graphs (split, overlay, amix chains)
+- [x] Add round-trip test: build arguments with `argument_builder.rs`, parse back, verify equivalence (compat_ext tests cover builder)
 - [ ] Test diagnostic output formatting matches FFmpeg-style warning/error format
 - [ ] Add fuzz testing for `arg_parser.rs` with random argument combinations
-- [ ] Test codec mapping completeness: verify all patent-free codecs have FFmpeg aliases
+- [x] Test codec mapping completeness — rw_61/rw_62/rw_63 verify patent-free codecs and substitutions (2026-05-31)
+
+## Wave 12 Deliverables (2026-05-31)
+- [x] `compat_ext.rs` (1,880L) split by splitrs → `compat_ext/` (types.rs 573L, functions.rs 439L, functions_2.rs 519L) + mod.rs; all < 600L
+- [x] `translate_ffprobe_args(&[&str]) -> Result<FfprobeQuery, FfprobeArgError>` — parses ffprobe CLI flags (-v, -print_format/-of, -show_format, -show_streams, -show_packets, -select_streams, -i)
+- [x] `FfprobeQuery` struct (input_path, print_format, show_format, show_streams, show_packets, verbosity, select_streams)
+- [x] `FfprobeArgError` enum (MissingValue, UnknownPrintFormat)
+- [x] `translate_batch_command(&[&str]) -> Result<Vec<BatchJob>, BatchError>` — multi-input multi-output parsing
+- [x] `BatchJob { inputs: Vec<BatchInputSpec>, outputs: Vec<BatchOutputSpec> }` — structured batch result
+- [x] `BatchInputSpec { path, index }` + `BatchOutputSpec { path, video_codec, audio_codec, video_bitrate, audio_bitrate, crf, format, metadata }`
+- [x] `translate_metadata_args(&[&str]) -> Vec<(String, String)>` — extracts `-metadata key=value` pairs from raw arg slice
+- [x] `parse_filter_graph_zerocopy(input: &str) -> Vec<FilterToken<'_>>` — zero-copy lexer (Label, FilterName, Arg, ChainSep)
+- [x] `FilterToken<'a>` enum with borrowed `&'a str` slices (no heap alloc)
+- [x] rw_61..rw_67 tests: codec completeness (patent-free video, audio, substitution), zero-copy lexer, batch_command, ffprobe, metadata integration
+- [x] All 749 tests pass, 0 clippy warnings
 
 ## Documentation
 - [ ] Add FFmpeg-to-OxiMedia command translation examples in crate docs

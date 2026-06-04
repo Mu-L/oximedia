@@ -14,8 +14,6 @@
 //! dependency surface minimal while remaining spec-compliant enough to be
 //! consumed by any standard HTTP client.
 
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 
 use crate::{JobState, Priority, WorkerState};

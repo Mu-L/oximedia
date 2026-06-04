@@ -233,10 +233,7 @@ impl SiteRegistry {
 
     /// Return all sites in a given region.
     pub fn sites_in_region(&self, region: &str) -> Vec<&Site> {
-        self.sites
-            .values()
-            .filter(|s| s.region == region)
-            .collect()
+        self.sites.values().filter(|s| s.region == region).collect()
     }
 
     /// Total number of registered sites.
@@ -271,13 +268,10 @@ impl SiteRegistry {
     /// Returns a [`DispatchRecord`] summarising which sites received the
     /// command and which were skipped due to being unreachable.
     pub fn dispatch(&mut self, command: SiteCommand) -> DispatchRecord {
+        // For broadcast (empty targets) we consider ALL registered sites; for targeted
+        // commands we only consider the named sites.
         let target_ids: Vec<String> = if command.targets.is_empty() {
-            // Broadcast: all reachable sites.
-            self.sites
-                .values()
-                .filter(|s| s.status.is_reachable())
-                .map(|s| s.id.clone())
-                .collect()
+            self.sites.keys().cloned().collect()
         } else {
             command.targets.clone()
         };
@@ -290,15 +284,14 @@ impl SiteRegistry {
                 Some(site) if site.status.is_reachable() => {
                     info!(
                         "Dispatching '{}' to site '{}' ({})",
-                        command.verb, site_id, site.status.label()
+                        command.verb,
+                        site_id,
+                        site.status.label()
                     );
                     delivered_to.push(site_id.clone());
                 }
                 Some(_site) => {
-                    warn!(
-                        "Skipping site '{}' — offline",
-                        site_id
-                    );
+                    warn!("Skipping site '{}' — offline", site_id);
                     skipped.push(site_id.clone());
                 }
                 None => {
@@ -343,18 +336,16 @@ mod tests {
     fn test_reachable_sites_initially_offline() {
         let mut reg = SiteRegistry::new();
         reg.register_site(make_site("s1", "US"));
-        assert_eq!(
-            reg.reachable_sites().len(),
-            0,
-            "sites start offline"
-        );
+        assert_eq!(reg.reachable_sites().len(), 0, "sites start offline");
     }
 
     #[test]
     fn test_mark_online_makes_reachable() {
         let mut reg = SiteRegistry::new();
         reg.register_site(make_site("s2", "EU"));
-        reg.get_site_mut("s2").expect("site should exist").mark_online(1000);
+        reg.get_site_mut("s2")
+            .expect("site should exist")
+            .mark_online(1000);
         assert_eq!(reg.reachable_sites().len(), 1);
     }
 

@@ -26,6 +26,12 @@
 - [x] Implement AAF metadata search/query API (find mobs/clips matching criteria) (`search.rs`: `AafQuery`, `AafSearcher`)
 - [x] Add Avid bin structure reading/writing for Avid Media Composer compatibility (`avid_bin.rs`)
 - [x] Implement essence relinking: update media file references when paths change (`relink.rs`)
+- [x] Register orphan modules `avid_bin.rs` (644 LoC) and `relink.rs` (247 LoC) in `lib.rs` — real implementations sitting on disk, never compiled (planned 2026-05-29)
+  - **Goal:** Both modules compile and are exposed as `pub mod avid_bin` / `pub mod relink` in the crate's public API; existing tests still pass; zero clippy warnings.
+  - **Design:** Add `pub mod avid_bin;` and `pub mod relink;` to `src/lib.rs` after the existing module block. Run `cargo check -p oximedia-aaf --all-features` and fix any surfaced compile errors (likely outdated `use` paths). Fix clippy warnings at source.
+  - **Files:** `src/lib.rs`, `src/avid_bin.rs`, `src/relink.rs`
+  - **Tests:** Smoke test importing one symbol from each newly-registered module (forces compilation + use). Existing test suite must pass.
+  - **Risk:** Orphan modules may have stale `use` paths from before recent API changes; fix per-file.
 - [x] Add timeline flattening: resolve nested compositions into a single flat sequence (`flatten.rs`)
 
 ## Performance

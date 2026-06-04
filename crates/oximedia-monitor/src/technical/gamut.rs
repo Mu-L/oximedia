@@ -1,6 +1,6 @@
 //! Color gamut violation detection.
 
-use crate::{MonitorError, MonitorResult};
+use crate::MonitorResult;
 use serde::{Deserialize, Serialize};
 
 /// Gamut violation metrics.

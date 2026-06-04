@@ -36,8 +36,6 @@
 //! assert!(cleaned.is_ok());
 //! ```
 
-#![allow(dead_code)]
-
 use std::f64::consts::PI;
 
 use oxifft::api::fft as oxifft_fft;
@@ -173,10 +171,7 @@ impl NoiseReducer {
             for (i, &s) in noise_samples.iter().enumerate().take(fft_size) {
                 padded[i] = f64::from(s) * self.window[i];
             }
-            let frame: Vec<Complex<f64>> = padded
-                .iter()
-                .map(|&s| Complex::new(s, 0.0))
-                .collect();
+            let frame: Vec<Complex<f64>> = padded.iter().map(|&s| Complex::new(s, 0.0)).collect();
             let spectrum = oxifft_fft(&frame);
             for k in 0..bins {
                 sum_mag[k] += spectrum[k].norm();
@@ -305,10 +300,7 @@ impl NoiseReducer {
         }
 
         // Return only the original length
-        let result: Vec<f32> = output[..samples.len()]
-            .iter()
-            .map(|&s| s as f32)
-            .collect();
+        let result: Vec<f32> = output[..samples.len()].iter().map(|&s| s as f32).collect();
 
         Ok(result)
     }
@@ -385,7 +377,11 @@ mod tests {
         let n = 16384;
         let signal = sine_wave(440.0, sr, n);
         let noise = deterministic_noise(n, 42, 0.1);
-        let noisy: Vec<f32> = signal.iter().zip(noise.iter()).map(|(s, n)| s + n).collect();
+        let noisy: Vec<f32> = signal
+            .iter()
+            .zip(noise.iter())
+            .map(|(s, n)| s + n)
+            .collect();
 
         let mut reducer = NoiseReducer::new(NoiseReductionConfig {
             fft_size: 1024,

@@ -3,7 +3,7 @@
 pub mod display;
 pub mod validate;
 
-use crate::{MonitorError, MonitorResult};
+use crate::MonitorResult;
 use serde::{Deserialize, Serialize};
 
 pub use display::CaptionDisplay;

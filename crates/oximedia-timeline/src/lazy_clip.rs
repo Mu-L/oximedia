@@ -317,19 +317,28 @@ impl LazyClipLoader {
     /// Returns the number of clips that have been probed.
     #[must_use]
     pub fn probed_count(&self) -> usize {
-        self.entries.values().filter(|e| e.state.is_probed()).count()
+        self.entries
+            .values()
+            .filter(|e| e.state.is_probed())
+            .count()
     }
 
     /// Returns the number of clips that are still unprobed.
     #[must_use]
     pub fn unprobed_count(&self) -> usize {
-        self.entries.values().filter(|e| e.state.is_unprobed()).count()
+        self.entries
+            .values()
+            .filter(|e| e.state.is_unprobed())
+            .count()
     }
 
     /// Returns the number of clips that failed probing.
     #[must_use]
     pub fn failed_count(&self) -> usize {
-        self.entries.values().filter(|e| e.state.is_failed()).count()
+        self.entries
+            .values()
+            .filter(|e| e.state.is_failed())
+            .count()
     }
 
     /// Total number of registered clips.

@@ -17,7 +17,11 @@ pub struct XmpProperty {
 impl XmpProperty {
     /// Create a new property.
     #[allow(dead_code)]
-    pub fn new(namespace: impl Into<String>, name: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn new(
+        namespace: impl Into<String>,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
         Self {
             namespace: namespace.into(),
             name: name.into(),
@@ -104,12 +108,21 @@ impl XmpDocument {
 
     /// Insert or update the property identified by `(namespace, name)`.
     #[allow(dead_code)]
-    pub fn set(&mut self, namespace: impl Into<String>, name: impl Into<String>, value: impl Into<String>) {
+    pub fn set(
+        &mut self,
+        namespace: impl Into<String>,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) {
         let ns = namespace.into();
         let nm = name.into();
         let val = value.into();
 
-        if let Some(prop) = self.properties.iter_mut().find(|p| p.namespace == ns && p.name == nm) {
+        if let Some(prop) = self
+            .properties
+            .iter_mut()
+            .find(|p| p.namespace == ns && p.name == nm)
+        {
             prop.value = val;
         } else {
             self.properties.push(XmpProperty::new(ns, nm, val));
@@ -120,14 +133,18 @@ impl XmpDocument {
     #[allow(dead_code)]
     pub fn remove(&mut self, namespace: &str, name: &str) -> bool {
         let before = self.properties.len();
-        self.properties.retain(|p| !(p.namespace == namespace && p.name == name));
+        self.properties
+            .retain(|p| !(p.namespace == namespace && p.name == name));
         self.properties.len() < before
     }
 
     /// Return all properties whose namespace matches `namespace`.
     #[allow(dead_code)]
     pub fn properties_in(&self, namespace: &str) -> Vec<&XmpProperty> {
-        self.properties.iter().filter(|p| p.namespace == namespace).collect()
+        self.properties
+            .iter()
+            .filter(|p| p.namespace == namespace)
+            .collect()
     }
 }
 
@@ -161,7 +178,9 @@ impl XmpSerializer {
                 XmpNamespace::Xmp,
                 XmpNamespace::Rights,
             ] {
-                if candidate.prefix() == prop.namespace && !ns_seen.iter().any(|(p, _)| *p == candidate.prefix()) {
+                if candidate.prefix() == prop.namespace
+                    && !ns_seen.iter().any(|(p, _)| *p == candidate.prefix())
+                {
                     ns_seen.push((candidate.prefix(), candidate.uri()));
                 }
             }
@@ -177,7 +196,8 @@ impl XmpSerializer {
             xml.push_str(">\n");
             for prop in &doc.properties {
                 let qname = prop.qualified_name();
-                let escaped = prop.value
+                let escaped = prop
+                    .value
                     .replace('&', "&amp;")
                     .replace('<', "&lt;")
                     .replace('>', "&gt;")
@@ -367,7 +387,10 @@ mod tests {
         assert_eq!(doc.get("dc", "creator"), Some("Alice"));
         assert_eq!(doc.get("dc", "subject"), Some("nature, outdoor"));
         assert_eq!(doc.get("xmpRights", "UsageTerms"), Some("CC-BY 4.0"));
-        assert_eq!(doc.get("dc", "description"), Some("A beautiful landscape photo"));
+        assert_eq!(
+            doc.get("dc", "description"),
+            Some("A beautiful landscape photo")
+        );
     }
 
     #[test]

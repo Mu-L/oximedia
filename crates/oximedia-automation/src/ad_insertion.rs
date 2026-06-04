@@ -17,9 +17,7 @@
 //! playout tick without locking overhead.  Thread-safety is the caller's
 //! responsibility (wrap in `Arc<Mutex<...>>` if needed).
 
-use crate::playlist::scte35::{
-    generate_splice_insert, generate_splice_return, SpliceCommand,
-};
+use crate::playlist::scte35::{generate_splice_insert, generate_splice_return, SpliceCommand};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tracing::{info, warn};
@@ -327,7 +325,10 @@ mod tests {
     fn test_duplicate_event_id_rejected() {
         let mut mgr = AdBreakManager::new();
         assert!(mgr.schedule(avail(4, 0, 1000)));
-        assert!(!mgr.schedule(avail(4, 500, 2000)), "duplicate should be rejected");
+        assert!(
+            !mgr.schedule(avail(4, 500, 2000)),
+            "duplicate should be rejected"
+        );
         assert_eq!(mgr.pending_count(), 1);
     }
 

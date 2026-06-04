@@ -220,6 +220,182 @@ impl fmt::Display for TotalFrameCounter {
     }
 }
 
+// ── Drop-frame boundary LUT verification ─────────────────────────────────────
+
+/// Build a lookup of "minutes that ARE drop" (i.e. frames 0 and 1 are skipped)
+/// in the first 60 minutes of 29.97 DF.
+///
+/// Specification: a minute is a *drop* minute when `minute % 10 != 0`, i.e.
+/// minutes 1–9, 11–19, 21–29, 31–39, 41–49, 51–59.
+///
+/// Returns a 60-element boolean array where `true` means "frames 0 and 1 are
+/// dropped at the start of this minute".
+fn build_df_29_97_drop_minute_lut() -> [bool; 60] {
+    let mut lut = [false; 60];
+    for (m, entry) in lut.iter_mut().enumerate() {
+        *entry = m % 10 != 0;
+    }
+    lut
+}
+
+/// Exact drop-frame round-trip and known-vector tests exercising
+/// [`crate::Timecode::from_frames`] (integer Poynton algorithm).
+#[cfg(test)]
+mod exact_df_tests {
+    use crate::{FrameRate, Timecode};
+
+    /// `to_frames(from_frames(n)) == n` for a large frame count.
+    #[test]
+    fn test_drop_frame_from_frames_round_trip_1_million() {
+        let n: u64 = 1_000_000;
+        let tc = Timecode::from_frames(n, FrameRate::Fps2997DF).expect("from_frames must succeed");
+        let back = tc.to_frames();
+        assert_eq!(
+            back, n,
+            "round-trip failed: from_frames({n}) → {tc} → to_frames={back}"
+        );
+    }
+
+    /// SMPTE known test vector for 29.97 DF:
+    /// Frame 1800 (the 1801st actual frame, 0-indexed) is the first frame of
+    /// minute 1 in 29.97 DF. Because frames 0 and 1 of that minute are skipped,
+    /// the displayed timecode is 00;01;00;02.
+    #[test]
+    fn test_drop_frame_known_vector_29_97() {
+        let tc =
+            Timecode::from_frames(1800, FrameRate::Fps2997DF).expect("from_frames must succeed");
+        assert_eq!(tc.hours, 0);
+        assert_eq!(tc.minutes, 1);
+        assert_eq!(tc.seconds, 0);
+        assert_eq!(
+            tc.frames, 2,
+            "first frame after first-minute drop must be frame 2"
+        );
+    }
+
+    /// Exhaustive round-trip: every frame in the first 10 minutes of 29.97 DF
+    /// (17982 actual frames) must survive `to_frames → from_frames` intact.
+    #[test]
+    fn test_drop_frame_exhaustive_10min_round_trip() {
+        // 17982 = 1 non-drop minute (1800) + 9 drop minutes (9×1798)
+        const FRAMES_PER_10MIN_29_97: u64 = 17982;
+        for n in 0..FRAMES_PER_10MIN_29_97 {
+            let tc =
+                Timecode::from_frames(n, FrameRate::Fps2997DF).expect("from_frames must succeed");
+            let back = tc.to_frames();
+            assert_eq!(
+                back, n,
+                "exhaustive round-trip failed at frame {n}: got {back}"
+            );
+        }
+    }
+
+    /// Pure-integer check: frame counts near midnight (day boundary) do not
+    /// rely on floating-point and remain exact.
+    #[test]
+    fn test_drop_frame_no_fp_at_midnight() {
+        // Total frames in 23 hours of 29.97 DF = 23 × 107892
+        let near_day_end: u64 = 23 * 107892 + 10000;
+        let tc = Timecode::from_frames(near_day_end, FrameRate::Fps2997DF)
+            .expect("from_frames must succeed");
+        let back = tc.to_frames();
+        assert_eq!(
+            back, near_day_end,
+            "near-midnight round-trip failed: {near_day_end} → {tc} → {back}"
+        );
+    }
+
+    /// Round-trip for 59.94 DF (4 frames dropped per minute, except every 10th).
+    #[test]
+    fn test_drop_frame_round_trip_5994_df() {
+        let n: u64 = 500_000;
+        let tc = Timecode::from_frames(n, FrameRate::Fps5994DF)
+            .expect("from_frames must succeed for 59.94 DF");
+        let back = tc.to_frames();
+        assert_eq!(back, n, "59.94 DF round-trip failed at frame {n}");
+    }
+
+    /// Round-trip for 23.976 DF (2 frames dropped per minute, except every 10th).
+    #[test]
+    fn test_drop_frame_round_trip_23976_df() {
+        let n: u64 = 200_000;
+        let tc = Timecode::from_frames(n, FrameRate::Fps23976DF)
+            .expect("from_frames must succeed for 23.976 DF");
+        let back = tc.to_frames();
+        assert_eq!(back, n, "23.976 DF round-trip failed at frame {n}");
+    }
+
+    // ── Drop-frame LUT correctness tests ──────────────────────────────────
+
+    /// Verify the drop-minute LUT matches the SMPTE rule for all 60 minutes.
+    #[test]
+    fn test_df_29_97_drop_minute_lut_correct() {
+        let lut = crate::drop_frame::build_df_29_97_drop_minute_lut();
+        assert_eq!(lut.len(), 60);
+
+        // Minute 0 must NOT be a drop minute.
+        assert!(!lut[0], "minute 0 must be a keep-minute");
+        // Minute 10 must NOT be a drop minute.
+        assert!(!lut[10], "minute 10 must be a keep-minute");
+        assert!(!lut[20], "minute 20 must be a keep-minute");
+        assert!(!lut[30], "minute 30 must be a keep-minute");
+        assert!(!lut[40], "minute 40 must be a keep-minute");
+        assert!(!lut[50], "minute 50 must be a keep-minute");
+
+        // All other minutes must be drop minutes.
+        for m in 0..60usize {
+            if m % 10 != 0 {
+                assert!(lut[m], "minute {m} must be a drop-minute");
+            }
+        }
+    }
+
+    /// Verify that `from_frames` respects drop boundaries:
+    /// the first real frame of minute 1 (frame index 1800) maps to display
+    /// frame 00;01;00;02 (frames 0 and 1 are absent).
+    #[test]
+    fn test_lut_boundary_minute_1_skips_frames_0_1() {
+        let tc =
+            Timecode::from_frames(1800, FrameRate::Fps2997DF).expect("from_frames must succeed");
+        assert_eq!(tc.minutes, 1);
+        assert_eq!(tc.seconds, 0);
+        assert_eq!(
+            tc.frames, 2,
+            "boundary: first display frame in minute 1 must be 02"
+        );
+    }
+
+    /// Verify boundary at minute 2 (second drop minute).
+    #[test]
+    fn test_lut_boundary_minute_2() {
+        // Frames in minute 1: 1798 real frames (1800 - 2 dropped)
+        // Start of minute 2 real-frame index = 1800 + 1798 = 3598
+        let tc =
+            Timecode::from_frames(3598, FrameRate::Fps2997DF).expect("from_frames must succeed");
+        assert_eq!(tc.minutes, 2);
+        assert_eq!(tc.seconds, 0);
+        assert_eq!(
+            tc.frames, 2,
+            "boundary: first display frame in minute 2 must be 02"
+        );
+    }
+
+    /// Verify that minute 10 is NOT a drop minute (frame 0 is valid).
+    #[test]
+    fn test_lut_boundary_minute_10_no_drop() {
+        // Start of minute 10 real-frame index = 1 non-drop minute + 9 drop minutes
+        //   = 1800 + 9 × 1798 = 1800 + 16182 = 17982
+        let tc =
+            Timecode::from_frames(17982, FrameRate::Fps2997DF).expect("from_frames must succeed");
+        assert_eq!(tc.minutes, 10);
+        assert_eq!(tc.seconds, 0);
+        assert_eq!(
+            tc.frames, 0,
+            "minute 10 is a keep-minute: display frame must be 00"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -182,9 +182,7 @@ impl EncodeLadder {
 
     /// Sorts rungs from highest to lowest bitrate in place.
     pub fn sort_descending(&mut self) {
-        self.rungs.sort_by(|a, b| {
-            b.bitrate_bps.cmp(&a.bitrate_bps)
-        });
+        self.rungs.sort_by(|a, b| b.bitrate_bps.cmp(&a.bitrate_bps));
     }
 
     /// Returns the codec set used across all rungs.
@@ -501,7 +499,10 @@ impl LadderValidator {
         if rung.width == 0 || rung.height == 0 {
             findings.push(LadderFinding::error(
                 Some(i),
-                format!("Rung {} has zero dimension ({}×{})", i, rung.width, rung.height),
+                format!(
+                    "Rung {} has zero dimension ({}×{})",
+                    i, rung.width, rung.height
+                ),
             ));
         }
 
@@ -653,14 +654,10 @@ pub fn vp9_hls_ladder() -> EncodeLadder {
 #[must_use]
 pub fn av1_cmaf_ladder() -> EncodeLadder {
     EncodeLadder::new(vec![
-        LadderRung::new(1920, 1080, 3_500_000, 30.0, "av1")
-            .with_segment_duration(2.0),
-        LadderRung::new(1280, 720, 1_800_000, 30.0, "av1")
-            .with_segment_duration(2.0),
-        LadderRung::new(854, 480, 800_000, 30.0, "av1")
-            .with_segment_duration(2.0),
-        LadderRung::new(640, 360, 350_000, 30.0, "av1")
-            .with_segment_duration(2.0),
+        LadderRung::new(1920, 1080, 3_500_000, 30.0, "av1").with_segment_duration(2.0),
+        LadderRung::new(1280, 720, 1_800_000, 30.0, "av1").with_segment_duration(2.0),
+        LadderRung::new(854, 480, 800_000, 30.0, "av1").with_segment_duration(2.0),
+        LadderRung::new(640, 360, 350_000, 30.0, "av1").with_segment_duration(2.0),
     ])
 }
 
@@ -742,15 +739,17 @@ mod tests {
             LadderRung::new(1920, 1080, 4_000_000, 30.0, "theora"), // not in HLS spec
         ]);
         let report = LadderValidator::new(LadderSpec::Hls).validate(&ladder);
-        assert!(report.error_count() > 0, "expected error for unsupported codec");
+        assert!(
+            report.error_count() > 0,
+            "expected error for unsupported codec"
+        );
     }
 
     #[test]
     fn test_segment_duration_out_of_range_errors() {
         // CMAF requires segment duration between 1.0 and 6.0 s.
         let ladder = EncodeLadder::new(vec![
-            LadderRung::new(1920, 1080, 4_000_000, 30.0, "av1")
-                .with_segment_duration(0.1), // too short for CMAF
+            LadderRung::new(1920, 1080, 4_000_000, 30.0, "av1").with_segment_duration(0.1), // too short for CMAF
         ]);
         let report = LadderValidator::new(LadderSpec::Cmaf).validate(&ladder);
         let error_msgs: Vec<&str> = report.errors().iter().map(|f| f.message.as_str()).collect();

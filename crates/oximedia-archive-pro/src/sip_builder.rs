@@ -264,15 +264,22 @@ impl SipBuilder {
 
         self.submission_time = Some(SystemTime::now());
 
+        // Pre-calculate before any partial moves
+        let total_size = self.total_size_bytes();
+
         Ok(SipDescriptor {
             package_id: self.package_id,
             title: self.title,
-            producer: self.producer.expect("producer validated: is_none check passed above"),
+            producer: self
+                .producer
+                .expect("producer validated: is_none check passed above"),
             files: self.files,
             descriptive_metadata: self.descriptive_metadata,
             agreement_status: self.agreement_status,
-            submission_time: self.submission_time.expect("submission_time set on line above"),
-            total_size_bytes: self.total_size_bytes(),
+            submission_time: self
+                .submission_time
+                .expect("submission_time set on line above"),
+            total_size_bytes: total_size,
         })
     }
 }
@@ -336,7 +343,6 @@ impl std::cmp::PartialEq for SipFileEntry {
 
 /// Implement `Eq` for `ContentCategory` is already derived above via the derive macro,
 /// but we need `Hash` for `HashSet` usage — done above.
-
 #[cfg(test)]
 mod tests {
     use super::*;

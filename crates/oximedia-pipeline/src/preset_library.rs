@@ -29,9 +29,7 @@
 use std::collections::HashMap;
 
 use crate::graph::PipelineGraph;
-use crate::node::{
-    FilterConfig, FrameFormat, NodeSpec, SinkConfig, SourceConfig, StreamSpec,
-};
+use crate::node::{FilterConfig, FrameFormat, NodeSpec, SinkConfig, SourceConfig, StreamSpec};
 use crate::PipelineError;
 
 // ── PresetCategory ────────────────────────────────────────────────────────────
@@ -434,7 +432,11 @@ pub fn preset_thumbnail() -> PipelinePreset {
         StreamSpec::video(FrameFormat::Yuv420p, 320, 240, 25),
         thumb_spec.clone(),
     );
-    let sink = NodeSpec::sink("sink", SinkConfig::File("thumb.rgba".to_string()), thumb_spec);
+    let sink = NodeSpec::sink(
+        "sink",
+        SinkConfig::File("thumb.rgba".to_string()),
+        thumb_spec,
+    );
     let s = g.add_node(src);
     let sc = g.add_node(scale);
     let cv = g.add_node(convert);
@@ -562,7 +564,13 @@ mod tests {
     #[test]
     fn builtins_present() {
         let lib = PresetLibrary::with_builtins();
-        for name in ["web_720p", "web_1080p", "archive_lossless", "thumbnail_jpeg", "abr_ladder"] {
+        for name in [
+            "web_720p",
+            "web_1080p",
+            "archive_lossless",
+            "thumbnail_jpeg",
+            "abr_ladder",
+        ] {
             assert!(lib.get(name).is_some(), "missing preset '{name}'");
         }
         assert_eq!(lib.len(), 5);
@@ -632,7 +640,13 @@ mod tests {
     fn catalogue_contains_all_names() {
         let lib = PresetLibrary::with_builtins();
         let cat = lib.catalogue();
-        for name in ["web_720p", "web_1080p", "archive_lossless", "thumbnail_jpeg", "abr_ladder"] {
+        for name in [
+            "web_720p",
+            "web_1080p",
+            "archive_lossless",
+            "thumbnail_jpeg",
+            "abr_ladder",
+        ] {
             assert!(cat.contains(name), "catalogue missing '{name}'");
         }
     }

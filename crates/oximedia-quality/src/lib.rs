@@ -58,6 +58,7 @@ mod batch;
 mod blockiness;
 mod blur;
 mod brisque;
+pub mod frame_pool;
 mod fsim;
 mod msssim;
 mod niqe;
@@ -66,6 +67,7 @@ mod psnr;
 mod reference;
 mod ssim;
 mod vif;
+pub mod vif_pyramid;
 mod vmaf;
 
 pub mod ab_compare;
@@ -110,8 +112,11 @@ pub mod scene_quality;
 pub mod sharpness_score;
 pub mod spatial_quality;
 pub mod ssim_simd;
+pub mod ssim_subsampled;
+pub mod temporal_psnr;
 pub mod temporal_quality;
 pub mod temporal_stable;
+pub mod vmaf_features;
 pub mod vmaf_like;
 pub mod vmaf_score;
 
@@ -123,6 +128,7 @@ pub use batch::{BatchAssessment, BatchResult};
 pub use blockiness::BlockinessDetector;
 pub use blur::BlurDetector;
 pub use brisque::BrisqueAssessor;
+pub use frame_pool::FramePool;
 pub use fsim::{
     compute_fsim, gradient_magnitude, phase_congruency_approx, scharr_gradient, FsimCalculator,
 };
@@ -133,11 +139,16 @@ pub use psnr::PsnrCalculator;
 pub use quality_gate::{PipelineQualityGate, QualityGateResult};
 pub use reference::ReferenceManager;
 pub use ssim::SsimCalculator;
+pub use temporal_psnr::{
+    SceneAwareQualityAccumulator, SceneAwareQualityConfig, TemporalPsnrAccumulator,
+    TemporalPsnrConfig, PSNR_MAX_DB,
+};
 pub use temporal_quality::{
     FrameQuality, QualityStats, SceneAwarePooler, SceneAwarePoolingReport, SceneSegmentStats,
     TemporalQualityAnalysisReport, TemporalQualityAnalyzer,
 };
 pub use vif::VifCalculator;
+pub use vif_pyramid::{gaussian_bandpass_filter, separable_gaussian_conv, PyramidVifCalculator};
 pub use vmaf::VmafCalculator;
 
 /// Video frame data for quality assessment.

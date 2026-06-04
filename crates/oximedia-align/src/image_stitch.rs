@@ -163,11 +163,11 @@ impl ImageStitcher {
         let cumulative = Self::chain_homographies(&homographies);
 
         // Step 3: compute output canvas size and warp each image
-        let (canvas_w, canvas_h, offsets) = self.compute_canvas(&images, &cumulative);
+        let (canvas_w, canvas_h, offsets) = self.compute_canvas(images, &cumulative);
 
         // Step 4: blend images onto the canvas
         let output =
-            self.blend_images_onto_canvas(&images, &cumulative, &offsets, canvas_w, canvas_h);
+            self.blend_images_onto_canvas(images, &cumulative, &offsets, canvas_w, canvas_h);
 
         Ok(StitchedImage {
             pixels: output,
@@ -186,7 +186,8 @@ impl ImageStitcher {
         src_idx: usize,
         dst_idx: usize,
     ) -> AlignResult<PairHomography> {
-        let matcher = FeatureMatcher::new(self.config.max_match_distance, self.config.ratio_threshold);
+        let matcher =
+            FeatureMatcher::new(self.config.max_match_distance, self.config.ratio_threshold);
         let matches = matcher.match_features(
             &src.keypoints,
             &src.descriptors,
@@ -211,7 +212,21 @@ impl ImageStitcher {
         };
 
         let estimator = HomographyEstimator::new(ransac_config);
-        let (h_mat, inlier_mask) = estimator.estimate(&matches)?;
+        let (h_homo, inlier_mask) = estimator.estimate(&matches)?;
+
+        // Convert nalgebra Matrix3 → row-major [f64; 9]
+        let m = &h_homo.matrix;
+        let h_mat: [f64; 9] = [
+            m[(0, 0)],
+            m[(0, 1)],
+            m[(0, 2)],
+            m[(1, 0)],
+            m[(1, 1)],
+            m[(1, 2)],
+            m[(2, 0)],
+            m[(2, 1)],
+            m[(2, 2)],
+        ];
 
         let num_inliers = inlier_mask.iter().filter(|&&b| b).count();
         let confidence = num_inliers as f64 / matches.len() as f64;
@@ -332,7 +347,11 @@ impl ImageStitcher {
                     let (sx, sy) = Self::project_h(&inv_h, wx, wy);
 
                     // Check if within source image bounds
-                    if sx < 0.0 || sy < 0.0 || sx >= img.width as f64 - 1.0 || sy >= img.height as f64 - 1.0 {
+                    if sx < 0.0
+                        || sy < 0.0
+                        || sx >= img.width as f64 - 1.0
+                        || sy >= img.height as f64 - 1.0
+                    {
                         continue;
                     }
 
@@ -340,7 +359,13 @@ impl ImageStitcher {
                     let pixel = Self::bilinear_sample(&img.pixels, img.width, img.height, sx, sy);
 
                     // Compute blending weight: distance from image border
-                    let weight = Self::blend_weight(sx, sy, img.width, img.height, self.config.blend_overlap);
+                    let weight = Self::blend_weight(
+                        sx,
+                        sy,
+                        img.width,
+                        img.height,
+                        self.config.blend_overlap,
+                    );
 
                     let out_idx = cy * canvas_w + cx;
                     canvas[out_idx] = ((f64::from(canvas[out_idx]) * weights[out_idx]
@@ -361,8 +386,14 @@ impl ImageStitcher {
         let margin_x = w as f64 * overlap;
         let margin_y = h as f64 * overlap;
 
-        let wx = (x / margin_x).min((w as f64 - x) / margin_x).min(1.0).max(0.0);
-        let wy = (y / margin_y).min((h as f64 - y) / margin_y).min(1.0).max(0.0);
+        let wx = (x / margin_x)
+            .min((w as f64 - x) / margin_x)
+            .min(1.0)
+            .max(0.0);
+        let wy = (y / margin_y)
+            .min((h as f64 - y) / margin_y)
+            .min(1.0)
+            .max(0.0);
 
         (wx * wy).max(1e-6)
     }
@@ -411,7 +442,10 @@ impl ImageStitcher {
         if w.abs() < 1e-14 {
             return (x, y);
         }
-        ((h[0] * x + h[1] * y + h[2]) / w, (h[3] * x + h[4] * y + h[5]) / w)
+        (
+            (h[0] * x + h[1] * y + h[2]) / w,
+            (h[3] * x + h[4] * y + h[5]) / w,
+        )
     }
 
     /// Identity homography.
@@ -421,8 +455,7 @@ impl ImageStitcher {
 
     /// Invert a 3×3 homography matrix (returns None if singular).
     fn invert_h(h: &[f64; 9]) -> Option<[f64; 9]> {
-        let det = h[0] * (h[4] * h[8] - h[5] * h[7])
-            - h[1] * (h[3] * h[8] - h[5] * h[6])
+        let det = h[0] * (h[4] * h[8] - h[5] * h[7]) - h[1] * (h[3] * h[8] - h[5] * h[6])
             + h[2] * (h[3] * h[7] - h[4] * h[6]);
 
         if det.abs() < 1e-14 {
@@ -497,12 +530,12 @@ mod tests {
 
     #[test]
     fn test_image_with_features_size_mismatch() {
+        // 10 bytes != 5*5=25 → should return an error.
         let result = ImageWithFeatures::from_gray(vec![0u8; 10], 5, 5, 100);
-        assert!(result.is_ok(), "5*5=25 but we pass 10 -> mismatch expected");
-        // Actually the 10 vs 25 case should fail
-        let result2 = ImageWithFeatures::from_gray(vec![0u8; 10], 5, 5, 100);
-        // 5*5 = 25 != 10 → error
-        assert!(result2.is_err() || result2.is_ok()); // Just check it doesn't panic
+        assert!(
+            result.is_err(),
+            "5*5=25 but only 10 bytes → mismatch should fail"
+        );
     }
 
     #[test]
@@ -580,16 +613,20 @@ mod tests {
 
     #[test]
     fn test_blend_weight_center() {
-        let w = Self::blend_weight(50.0, 50.0, 100, 100, 0.1);
+        let w = blend_weight_helper(50.0, 50.0, 100, 100, 0.1);
         // Center should have weight 1.0
         assert!(w > 0.9, "center weight should be near 1: {w}");
     }
 
-    // Re-export for test
-    struct Self;
-    impl Self {
-        fn blend_weight(x: f64, y: f64, w: usize, h: usize, overlap: f64) -> f64 {
-            ImageStitcher::blend_weight(x, y, w, h, overlap)
-        }
+    fn blend_weight_helper(x: f64, y: f64, w: usize, h: usize, overlap: f64) -> f64 {
+        ImageStitcher::blend_weight(x, y, w, h, overlap)
+    }
+
+    #[test]
+    fn test_make_test_image_dimensions() {
+        let img = make_test_image(64, 32, 0);
+        assert_eq!(img.width, 64);
+        assert_eq!(img.height, 32);
+        assert_eq!(img.pixels.len(), 64 * 32);
     }
 }

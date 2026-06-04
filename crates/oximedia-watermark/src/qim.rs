@@ -191,7 +191,9 @@ impl QimEmbedder {
         // Q1 is offset by delta/2 from Q0
         let offset = if bit { delta / 2.0 } else { 0.0 };
 
-        let quantized = ((value - offset) / delta).round() * delta + offset;
+        // Compute the quantizer index k once, eliminating the redundant divide+round.
+        let k = ((value - offset) / delta).round();
+        let quantized = k * delta + offset;
 
         if self.config.dither {
             // Add small dither using deterministic seed based on value bits
@@ -208,9 +210,16 @@ impl QimEmbedder {
     fn detect_bit(&self, value: f32) -> bool {
         let delta = self.config.step_size;
 
-        // Calculate distance to both quantizers
-        let dist_0 = (value - (value / delta).round() * delta).abs();
-        let dist_1 = (value - delta / 2.0 - ((value - delta / 2.0) / delta).round() * delta).abs();
+        // Compute quantizer indices once, eliminating the redundant divide+round
+        // for the second branch (dist_1).
+        let k0 = (value / delta).round();
+        let reconstructed_0 = k0 * delta;
+        let dist_0 = (value - reconstructed_0).abs();
+
+        let shifted = value - delta / 2.0;
+        let k1 = (shifted / delta).round();
+        let reconstructed_1 = k1 * delta + delta / 2.0;
+        let dist_1 = (value - reconstructed_1).abs();
 
         // Choose quantizer with smaller distance
         dist_1 < dist_0
@@ -357,8 +366,18 @@ impl QimDetector {
     /// Detect quantized bit.
     fn detect_bit(&self, value: f32) -> bool {
         let delta = self.config.step_size;
-        let dist_0 = (value - (value / delta).round() * delta).abs();
-        let dist_1 = (value - delta / 2.0 - ((value - delta / 2.0) / delta).round() * delta).abs();
+
+        // Compute quantizer indices once, eliminating redundant divide+round
+        // for the second branch (dist_1).
+        let k0 = (value / delta).round();
+        let reconstructed_0 = k0 * delta;
+        let dist_0 = (value - reconstructed_0).abs();
+
+        let shifted = value - delta / 2.0;
+        let k1 = (shifted / delta).round();
+        let reconstructed_1 = k1 * delta + delta / 2.0;
+        let dist_1 = (value - reconstructed_1).abs();
+
         dist_1 < dist_0
     }
 }
@@ -392,8 +411,18 @@ impl DcQimEmbedder {
     #[must_use]
     pub fn detect(&self, value: f32) -> bool {
         let delta = self.step_size;
-        let dist_0 = (value - (value / delta).round() * delta).abs();
-        let dist_1 = (value - delta / 2.0 - ((value - delta / 2.0) / delta).round() * delta).abs();
+
+        // Compute quantizer indices once, eliminating redundant divide+round
+        // for the second branch (dist_1).
+        let k0 = (value / delta).round();
+        let reconstructed_0 = k0 * delta;
+        let dist_0 = (value - reconstructed_0).abs();
+
+        let shifted = value - delta / 2.0;
+        let k1 = (shifted / delta).round();
+        let reconstructed_1 = k1 * delta + delta / 2.0;
+        let dist_1 = (value - reconstructed_1).abs();
+
         dist_1 < dist_0
     }
 }
@@ -507,5 +536,57 @@ mod tests {
 
         let capacity = embedder.capacity(44100);
         assert!(capacity > 0);
+    }
+
+    // ── Item 3: QIM optimized quantizer ──────────────────────────────────────
+
+    #[test]
+    fn test_qim_optimized_identical_to_original() {
+        // Verify that the optimized quantize output matches the original formula
+        // (value/delta).round() * delta over a sweep of values.
+        let config = QimConfig {
+            step_size: 0.5,
+            dither: false,
+            frequency_domain: false,
+            ..Default::default()
+        };
+        let embedder = QimEmbedder::new(config).expect("should succeed in test");
+        let delta = 0.5_f32;
+
+        let mut v = -10.0_f32;
+        while v <= 10.0_f32 {
+            // Original formula for bit=false (offset=0).
+            let original = (v / delta).round() * delta;
+            let optimized = embedder.quantize(v, false);
+            assert!(
+                (optimized - original).abs() < 1e-5,
+                "value={v}: optimized={optimized} vs original={original}"
+            );
+            v += 0.01;
+        }
+    }
+
+    #[test]
+    fn test_qim_half_delta_boundary() {
+        // At value=0.25, delta=0.5 the input is exactly halfway between Q0 levels 0.0 and 0.5.
+        // Tie-breaking should match Rust's f32::round() (round-half-away-from-zero).
+        let config = QimConfig {
+            step_size: 0.5,
+            dither: false,
+            frequency_domain: false,
+            ..Default::default()
+        };
+        let embedder = QimEmbedder::new(config).expect("should succeed in test");
+        let delta = 0.5_f32;
+        let value = 0.25_f32;
+
+        // Original formula.
+        let original = (value / delta).round() * delta;
+        let optimized = embedder.quantize(value, false);
+
+        assert!(
+            (optimized - original).abs() < 1e-5,
+            "half-delta boundary: optimized={optimized} vs original={original}"
+        );
     }
 }

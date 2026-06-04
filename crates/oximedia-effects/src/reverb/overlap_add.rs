@@ -244,6 +244,8 @@ impl OverlapAddConvolver {
 }
 
 impl AudioEffect for OverlapAddConvolver {
+    const EFFECT_ID: &'static str = "overlap_add_convolver";
+
     fn process_sample(&mut self, input: f32) -> f32 {
         // Accumulate input.
         self.input_block[self.input_fill] = input;
@@ -377,7 +379,10 @@ mod tests {
         }
         // Now feed the impulse.
         let out = conv.process_sample(1.0);
-        assert!(out.is_finite(), "passthrough output should be finite: {out}");
+        assert!(
+            out.is_finite(),
+            "passthrough output should be finite: {out}"
+        );
     }
 
     // ── wet/dry ──────────────────────────────────────────────────────────────

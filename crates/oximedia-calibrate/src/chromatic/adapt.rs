@@ -5,6 +5,8 @@
 
 use crate::error::{CalibrationError, CalibrationResult};
 use crate::{Illuminant, Matrix3x3, Rgb, Xyz};
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 // ── SIMD 3×3 matrix × 3-vector ────────────────────────────────────────────────
 
@@ -155,8 +157,27 @@ pub fn mat3x3_mul_vec3_simd(mat: &[[f64; 3]; 3], v: &[f64; 3]) -> [f64; 3] {
     mat3x3_mul_vec3_scalar(mat, v)
 }
 
+// ── Module-level matrix cache ──────────────────────────────────────────────────
+//
+// Key: (source_illuminant, target_illuminant, method)
+// Value: the 3×3 f64 adaptation matrix
+//
+// We use a `Mutex<HashMap<...>>` because the key types implement `Hash + Eq`
+// and we need interior mutability for lazy population from an immutable reference.
+// The cache size is bounded: 9 illuminants × 9 illuminants × 4 methods = 324 max.
+
+type CacheKey = (Illuminant, Illuminant, ChromaticAdaptationMethod);
+type CacheMap = Mutex<HashMap<CacheKey, Matrix3x3>>;
+
+static ADAPT_MATRIX_CACHE: std::sync::OnceLock<CacheMap> = std::sync::OnceLock::new();
+
+/// Obtain a reference to the module-level adaptation matrix cache.
+fn cache() -> &'static CacheMap {
+    ADAPT_MATRIX_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Chromatic adaptation method.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ChromaticAdaptationMethod {
     /// Bradford chromatic adaptation transform.
     Bradford,
@@ -179,6 +200,11 @@ pub struct ChromaticAdaptation {
 impl ChromaticAdaptation {
     /// Create a new chromatic adaptation transform.
     ///
+    /// The adaptation matrix is looked up in a thread-safe module-level cache
+    /// keyed by `(source_illuminant, target_illuminant, method)`.  On a cache
+    /// miss the matrix is computed once and stored for all subsequent calls
+    /// with the same key.
+    ///
     /// # Arguments
     ///
     /// * `method` - Adaptation method
@@ -194,7 +220,7 @@ impl ChromaticAdaptation {
         target_illuminant: Illuminant,
     ) -> CalibrationResult<Self> {
         let transform_matrix =
-            Self::compute_transform_matrix(method, source_illuminant, target_illuminant)?;
+            Self::cached_transform_matrix(method, source_illuminant, target_illuminant)?;
 
         Ok(Self {
             method,
@@ -202,6 +228,44 @@ impl ChromaticAdaptation {
             target_illuminant,
             transform_matrix,
         })
+    }
+
+    /// Look up the adaptation matrix in the module-level cache, computing and
+    /// inserting it on a miss.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from the underlying matrix computation.
+    fn cached_transform_matrix(
+        method: ChromaticAdaptationMethod,
+        source: Illuminant,
+        target: Illuminant,
+    ) -> CalibrationResult<Matrix3x3> {
+        let key: CacheKey = (source, target, method);
+
+        // Fast path: check the cache under a short-lived lock.
+        {
+            let guard = cache().lock().map_err(|_| {
+                CalibrationError::ChromaticAdaptationFailed("cache lock poisoned".to_string())
+            })?;
+            if let Some(&mat) = guard.get(&key) {
+                return Ok(mat);
+            }
+        }
+
+        // Slow path: compute outside the lock, then insert.
+        let mat = Self::compute_transform_matrix(method, source, target)?;
+
+        {
+            let mut guard = cache().lock().map_err(|_| {
+                CalibrationError::ChromaticAdaptationFailed("cache lock poisoned".to_string())
+            })?;
+            // Another thread may have inserted while we computed — that is fine;
+            // the matrix is deterministic and identical, so we just overwrite.
+            guard.entry(key).or_insert(mat);
+        }
+
+        Ok(mat)
     }
 
     /// Compute the chromatic adaptation transform matrix.

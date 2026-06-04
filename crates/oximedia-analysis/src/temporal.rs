@@ -11,9 +11,19 @@
 //! - Frame-to-frame brightness analysis for flicker
 //! - Motion-compensated temporal filtering for noise
 //! - Pattern matching for telecine detection
+//!
+//! # Memory
+//!
+//! `TemporalAnalyzer` stores brightness history in a bounded ring-buffer of
+//! capacity [`BRIGHTNESS_HISTORY_CAP`] to avoid unbounded growth.
+
+use std::collections::VecDeque;
 
 use crate::{AnalysisError, AnalysisResult};
 use serde::{Deserialize, Serialize};
+
+/// Maximum number of brightness samples retained in the ring-buffer (≈ 30 s at 30 fps).
+pub const BRIGHTNESS_HISTORY_CAP: usize = 900;
 
 /// Temporal analysis results.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,11 +65,17 @@ pub enum TelecinePattern {
 }
 
 /// Temporal analyzer.
+///
+/// `brightness_history` is a bounded ring-buffer of [`BRIGHTNESS_HISTORY_CAP`]
+/// samples.  When the capacity is reached the oldest sample is evicted before
+/// the new one is appended, so memory stays constant regardless of stream length.
 pub struct TemporalAnalyzer {
-    brightness_history: Vec<f64>,
+    brightness_history: VecDeque<f64>,
     flicker_events: Vec<FlickerEvent>,
     prev_frame: Option<Vec<u8>>,
     temporal_diffs: Vec<f64>,
+    /// Total frames seen (including evicted ones).
+    total_frames: usize,
 }
 
 impl TemporalAnalyzer {
@@ -67,10 +83,11 @@ impl TemporalAnalyzer {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            brightness_history: Vec::new(),
+            brightness_history: VecDeque::with_capacity(BRIGHTNESS_HISTORY_CAP),
             flicker_events: Vec::new(),
             prev_frame: None,
             temporal_diffs: Vec::new(),
+            total_frames: 0,
         }
     }
 
@@ -88,9 +105,13 @@ impl TemporalAnalyzer {
             ));
         }
 
-        // Compute average brightness
+        // Compute average brightness and push into bounded ring-buffer.
         let brightness = compute_average_brightness(y_plane);
-        self.brightness_history.push(brightness);
+        if self.brightness_history.len() >= BRIGHTNESS_HISTORY_CAP {
+            self.brightness_history.pop_front();
+        }
+        self.brightness_history.push_back(brightness);
+        self.total_frames += 1;
 
         // Compute temporal difference
         if let Some(ref prev) = self.prev_frame {
@@ -98,14 +119,22 @@ impl TemporalAnalyzer {
             self.temporal_diffs.push(diff);
         }
 
-        // Detect flicker in recent window
+        // Detect flicker in recent window using the last WINDOW_SIZE entries.
         const WINDOW_SIZE: usize = 30;
         if self.brightness_history.len() >= WINDOW_SIZE {
-            let start_idx = self.brightness_history.len() - WINDOW_SIZE;
-            let window = &self.brightness_history[start_idx..];
-            if let Some(flicker) =
-                detect_flicker_in_window(window, frame_number.saturating_sub(WINDOW_SIZE - 1))
-            {
+            // Collect the last WINDOW_SIZE entries into a temporary slice.
+            let start = self.brightness_history.len() - WINDOW_SIZE;
+            let window: Vec<f64> = self
+                .brightness_history
+                .iter()
+                .skip(start)
+                .copied()
+                .collect();
+            let start_frame = self
+                .total_frames
+                .saturating_sub(WINDOW_SIZE)
+                .max(frame_number.saturating_sub(WINDOW_SIZE - 1));
+            if let Some(flicker) = detect_flicker_in_window(&window, start_frame) {
                 self.flicker_events.push(flicker);
             }
         }
@@ -152,8 +181,10 @@ impl TemporalAnalyzer {
             1.0
         };
 
-        // Detect telecine pattern
-        let telecine = detect_telecine(&self.brightness_history);
+        // Detect telecine pattern — collect into a contiguous Vec for the
+        // existing slice-based helper.
+        let history_slice: Vec<f64> = self.brightness_history.iter().copied().collect();
+        let telecine = detect_telecine(&history_slice);
 
         TemporalAnalysis {
             flicker_events: self.flicker_events,

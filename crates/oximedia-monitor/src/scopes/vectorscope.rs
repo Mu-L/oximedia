@@ -1,6 +1,6 @@
 //! Vectorscope monitor implementation.
 
-use crate::{MonitorError, MonitorResult};
+use crate::MonitorResult;
 use oximedia_scopes::ScopeConfig;
 use serde::{Deserialize, Serialize};
 
@@ -111,9 +111,12 @@ impl VectorscopeMonitor {
                     }
 
                     // Check gamut
-                    if r < 16.0 / 255.0 || r > 235.0 / 255.0
-                        || g < 16.0 / 255.0 || g > 235.0 / 255.0
-                        || b < 16.0 / 255.0 || b > 235.0 / 255.0
+                    if r < 16.0 / 255.0
+                        || r > 235.0 / 255.0
+                        || g < 16.0 / 255.0
+                        || g > 235.0 / 255.0
+                        || b < 16.0 / 255.0
+                        || b > 235.0 / 255.0
                     {
                         gamut_violations += 1;
                     }
@@ -132,11 +135,7 @@ impl VectorscopeMonitor {
         self.metrics.gamut_violations = gamut_violations;
 
         // Find dominant hue
-        if let Some((hue, _)) = hue_bins
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, &count)| count)
-        {
+        if let Some((hue, _)) = hue_bins.iter().enumerate().max_by_key(|(_, &count)| count) {
             self.metrics.dominant_hue = hue as f32;
         }
     }

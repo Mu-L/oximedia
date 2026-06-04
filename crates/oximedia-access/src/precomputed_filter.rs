@@ -331,11 +331,7 @@ impl PrecomputedFilterCache {
     }
 
     /// Retrieve cached coefficients or compute and cache them.
-    pub fn get_or_compute(
-        &mut self,
-        spec: &FilterSpec,
-        sample_rate: u32,
-    ) -> BiquadCoefficients {
+    pub fn get_or_compute(&mut self, spec: &FilterSpec, sample_rate: u32) -> BiquadCoefficients {
         let key = CacheKey::from_spec(spec, sample_rate);
         *self
             .cache
@@ -517,7 +513,11 @@ mod tests {
     fn test_populate_speech_clarity() {
         let mut cache = PrecomputedFilterCache::new();
         cache.populate_speech_clarity(48000);
-        assert_eq!(cache.len(), 6, "should pre-populate 6 speech-clarity filters");
+        assert_eq!(
+            cache.len(),
+            6,
+            "should pre-populate 6 speech-clarity filters"
+        );
     }
 
     #[test]

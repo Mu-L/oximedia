@@ -3,8 +3,14 @@
 //! Provides multiple detection methods (threshold, histogram, edge, adaptive)
 //! capable of identifying cut, gradual, dissolve, and fade transitions between
 //! scenes. Maintains a rolling frame-feature history for temporal analysis.
+//!
+//! The [`IntegralImage`](crate::integral_image::IntegralImage) type is used
+//! inside [`extract_features`] to compute spatial variance in O(1) per region
+//! instead of the naïve O(W×H) per query.
 
 use std::collections::VecDeque;
+
+use crate::integral_image::IntegralImage;
 
 // -----------------------------------------------------------------------
 // Public enums and structs
@@ -45,6 +51,12 @@ pub struct FrameFeatures {
     pub mean_chroma_u: f32,
     /// Mean Cr (V-plane) value in [0, 255].
     pub mean_chroma_v: f32,
+    /// Spatial variance of luma pixels across the full Y plane, computed via
+    /// the integral image for O(1) per-region queries.
+    ///
+    /// Normalised to \[0.0, 1.0\] by dividing by the maximum possible pixel
+    /// variance (127.5² ≈ 16256.25 for an 8-bit image).
+    pub spatial_variance: f32,
 }
 
 /// Classification of a detected scene transition.
@@ -291,9 +303,17 @@ impl SceneChangeDetector {
         // in [0, ~0.06] for uniform, much lower for peaky distributions.
         let norm_spread = (prev_spread * 20.0).clamp(0.0, 1.0);
 
+        // Spatial variance (from integral image, already normalised to [0,1]).
+        let spatial_var_complexity = prev.spatial_variance;
+
         // Composite complexity score in [0, 1]:
-        //   40% entropy + 30% histogram spread + 30% edge density
-        let complexity = norm_entropy * 0.4 + norm_spread * 0.3 + edge_complexity * 0.3;
+        //   35% entropy + 25% histogram spread + 25% edge density + 15% spatial variance
+        // The spatial variance term (from the integral image) captures local pixel
+        // intensity variation that complements the histogram-level measures.
+        let complexity = norm_entropy * 0.35
+            + norm_spread * 0.25
+            + edge_complexity * 0.25
+            + spatial_var_complexity * 0.15;
 
         // --- Step 2: Compute running variance of recent histogram diffs ---
         let history_volatility = self.compute_history_volatility();
@@ -408,6 +428,17 @@ pub fn extract_features(frame: &[u8], width: u32, height: u32, frame_number: u64
     // Edge density: simple horizontal gradient on the Y plane.
     let edge_density = compute_edge_density(y_plane, width, height);
 
+    // Spatial variance via integral image — O(1) full-frame query after O(W×H) build.
+    // Maximum possible 8-bit variance is 127.5² = 16256.25 (half-black / half-white).
+    const MAX_VAR: f64 = 16256.25;
+    let spatial_variance = if y_plane.is_empty() || width == 0 || height == 0 {
+        0.0
+    } else {
+        let ii = IntegralImage::build(y_plane, width, height);
+        let raw_var = ii.rect_variance(0, 0, width, height);
+        (raw_var / MAX_VAR).clamp(0.0, 1.0) as f32
+    };
+
     FrameFeatures {
         frame_number,
         histogram,
@@ -415,6 +446,7 @@ pub fn extract_features(frame: &[u8], width: u32, height: u32, frame_number: u64
         mean_luma,
         mean_chroma_u,
         mean_chroma_v,
+        spatial_variance,
     }
 }
 
@@ -608,6 +640,7 @@ mod tests {
             mean_luma,
             mean_chroma_u: 128.0,
             mean_chroma_v: 128.0,
+            spatial_variance: 0.0,
         }
     }
 
@@ -703,6 +736,7 @@ mod tests {
             mean_luma: 0.0,
             mean_chroma_u: 128.0,
             mean_chroma_v: 128.0,
+            spatial_variance: 0.0,
         };
         let curr = FrameFeatures {
             frame_number: 1,
@@ -711,6 +745,7 @@ mod tests {
             mean_luma: 255.0,
             mean_chroma_u: 128.0,
             mean_chroma_v: 128.0,
+            spatial_variance: 0.0,
         };
 
         let result = detect_change(&prev, &curr);
@@ -744,6 +779,7 @@ mod tests {
             mean_luma: 64.0,
             mean_chroma_u: 128.0,
             mean_chroma_v: 128.0,
+            spatial_variance: 0.0,
         };
         let curr = FrameFeatures {
             frame_number: 1,
@@ -752,6 +788,7 @@ mod tests {
             mean_luma: 192.0,
             mean_chroma_u: 128.0,
             mean_chroma_v: 128.0,
+            spatial_variance: 0.0,
         };
 
         let result = detect_change(&prev, &curr);
@@ -776,6 +813,7 @@ mod tests {
             mean_luma: 128.0,
             mean_chroma_u: 128.0,
             mean_chroma_v: 128.0,
+            spatial_variance: 0.0,
         };
         let curr = FrameFeatures {
             frame_number: 10,
@@ -784,6 +822,7 @@ mod tests {
             mean_luma: 0.0, // fade to black
             mean_chroma_u: 128.0,
             mean_chroma_v: 128.0,
+            spatial_variance: 0.0,
         };
 
         let result = detect_change(&prev, &curr);
@@ -1166,6 +1205,109 @@ mod tests {
         assert_ne!(
             SceneDetectionMethod::Adaptive,
             SceneDetectionMethod::AdaptiveComplexity
+        );
+    }
+
+    // ---- IntegralImage integration tests (via extract_features) ----------
+
+    // 37. extract_features: flat frame has spatial_variance == 0
+    #[test]
+    fn test_extract_features_flat_spatial_variance_zero() {
+        let frame = make_yuv_frame(16, 16, 128);
+        let feats = extract_features(&frame, 16, 16, 0);
+        assert!(
+            feats.spatial_variance.abs() < 1e-6,
+            "flat frame must have spatial_variance == 0, got {}",
+            feats.spatial_variance
+        );
+    }
+
+    // 38. extract_features: ramp frame has spatial_variance > 0
+    #[test]
+    fn test_extract_features_ramp_spatial_variance_nonzero() {
+        // Build a YUV frame with a ramp Y plane (0..64 repeated).
+        let w: u32 = 16;
+        let h: u32 = 16;
+        let y_size = (w * h) as usize;
+        let uv_size = ((w / 2) * (h / 2)) as usize;
+        let mut frame = Vec::with_capacity(y_size + 2 * uv_size);
+        for i in 0..y_size {
+            frame.push((i % 256) as u8);
+        }
+        frame.extend(std::iter::repeat(128u8).take(uv_size));
+        frame.extend(std::iter::repeat(128u8).take(uv_size));
+
+        let feats = extract_features(&frame, w, h, 0);
+        assert!(
+            feats.spatial_variance > 0.0,
+            "ramp frame must have spatial_variance > 0, got {}",
+            feats.spatial_variance
+        );
+    }
+
+    // 39. extract_features: spatial_variance is normalised to [0, 1]
+    #[test]
+    fn test_extract_features_spatial_variance_normalised() {
+        // Maximum-variance frame: alternating 0 and 255.
+        let w: u32 = 16;
+        let h: u32 = 16;
+        let y_size = (w * h) as usize;
+        let uv_size = ((w / 2) * (h / 2)) as usize;
+        let mut frame = Vec::with_capacity(y_size + 2 * uv_size);
+        for i in 0..y_size {
+            frame.push(if i % 2 == 0 { 0u8 } else { 255u8 });
+        }
+        frame.extend(std::iter::repeat(128u8).take(uv_size));
+        frame.extend(std::iter::repeat(128u8).take(uv_size));
+
+        let feats = extract_features(&frame, w, h, 0);
+        assert!(
+            feats.spatial_variance >= 0.0 && feats.spatial_variance <= 1.0,
+            "spatial_variance must be in [0, 1], got {}",
+            feats.spatial_variance
+        );
+        // Maximum theoretical variance (alternating 0/255): ≈ 16256.25 / 16256.25 ≈ 1.0
+        assert!(
+            feats.spatial_variance > 0.5,
+            "max-variance frame should have spatial_variance close to 1.0, got {}",
+            feats.spatial_variance
+        );
+    }
+
+    // 40. AdaptiveComplexity uses spatial variance: complex ramp frame raises threshold
+    #[test]
+    fn test_adaptive_complexity_with_integral_image_ramp() {
+        // A ramp frame has high spatial variance → higher threshold → harder to trigger a change.
+        let mut detector =
+            SceneChangeDetector::new(SceneDetectionMethod::AdaptiveComplexity, 0.30, 30);
+
+        let w: u32 = 16;
+        let h: u32 = 16;
+        let y_size = (w * h) as usize;
+        let uv_size = ((w / 2) * (h / 2)) as usize;
+
+        // Build a high-spatial-variance frame (ramp Y).
+        let mut ramp_frame = Vec::with_capacity(y_size + 2 * uv_size);
+        for i in 0..y_size {
+            ramp_frame.push((i % 256) as u8);
+        }
+        ramp_frame.extend(std::iter::repeat(128u8).take(uv_size));
+        ramp_frame.extend(std::iter::repeat(128u8).take(uv_size));
+
+        detector.push_frame(&ramp_frame, 0, w, h);
+
+        // A slightly shifted version of the ramp — should NOT trigger with high complexity.
+        let mut shifted = ramp_frame.clone();
+        for i in 0..y_size {
+            shifted[i] = shifted[i].saturating_add(15);
+        }
+        let result = detector.push_frame(&shifted, 1, w, h);
+
+        // High spatial variance raises the complexity score which raises the threshold;
+        // this moderate shift should not produce a scene change.
+        assert!(
+            result.is_none(),
+            "high spatial variance should raise threshold and suppress false positive"
         );
     }
 }

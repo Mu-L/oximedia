@@ -250,9 +250,7 @@ impl MetadataReporter {
             }
             if let Some(ref l2) = rpu.level2 {
                 l2_count += 1;
-                *trim_targets
-                    .entry(l2.target_display_index)
-                    .or_insert(0) += 1;
+                *trim_targets.entry(l2.target_display_index).or_insert(0) += 1;
             }
             if rpu.level5.is_some() {
                 l5_count += 1;
@@ -333,13 +331,7 @@ impl MetadataReporter {
 
         // Compliance checks
         let mut issues = Vec::new();
-        Self::check_compliance(
-            total,
-            l1_count,
-            l6_count,
-            &observed_profile,
-            &mut issues,
-        );
+        Self::check_compliance(total, l1_count, l6_count, &observed_profile, &mut issues);
 
         MetadataReport {
             total_frames: total,
@@ -384,9 +376,7 @@ impl MetadataReporter {
             let missing = total - l1_count;
             issues.push(ComplianceIssue {
                 code: "INCOMPLETE_LEVEL1".to_string(),
-                description: format!(
-                    "Level 1 metadata missing from {missing} of {total} frames."
-                ),
+                description: format!("Level 1 metadata missing from {missing} of {total} frames."),
                 severity: IssueSeverity::Warning,
             });
         }
@@ -600,10 +590,7 @@ mod tests {
     #[test]
     fn test_compliance_empty_stream_warning() {
         let report = MetadataReporter::generate(&[]);
-        let has_empty = report
-            .issues
-            .iter()
-            .any(|i| i.code == "EMPTY_STREAM");
+        let has_empty = report.issues.iter().any(|i| i.code == "EMPTY_STREAM");
         assert!(has_empty);
     }
 

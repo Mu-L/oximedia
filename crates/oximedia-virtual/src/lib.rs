@@ -31,23 +31,31 @@
 
 pub mod math;
 
+pub mod ar_overlay;
 pub mod background_plate;
 pub mod camera_frustum;
+pub mod camera_rig;
 pub mod camera_tracker;
 pub mod camera_tracking;
 pub mod color;
+pub mod color_temp_control;
 pub mod constants;
+pub mod core_interop;
+pub mod dmx_scene;
 pub mod examples;
 pub mod frustum;
 pub mod frustum_culling;
 pub mod genlock;
 pub mod greenscreen;
+pub mod hdri_capture;
 pub mod icvfx;
 pub mod keying;
 pub mod led;
 pub mod led_volume;
 pub mod led_wall;
 pub mod lens;
+pub mod lens_projection;
+pub mod light_rig;
 pub mod metrics;
 pub mod mocap;
 pub mod motion_path;
@@ -55,19 +63,35 @@ pub mod multicam;
 pub mod ndi_bridge;
 pub mod panel_topology;
 pub mod pixel_mapping;
+pub mod pixel_mapping_lut;
 pub mod preview;
+pub mod previz;
 pub mod projection_map;
+pub mod remote_session;
 pub mod render_layer;
 pub mod render_output;
+pub mod rig_path;
 pub mod scene;
 pub mod scene_setup;
+pub mod set_extension;
 pub mod stage;
+pub mod stage_element_layout;
 pub mod stage_layout;
 pub mod stage_manager;
+pub mod stage_safety;
+pub mod stage_visualization;
 pub mod sync;
 pub mod talent_keying;
+pub mod talent_tracking;
+// `timecode` is the virtual-production SMPTE timecode module (distinct from the
+// oximedia-timecode crate).
+pub mod timecode;
 pub mod tracking;
 pub mod tracking_data;
+// `tracking_filter` provides crate-root 6-DOF filtering (PassThrough / LowPass /
+// Kalman / OneEuro). Not a collision: `crate::tracking::filter` lives at a
+// different path.
+pub mod tracking_filter;
 pub mod tracking_session;
 pub mod unreal;
 pub mod utils;

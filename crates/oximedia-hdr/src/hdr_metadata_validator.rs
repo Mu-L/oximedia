@@ -89,15 +89,15 @@ pub struct ValidationReport {
 impl ValidationReport {
     /// Return `true` if no `Error`-severity findings were recorded.
     pub fn is_compliant(&self) -> bool {
-        !self
-            .findings
-            .iter()
-            .any(|f| f.severity == Severity::Error)
+        !self.findings.iter().any(|f| f.severity == Severity::Error)
     }
 
     /// Return the number of findings at the given severity level.
     pub fn count(&self, severity: Severity) -> usize {
-        self.findings.iter().filter(|f| f.severity == severity).count()
+        self.findings
+            .iter()
+            .filter(|f| f.severity == severity)
+            .count()
     }
 
     /// Return only the findings at or above `min_severity`.
@@ -467,7 +467,9 @@ impl HdrMetadataValidator {
         // Optional MaxCLL check.
         if let Some(cll) = meta.max_cll_nits {
             if cll.is_nan() {
-                return Err(HdrError::MetadataParseError("HLG max_cll_nits is NaN".into()));
+                return Err(HdrError::MetadataParseError(
+                    "HLG max_cll_nits is NaN".into(),
+                ));
             }
             if cll < 0.0 {
                 report.push(ValidationFinding::error(
@@ -541,7 +543,10 @@ mod tests {
             red: ChromaticityXy { x: 0.708, y: 0.292 },
             green: ChromaticityXy { x: 0.170, y: 0.797 },
             blue: ChromaticityXy { x: 0.131, y: 0.046 },
-            white: ChromaticityXy { x: 0.3127, y: 0.3290 },
+            white: ChromaticityXy {
+                x: 0.3127,
+                y: 0.3290,
+            },
             min_luminance_nits: 0.005,
             max_luminance_nits: 1000.0,
         }

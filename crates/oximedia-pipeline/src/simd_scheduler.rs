@@ -343,11 +343,8 @@ impl SimdScheduler {
 
         // Build per-node class map using the same weight heuristic per node.
         // (A real executor would inspect NodeType; we use a cost proxy here.)
-        let node_classes: HashMap<NodeId, SimdFilterClass> = stage
-            .nodes
-            .iter()
-            .map(|&id| (id, dominant_class))
-            .collect();
+        let node_classes: HashMap<NodeId, SimdFilterClass> =
+            stage.nodes.iter().map(|&id| (id, dominant_class)).collect();
 
         SimdAnnotation {
             stage_id: stage.stage_id,
@@ -400,7 +397,8 @@ impl SimdScheduler {
         };
 
         let min_tier = class.minimum_tier();
-        let acceleratable = Self::tier_supported(min_tier, caps) && class != SimdFilterClass::NotSuitableForSimd;
+        let acceleratable =
+            Self::tier_supported(min_tier, caps) && class != SimdFilterClass::NotSuitableForSimd;
 
         SimdNodeSchedule {
             node_id: spec.id,
@@ -479,7 +477,7 @@ mod tests {
     use super::*;
     use crate::builder::PipelineBuilder;
     use crate::execution_plan::ExecutionPlanner;
-    use crate::node::{FilterConfig, FrameFormat, SinkConfig, SourceConfig};
+    use crate::node::{FilterConfig, SinkConfig, SourceConfig};
 
     fn make_caps(tier: SimdTier) -> CpuCapabilities {
         CpuCapabilities::with_tier(tier, 4)
@@ -547,7 +545,10 @@ mod tests {
 
     #[test]
     fn classify_scale_convolution_heavy() {
-        let class = SimdScheduler::classify(&FilterConfig::Scale { width: 1920, height: 1080 });
+        let class = SimdScheduler::classify(&FilterConfig::Scale {
+            width: 1920,
+            height: 1080,
+        });
         assert_eq!(class, SimdFilterClass::ConvolutionHeavy);
     }
 
@@ -559,7 +560,10 @@ mod tests {
 
     #[test]
     fn classify_parametric_delegates_to_base() {
-        let base = FilterConfig::Scale { width: 640, height: 360 };
+        let base = FilterConfig::Scale {
+            width: 640,
+            height: 360,
+        };
         let param = FilterConfig::parametric(base, Default::default());
         let class = SimdScheduler::classify(&param);
         assert_eq!(class, SimdFilterClass::ConvolutionHeavy);
@@ -646,7 +650,9 @@ mod tests {
         let caps = make_caps(SimdTier::Avx2);
         let schedule = SimdScheduler::classify_graph(&graph, &caps);
         // At least one node should be NotSuitableForSimd (source node).
-        let has_non_simd = schedule.values().any(|s| s.filter_class == SimdFilterClass::NotSuitableForSimd);
+        let has_non_simd = schedule
+            .values()
+            .any(|s| s.filter_class == SimdFilterClass::NotSuitableForSimd);
         assert!(has_non_simd);
     }
 }

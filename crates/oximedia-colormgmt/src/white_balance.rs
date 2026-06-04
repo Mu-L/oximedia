@@ -22,8 +22,6 @@
 //! - Land & McCann, "Lightness and Retinex theory", JOSA 1971
 //! - McCamy, "Correlated color temperature of the sun", Color Research & Application 1992
 
-#![allow(dead_code)]
-
 use crate::error::{ColorError, Result};
 
 // ── Gain triplet ──────────────────────────────────────────────────────────────
@@ -158,8 +156,7 @@ pub fn grey_world(pixels: &[[f64; 3]]) -> Result<WbGains> {
         ));
     }
 
-    WbGains::new(mean_all / mean_r, mean_all / mean_g, mean_all / mean_b)?
-        .normalise_green()
+    WbGains::new(mean_all / mean_r, mean_all / mean_g, mean_all / mean_b)?.normalise_green()
 }
 
 // ── White-Patch (Max-RGB) algorithm ──────────────────────────────────────────
@@ -211,8 +208,7 @@ pub fn white_patch(pixels: &[[f64; 3]]) -> Result<WbGains> {
     }
 
     let max_all = max_r.max(max_g).max(max_b);
-    WbGains::new(max_all / max_r, max_all / max_g, max_all / max_b)?
-        .normalise_green()
+    WbGains::new(max_all / max_r, max_all / max_g, max_all / max_b)?.normalise_green()
 }
 
 // ── Shades-of-Grey (p-norm) algorithm ────────────────────────────────────────
@@ -270,8 +266,7 @@ pub fn shades_of_grey(pixels: &[[f64; 3]], p: f64) -> Result<WbGains> {
     }
 
     let norm_all = (norm_r + norm_g + norm_b) / 3.0;
-    WbGains::new(norm_all / norm_r, norm_all / norm_g, norm_all / norm_b)?
-        .normalise_green()
+    WbGains::new(norm_all / norm_r, norm_all / norm_g, norm_all / norm_b)?.normalise_green()
 }
 
 // ── Combined (blended) estimator ─────────────────────────────────────────────
@@ -421,7 +416,7 @@ pub fn xyz_to_cct(x: f64, y: f64, z: f64) -> Result<f64> {
             let r0 = RT[prev_i].0;
             let r1 = RT[i].0;
             let r_mrd = r0 + f * (r1 - r0); // interpolated in reciprocal megakelvin
-            // Convert reciprocal megakelvin → Kelvin
+                                            // Convert reciprocal megakelvin → Kelvin
             let cct = 1.0e6 / r_mrd.max(1e-6);
             return Ok(cct.clamp(1000.0, 20000.0));
         }
@@ -669,12 +664,14 @@ mod tests {
 
     #[test]
     fn shades_of_grey_p1_matches_grey_world() {
-        let pixels: Vec<[f64; 3]> = (0..50).map(|i| {
-            let v = (i as f64) / 50.0 + 0.1;
-            [v * 1.2, v, v * 0.8]
-        }).collect();
+        let pixels: Vec<[f64; 3]> = (0..50)
+            .map(|i| {
+                let v = (i as f64) / 50.0 + 0.1;
+                [v * 1.2, v, v * 0.8]
+            })
+            .collect();
         let sog = shades_of_grey(&pixels, 1.0).unwrap();
-        let gw  = grey_world(&pixels).unwrap();
+        let gw = grey_world(&pixels).unwrap();
         assert!((sog.r - gw.r).abs() < 1e-9, "r: {} vs {}", sog.r, gw.r);
         assert!((sog.b - gw.b).abs() < 1e-9, "b: {} vs {}", sog.b, gw.b);
     }
@@ -689,12 +686,14 @@ mod tests {
 
     #[test]
     fn combined_alpha1_matches_grey_world() {
-        let pixels: Vec<[f64; 3]> = (0..80).map(|i| {
-            let v = (i as f64) / 80.0 + 0.1;
-            [v * 1.1, v, v * 0.9]
-        }).collect();
+        let pixels: Vec<[f64; 3]> = (0..80)
+            .map(|i| {
+                let v = (i as f64) / 80.0 + 0.1;
+                [v * 1.1, v, v * 0.9]
+            })
+            .collect();
         let comb = combined(&pixels, 1.0).unwrap();
-        let gw   = grey_world(&pixels).unwrap();
+        let gw = grey_world(&pixels).unwrap();
         assert!((comb.r - gw.r).abs() < 1e-9);
         assert!((comb.b - gw.b).abs() < 1e-9);
     }
@@ -782,8 +781,16 @@ mod tests {
         // Positive tint → green gain factor > 1 → after green normalisation,
         // red and blue gains should decrease
         let tinted = apply_tint(&base, 0.5).unwrap();
-        assert!(tinted.r < 1.0, "r should be < 1 after green tint: {}", tinted.r);
-        assert!(tinted.b < 1.0, "b should be < 1 after green tint: {}", tinted.b);
+        assert!(
+            tinted.r < 1.0,
+            "r should be < 1 after green tint: {}",
+            tinted.r
+        );
+        assert!(
+            tinted.b < 1.0,
+            "b should be < 1 after green tint: {}",
+            tinted.b
+        );
     }
 
     #[test]

@@ -449,6 +449,82 @@ impl GazeEstimator {
 }
 
 // ─────────────────────────────────────────────────────────────
+// BlurScore — standalone sharpness metric
+// ─────────────────────────────────────────────────────────────
+
+/// Sharpness score derived from the variance of the Laplacian response.
+///
+/// A high `variance_of_laplacian` means the region is sharp; a low value
+/// means it is blurred or otherwise obscured.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlurScore {
+    /// Variance of the Laplacian response over the face region.
+    ///
+    /// Computed as `mean(lap²) − mean(lap)²` where the Laplacian kernel is
+    /// `[0,1,0; 1,−4,1; 0,1,0]`.  Normalised by interior pixel count so the
+    /// threshold is scale-invariant.
+    ///
+    /// Higher ⇒ sharper.  Lower ⇒ blurred / obscured.
+    pub variance_of_laplacian: f32,
+    /// `true` when the region is considered blurred (`variance_of_laplacian < blur_threshold`).
+    pub is_blurred: bool,
+}
+
+impl BlurScore {
+    /// Compute the Laplacian-variance sharpness score for a grayscale region.
+    ///
+    /// * `pixels` – row-major u8 luma data for the region.
+    /// * `width` / `height` – dimensions of the region.
+    /// * `blur_threshold` – variance below which the region is flagged as blurred.
+    ///
+    /// The Laplacian kernel `[0,1,0; 1,−4,1; 0,1,0]` is applied to every
+    /// interior pixel (1-pixel border is skipped).  The variance of the
+    /// responses is then computed as `mean(lap²) − mean(lap)²`.  Regions
+    /// smaller than 3×3 are returned as `variance_of_laplacian = 0.0`.
+    #[must_use]
+    pub fn compute(pixels: &[u8], width: usize, height: usize, blur_threshold: f32) -> Self {
+        if width < 3 || height < 3 || pixels.len() < width * height {
+            return Self {
+                variance_of_laplacian: 0.0,
+                is_blurred: true,
+            };
+        }
+
+        let mut lap_sum = 0.0f64;
+        let mut lap_sq_sum = 0.0f64;
+        let mut count = 0u64;
+
+        for y in 1..(height - 1) {
+            for x in 1..(width - 1) {
+                let c = f64::from(pixels[y * width + x]);
+                let n = f64::from(pixels[(y - 1) * width + x]);
+                let s = f64::from(pixels[(y + 1) * width + x]);
+                let l = f64::from(pixels[y * width + (x - 1)]);
+                let r = f64::from(pixels[y * width + (x + 1)]);
+                // Laplacian: N + S + L + R − 4·C
+                let lap = n + s + l + r - 4.0 * c;
+                lap_sum += lap;
+                lap_sq_sum += lap * lap;
+                count += 1;
+            }
+        }
+
+        let variance = if count > 0 {
+            let mean = lap_sum / count as f64;
+            let var = lap_sq_sum / count as f64 - mean * mean;
+            var.max(0.0) as f32
+        } else {
+            0.0
+        };
+
+        Self {
+            variance_of_laplacian: variance,
+            is_blurred: variance < blur_threshold,
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
 // Face Blur / Obscurity Detection
 // ─────────────────────────────────────────────────────────────
 
@@ -491,6 +567,8 @@ pub struct FacePrivacyAssessment {
     pub region: FaceRegion,
     /// Measured blur score within the face bounding box (Laplacian variance, lower = blurrier).
     pub blur_score: f32,
+    /// Structured `BlurScore` detail, including the `is_blurred` flag.
+    pub blur_score_detail: BlurScore,
     /// Fraction of the face bounding box that is covered by near-uniform (obscuring) regions.
     pub occlusion_ratio: f32,
     /// Derived obscurity level.
@@ -573,6 +651,10 @@ fn assess_single_face(
         return FacePrivacyAssessment {
             region: face.clone(),
             blur_score: 0.0,
+            blur_score_detail: BlurScore {
+                variance_of_laplacian: 0.0,
+                is_blurred: true,
+            },
             occlusion_ratio: 0.0,
             obscurity_level: FaceObscurityLevel::Indeterminate,
         };
@@ -603,6 +685,12 @@ fn assess_single_face(
         variance.max(0.0) as f32
     } else {
         0.0
+    };
+
+    // Build a structured BlurScore using the same variance.
+    let blur_score_detail = BlurScore {
+        variance_of_laplacian: blur_score,
+        is_blurred: blur_score < thresholds.blur_threshold,
     };
 
     // --- Occlusion ratio: fraction of face pixels that are near-uniform (likely covered) ---
@@ -657,6 +745,7 @@ fn assess_single_face(
     FacePrivacyAssessment {
         region: face.clone(),
         blur_score,
+        blur_score_detail,
         occlusion_ratio,
         obscurity_level,
     }
@@ -997,5 +1086,159 @@ mod tests {
         assert!(gx >= -1.0 && gx <= 1.0);
         assert!(gy >= -1.0 && gy <= 1.0);
         assert!(gx > 0.0); // nose shifted right → positive gaze_x
+    }
+
+    // ── BlurScore ──────────────────────────────────────────────
+
+    /// A high-frequency checkerboard should produce high Laplacian variance,
+    /// indicating a sharp (non-blurred) region.
+    #[test]
+    fn test_sharp_face_scores_high() {
+        let width = 32usize;
+        let height = 32usize;
+        // 1px checkerboard (alternating 0 / 255) — maximum spatial frequency.
+        let pixels: Vec<u8> = (0..(width * height))
+            .map(|i| {
+                let x = i % width;
+                let y = i / width;
+                if (x + y) % 2 == 0 {
+                    0u8
+                } else {
+                    255u8
+                }
+            })
+            .collect();
+
+        let score = BlurScore::compute(&pixels, width, height, 100.0);
+        // A 1px checkerboard generates very large Laplacian responses (±1020),
+        // so variance should be well above 1000.
+        assert!(
+            score.variance_of_laplacian > 1000.0,
+            "expected variance > 1000 for checkerboard, got {}",
+            score.variance_of_laplacian
+        );
+        assert!(
+            !score.is_blurred,
+            "sharp checkerboard should not be flagged as blurred"
+        );
+    }
+
+    /// A single box-blur pass on a sharp checkerboard dramatically reduces the
+    /// Laplacian variance; the score must decrease monotonically with each
+    /// successive pass, and a near-uniform (heavily smoothed) region must be
+    /// flagged as blurred.
+    #[test]
+    fn test_blurred_face_scores_low() {
+        // Apply one 3×3 box-blur pass (interior pixels only, border kept).
+        fn box_blur_interior(src: &[u8], width: usize, height: usize) -> Vec<u8> {
+            let mut dst = src.to_vec();
+            for y in 1..(height - 1) {
+                for x in 1..(width - 1) {
+                    let mut sum = 0u32;
+                    for dy in 0..3usize {
+                        for dx in 0..3usize {
+                            sum += u32::from(src[(y + dy - 1) * width + (x + dx - 1)]);
+                        }
+                    }
+                    dst[y * width + x] = (sum / 9) as u8;
+                }
+            }
+            dst
+        }
+
+        let width = 64usize;
+        let height = 64usize;
+
+        // 1px checkerboard — maximum spatial frequency → high Laplacian variance.
+        let sharp: Vec<u8> = (0..(width * height))
+            .map(|i| {
+                let x = i % width;
+                let y = i / width;
+                if (x + y) % 2 == 0 {
+                    0u8
+                } else {
+                    255u8
+                }
+            })
+            .collect();
+
+        // One pass of box-blur reduces the variance dramatically.
+        let blurred_1 = box_blur_interior(&sharp, width, height);
+
+        // Variance of the once-blurred image (no threshold check needed here).
+        let score_sharp = BlurScore::compute(&sharp, width, height, 100_000.0);
+        let score_blur1 = BlurScore::compute(&blurred_1, width, height, 100_000.0);
+
+        // Monotonic: one blur pass must reduce variance significantly.
+        assert!(
+            score_sharp.variance_of_laplacian > score_blur1.variance_of_laplacian,
+            "single blur must reduce variance: sharp={}, blur1={}",
+            score_sharp.variance_of_laplacian,
+            score_blur1.variance_of_laplacian
+        );
+        // The reduction must be substantial (> 10×).
+        assert!(
+            score_sharp.variance_of_laplacian > score_blur1.variance_of_laplacian * 10.0,
+            "blur must reduce variance by at least 10×: sharp={}, blur1={}",
+            score_sharp.variance_of_laplacian,
+            score_blur1.variance_of_laplacian
+        );
+
+        // A truly near-uniform region (constant value) must always be flagged.
+        let flat = vec![128u8; width * height];
+        let score_flat = BlurScore::compute(&flat, width, height, 100.0);
+        assert!(
+            score_flat.is_blurred,
+            "constant region must be flagged as blurred; variance={}",
+            score_flat.variance_of_laplacian
+        );
+        assert!(
+            score_flat.variance_of_laplacian < 1.0,
+            "constant region must have near-zero Laplacian variance; got {}",
+            score_flat.variance_of_laplacian
+        );
+
+        // The sharp checkerboard must NOT be flagged when threshold = 10_000.
+        let score_sharp_flag = BlurScore::compute(&sharp, width, height, 10_000.0);
+        assert!(
+            !score_sharp_flag.is_blurred,
+            "sharp checkerboard must not be flagged; variance={}",
+            score_sharp_flag.variance_of_laplacian
+        );
+    }
+
+    /// End-to-end: blurred face regions must appear in `FacePrivacyAssessment`
+    /// with `blur_score_detail.is_blurred == true`.
+    #[test]
+    fn test_blur_privacy_assessment() {
+        let w = 64u32;
+        let h = 64u32;
+        // Near-uniform image simulates a heavy mosaic blur.
+        let luma = vec![128u8; (w * h) as usize];
+        let face = FaceRegion {
+            x: 4,
+            y: 4,
+            width: 56,
+            height: 56,
+            confidence: 0.95,
+            face_id: Some(0),
+        };
+        let results = assess_face_privacy(&luma, w, h, &[face]);
+        assert_eq!(results.len(), 1);
+        let pa = &results[0];
+
+        // The blur_score_detail field should flag the region as blurred.
+        assert!(
+            pa.blur_score_detail.is_blurred,
+            "uniform image must be flagged as blurred; variance={}",
+            pa.blur_score_detail.variance_of_laplacian
+        );
+        // And the obscurity level must reflect this.
+        assert_eq!(
+            pa.obscurity_level,
+            FaceObscurityLevel::HeavilyObscured,
+            "uniform face region must be HeavilyObscured"
+        );
+        assert!(pa.is_compliant());
     }
 }

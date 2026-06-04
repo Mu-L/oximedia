@@ -19,7 +19,7 @@
 - [x] Implement progressive JPEG output option in `transform.rs` for faster perceived loading
 - [x] Add cache-control header generation to `negotiation.rs` based on transform parameters
 - [x] Extend `parser.rs` with named preset support (e.g., `/cdn-cgi/image/preset=thumbnail/photo.jpg`)
-- [ ] Add aspect ratio preservation enforcement in `transform.rs` when both width and height are set (verified-open 2026-05-16: no enforce_aspect_ratio fn in transform.rs; FitMode::Contain partially addresses this)
+- [x] Add aspect ratio preservation enforcement in `transform.rs` when both width and height are set — `enforce_aspect_ratio(src_w, src_h, req_w, req_h, fit_mode)` added; handles Contain/ScaleDown (letterbox) and Cover/Crop (fill) modes with 10 unit tests
 
 ## New Features
 - [x] Add a `watermark.rs` module for image watermark overlay (text and image) with configurable position and opacity
@@ -33,13 +33,13 @@
 - [x] Add an `image_analysis.rs` module for dominant color extraction and blur hash generation (verified 2026-05-16; src/image_analysis.rs:19 BlurHashEncoder, DominantColorExtractor, 668 lines)
 
 ## Performance
-- [ ] Add response caching layer with content-addressable storage keyed on transform params hash
-- [ ] Implement streaming transform pipeline to avoid loading entire source image into memory
+- [x] Add response caching layer with content-addressable storage keyed on transform params hash — `src/response_cache.rs`: `ResponseCache` (FIFO eviction, LRU hit-count, content-address key via `DefaultHasher`); 15 unit tests
+- [x] Implement streaming transform pipeline to avoid loading entire source image into memory — `src/processor/streaming.rs`: `StreamingProcessor` + `StreamingConfig` (tile_rows/overlap_rows); bilinear scale per tile strip; 10 unit tests
 - [ ] Add early termination in `processor.rs` when output dimensions are smaller than a threshold
-- [ ] Implement parallel transform execution for batch requests
+- [x] Implement parallel transform execution for batch requests — `batch_transform.rs` `process_batch` now uses `rayon::par_iter`
 
 ## Testing
-- [ ] Add parser fuzz tests for malformed `/cdn-cgi/image/` URLs (empty params, invalid values, injection attempts)
+- [x] Add parser fuzz tests for malformed `/cdn-cgi/image/` URLs (empty params, invalid values, injection attempts) — `tests/parser_fuzz.rs`: 40 tests covering empty/blank, missing values, integer overflow, shell injection, path traversal, unicode, extreme lengths, boundary values
 - [ ] Test `negotiation.rs` with all common browser Accept header combinations
 - [ ] Add round-trip tests: parse transform string -> serialize -> parse again -> compare
 - [ ] Test `security.rs` with path traversal attempts, oversized dimensions, and resource exhaustion vectors

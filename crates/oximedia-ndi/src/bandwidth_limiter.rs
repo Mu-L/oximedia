@@ -463,7 +463,7 @@ mod tests {
         let mut lim = BandwidthLimiter::new(cfg_small());
         // Drain to ~30% fill → below lowest_tier_threshold (40%) but above audio_only (10%)
         lim.force_consume(350_000); // 350k of 500k → 30% remaining
-        // Manually trigger tier update by calling try_consume (which calls update_tier)
+                                    // Manually trigger tier update by calling try_consume (which calls update_tier)
         let _ = lim.try_consume(1);
         assert_eq!(lim.recommended_tier(), QualityTier::Lowest);
     }

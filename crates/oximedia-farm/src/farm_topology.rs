@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Farm topology management for the encoding farm.
 //!
 //! Models the physical and logical layout of the worker farm:
@@ -129,7 +128,9 @@ impl Rack {
     ) -> crate::Result<Self> {
         let label = label.into();
         if label.is_empty() {
-            return Err(FarmError::InvalidConfig("Rack label must not be empty".into()));
+            return Err(FarmError::InvalidConfig(
+                "Rack label must not be empty".into(),
+            ));
         }
         Ok(Self {
             id,
@@ -164,10 +165,16 @@ impl Zone {
     /// # Errors
     ///
     /// Returns [`FarmError::InvalidConfig`] if `label` is empty.
-    pub fn new(id: ZoneId, label: impl Into<String>, region: Option<String>) -> crate::Result<Self> {
+    pub fn new(
+        id: ZoneId,
+        label: impl Into<String>,
+        region: Option<String>,
+    ) -> crate::Result<Self> {
         let label = label.into();
         if label.is_empty() {
-            return Err(FarmError::InvalidConfig("Zone label must not be empty".into()));
+            return Err(FarmError::InvalidConfig(
+                "Zone label must not be empty".into(),
+            ));
         }
         Ok(Self { id, label, region })
     }
@@ -652,27 +659,16 @@ mod tests {
     fn setup_topology() -> FarmTopology {
         let mut topo = FarmTopology::new();
 
-        let zone_a = Zone::new(ZoneId::new("zone-a"), "Zone A", Some("us-east".into()))
-            .expect("zone ok");
-        let zone_b =
-            Zone::new(ZoneId::new("zone-b"), "Zone B", None).expect("zone ok");
+        let zone_a =
+            Zone::new(ZoneId::new("zone-a"), "Zone A", Some("us-east".into())).expect("zone ok");
+        let zone_b = Zone::new(ZoneId::new("zone-b"), "Zone B", None).expect("zone ok");
         topo.add_zone(zone_a).expect("add zone-a");
         topo.add_zone(zone_b).expect("add zone-b");
 
-        let rack1 = Rack::new(
-            RackId::new("rack-1"),
-            ZoneId::new("zone-a"),
-            "Rack 1",
-            4,
-        )
-        .expect("rack ok");
-        let rack2 = Rack::new(
-            RackId::new("rack-2"),
-            ZoneId::new("zone-b"),
-            "Rack 2",
-            4,
-        )
-        .expect("rack ok");
+        let rack1 =
+            Rack::new(RackId::new("rack-1"), ZoneId::new("zone-a"), "Rack 1", 4).expect("rack ok");
+        let rack2 =
+            Rack::new(RackId::new("rack-2"), ZoneId::new("zone-b"), "Rack 2", 4).expect("rack ok");
         topo.add_rack(rack1).expect("add rack-1");
         topo.add_rack(rack2).expect("add rack-2");
 
@@ -720,8 +716,7 @@ mod tests {
 
     #[test]
     fn test_worker_group_capabilities() {
-        let mut group =
-            WorkerGroup::new(GroupId::new("gpu-group"), "GPU Workers").expect("ok");
+        let mut group = WorkerGroup::new(GroupId::new("gpu-group"), "GPU Workers").expect("ok");
         group.add_capability("gpu");
         group.add_capability("hdr");
         assert!(group.has_capability("gpu"));
@@ -736,7 +731,8 @@ mod tests {
         topo.add_group(grp).expect("ok");
 
         let w = WorkerId::new("w1");
-        topo.join_group(w.clone(), &GroupId::new("g1")).expect("join ok");
+        topo.join_group(w.clone(), &GroupId::new("g1"))
+            .expect("join ok");
         assert!(topo
             .group(&GroupId::new("g1"))
             .expect("group exists")
@@ -773,8 +769,10 @@ mod tests {
         let mut topo = setup_topology();
         let w1 = WorkerId::new("local-worker");
         let w2 = WorkerId::new("remote-worker");
-        topo.place_worker(w1.clone(), &RackId::new("rack-1")).expect("ok");
-        topo.place_worker(w2.clone(), &RackId::new("rack-2")).expect("ok");
+        topo.place_worker(w1.clone(), &RackId::new("rack-1"))
+            .expect("ok");
+        topo.place_worker(w2.clone(), &RackId::new("rack-2"))
+            .expect("ok");
 
         let hints = topo
             .scheduling_hints(&RackId::new("rack-1"), &[], &[w1.clone(), w2.clone()])
@@ -789,8 +787,10 @@ mod tests {
         let mut topo = setup_topology();
         let w_gpu = WorkerId::new("gpu-worker");
         let w_cpu = WorkerId::new("cpu-worker");
-        topo.place_worker(w_gpu.clone(), &RackId::new("rack-1")).expect("ok");
-        topo.place_worker(w_cpu.clone(), &RackId::new("rack-2")).expect("ok");
+        topo.place_worker(w_gpu.clone(), &RackId::new("rack-1"))
+            .expect("ok");
+        topo.place_worker(w_cpu.clone(), &RackId::new("rack-2"))
+            .expect("ok");
 
         let mut grp = WorkerGroup::new(GroupId::new("gpu"), "GPU").expect("ok");
         grp.add_capability("gpu");

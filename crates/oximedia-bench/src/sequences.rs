@@ -896,6 +896,36 @@ mod tests {
         assert_eq!(y[0], 0, "leftmost pixel should be 0");
         assert_eq!(y[width - 1], 235, "rightmost pixel should be 235");
     }
+
+    #[test]
+    fn y4m_roundtrip_5frames() {
+        let width = 64usize;
+        let height = 48usize;
+        let frames: Vec<BenchFrame> = (0..5)
+            .map(|i| BenchFrame::synthetic(width, height, (i * 40) as u8, 128, 128))
+            .collect();
+
+        // Write to temp buffer.
+        let mut buf = Vec::new();
+        let mut writer = Y4mWriter::new(&mut buf, width, height, 30, 1, Y4mColorFormat::C420Jpeg);
+        for f in &frames {
+            writer.write_frame(f).expect("write_frame should succeed");
+        }
+
+        // Read back.
+        let mut reader = Y4mReader::new(buf.as_slice()).expect("Y4mReader::new should succeed");
+        assert_eq!(reader.width, width);
+        assert_eq!(reader.height, height);
+        let mut read_frames = Vec::new();
+        while let Some(f) = reader.next_frame().expect("next_frame should succeed") {
+            read_frames.push(f);
+        }
+        assert_eq!(read_frames.len(), 5);
+        // Byte-identical Y planes.
+        for (orig, read) in frames.iter().zip(read_frames.iter()) {
+            assert_eq!(orig.y_plane, read.y_plane);
+        }
+    }
 }
 
 /// Sequence analyzer for analyzing video content characteristics.
@@ -1739,6 +1769,10 @@ impl<R: std::io::Read> Y4mSequence<R> {
         })
     }
 }
+
+// ─── Y4mReader / Y4mWriter — re-exported from the y4m_rw submodule ───────────
+
+pub use crate::y4m_rw::{BenchFrame, Y4mColorFormat, Y4mReader, Y4mWriter};
 
 /// Read bytes from `reader` until a `\n` byte, returning the consumed string
 /// (without the newline).  Returns `Y4mError::Io(UnexpectedEof)` if the reader

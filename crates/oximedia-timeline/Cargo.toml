@@ -30,6 +30,7 @@ parking_lot = { workspace = true }
 chrono = { workspace = true }
 dashmap = { workspace = true }
 quick-xml = { workspace = true }
+rayon = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }

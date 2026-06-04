@@ -6,7 +6,7 @@ Comprehensive accessibility tools for inclusive media production in OxiMedia.
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.7 — 2026-05-16 — 761 tests
+Version: 0.1.8 — 2026-05-29 — 761 tests
 
 ## Features
 

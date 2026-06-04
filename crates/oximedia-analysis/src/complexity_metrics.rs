@@ -148,8 +148,7 @@ impl ComplexityAnalyzer {
         }
         let scores: Vec<f64> = self.score_window.iter().copied().collect();
         let mean = scores.iter().sum::<f64>() / n as f64;
-        let variance =
-            scores.iter().map(|s| (s - mean) * (s - mean)).sum::<f64>() / n as f64;
+        let variance = scores.iter().map(|s| (s - mean) * (s - mean)).sum::<f64>() / n as f64;
         let std_score = variance.sqrt();
 
         let change_rate = if n > 1 {
@@ -279,8 +278,10 @@ fn compute_dct_variance(
             dct2_cols(block_slice, bs);
 
             // AC variance = mean of squared non-DC coefficients
-            let ac_sum: f64 = block_slice.iter().enumerate()
-                .filter(|&(idx, _)| idx != 0)  // skip DC
+            let ac_sum: f64 = block_slice
+                .iter()
+                .enumerate()
+                .filter(|&(idx, _)| idx != 0) // skip DC
                 .map(|(_, &v)| v * v)
                 .sum();
             let ac_var = ac_sum / (bs * bs - 1).max(1) as f64;

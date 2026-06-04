@@ -2,10 +2,19 @@
 //!
 //! Provides a software renderer that composites video clips, transitions,
 //! and effects into RGBA pixel buffers suitable for preview display.
+//!
+//! # Parallel rendering
+//!
+//! [`render_frame_parallel`] uses `rayon` to render each video track
+//! independently (tracks are composited bottom-to-top in z-order after the
+//! parallel gather phase).
+
+use rayon::prelude::*;
 
 use crate::clip::{Clip, MediaSource};
 use crate::error::{TimelineError, TimelineResult};
 use crate::timeline::Timeline;
+use crate::track::Track;
 use crate::transition_engine::{TransitionEngine, TransitionInput};
 use crate::types::Position;
 
@@ -155,6 +164,196 @@ pub struct RenderedFrame {
     /// Video track count that contributed to this frame.
     pub layers_composited: u32,
 }
+
+/// Configuration passed to the parallel render path.
+///
+/// Mirrors the fields of [`FrameRenderSettings`] but is cheaply `Clone` and
+/// `Send + Sync` so it can be shared across rayon threads.
+#[derive(Debug, Clone)]
+pub struct RenderConfig {
+    /// Target output width.
+    pub width: u32,
+    /// Target output height.
+    pub height: u32,
+    /// Background fill color (RGBA).
+    pub background: [u8; 4],
+    /// Whether to honour the track `hidden` flag (skip hidden tracks when `true`).
+    pub skip_hidden: bool,
+}
+
+impl Default for RenderConfig {
+    fn default() -> Self {
+        Self {
+            width: 1920,
+            height: 1080,
+            background: [0, 0, 0, 255],
+            skip_hidden: true,
+        }
+    }
+}
+
+impl From<&FrameRenderSettings> for RenderConfig {
+    fn from(s: &FrameRenderSettings) -> Self {
+        Self {
+            width: s.width,
+            height: s.height,
+            background: s.background,
+            skip_hidden: true,
+        }
+    }
+}
+
+/// A composited output frame produced by [`render_frame_parallel`].
+///
+/// Parallel rendering gathers per-track pixel buffers in rayon threads and
+/// then composites them in z-order on the calling thread, so the result is
+/// identical to sequential compositing.
+#[derive(Debug, Clone)]
+pub struct CompositeFrame {
+    /// Frame position in timeline.
+    pub position: Position,
+    /// Composited pixel buffer (RGBA, `width × height × 4` bytes).
+    pub buffer: PixelBuffer,
+    /// Number of track layers that contributed to the composite.
+    pub layers_composited: u32,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Parallel track rendering (free function, not a method on TimelineRenderer)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Render one frame by processing each video track in parallel with rayon.
+///
+/// Track rendering is embarrassingly parallel: each track's contribution
+/// (a flat [`PixelBuffer`]) depends only on its own clips and the frame index.
+/// After the parallel gather phase the track buffers are composited in
+/// ascending z-order on the calling thread, producing the same result as
+/// the sequential path.
+///
+/// # Arguments
+///
+/// * `tracks` — slice of video [`Track`]s; z-order is determined by
+///   `Track::z_index` (lower index composited first / below).
+/// * `frame_idx` — absolute frame number (used to find clips that overlap).
+/// * `config` — render dimensions and background colour.
+///
+/// # Returns
+///
+/// A [`CompositeFrame`] with a full RGBA pixel buffer.
+#[must_use]
+pub fn render_frame_parallel(
+    tracks: &[Track],
+    frame_idx: u64,
+    config: &RenderConfig,
+) -> CompositeFrame {
+    // ── Phase 1: parallel per-track render ───────────────────────────────────
+    // Each element: (z_index, Option<PixelBuffer>) — None if the track is
+    // hidden or has no active clips at this frame.
+    let mut track_results: Vec<(i32, Option<PixelBuffer>)> = tracks
+        .par_iter()
+        .map(|track| {
+            if config.skip_hidden && track.hidden {
+                return (track.z_index, None);
+            }
+            let buf = render_track_at_frame(track, frame_idx, config);
+            (track.z_index, buf)
+        })
+        .collect();
+
+    // ── Phase 2: sort by z-order and composite on calling thread ─────────────
+    track_results.sort_by_key(|(z, _)| *z);
+
+    let mut base = PixelBuffer::solid(config.width, config.height, config.background);
+    let mut layers_composited = 0u32;
+
+    for (_, opt_buf) in track_results {
+        let Some(buf) = opt_buf else {
+            continue;
+        };
+        let resized = if buf.width != config.width || buf.height != config.height {
+            buf.resize_nearest(config.width, config.height)
+        } else {
+            buf
+        };
+        base.composite_over(&resized, 0, 0, 1.0);
+        layers_composited += 1;
+    }
+
+    CompositeFrame {
+        position: Position::new(frame_idx as i64),
+        buffer: base,
+        layers_composited,
+    }
+}
+
+/// Render the contribution of a single track at `frame_idx`.
+///
+/// Returns `None` when no clip in the track is active at this frame.
+/// Returns a pixel buffer whose every pixel is the blended colour of all
+/// active clips (for this reference renderer, the first active clip's colour
+/// fills the buffer).
+fn render_track_at_frame(
+    track: &Track,
+    frame_idx: u64,
+    config: &RenderConfig,
+) -> Option<PixelBuffer> {
+    // Collect active clips at this frame (not disabled).
+    let mut active: Vec<[u8; 4]> = Vec::new();
+    let pos = Position::new(frame_idx as i64);
+
+    for clip in &track.clips {
+        if !clip.enabled {
+            continue;
+        }
+        let clip_start = clip.timeline_in.value();
+        let clip_dur = clip.source_out.value() - clip.source_in.value();
+        let clip_end = clip_start + clip_dur;
+        if pos.value() >= clip_start && pos.value() < clip_end {
+            let color = source_color_for_render(&clip.source);
+            active.push(color);
+        }
+    }
+
+    if active.is_empty() {
+        return None;
+    }
+
+    // Composite active clip layers into a single buffer.
+    let mut buf = PixelBuffer::solid(config.width, config.height, active[0]);
+    for &color in active.iter().skip(1) {
+        let overlay = PixelBuffer::solid(config.width, config.height, color);
+        buf.composite_over(&overlay, 0, 0, 0.5);
+    }
+    Some(buf)
+}
+
+/// Deterministic preview colour for a media source (duplicates the logic in
+/// [`TimelineRenderer::source_color`] so the free function is self-contained).
+fn source_color_for_render(source: &MediaSource) -> [u8; 4] {
+    match source {
+        MediaSource::Color { rgba } => [
+            (rgba[0] * 255.0) as u8,
+            (rgba[1] * 255.0) as u8,
+            (rgba[2] * 255.0) as u8,
+            (rgba[3] * 255.0) as u8,
+        ],
+        MediaSource::BarsAndTone => [100, 100, 180, 255],
+        MediaSource::File { path, .. } => {
+            let hash = path.to_string_lossy().bytes().fold(0u32, |acc, b| {
+                acc.wrapping_mul(31).wrapping_add(u32::from(b))
+            });
+            [
+                ((hash >> 16) & 0xFF) as u8,
+                ((hash >> 8) & 0xFF) as u8,
+                (hash & 0xFF) as u8,
+                255,
+            ]
+        }
+        _ => [80, 80, 80, 255],
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 /// Timeline renderer: composites clips into pixel buffers.
 pub struct TimelineRenderer {
@@ -405,11 +604,7 @@ impl TimelineRenderer {
                     incoming_buf
                 };
 
-                let input = TransitionInput {
-                    outgoing: &out_resized,
-                    incoming: &in_resized,
-                    progress,
-                };
+                let input = TransitionInput::new(&out_resized, &in_resized, progress);
 
                 // Apply the transition; on error fall back to the outgoing buffer.
                 let blended = engine.apply_or_fallback(transition, &input);
@@ -542,5 +737,182 @@ mod tests {
             Timeline::new("test", Rational::new(24, 1), 48000).expect("should succeed in test");
         let result = renderer.render_range(&timeline, Position::new(10), Position::new(5));
         assert!(result.is_err());
+    }
+
+    // ── Parallel rendering ────────────────────────────────────────────────────
+
+    /// Build a minimal set of tracks suitable for parallel rendering tests.
+    ///
+    /// Returns 3 tracks:
+    ///  - track 0 (z=0): red clip at frames 0-99
+    ///  - track 1 (z=1): green clip at frames 0-99
+    ///  - track 2 (z=2): blue clip at frames 0-99
+    fn make_three_tracks() -> Vec<crate::track::Track> {
+        use crate::clip::{Clip, MediaSource};
+        use crate::track::{Track, TrackType};
+        use crate::types::Position;
+
+        let make_clip = |r: f32, g: f32, b: f32| -> Clip {
+            Clip::new(
+                "clip".to_string(),
+                MediaSource::Color {
+                    rgba: [r, g, b, 1.0],
+                },
+                Position::new(0),
+                Position::new(100),
+                Position::new(0),
+            )
+            .expect("clip creation should succeed in test")
+        };
+
+        let colors: [(f32, f32, f32, i32); 3] = [
+            (1.0, 0.0, 0.0, 0), // red, z=0
+            (0.0, 1.0, 0.0, 1), // green, z=1
+            (0.0, 0.0, 1.0, 2), // blue, z=2
+        ];
+
+        colors
+            .iter()
+            .map(|&(r, g, b, z)| {
+                let mut track = Track::new(format!("track-{z}"), TrackType::Video);
+                track.z_index = z;
+                let clip = make_clip(r, g, b);
+                track.clips.push(clip);
+                track
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_render_parallel_matches_sequential() {
+        // Build 3 tracks with solid-colour clips active at frame 10.
+        let tracks = make_three_tracks();
+        let config = RenderConfig {
+            width: 16,
+            height: 16,
+            background: [0, 0, 0, 255],
+            skip_hidden: true,
+        };
+
+        // ── Sequential reference ──────────────────────────────────────────────
+        let renderer = TimelineRenderer::with_settings(FrameRenderSettings {
+            width: 16,
+            height: 16,
+            background: [0, 0, 0, 255],
+            render_transitions: false,
+        });
+
+        // Build a minimal timeline from the tracks.
+        use crate::timeline::Timeline;
+        use oximedia_core::Rational;
+        let mut timeline = Timeline::new("par-test", Rational::new(24, 1), 48000)
+            .expect("timeline creation should succeed in test");
+        for track in &tracks {
+            let tid = timeline
+                .add_video_track(&track.name)
+                .expect("add_video_track should succeed in test");
+            for clip in &track.clips {
+                timeline
+                    .add_clip(tid, clip.clone())
+                    .expect("add_clip should succeed in test");
+            }
+        }
+
+        let seq_frame = renderer
+            .render_frame(&timeline, Position::new(10))
+            .expect("sequential render should succeed in test");
+
+        // ── Parallel rendering ────────────────────────────────────────────────
+        let par_frame = render_frame_parallel(&tracks, 10, &config);
+
+        // Both must produce a buffer of the same dimensions.
+        assert_eq!(
+            par_frame.buffer.width, seq_frame.buffer.width,
+            "Width mismatch"
+        );
+        assert_eq!(
+            par_frame.buffer.height, seq_frame.buffer.height,
+            "Height mismatch"
+        );
+
+        // The pixel data must be identical (same z-order, same compositing math).
+        assert_eq!(
+            par_frame.buffer.data, seq_frame.buffer.data,
+            "Pixel data differs between parallel and sequential render"
+        );
+    }
+
+    #[test]
+    fn test_render_parallel_empty_tracks() {
+        // Empty track slice should produce a background-coloured buffer.
+        let config = RenderConfig {
+            width: 8,
+            height: 8,
+            background: [42, 43, 44, 255],
+            skip_hidden: true,
+        };
+        let frame = render_frame_parallel(&[], 0, &config);
+        assert_eq!(frame.layers_composited, 0);
+        // All pixels should equal the background colour.
+        for px in frame.buffer.data.chunks(4) {
+            assert_eq!(px, &[42, 43, 44, 255], "Expected background pixel");
+        }
+    }
+
+    #[test]
+    fn test_render_parallel_hidden_tracks_skipped() {
+        use crate::clip::{Clip, MediaSource};
+        use crate::track::{Track, TrackType};
+
+        let mut track = Track::new("hidden".to_string(), TrackType::Video);
+        track.hidden = true;
+        let clip = Clip::new(
+            "c".to_string(),
+            MediaSource::Color {
+                rgba: [1.0, 0.0, 0.0, 1.0],
+            },
+            Position::new(0),
+            Position::new(10),
+            Position::new(0),
+        )
+        .expect("clip creation should succeed in test");
+        track.clips.push(clip);
+
+        let config = RenderConfig {
+            width: 4,
+            height: 4,
+            background: [10, 10, 10, 255],
+            skip_hidden: true,
+        };
+        let frame = render_frame_parallel(&[track], 5, &config);
+        assert_eq!(
+            frame.layers_composited, 0,
+            "Hidden track should not contribute layers"
+        );
+        // Background should be unchanged.
+        assert_eq!(&frame.buffer.data[0..4], &[10, 10, 10, 255]);
+    }
+
+    #[test]
+    fn test_render_config_default() {
+        let cfg = RenderConfig::default();
+        assert_eq!(cfg.width, 1920);
+        assert_eq!(cfg.height, 1080);
+        assert_eq!(cfg.background, [0, 0, 0, 255]);
+        assert!(cfg.skip_hidden);
+    }
+
+    #[test]
+    fn test_render_config_from_frame_settings() {
+        let fs = FrameRenderSettings {
+            width: 320,
+            height: 240,
+            background: [1, 2, 3, 4],
+            render_transitions: false,
+        };
+        let cfg = RenderConfig::from(&fs);
+        assert_eq!(cfg.width, 320);
+        assert_eq!(cfg.height, 240);
+        assert_eq!(cfg.background, [1, 2, 3, 4]);
     }
 }

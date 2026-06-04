@@ -22,8 +22,8 @@
 #![allow(dead_code)]
 
 use std::ops::{Deref, DerefMut};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use parking_lot::Mutex;
 
@@ -190,12 +190,7 @@ pub struct BufferPool {
 impl BufferPool {
     /// Create a new pool with `capacity` pre-allocated buffers, each sized for
     /// `frame_width × frame_height` pixels in the specified `format`.
-    pub fn new(
-        capacity: usize,
-        frame_width: u32,
-        frame_height: u32,
-        format: PixelFormat,
-    ) -> Self {
+    pub fn new(capacity: usize, frame_width: u32, frame_height: u32, format: PixelFormat) -> Self {
         Self {
             inner: Arc::new(PoolInner::new(capacity, frame_width, frame_height, format)),
         }
@@ -342,12 +337,18 @@ mod tests {
 
     #[test]
     fn uyvy422_bytes_per_frame() {
-        assert_eq!(PixelFormat::Uyvy422.bytes_per_frame(1920, 1080), 1920 * 1080 * 2);
+        assert_eq!(
+            PixelFormat::Uyvy422.bytes_per_frame(1920, 1080),
+            1920 * 1080 * 2
+        );
     }
 
     #[test]
     fn bgra8_bytes_per_frame() {
-        assert_eq!(PixelFormat::Bgra8.bytes_per_frame(1280, 720), 1280 * 720 * 4);
+        assert_eq!(
+            PixelFormat::Bgra8.bytes_per_frame(1280, 720),
+            1280 * 720 * 4
+        );
     }
 
     #[test]
@@ -378,7 +379,10 @@ mod tests {
     #[test]
     fn frame_buffer_allocates_correct_size() {
         let buf = FrameBuffer::new(1920, 1080, PixelFormat::Bgra8);
-        assert_eq!(buf.data.len(), PixelFormat::Bgra8.bytes_per_frame(1920, 1080));
+        assert_eq!(
+            buf.data.len(),
+            PixelFormat::Bgra8.bytes_per_frame(1920, 1080)
+        );
         assert_eq!(buf.width, 1920);
         assert_eq!(buf.height, 1080);
         assert_eq!(buf.format, PixelFormat::Bgra8);
@@ -478,7 +482,10 @@ mod tests {
             pb.data.iter_mut().for_each(|b| *b = 0xAB);
         }
         let pb2 = acquire_or_fail(&pool);
-        assert!(pb2.data.iter().all(|&b| b == 0), "buffer data should be zeroed after return");
+        assert!(
+            pb2.data.iter().all(|&b| b == 0),
+            "buffer data should be zeroed after return"
+        );
     }
 
     // ── Capacity helper ───────────────────────────────────────────────────────
@@ -506,7 +513,9 @@ mod tests {
         let pool = BufferPool::new(1, 8, 8, PixelFormat::Bgra8);
         let pb = acquire_or_fail(&pool);
         assert!(pb.buffer().is_ok());
-        let buf = pb.buffer().unwrap_or_else(|_| panic!("buffer should be Ok"));
+        let buf = pb
+            .buffer()
+            .unwrap_or_else(|_| panic!("buffer should be Ok"));
         assert_eq!(buf.width, 8);
         assert_eq!(buf.height, 8);
     }
@@ -584,9 +593,24 @@ mod tests {
 
     #[test]
     fn pool_stats_equality() {
-        let s1 = PoolStats { total: 4, available: 2, in_use: 2, peak_in_use: 3 };
-        let s2 = PoolStats { total: 4, available: 2, in_use: 2, peak_in_use: 3 };
-        let s3 = PoolStats { total: 4, available: 3, in_use: 1, peak_in_use: 3 };
+        let s1 = PoolStats {
+            total: 4,
+            available: 2,
+            in_use: 2,
+            peak_in_use: 3,
+        };
+        let s2 = PoolStats {
+            total: 4,
+            available: 2,
+            in_use: 2,
+            peak_in_use: 3,
+        };
+        let s3 = PoolStats {
+            total: 4,
+            available: 3,
+            in_use: 1,
+            peak_in_use: 3,
+        };
         assert_eq!(s1, s2);
         assert_ne!(s1, s3);
     }

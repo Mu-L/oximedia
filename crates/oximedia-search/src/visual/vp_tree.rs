@@ -32,8 +32,6 @@
 //! assert_eq!(knn[0].0, 0); // closest to origin
 //! ```
 
-#![allow(dead_code)]
-
 use std::collections::BinaryHeap;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -57,10 +55,12 @@ use std::collections::BinaryHeap;
 #[must_use]
 pub fn euclidean_dist(a: &[f32], b: &[f32]) -> f32 {
     let len = a.len().min(b.len());
-    let sum_sq: f32 = (0..len).map(|i| {
-        let diff = a[i] - b[i];
-        diff * diff
-    }).sum();
+    let sum_sq: f32 = (0..len)
+        .map(|i| {
+            let diff = a[i] - b[i];
+            diff * diff
+        })
+        .sum();
     sum_sq.sqrt()
 }
 
@@ -197,10 +197,7 @@ impl FloatVpTree {
             Self::knn_search(root, &self.points, query, effective_k, &mut heap, &mut tau);
         }
 
-        let mut results: Vec<(usize, f32)> = heap
-            .into_iter()
-            .map(|e| (e.id, e.dist))
-            .collect();
+        let mut results: Vec<(usize, f32)> = heap.into_iter().map(|e| (e.id, e.dist)).collect();
         results.sort_by(|a, b| a.1.total_cmp(&b.1));
         results
     }
@@ -223,10 +220,7 @@ impl FloatVpTree {
 
     // ── Internal construction ─────────────────────────────────────────────
 
-    fn build_subtree(
-        all_points: &[(usize, Vec<f32>)],
-        indices: &mut [usize],
-    ) -> VpNode {
+    fn build_subtree(all_points: &[(usize, Vec<f32>)], indices: &mut [usize]) -> VpNode {
         match indices.len() {
             0 => unreachable!("build_subtree called with empty slice"),
             1 => {
@@ -254,24 +248,26 @@ impl FloatVpTree {
                 // Sort by distance to find the median threshold.
                 dists.sort_by(|a, b| a.1.total_cmp(&b.1));
                 let mid = n / 2;
-                let threshold = dists.get(mid.saturating_sub(1))
-                    .map(|e| e.1)
-                    .unwrap_or(0.0);
+                let threshold = dists.get(mid.saturating_sub(1)).map(|e| e.1).unwrap_or(0.0);
 
-                let mut inner_indices: Vec<usize> =
-                    dists[..mid].iter().map(|e| e.0).collect();
-                let mut outer_indices: Vec<usize> =
-                    dists[mid..].iter().map(|e| e.0).collect();
+                let mut inner_indices: Vec<usize> = dists[..mid].iter().map(|e| e.0).collect();
+                let mut outer_indices: Vec<usize> = dists[mid..].iter().map(|e| e.0).collect();
 
                 let left = if inner_indices.is_empty() {
                     None
                 } else {
-                    Some(Box::new(Self::build_subtree(all_points, &mut inner_indices)))
+                    Some(Box::new(Self::build_subtree(
+                        all_points,
+                        &mut inner_indices,
+                    )))
                 };
                 let right = if outer_indices.is_empty() {
                     None
                 } else {
-                    Some(Box::new(Self::build_subtree(all_points, &mut outer_indices)))
+                    Some(Box::new(Self::build_subtree(
+                        all_points,
+                        &mut outer_indices,
+                    )))
                 };
 
                 VpNode {
@@ -391,9 +387,7 @@ mod tests {
     use super::*;
 
     fn pts(raw: &[(usize, &[f32])]) -> Vec<(usize, Vec<f32>)> {
-        raw.iter()
-            .map(|(id, v)| (*id, v.to_vec()))
-            .collect()
+        raw.iter().map(|(id, v)| (*id, v.to_vec())).collect()
     }
 
     fn brute_knn(points: &[(usize, Vec<f32>)], query: &[f32], k: usize) -> Vec<(usize, f32)> {
@@ -477,9 +471,7 @@ mod tests {
 
     #[test]
     fn test_knn_correctness_2d() {
-        let raw: Vec<(usize, Vec<f32>)> = (0..20)
-            .map(|i| (i, vec![i as f32, 0.0]))
-            .collect();
+        let raw: Vec<(usize, Vec<f32>)> = (0..20).map(|i| (i, vec![i as f32, 0.0])).collect();
         let tree = FloatVpTree::build(raw.clone());
         let query = [7.5_f32, 0.0];
         let k = 3;
@@ -508,9 +500,7 @@ mod tests {
 
     #[test]
     fn test_knn_sorted_ascending() {
-        let raw: Vec<(usize, Vec<f32>)> = (0..10)
-            .map(|i| (i, vec![i as f32 * 2.0]))
-            .collect();
+        let raw: Vec<(usize, Vec<f32>)> = (0..10).map(|i| (i, vec![i as f32 * 2.0])).collect();
         let tree = FloatVpTree::build(raw);
         let query = [5.0_f32];
         let res = tree.search_knn(&query, 5);
@@ -535,10 +525,7 @@ mod tests {
 
     #[test]
     fn test_radius_search_none_within() {
-        let raw = pts(&[
-            (0, &[10.0, 10.0]),
-            (1, &[20.0, 20.0]),
-        ]);
+        let raw = pts(&[(0, &[10.0, 10.0]), (1, &[20.0, 20.0])]);
         let tree = FloatVpTree::build(raw);
         let res = tree.search_radius(&[0.0, 0.0], 1.0);
         assert!(res.is_empty());
@@ -546,9 +533,7 @@ mod tests {
 
     #[test]
     fn test_radius_search_sorted_ascending() {
-        let raw: Vec<(usize, Vec<f32>)> = (0..8)
-            .map(|i| (i, vec![i as f32]))
-            .collect();
+        let raw: Vec<(usize, Vec<f32>)> = (0..8).map(|i| (i, vec![i as f32])).collect();
         let tree = FloatVpTree::build(raw);
         let res = tree.search_radius(&[3.5], 4.0);
         for i in 1..res.len() {
@@ -558,11 +543,7 @@ mod tests {
 
     #[test]
     fn test_len_and_is_empty() {
-        let tree = FloatVpTree::build(pts(&[
-            (0, &[1.0]),
-            (1, &[2.0]),
-            (2, &[3.0]),
-        ]));
+        let tree = FloatVpTree::build(pts(&[(0, &[1.0]), (1, &[2.0]), (2, &[3.0])]));
         assert_eq!(tree.len(), 3);
         assert!(!tree.is_empty());
     }

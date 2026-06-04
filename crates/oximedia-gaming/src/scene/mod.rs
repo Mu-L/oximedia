@@ -2,6 +2,7 @@
 
 pub mod hotkey;
 pub mod manager;
+pub mod stinger_decode;
 pub mod transition;
 
 pub use hotkey::{Hotkey, HotkeyAction, HotkeyManager};

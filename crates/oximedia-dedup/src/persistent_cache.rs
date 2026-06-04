@@ -278,8 +278,7 @@ impl PersistentFingerprintCache {
     /// Returns the number of entries evicted.
     pub fn evict_missing(&mut self) -> usize {
         let before = self.entries.len();
-        self.entries
-            .retain(|path, _| Path::new(path).exists());
+        self.entries.retain(|path, _| Path::new(path).exists());
         before - self.entries.len()
     }
 
@@ -476,7 +475,8 @@ mod tests {
         // Now mutate the file.
         {
             let mut f = std::fs::File::create(&file_path).expect("create");
-            f.write_all(b"modified content, different bytes!").expect("write");
+            f.write_all(b"modified content, different bytes!")
+                .expect("write");
         }
 
         // Now the cached hash is stale.

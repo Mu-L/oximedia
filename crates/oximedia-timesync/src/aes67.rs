@@ -243,6 +243,128 @@ impl Aes67Sdp {
     }
 }
 
+// ---------------------------------------------------------------------------
+// AES67 PTP Profile Compliance Checker
+// ---------------------------------------------------------------------------
+
+/// Minimal PTP configuration record for AES67 compliance checking.
+///
+/// AES67-2013 §7 mandates specific PTP parameter values. This struct carries
+/// the fields that the compliance checker inspects.
+#[derive(Debug, Clone)]
+pub struct PtpConfig {
+    /// Log₂ of the announce interval (logAnnounceInterval).
+    /// AES67 requires 0 (= 1 packet/s).
+    pub log_announce_interval: i8,
+    /// Log₂ of the sync interval (logSyncInterval).
+    /// AES67 requires −7 (= 128 packets/s, i.e. 1 ms period).
+    pub log_sync_interval: i8,
+    /// Delay request mechanism.
+    /// AES67 mandates `E2E` only (§7.3).
+    pub delay_mechanism: PtpDelayMechanism,
+    /// PTP domain number (0–127).
+    /// AES67 default is 0; user may configure a non-zero value.
+    pub domain: u8,
+}
+
+impl Default for PtpConfig {
+    fn default() -> Self {
+        // Compliant defaults per AES67-2013.
+        Self {
+            log_announce_interval: 0,
+            log_sync_interval: -7,
+            delay_mechanism: PtpDelayMechanism::E2E,
+            domain: 0,
+        }
+    }
+}
+
+/// Delay mechanism selection for PTP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PtpDelayMechanism {
+    /// End-to-end (required by AES67).
+    E2E,
+    /// Peer-to-peer (not permitted by AES67).
+    P2P,
+}
+
+/// Stateless AES67-2013 PTP profile compliance checker.
+///
+/// Call [`Aes67ProfileChecker::check_config`] with a [`PtpConfig`] to get a
+/// [`Aes67ComplianceReport`] listing every parameter that deviates from the
+/// AES67-2013 §7 specification.
+pub struct Aes67ProfileChecker;
+
+/// Result of an AES67 compliance check.
+#[derive(Debug, Clone)]
+pub struct Aes67ComplianceReport {
+    /// `true` iff no violations were found.
+    pub compliant: bool,
+    /// Human-readable description of each violation.
+    pub violations: Vec<String>,
+}
+
+impl Aes67ComplianceReport {
+    fn new(violations: Vec<String>) -> Self {
+        let compliant = violations.is_empty();
+        Self {
+            compliant,
+            violations,
+        }
+    }
+}
+
+impl Aes67ProfileChecker {
+    // AES67-2013 §7 normative values.
+    const REQUIRED_LOG_ANNOUNCE: i8 = 0; // 1 packet/s
+    const REQUIRED_LOG_SYNC: i8 = -7; // 128 packets/s (≈ 1 ms)
+
+    /// Checks `config` against the AES67-2013 §7 PTP profile requirements.
+    ///
+    /// Returns an [`Aes67ComplianceReport`] whose `violations` list is empty
+    /// when the configuration is fully compliant.
+    #[must_use]
+    pub fn check_config(config: &PtpConfig) -> Aes67ComplianceReport {
+        let mut violations: Vec<String> = Vec::new();
+
+        // §7.2 — Announce interval.
+        if config.log_announce_interval != Self::REQUIRED_LOG_ANNOUNCE {
+            violations.push(format!(
+                "logAnnounceInterval must be {} (1 packet/s per AES67 §7.2), \
+                 got {}",
+                Self::REQUIRED_LOG_ANNOUNCE,
+                config.log_announce_interval
+            ));
+        }
+
+        // §7.2 — Sync interval.
+        if config.log_sync_interval != Self::REQUIRED_LOG_SYNC {
+            violations.push(format!(
+                "logSyncInterval must be {} (128 packets/s, 1 ms period per AES67 §7.2), \
+                 got {}",
+                Self::REQUIRED_LOG_SYNC,
+                config.log_sync_interval
+            ));
+        }
+
+        // §7.3 — Delay mechanism must be E2E.
+        if config.delay_mechanism != PtpDelayMechanism::E2E {
+            violations
+                .push("AES67 §7.3 requires E2E delay mechanism; P2P is not permitted".to_string());
+        }
+
+        // §7.1 — Domain must be in 0–127 (PTP domain validity).
+        if config.domain > 127 {
+            violations.push(format!(
+                "PTP domain must be 0–127 (AES67 §7.1), got {}",
+                config.domain
+            ));
+        }
+
+        Aes67ComplianceReport::new(violations)
+    }
+}
+
 /// AES67 jitter buffer for compensating network timing variation.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -425,5 +547,104 @@ mod tests {
         buf.reset();
         assert_eq!(buf.packet_count(), 0);
         assert_eq!(buf.fill_level_us, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Aes67ProfileChecker tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_profile_checker_compliant_defaults() {
+        // Default PtpConfig must be fully AES67-compliant.
+        let cfg = PtpConfig::default();
+        let report = Aes67ProfileChecker::check_config(&cfg);
+        assert!(
+            report.compliant,
+            "default config should be compliant; violations: {:?}",
+            report.violations
+        );
+        assert!(report.violations.is_empty());
+    }
+
+    #[test]
+    fn test_profile_checker_wrong_sync_interval() {
+        let cfg = PtpConfig {
+            log_sync_interval: 0, // 1/s instead of 128/s
+            ..PtpConfig::default()
+        };
+        let report = Aes67ProfileChecker::check_config(&cfg);
+        assert!(!report.compliant);
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|v| v.contains("logSyncInterval")),
+            "should report sync interval violation; got {:?}",
+            report.violations
+        );
+    }
+
+    #[test]
+    fn test_profile_checker_wrong_announce_interval() {
+        let cfg = PtpConfig {
+            log_announce_interval: 1, // 0.5/s instead of 1/s
+            ..PtpConfig::default()
+        };
+        let report = Aes67ProfileChecker::check_config(&cfg);
+        assert!(!report.compliant);
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|v| v.contains("logAnnounceInterval")),
+            "should report announce interval violation"
+        );
+    }
+
+    #[test]
+    fn test_profile_checker_p2p_delay_mechanism() {
+        let cfg = PtpConfig {
+            delay_mechanism: PtpDelayMechanism::P2P,
+            ..PtpConfig::default()
+        };
+        let report = Aes67ProfileChecker::check_config(&cfg);
+        assert!(!report.compliant);
+        assert!(
+            report.violations.iter().any(|v| v.contains("E2E")),
+            "should report E2E requirement violation; got {:?}",
+            report.violations
+        );
+    }
+
+    #[test]
+    fn test_profile_checker_multiple_violations() {
+        let cfg = PtpConfig {
+            log_announce_interval: -1,
+            log_sync_interval: 0,
+            delay_mechanism: PtpDelayMechanism::P2P,
+            domain: 0,
+        };
+        let report = Aes67ProfileChecker::check_config(&cfg);
+        assert!(!report.compliant);
+        assert!(
+            report.violations.len() >= 3,
+            "expected ≥3 violations, got {}",
+            report.violations.len()
+        );
+    }
+
+    #[test]
+    fn test_profile_checker_custom_domain_valid() {
+        // Non-zero domain is allowed by AES67 as long as it is ≤ 127.
+        let cfg = PtpConfig {
+            domain: 1,
+            ..PtpConfig::default()
+        };
+        let report = Aes67ProfileChecker::check_config(&cfg);
+        assert!(
+            report.compliant,
+            "domain=1 should still be compliant; violations: {:?}",
+            report.violations
+        );
     }
 }

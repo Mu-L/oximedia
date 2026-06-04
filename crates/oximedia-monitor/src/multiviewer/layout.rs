@@ -1,6 +1,6 @@
 //! Layout management for multi-viewer.
 
-use super::{ViewPane, ViewerLayout};
+use super::ViewerLayout;
 
 /// Layout manager.
 pub struct LayoutManager {

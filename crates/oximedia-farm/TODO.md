@@ -34,17 +34,17 @@
 ## Performance
 - [x] Optimize `persistence/schema.rs` SQLite queries with prepared statements and indexes
 - [x] Add connection pooling for SQLite using r2d2 (already a dependency, ensure usage) (verified 2026-05-16; src/persistence/mod.rs:14 r2d2::Pool, SqliteConnectionManager, DbPool type alias:23)
-- [ ] Implement batch heartbeat processing in coordinator to reduce per-heartbeat overhead
+- [x] Implement batch heartbeat processing in coordinator to reduce per-heartbeat overhead (done 2026-06-01; `WorkerRegistry::with_batch_config`, `HeartbeatBatch` field + `flush_heartbeat_batch` + `flush_pending_heartbeats`; 2 new tests: `test_heartbeat_batch_accumulates`, `test_heartbeat_batch_flushes`)
 - [x] Use gRPC streaming for progress updates instead of individual RPCs
-- [ ] Add in-memory caching layer in front of SQLite for frequently accessed job state
+- [x] Add in-memory caching layer in front of SQLite for frequently accessed job state
 - [x] Optimize `priority_queue.rs` with a proper binary heap instead of sorted Vec
 
 ## Testing
 - [x] Add end-to-end integration test: submit job -> assign to worker -> complete -> verify output
-- [ ] Test `fault_tolerance/circuit_breaker.rs` state transitions (closed -> open -> half-open)
-- [ ] Test `fault_tolerance/retry.rs` with exponential backoff and jitter verification
-- [ ] Add `scheduler/strategies.rs` benchmarks with 10K+ jobs and 100+ workers
-- [ ] Test `persistence/schema.rs` database migration and schema evolution
+- [x] Test `fault_tolerance/circuit_breaker.rs` state transitions (closed -> open -> half-open)
+- [x] Test `fault_tolerance/retry.rs` with exponential backoff and jitter verification
+- [x] Add `scheduler/strategies.rs` benchmarks with 10K+ jobs and 100+ workers
+- [x] Test `persistence/schema.rs` database migration and schema evolution
 - [x] Test graceful shutdown: worker draining, in-flight task handoff
 - [x] Add chaos testing: random worker disconnects during active jobs
 

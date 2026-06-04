@@ -131,8 +131,12 @@ impl ImfArchive {
 
     #[must_use]
     pub fn to_xml(&self) -> String {
-        let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ArchiveManifest>\n");
-        xml.push_str(&format!("  <PackagePath>{}</PackagePath>\n", xe(&self.package_path)));
+        let mut xml =
+            String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ArchiveManifest>\n");
+        xml.push_str(&format!(
+            "  <PackagePath>{}</PackagePath>\n",
+            xe(&self.package_path)
+        ));
         xml.push_str(&format!("  <OaisType>{}</OaisType>\n", self.package_type));
         if let Some(ref o) = self.originator {
             xml.push_str(&format!("  <Originator>{}</Originator>\n", xe(o)));
@@ -141,7 +145,10 @@ impl ImfArchive {
             xml.push_str(&format!("  <Rights>{}</Rights>\n", xe(r)));
         }
         if let Some(ref id) = self.content_identifier {
-            xml.push_str(&format!("  <ContentIdentifier>{}</ContentIdentifier>\n", xe(id)));
+            xml.push_str(&format!(
+                "  <ContentIdentifier>{}</ContentIdentifier>\n",
+                xe(id)
+            ));
         }
         if !self.languages.is_empty() {
             xml.push_str("  <Languages>\n");
@@ -156,8 +163,14 @@ impl ImfArchive {
                 xml.push_str(&format!(
                     "    <Event><DateTime>{}</DateTime><Agent>{}</Agent>\
                      <Type>{}</Type><Outcome>{}</Outcome>{}</Event>\n",
-                    xe(&ev.date_time), xe(&ev.agent), xe(&ev.event_type), xe(&ev.outcome),
-                    ev.note.as_ref().map(|n| format!("<Note>{}</Note>", xe(n))).unwrap_or_default()
+                    xe(&ev.date_time),
+                    xe(&ev.agent),
+                    xe(&ev.event_type),
+                    xe(&ev.outcome),
+                    ev.note
+                        .as_ref()
+                        .map(|n| format!("<Note>{}</Note>", xe(n)))
+                        .unwrap_or_default()
                 ));
             }
             xml.push_str("  </PreservationHistory>\n");
@@ -188,7 +201,9 @@ impl ImfArchive {
     pub fn read_manifest(path: impl AsRef<Path>) -> ImfResult<Self> {
         let content = std::fs::read_to_string(path).map_err(|e| ImfError::Other(e.to_string()))?;
         if !content.contains("<ArchiveManifest") {
-            return Err(ImfError::InvalidPackage("Not an ArchiveManifest document".to_string()));
+            return Err(ImfError::InvalidPackage(
+                "Not an ArchiveManifest document".to_string(),
+            ));
         }
         let package_path = extract_tag(&content, "PackagePath").unwrap_or_default();
         let pt_str = extract_tag(&content, "OaisType").unwrap_or_default();
@@ -211,9 +226,13 @@ impl ImfArchive {
 }
 
 fn xe(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
-fn xa(s: &str) -> String { xe(s).replace('"', "&quot;") }
+fn xa(s: &str) -> String {
+    xe(s).replace('"', "&quot;")
+}
 fn extract_tag(xml: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");
@@ -231,8 +250,7 @@ mod tests {
         let dir = std::env::temp_dir().join("oximedia_archive_rt");
         std::fs::create_dir_all(&dir).ok();
         let p = dir.join("ARCHIVE_MANIFEST.xml");
-        let archive = ImfArchive::new("/pkg", OaisPackageType::Sip)
-            .with_originator("TestOrg");
+        let archive = ImfArchive::new("/pkg", OaisPackageType::Sip).with_originator("TestOrg");
         archive.write_manifest(&p).expect("write ok");
         let loaded = ImfArchive::read_manifest(&p).expect("read ok");
         assert_eq!(loaded.package_path, "/pkg");
@@ -260,7 +278,8 @@ mod tests {
     #[test]
     fn test_languages() {
         let archive = ImfArchive::new("/pkg", OaisPackageType::Aip)
-            .add_language("en").add_language("fr");
+            .add_language("en")
+            .add_language("fr");
         let xml = archive.to_xml();
         assert!(xml.contains("<Language>en</Language>"));
         assert!(xml.contains("<Language>fr</Language>"));

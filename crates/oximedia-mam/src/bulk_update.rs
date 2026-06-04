@@ -1,10 +1,8 @@
 //! Bulk metadata update operations for the MAM system.
 //!
-//! Provides [`MetadataStore`], a simple in-memory key-value store per asset,
-//! and [`BulkMetadataUpdate`], which accumulates a set of field-value pairs
+//! Provides `MetadataStore`, a simple in-memory key-value store per asset,
+//! and `BulkMetadataUpdate`, which accumulates a set of field-value pairs
 //! and applies them atomically to a slice of asset IDs.
-
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 

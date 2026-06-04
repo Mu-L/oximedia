@@ -12,7 +12,7 @@
 //! This means that an "unset" child field (one that was never explicitly
 //! changed from the default) falls back to the parent's value.
 
-use crate::style::{SubtitleStyle, FontWeight, FontStyle, Color, Alignment, VerticalAlignment};
+use crate::style::{Alignment, Color, FontStyle, FontWeight, SubtitleStyle, VerticalAlignment};
 
 /// Subtitle style inheritance resolver.
 ///

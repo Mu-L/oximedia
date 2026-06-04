@@ -292,8 +292,7 @@ impl BounceEngine {
         let render_time_ms = start_instant.elapsed().as_millis() as u64;
 
         // Silence trimming.
-        let (frames_rendered, frames_trimmed) =
-            self.trim_silence(&mut output, out_ch, frames_done);
+        let (frames_rendered, frames_trimmed) = self.trim_silence(&mut output, out_ch, frames_done);
 
         let rms = if frames_rendered > 0 {
             (sum_sq / (frames_rendered as f64 * out_ch as f64)).sqrt() as f32
@@ -445,22 +444,14 @@ impl BounceEngineBuilder {
     /// Set per-channel gain.
     #[must_use]
     pub fn with_channel_gain(mut self, channel: u32, gain: f32) -> Self {
-        self.config
-            .channel_params
-            .entry(channel)
-            .or_default()
-            .gain = gain;
+        self.config.channel_params.entry(channel).or_default().gain = gain;
         self
     }
 
     /// Set per-channel pan.
     #[must_use]
     pub fn with_channel_pan(mut self, channel: u32, pan: f32) -> Self {
-        self.config
-            .channel_params
-            .entry(channel)
-            .or_default()
-            .pan = pan;
+        self.config.channel_params.entry(channel).or_default().pan = pan;
         self
     }
 
@@ -507,7 +498,12 @@ impl SineSource {
 }
 
 impl AudioSource for SineSource {
-    fn fill(&mut self, sample_offset: u64, channels: u32, output: &mut [f32]) -> Result<usize, String> {
+    fn fill(
+        &mut self,
+        sample_offset: u64,
+        channels: u32,
+        output: &mut [f32],
+    ) -> Result<usize, String> {
         let frames = output.len() / channels as usize;
         let remaining = (self.total_frames.saturating_sub(sample_offset)) as usize;
         let write_frames = frames.min(remaining);
@@ -540,7 +536,12 @@ impl SilentSource {
 }
 
 impl AudioSource for SilentSource {
-    fn fill(&mut self, sample_offset: u64, channels: u32, output: &mut [f32]) -> Result<usize, String> {
+    fn fill(
+        &mut self,
+        sample_offset: u64,
+        channels: u32,
+        output: &mut [f32],
+    ) -> Result<usize, String> {
         let frames = output.len() / channels as usize;
         let remaining = (self.total_frames.saturating_sub(sample_offset)) as usize;
         let write_frames = frames.min(remaining);

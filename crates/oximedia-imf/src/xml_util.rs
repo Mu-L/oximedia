@@ -5,8 +5,6 @@
 //! constructing XML trees and serialising them to strings, without
 //! depending on a full XML DOM library.
 
-#![allow(dead_code)]
-
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -442,5 +440,281 @@ mod tests {
         let e = XmlElement::new("Tag").with_text("val");
         let s = format!("{e}");
         assert!(s.contains("<Tag>val</Tag>"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// XmlStreamWriter  (streaming / zero-copy incremental XML emission)
+// ---------------------------------------------------------------------------
+
+use crate::cpl_parser::CompositionPlaylist;
+use crate::ImfError;
+use quick_xml::{
+    events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event},
+    Writer,
+};
+
+/// A streaming XML writer that emits elements incrementally to any
+/// [`std::io::Write`] target.
+///
+/// Unlike [`XmlBuilder`], this type does not buffer the full document in
+/// memory; each `write_*` call flushes bytes directly to the underlying
+/// writer, making it suitable for large CPL / OPL generation.
+pub struct XmlStreamWriter<W: std::io::Write> {
+    writer: Writer<W>,
+}
+
+impl<W: std::io::Write> XmlStreamWriter<W> {
+    /// Create a new streaming writer wrapping `inner`.
+    pub fn new(inner: W) -> Self {
+        Self {
+            writer: Writer::new_with_indent(inner, b' ', 2),
+        }
+    }
+
+    /// Write the XML declaration (`<?xml version="1.0" encoding="UTF-8"?>`).
+    pub fn write_declaration(&mut self) -> std::io::Result<()> {
+        self.writer
+            .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
+    }
+
+    /// Write `<name>text</name>` as a single inline element.
+    pub fn write_element(&mut self, name: &str, text: &str) -> std::io::Result<()> {
+        self.writer
+            .create_element(name)
+            .write_text_content(BytesText::new(text))?;
+        Ok(())
+    }
+
+    /// Write an opening tag `<name>`.
+    pub fn start_element(&mut self, name: &str) -> std::io::Result<()> {
+        self.writer
+            .write_event(Event::Start(BytesStart::new(name.to_string())))
+    }
+
+    /// Write an opening tag with a single attribute.
+    pub fn start_element_with_attr(
+        &mut self,
+        name: &str,
+        attr_name: &str,
+        attr_value: &str,
+    ) -> std::io::Result<()> {
+        let mut start = BytesStart::new(name.to_string());
+        start.push_attribute((attr_name, attr_value));
+        self.writer.write_event(Event::Start(start))
+    }
+
+    /// Write a closing tag `</name>`.
+    pub fn end_element(&mut self, name: &str) -> std::io::Result<()> {
+        self.writer
+            .write_event(Event::End(BytesEnd::new(name.to_string())))
+    }
+
+    /// Consume this writer and return the inner `W`.
+    pub fn into_inner(self) -> W {
+        self.writer.into_inner()
+    }
+}
+
+/// Stream a [`CompositionPlaylist`] to any [`std::io::Write`] target.
+///
+/// The output conforms to a simplified subset of SMPTE ST 2067-3 (the same
+/// schema as [`CompositionPlaylist::to_xml`]) and can be round-tripped back
+/// with [`CompositionPlaylist::from_xml`].
+pub fn write_cpl_streaming<W: std::io::Write>(
+    cpl: &CompositionPlaylist,
+    writer: W,
+) -> Result<(), ImfError> {
+    let mut sw = XmlStreamWriter::new(writer);
+    sw.write_declaration()
+        .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+
+    sw.start_element_with_attr(
+        "CompositionPlaylist",
+        "xmlns",
+        "http://www.smpte-ra.org/schemas/2067-3/2016",
+    )
+    .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+
+    sw.write_element("Id", &format!("urn:uuid:{}", cpl.id))
+        .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+    sw.write_element("ContentTitle", &cpl.content_title)
+        .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+
+    let (rate_num, rate_den) = cpl.edit_rate;
+    sw.write_element("EditRate", &format!("{rate_num} {rate_den}"))
+        .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+
+    sw.start_element("SegmentList")
+        .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+
+    for seg in cpl.segments() {
+        sw.start_element("Segment")
+            .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+
+        sw.write_element("Id", &format!("urn:uuid:{}", seg.id))
+            .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+
+        if let Some(ref ann) = seg.annotation {
+            sw.write_element("Annotation", ann)
+                .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+        }
+
+        sw.start_element("SequenceList")
+            .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+
+        for seq in &seg.sequences {
+            sw.start_element("Sequence")
+                .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+
+            sw.write_element("Id", &format!("urn:uuid:{}", seq.id))
+                .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+            sw.write_element("TrackId", &format!("urn:uuid:{}", seq.track_id))
+                .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+
+            sw.start_element("ResourceList")
+                .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+
+            for res in &seq.resources {
+                sw.start_element("Resource")
+                    .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+
+                sw.write_element("TrackFileId", &format!("urn:uuid:{}", res.track_file_id))
+                    .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+                sw.write_element("SourceDuration", &res.source_duration.to_string())
+                    .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+                sw.write_element("EntryPoint", &res.entry_point.to_string())
+                    .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+                sw.write_element("IntrinsicDuration", &res.intrinsic_duration.to_string())
+                    .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+                sw.write_element("RepeatCount", &res.repeat_count.to_string())
+                    .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+
+                sw.end_element("Resource")
+                    .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+            }
+
+            sw.end_element("ResourceList")
+                .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+            sw.end_element("Sequence")
+                .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+        }
+
+        sw.end_element("SequenceList")
+            .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+        sw.end_element("Segment")
+            .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+    }
+
+    sw.end_element("SegmentList")
+        .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+    sw.end_element("CompositionPlaylist")
+        .map_err(|e: std::io::Error| ImfError::XmlError(e.to_string()))?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Streaming writer tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+    use crate::cpl_parser::{CompositionPlaylist, CplResource, CplSegment, CplSequence};
+
+    fn reference_cpl() -> CompositionPlaylist {
+        let mut cpl = CompositionPlaylist::new("stream-cpl-001", "Streaming Test Film", (25, 1));
+
+        let mut seg = CplSegment::new("stream-seg-001");
+        seg.annotation = Some("Chapter 1".to_string());
+        let mut seq = CplSequence::new("stream-seq-001", "stream-track-001");
+        seq.add_resource(CplResource::simple("stream-tf-001", 2500));
+        seg.add_sequence(seq);
+        cpl.add_segment(seg);
+
+        let mut seg2 = CplSegment::new("stream-seg-002");
+        let mut seq2 = CplSequence::new("stream-seq-002", "stream-track-001");
+        let mut res2 = CplResource::simple("stream-tf-002", 5000);
+        res2.entry_point = 25;
+        res2.repeat_count = 2;
+        seq2.add_resource(res2);
+        seg2.add_sequence(seq2);
+        cpl.add_segment(seg2);
+
+        cpl
+    }
+
+    #[test]
+    fn test_streaming_writer_valid_xml() {
+        let cpl = reference_cpl();
+        let mut buf: Vec<u8> = Vec::new();
+        write_cpl_streaming(&cpl, &mut buf).expect("streaming write must succeed");
+
+        let xml = String::from_utf8(buf).expect("output must be valid UTF-8");
+
+        // Validate that quick-xml can parse it back without errors.
+        use quick_xml::events::Event;
+        use quick_xml::Reader;
+        let mut reader = Reader::from_str(&xml);
+        let mut event_buf = Vec::new();
+        let mut element_count = 0usize;
+        loop {
+            match reader.read_event_into(&mut event_buf) {
+                Ok(Event::Start(_)) => element_count += 1,
+                Ok(Event::Eof) => break,
+                Err(e) => panic!("streaming output is not valid XML: {e}"),
+                _ => {}
+            }
+            event_buf.clear();
+        }
+        assert!(
+            element_count > 0,
+            "output must contain at least one element"
+        );
+        assert!(
+            xml.contains("CompositionPlaylist"),
+            "must contain CPL root element"
+        );
+        assert!(xml.contains("stream-cpl-001"), "must contain CPL id");
+    }
+
+    #[test]
+    fn test_streaming_matches_eager() {
+        let cpl = reference_cpl();
+
+        // Eager string-builder output.
+        let eager_xml = cpl.to_xml();
+
+        // Streaming output.
+        let mut streaming_buf: Vec<u8> = Vec::new();
+        write_cpl_streaming(&cpl, &mut streaming_buf).expect("streaming write must succeed");
+        let streaming_xml = String::from_utf8(streaming_buf).expect("valid UTF-8");
+
+        // Both outputs must round-trip to structurally equivalent CPLs.
+        let eager_parsed =
+            CompositionPlaylist::from_xml(&eager_xml).expect("eager round-trip must succeed");
+        let streaming_parsed = CompositionPlaylist::from_xml(&streaming_xml)
+            .expect("streaming round-trip must succeed");
+
+        assert_eq!(eager_parsed.id, streaming_parsed.id, "id must match");
+        assert_eq!(
+            eager_parsed.content_title, streaming_parsed.content_title,
+            "content_title must match"
+        );
+        assert_eq!(
+            eager_parsed.edit_rate, streaming_parsed.edit_rate,
+            "edit_rate must match"
+        );
+        assert_eq!(
+            eager_parsed.segment_count(),
+            streaming_parsed.segment_count(),
+            "segment count must match"
+        );
+        assert_eq!(
+            eager_parsed.total_duration(),
+            streaming_parsed.total_duration(),
+            "total_duration must match"
+        );
     }
 }

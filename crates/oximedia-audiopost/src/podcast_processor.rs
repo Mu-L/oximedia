@@ -137,19 +137,16 @@ pub fn detect_intro_outro(
     // Silence frames are frames whose RMS is below threshold.
     // We scan from the start for intro boundary and from the end for outro boundary.
 
-    let min_silent_frames =
-        ((config.min_silence_secs * sr) / hop as f64).ceil() as usize;
-    let max_intro_frames =
-        ((config.max_intro_search_secs * sr) / hop as f64).ceil() as usize;
+    let min_silent_frames = ((config.min_silence_secs * sr) / hop as f64).ceil() as usize;
+    let max_intro_frames = ((config.max_intro_search_secs * sr) / hop as f64).ceil() as usize;
     let total_frames = if samples.len() >= win {
         (samples.len() - win) / hop + 1
     } else {
         0
     };
-    let max_outro_frames =
-        ((config.max_outro_search_secs * sr) / hop as f64)
-            .ceil()
-            .min(total_frames as f64) as usize;
+    let max_outro_frames = ((config.max_outro_search_secs * sr) / hop as f64)
+        .ceil()
+        .min(total_frames as f64) as usize;
 
     // Build silence mask
     let silence_mask: Vec<bool> = (0..total_frames)
@@ -320,8 +317,7 @@ pub fn generate_chapter_markers(
         })
         .collect();
 
-    let min_gap_frames =
-        ((config.min_chapter_duration_secs * sr) / hop as f64).ceil() as usize;
+    let min_gap_frames = ((config.min_chapter_duration_secs * sr) / hop as f64).ceil() as usize;
     let lm_half = config.local_mean_window_frames / 2;
 
     let mut markers: Vec<ChapterMarker> = Vec::new();
@@ -340,8 +336,7 @@ pub fn generate_chapter_markers(
         // Local mean energy around frame i
         let lo = i.saturating_sub(lm_half);
         let hi = (i + lm_half).min(frame_rms.len());
-        let local_mean: f32 = frame_rms[lo..hi].iter().copied().sum::<f32>()
-            / (hi - lo) as f32;
+        let local_mean: f32 = frame_rms[lo..hi].iter().copied().sum::<f32>() / (hi - lo) as f32;
 
         let is_boundary = frame_rms[i] < local_mean * config.energy_drop_ratio
             && frames_since_last >= min_gap_frames;
@@ -690,10 +685,7 @@ mod tests {
 
         // Intro should end somewhere after the 2 s silence and before 5 s
         if let Some(intro_end) = result.intro_end_secs {
-            assert!(
-                intro_end > 1.5 && intro_end < 5.0,
-                "intro_end={intro_end}"
-            );
+            assert!(intro_end > 1.5 && intro_end < 5.0, "intro_end={intro_end}");
         }
     }
 
@@ -794,7 +786,8 @@ mod tests {
         // A 0.5-amplitude sine has RMS ≈ 0.5 / sqrt(2) ≈ 0.354
         assert!(
             m.mean_active_rms > 0.3 && m.mean_active_rms < 0.4,
-            "RMS={}", m.mean_active_rms
+            "RMS={}",
+            m.mean_active_rms
         );
         assert!(m.peak_linear > 0.48 && m.peak_linear <= 0.5001);
         assert!(m.silence_ratio < 0.1);

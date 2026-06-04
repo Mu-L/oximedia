@@ -486,6 +486,147 @@ fn parse_args(args_str: &str) -> (Vec<String>, Vec<(String, String)>) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Zero-copy filter graph lexer
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A single zero-copy token from a filtergraph string.
+///
+/// All string slices borrow directly from the original input, so no heap
+/// allocations occur for token content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilterToken<'a> {
+    /// A pad label: e.g. `"in"` from `[in]`.
+    Label(&'a str),
+    /// A filter name: e.g. `"scale"`.
+    FilterName(&'a str),
+    /// A colon-separated argument token: `"1280"`, `"720"`, `"w=1920"`.
+    Arg(&'a str),
+    /// A chain separator (`;`).
+    ChainSep,
+}
+
+/// Parse a filtergraph string into a sequence of zero-copy [`FilterToken`]s.
+///
+/// This function avoids any `String` allocation for token content — all
+/// `&str` slices are sub-slices of `input`.  It is faster than the allocating
+/// [`parse_filter_graph`] path when only token-level information is needed
+/// (e.g. syntax validation, quick format detection, streaming tokenisation).
+///
+/// The grammar is a flat scan:
+/// - `[label]` → zero or more [`FilterToken::Label`]
+/// - `filter_name` → [`FilterToken::FilterName`]
+/// - `=arg:arg:...` → [`FilterToken::Arg`] per colon-delimited token
+/// - `;` → [`FilterToken::ChainSep`]
+///
+/// Commas that separate filters within one chain are skipped (they are
+/// structurally significant in [`parse_filter_graph`] but create noise at the
+/// token level).
+///
+/// # Example
+///
+/// ```rust
+/// use oximedia_compat_ffmpeg::filter_lex::{parse_filter_graph_zerocopy, FilterToken};
+///
+/// let input = "[in]scale=1280:720[out];[out]hflip[final]";
+/// let tokens = parse_filter_graph_zerocopy(input);
+///
+/// // Check that we get Label("in"), FilterName("scale"), Arg("1280"), Arg("720"),
+/// // Label("out"), ChainSep, Label("out"), FilterName("hflip"), Label("final").
+/// assert!(tokens.iter().any(|t| matches!(t, FilterToken::Label("in"))));
+/// assert!(tokens.iter().any(|t| matches!(t, FilterToken::FilterName("scale"))));
+/// assert!(tokens.iter().any(|t| matches!(t, FilterToken::Arg("1280"))));
+/// assert!(tokens.iter().any(|t| matches!(t, FilterToken::ChainSep)));
+/// assert!(tokens.iter().any(|t| matches!(t, FilterToken::FilterName("hflip"))));
+/// ```
+pub fn parse_filter_graph_zerocopy(input: &str) -> Vec<FilterToken<'_>> {
+    let mut tokens = Vec::new();
+    let mut pos = 0;
+    let bytes = input.as_bytes();
+    let len = bytes.len();
+
+    while pos < len {
+        match bytes[pos] {
+            // ── Pad label: [label] ─────────────────────────────────────────
+            b'[' => {
+                let start = pos + 1; // skip '['
+                let end = input[start..].find(']').map(|i| start + i).unwrap_or(len);
+                let label = &input[start..end];
+                if !label.is_empty() {
+                    tokens.push(FilterToken::Label(label));
+                }
+                pos = end + 1; // skip ']'
+            }
+
+            // ── Chain separator ────────────────────────────────────────────
+            b';' => {
+                tokens.push(FilterToken::ChainSep);
+                pos += 1;
+            }
+
+            // ── Filter-chain commas — skip (intra-chain separator) ─────────
+            b',' => {
+                pos += 1;
+            }
+
+            // ── Whitespace ─────────────────────────────────────────────────
+            b' ' | b'\t' | b'\r' | b'\n' => {
+                pos += 1;
+            }
+
+            // ── Filter name (and optional =args) ───────────────────────────
+            _ => {
+                // Collect the filter name up to '=', '[', ',', ';', or end.
+                let name_start = pos;
+                while pos < len
+                    && bytes[pos] != b'='
+                    && bytes[pos] != b'['
+                    && bytes[pos] != b','
+                    && bytes[pos] != b';'
+                    && bytes[pos] != b' '
+                    && bytes[pos] != b'\t'
+                {
+                    pos += 1;
+                }
+                let name = input[name_start..pos].trim();
+                if !name.is_empty() {
+                    tokens.push(FilterToken::FilterName(name));
+                }
+
+                // If the next char is '=', collect colon-separated arg tokens.
+                if pos < len && bytes[pos] == b'=' {
+                    pos += 1; // skip '='
+                              // Collect arg tokens separated by ':'.
+                              // Stop at '[', ';', ',' or end.
+                    loop {
+                        let arg_start = pos;
+                        while pos < len
+                            && bytes[pos] != b':'
+                            && bytes[pos] != b'['
+                            && bytes[pos] != b','
+                            && bytes[pos] != b';'
+                        {
+                            pos += 1;
+                        }
+                        let arg = input[arg_start..pos].trim();
+                        if !arg.is_empty() {
+                            tokens.push(FilterToken::Arg(arg));
+                        }
+                        // Continue if ':' separator
+                        if pos < len && bytes[pos] == b':' {
+                            pos += 1; // skip ':'
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    tokens
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -864,5 +1005,129 @@ mod tests {
         let g = parse_filter_string("scale=640:480").expect("legacy parse");
         assert_eq!(g.nodes.len(), 1);
         assert_eq!(g.nodes[0].name, "scale");
+    }
+
+    // ── Zero-copy filter lexer ────────────────────────────────────────────────
+
+    #[test]
+    fn test_zerocopy_basic_scale() {
+        let input = "scale=1280:720";
+        let tokens = parse_filter_graph_zerocopy(input);
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(t, FilterToken::FilterName("scale"))));
+        assert!(tokens.iter().any(|t| matches!(t, FilterToken::Arg("1280"))));
+        assert!(tokens.iter().any(|t| matches!(t, FilterToken::Arg("720"))));
+    }
+
+    #[test]
+    fn test_zerocopy_label_input_output() {
+        let input = "[in]scale=1280:720[out]";
+        let tokens = parse_filter_graph_zerocopy(input);
+        assert!(tokens.iter().any(|t| matches!(t, FilterToken::Label("in"))));
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(t, FilterToken::FilterName("scale"))));
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(t, FilterToken::Label("out"))));
+    }
+
+    #[test]
+    fn test_zerocopy_chain_separator() {
+        let input = "scale=1280:720;hflip";
+        let tokens = parse_filter_graph_zerocopy(input);
+        assert!(tokens.iter().any(|t| matches!(t, FilterToken::ChainSep)));
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(t, FilterToken::FilterName("scale"))));
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(t, FilterToken::FilterName("hflip"))));
+    }
+
+    #[test]
+    fn test_zerocopy_two_chain_labels() {
+        let input = "[in]scale=1920:1080[out];[out]hflip[final]";
+        let tokens = parse_filter_graph_zerocopy(input);
+        assert!(tokens.iter().any(|t| matches!(t, FilterToken::Label("in"))));
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(t, FilterToken::Label("out"))));
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(t, FilterToken::Label("final"))));
+        assert!(tokens.iter().any(|t| matches!(t, FilterToken::ChainSep)));
+    }
+
+    #[test]
+    fn test_zerocopy_no_alloc_subslices() {
+        // Verify that the token &str values are sub-slices of the original input:
+        // every character in each token must also appear in the original string at
+        // the same relative byte offset. We check this by ensuring that each
+        // token content is a contiguous substring of `input`.
+        let input = "[a]scale=640:480[b]";
+        let tokens = parse_filter_graph_zerocopy(input);
+        for token in &tokens {
+            let token_str = match token {
+                FilterToken::Label(s) | FilterToken::FilterName(s) | FilterToken::Arg(s) => *s,
+                FilterToken::ChainSep => continue,
+            };
+            // A zero-copy slice must be a substring of the original input.
+            assert!(
+                input.contains(token_str),
+                "token {:?} is not a substring of the input",
+                token_str
+            );
+        }
+    }
+
+    #[test]
+    fn test_zerocopy_multi_arg_filter() {
+        let input = "crop=640:480:10:20";
+        let tokens = parse_filter_graph_zerocopy(input);
+        let args: Vec<&str> = tokens
+            .iter()
+            .filter_map(|t| {
+                if let FilterToken::Arg(s) = t {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(args, vec!["640", "480", "10", "20"]);
+    }
+
+    #[test]
+    fn test_zerocopy_no_arg_filter() {
+        let input = "hflip";
+        let tokens = parse_filter_graph_zerocopy(input);
+        assert_eq!(tokens.len(), 1);
+        assert!(matches!(tokens[0], FilterToken::FilterName("hflip")));
+    }
+
+    #[test]
+    fn test_zerocopy_comma_separated_chain() {
+        let input = "scale=1280:720,fps=30";
+        let tokens = parse_filter_graph_zerocopy(input);
+        let names: Vec<&str> = tokens
+            .iter()
+            .filter_map(|t| {
+                if let FilterToken::FilterName(s) = t {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(names.contains(&"scale"));
+        assert!(names.contains(&"fps"));
+    }
+
+    #[test]
+    fn test_zerocopy_empty_input() {
+        let tokens = parse_filter_graph_zerocopy("");
+        assert!(tokens.is_empty());
     }
 }

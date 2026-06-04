@@ -1,11 +1,9 @@
 //! Asset–rights linking for the MAM system.
 //!
-//! Provides [`AssetRightsLink`], which associates a media asset with a rights
-//! record (managed externally, e.g. by `oximedia-rights`), and [`RightsLinker`],
+//! Provides `AssetRightsLink`, which associates a media asset with a rights
+//! record (managed externally, e.g. by `oximedia-rights`), and `RightsLinker`,
 //! which manages a collection of such links and can filter to those that are
 //! currently active.
-
-#![allow(dead_code)]
 
 // ── AssetRightsLink ───────────────────────────────────────────────────────────
 
@@ -104,7 +102,10 @@ impl RightsLinker {
     /// Return all links for a specific asset, active or not.
     #[must_use]
     pub fn links_for_asset(&self, asset_id: u64) -> Vec<&AssetRightsLink> {
-        self.links.iter().filter(|l| l.asset_id == asset_id).collect()
+        self.links
+            .iter()
+            .filter(|l| l.asset_id == asset_id)
+            .collect()
     }
 
     /// Return all links that are active for a specific asset at `now_ts`.

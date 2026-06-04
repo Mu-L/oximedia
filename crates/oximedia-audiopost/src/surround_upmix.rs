@@ -167,10 +167,7 @@ impl SurroundUpmixer {
     /// # Errors
     ///
     /// Returns an error if the input does not have exactly 6 channels or channels are mismatched.
-    pub fn upmix_51_to_71(
-        &mut self,
-        channels_51: &[Vec<f32>],
-    ) -> AudioPostResult<Vec<Vec<f32>>> {
+    pub fn upmix_51_to_71(&mut self, channels_51: &[Vec<f32>]) -> AudioPostResult<Vec<Vec<f32>>> {
         if channels_51.len() != 6 {
             return Err(AudioPostError::InvalidChannelCount(channels_51.len()));
         }
@@ -261,7 +258,11 @@ impl SurroundUpmixer {
 
         let half = fft_size / 2;
         for bin in 0..=half {
-            let mirror = if bin > 0 && bin < half { fft_size - bin } else { bin };
+            let mirror = if bin > 0 && bin < half {
+                fft_size - bin
+            } else {
+                bin
+            };
             let sum = (left_fft[bin] + right_fft[bin]) * 0.5;
             let diff = (left_fft[bin] - right_fft[bin]) * 0.5;
 
@@ -484,9 +485,7 @@ mod tests {
             SurroundUpmixer::new(48000, UpmixAlgorithm::Passive, config).expect("create upmixer");
         let left = make_sine(440.0, 48000, 1024);
         let right = make_sine(440.0, 48000, 1024);
-        let result = upmixer
-            .upmix_stereo_to_51(&left, &right)
-            .expect("upmix");
+        let result = upmixer.upmix_stereo_to_51(&left, &right).expect("upmix");
         assert_eq!(result.len(), 6);
         for ch in &result {
             assert_eq!(ch.len(), 1024);
@@ -501,13 +500,14 @@ mod tests {
 
         // Identical L/R should produce strong center
         let mono = vec![0.5_f32; 512];
-        let result = upmixer
-            .upmix_stereo_to_51(&mono, &mono)
-            .expect("upmix");
+        let result = upmixer.upmix_stereo_to_51(&mono, &mono).expect("upmix");
 
         let center = &result[2];
         let center_energy: f32 = center.iter().map(|s| s * s).sum();
-        assert!(center_energy > 0.0, "Center should have energy for mono signal");
+        assert!(
+            center_energy > 0.0,
+            "Center should have energy for mono signal"
+        );
 
         // Surround should be near-silent for identical L/R
         let ls = &result[4];
@@ -527,9 +527,7 @@ mod tests {
         // Out-of-phase signals => strong surround
         let left = vec![0.5_f32; 512];
         let right = vec![-0.5_f32; 512];
-        let result = upmixer
-            .upmix_stereo_to_51(&left, &right)
-            .expect("upmix");
+        let result = upmixer.upmix_stereo_to_51(&left, &right).expect("upmix");
 
         let ls_energy: f32 = result[4].iter().map(|s| s * s).sum();
         let center_energy: f32 = result[2].iter().map(|s| s * s).sum();
@@ -548,9 +546,7 @@ mod tests {
 
         let left = make_sine(200.0, 48000, 2048);
         let right = make_sine(300.0, 48000, 2048);
-        let result = upmixer
-            .upmix_stereo_to_51(&left, &right)
-            .expect("upmix");
+        let result = upmixer.upmix_stereo_to_51(&left, &right).expect("upmix");
 
         assert_eq!(result.len(), 6);
         // Surround channels should have content due to L/R difference
@@ -569,9 +565,7 @@ mod tests {
 
         // Low frequency signal
         let low = make_sine(60.0, 48000, 4096);
-        let result = upmixer
-            .upmix_stereo_to_51(&low, &low)
-            .expect("upmix");
+        let result = upmixer.upmix_stereo_to_51(&low, &low).expect("upmix");
 
         let lfe_energy: f32 = result[3].iter().map(|s| s * s).sum();
         assert!(lfe_energy > 0.0, "LFE should capture low-frequency content");
@@ -580,8 +574,8 @@ mod tests {
     #[test]
     fn test_51_to_71_upmix() {
         let config = UpmixConfig::default();
-        let mut upmixer = SurroundUpmixer::new(48000, UpmixAlgorithm::Passive, config)
-            .expect("create upmixer");
+        let mut upmixer =
+            SurroundUpmixer::new(48000, UpmixAlgorithm::Passive, config).expect("create upmixer");
 
         let channels_51: Vec<Vec<f32>> = (0..6)
             .map(|i| make_sine(100.0 * (i as f32 + 1.0), 48000, 1024))
@@ -639,8 +633,8 @@ mod tests {
     #[test]
     fn test_reset_clears_state() {
         let config = UpmixConfig::default();
-        let mut upmixer = SurroundUpmixer::new(48000, UpmixAlgorithm::AmbientExtract, config)
-            .expect("create");
+        let mut upmixer =
+            SurroundUpmixer::new(48000, UpmixAlgorithm::AmbientExtract, config).expect("create");
         let left = make_sine(440.0, 48000, 512);
         let right = make_sine(220.0, 48000, 512);
         let _ = upmixer.upmix_stereo_to_51(&left, &right);

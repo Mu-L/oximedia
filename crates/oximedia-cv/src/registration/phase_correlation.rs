@@ -119,7 +119,7 @@ impl PhaseCorrelation {
         }
 
         if !is_power_of_two(width) || !is_power_of_two(height) {
-            return Err(CvError::computation(
+            return Err(CvError::matrix_error(
                 "phase correlation requires power-of-two dimensions",
             ));
         }
@@ -360,7 +360,7 @@ pub fn estimate_rotation_and_scale(
 // Helper functions
 
 fn is_power_of_two(n: u32) -> bool {
-    n > 0 && (n & (n - 1)) == 0
+    n.is_power_of_two()
 }
 
 fn next_power_of_two(n: u32) -> u32 {
@@ -403,8 +403,7 @@ fn blackman_window(n: f64, size: f64) -> f64 {
     let a0 = 0.42;
     let a1 = 0.5;
     let a2 = 0.08;
-    a0 - a1 * ((2.0 * PI * n) / (size - 1.0)).cos()
-        + a2 * ((4.0 * PI * n) / (size - 1.0)).cos()
+    a0 - a1 * ((2.0 * PI * n) / (size - 1.0)).cos() + a2 * ((4.0 * PI * n) / (size - 1.0)).cos()
 }
 
 /// 2D FFT using row-column decomposition.
@@ -535,10 +534,7 @@ fn compute_cross_power_spectrum(fft1: &[Complex], fft2: &[Complex]) -> Vec<Compl
         let magnitude = product.magnitude();
 
         if magnitude > f64::EPSILON {
-            result.push(Complex::new(
-                product.re / magnitude,
-                product.im / magnitude,
-            ));
+            result.push(Complex::new(product.re / magnitude, product.im / magnitude));
         } else {
             result.push(Complex::new(0.0, 0.0));
         }

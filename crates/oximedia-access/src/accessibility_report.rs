@@ -393,7 +393,10 @@ impl AccessibilityReport {
     /// Count findings with a given status.
     #[must_use]
     pub fn count_with_status(&self, status: CriterionStatus) -> usize {
-        self.findings.values().filter(|f| f.status == status).count()
+        self.findings
+            .values()
+            .filter(|f| f.status == status)
+            .count()
     }
 
     /// Compute the weighted accessibility score in `[0.0, 100.0]`.
@@ -436,10 +439,9 @@ impl AccessibilityReport {
     pub fn conformance_level(&self) -> WcagLevel {
         for &level in &[WcagLevel::Aaa, WcagLevel::Aa, WcagLevel::A] {
             // Require at least one applicable criterion recorded at exactly this level.
-            let has_this_level = self
-                .findings
-                .values()
-                .any(|f| f.criterion.minimum_level() == level && f.status != CriterionStatus::NotApplicable);
+            let has_this_level = self.findings.values().any(|f| {
+                f.criterion.minimum_level() == level && f.status != CriterionStatus::NotApplicable
+            });
 
             if !has_this_level {
                 continue;
@@ -486,7 +488,9 @@ impl AccessibilityReport {
     /// Generate a brief summary line.
     #[must_use]
     pub fn summary(&self) -> String {
-        let score = self.score().map_or_else(|| "N/A".to_string(), |s| format!("{s:.1}"));
+        let score = self
+            .score()
+            .map_or_else(|| "N/A".to_string(), |s| format!("{s:.1}"));
         let level = self.conformance_level();
         let passes = self.count_with_status(CriterionStatus::Pass);
         let fails = self.count_with_status(CriterionStatus::Fail);
@@ -596,7 +600,10 @@ mod tests {
     #[test]
     fn test_conformance_level_none_when_fail() {
         let report = ReportBuilder::new("a1")
-            .record(Finding::fail(Criterion::CaptionsPresent, "Missing captions"))
+            .record(Finding::fail(
+                Criterion::CaptionsPresent,
+                "Missing captions",
+            ))
             .record(Finding::pass(Criterion::AudioDescriptionPresent))
             .build()
             .unwrap();
@@ -638,7 +645,10 @@ mod tests {
     fn test_recommendations_only_for_fail_and_partial() {
         let report = ReportBuilder::new("a1")
             .record(Finding::pass(Criterion::CaptionsPresent))
-            .record(Finding::fail(Criterion::AudioDescriptionPresent, "Add AD track"))
+            .record(Finding::fail(
+                Criterion::AudioDescriptionPresent,
+                "Add AD track",
+            ))
             .record(Finding::partial(
                 Criterion::CaptionCoverage,
                 "88%",

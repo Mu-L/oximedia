@@ -90,10 +90,22 @@ struct LevelParams {
 
 fn params_for_level(level: u8) -> LevelParams {
     match level {
-        0 => LevelParams { window: 64, max_len: 16 },
-        1 => LevelParams { window: 128, max_len: 32 },
-        2 => LevelParams { window: 256, max_len: 64 },
-        _ => LevelParams { window: 512, max_len: 128 },
+        0 => LevelParams {
+            window: 64,
+            max_len: 16,
+        },
+        1 => LevelParams {
+            window: 128,
+            max_len: 32,
+        },
+        2 => LevelParams {
+            window: 256,
+            max_len: 64,
+        },
+        _ => LevelParams {
+            window: 512,
+            max_len: 128,
+        },
     }
 }
 
@@ -112,7 +124,9 @@ impl TierCompressor {
     /// are treated as level 3).
     #[must_use]
     pub fn new(level: u8) -> Self {
-        Self { level: level.min(3) }
+        Self {
+            level: level.min(3),
+        }
     }
 
     /// Compress `input` and return the compressed bytes.
@@ -285,9 +299,7 @@ fn find_longest_match(window: &[u8], lookahead: &[u8], max_len: usize) -> Option
 
     for start in 0..window.len() {
         let mut len = 0usize;
-        while len < max_len
-            && len < lookahead.len()
-            && len < window.len() - start + lookahead.len()
+        while len < max_len && len < lookahead.len() && len < window.len() - start + lookahead.len()
         {
             // Use modular indexing for overlapping matches (like LZ77 copy).
             let window_idx = start + (len % (window.len() - start));
@@ -440,9 +452,9 @@ mod tests {
         let orig = b"abcde".to_vec();
         let compressed = c.compress(&orig).expect("compress");
         // Bytes 3..7 are the LE u32 original length.
-        let stored_len = u32::from_le_bytes([
-            compressed[3], compressed[4], compressed[5], compressed[6],
-        ]) as usize;
+        let stored_len =
+            u32::from_le_bytes([compressed[3], compressed[4], compressed[5], compressed[6]])
+                as usize;
         assert_eq!(stored_len, orig.len());
     }
 

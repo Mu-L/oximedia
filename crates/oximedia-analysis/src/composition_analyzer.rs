@@ -70,10 +70,10 @@ impl CompositionAnalyzer {
 
         for y in 0..height {
             for x in 0..width {
-                let near_vline = (x.abs_diff(third_x1) <= band_x)
-                    || (x.abs_diff(third_x2) <= band_x);
-                let near_hline = (y.abs_diff(third_y1) <= band_y)
-                    || (y.abs_diff(third_y2) <= band_y);
+                let near_vline =
+                    (x.abs_diff(third_x1) <= band_x) || (x.abs_diff(third_x2) <= band_x);
+                let near_hline =
+                    (y.abs_diff(third_y1) <= band_y) || (y.abs_diff(third_y2) <= band_y);
 
                 if near_vline || near_hline {
                     thirds_sal += saliency[y * width + x];
@@ -217,7 +217,10 @@ mod tests {
         let h = 30u32;
         let sal = uniform_saliency(w as usize, h as usize);
         let score = CompositionAnalyzer::rule_of_thirds_score(&sal, w, h);
-        assert!(score > 0.0, "uniform frame should have non-zero score, got {score}");
+        assert!(
+            score > 0.0,
+            "uniform frame should have non-zero score, got {score}"
+        );
     }
 
     #[test]
@@ -231,7 +234,10 @@ mod tests {
             sal[y * w + third_x] = 1.0;
         }
         let score = CompositionAnalyzer::rule_of_thirds_score(&sal, w as u32, h as u32);
-        assert!(score > 0.5, "score should be high when mass is on thirds line, got {score}");
+        assert!(
+            score > 0.5,
+            "score should be high when mass is on thirds line, got {score}"
+        );
     }
 
     #[test]

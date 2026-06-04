@@ -6,7 +6,7 @@ Professional audio post-production suite for OxiMedia: ADR, Foley, sound design,
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.7 — 2026-05-16 — 806 tests
+Version: 0.1.8 — 2026-05-29 — 806 tests
 
 ## Features
 
@@ -101,7 +101,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-audiopost = "0.1.7"
+oximedia-audiopost = "0.1.8"
 ```
 
 ### ADR Session Example

@@ -12,6 +12,9 @@ keywords = ["optimization", "codec", "encoding", "video", "multimedia"]
 categories = ["multimedia::encoding", "multimedia"]
 readme = "README.md"
 
+[features]
+ml-decision = ["oximedia-neural"]
+
 [lints]
 workspace = true
 
@@ -21,5 +24,15 @@ oximedia-codec = { workspace = true, default-features = true }
 thiserror.workspace = true
 rayon.workspace = true
 scirs2-core.workspace = true
+oximedia-neural = { workspace = true, optional = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "cache_prefetch"
+harness = false
+
+[[bench]]
+name = "presets"
+harness = false

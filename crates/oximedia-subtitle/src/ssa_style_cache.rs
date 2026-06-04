@@ -159,11 +159,7 @@ impl AssStyleCache {
         } else {
             self.fallback_count += 1;
             let fb_name = self.fallback_name.clone();
-            let base = self
-                .styles
-                .get(&fb_name)
-                .cloned()
-                .unwrap_or_default();
+            let base = self.styles.get(&fb_name).cloned().unwrap_or_default();
             (base, fb_name, true)
         };
 

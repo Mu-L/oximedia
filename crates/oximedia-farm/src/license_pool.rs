@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Software license pool management for the encoding farm.
 //!
 //! ## Model
@@ -433,17 +432,19 @@ impl LicenseManager {
     /// Aggregate stats snapshot for all pools.
     #[must_use]
     pub fn aggregate_stats(&self) -> LicensePoolStats {
-        self.pools.values().fold(LicensePoolStats::default(), |mut acc, p| {
-            let s = p.stats();
-            acc.total_checkouts += s.total_checkouts;
-            acc.total_checkins += s.total_checkins;
-            acc.total_denials += s.total_denials;
-            acc.total_reclaims += s.total_reclaims;
-            if s.peak_concurrent > acc.peak_concurrent {
-                acc.peak_concurrent = s.peak_concurrent;
-            }
-            acc
-        })
+        self.pools
+            .values()
+            .fold(LicensePoolStats::default(), |mut acc, p| {
+                let s = p.stats();
+                acc.total_checkouts += s.total_checkouts;
+                acc.total_checkins += s.total_checkins;
+                acc.total_denials += s.total_denials;
+                acc.total_reclaims += s.total_reclaims;
+                if s.peak_concurrent > acc.peak_concurrent {
+                    acc.peak_concurrent = s.peak_concurrent;
+                }
+                acc
+            })
     }
 }
 
@@ -467,7 +468,9 @@ mod tests {
     #[test]
     fn test_basic_checkout_checkin() {
         let mut pool = make_pool(2);
-        let tok = pool.check_out(worker(1), None, None).expect("checkout should succeed");
+        let tok = pool
+            .check_out(worker(1), None, None)
+            .expect("checkout should succeed");
         assert_eq!(pool.active_count(), 1);
         pool.check_in(tok.id).expect("check-in should succeed");
         assert_eq!(pool.active_count(), 0);
@@ -478,8 +481,12 @@ mod tests {
     #[test]
     fn test_capacity_exhaustion() {
         let mut pool = make_pool(2);
-        let _t1 = pool.check_out(worker(1), None, None).expect("first checkout should succeed");
-        let _t2 = pool.check_out(worker(2), None, None).expect("second checkout should succeed");
+        let _t1 = pool
+            .check_out(worker(1), None, None)
+            .expect("first checkout should succeed");
+        let _t2 = pool
+            .check_out(worker(2), None, None)
+            .expect("second checkout should succeed");
         let err = pool.check_out(worker(3), None, None);
         assert!(matches!(err, Err(FarmError::ResourceExhausted(_))));
         assert_eq!(pool.stats().total_denials, 1);
@@ -490,7 +497,8 @@ mod tests {
         let cfg = LicensePoolConfig::new("expiry-test", 1, Duration::from_millis(1));
         let mut pool = LicensePool::new(cfg).expect("pool creation should succeed");
 
-        let _tok = pool.check_out(worker(1), None, Some(Duration::from_millis(1)))
+        let _tok = pool
+            .check_out(worker(1), None, Some(Duration::from_millis(1)))
             .expect("checkout should succeed");
 
         // Spin until the token is expired (1 ms TTL).
@@ -500,14 +508,16 @@ mod tests {
         assert_eq!(reclaimed, 1);
         assert_eq!(pool.active_count(), 0);
         // After reclaim a new checkout should succeed.
-        pool.check_out(worker(2), None, None).expect("checkout after reclaim should succeed");
+        pool.check_out(worker(2), None, None)
+            .expect("checkout after reclaim should succeed");
     }
 
     #[test]
     fn test_token_renewal() {
         let cfg = LicensePoolConfig::new("renew-test", 2, Duration::from_millis(1));
         let mut pool = LicensePool::new(cfg).expect("pool creation should succeed");
-        let tok = pool.check_out(worker(1), None, Some(Duration::from_millis(1)))
+        let tok = pool
+            .check_out(worker(1), None, Some(Duration::from_millis(1)))
             .expect("checkout should succeed");
         // Renew with a longer TTL before expiry.
         pool.renew(tok.id, Some(Duration::from_secs(60)))
@@ -529,9 +539,12 @@ mod tests {
     fn test_revoke_worker() {
         let mut pool = make_pool(4);
         let w = worker(1);
-        pool.check_out(w.clone(), None, None).expect("first checkout should succeed");
-        pool.check_out(w.clone(), None, None).expect("second checkout should succeed");
-        pool.check_out(worker(2), None, None).expect("third checkout should succeed");
+        pool.check_out(w.clone(), None, None)
+            .expect("first checkout should succeed");
+        pool.check_out(w.clone(), None, None)
+            .expect("second checkout should succeed");
+        pool.check_out(worker(2), None, None)
+            .expect("third checkout should succeed");
 
         let revoked = pool.revoke_worker(&w);
         assert_eq!(revoked, 2);
@@ -543,8 +556,8 @@ mod tests {
         // Construct a pool whose license has already expired.
         let past = Instant::now(); // effectively "now" — expired immediately
         std::thread::sleep(Duration::from_millis(2));
-        let cfg = LicensePoolConfig::new("expired-product", 5, Duration::from_secs(60))
-            .with_expiry(past);
+        let cfg =
+            LicensePoolConfig::new("expired-product", 5, Duration::from_secs(60)).with_expiry(past);
         let mut pool = LicensePool::new(cfg).expect("pool creation should succeed");
         let err = pool.check_out(worker(1), None, None);
         assert!(matches!(err, Err(FarmError::PermissionDenied(_))));
@@ -558,7 +571,8 @@ mod tests {
         mgr.register(LicensePoolConfig::new("prod-b", 1, Duration::from_secs(60)))
             .expect("register prod-b should succeed");
 
-        let tok_a = mgr.check_out("prod-a", worker(1), None, None)
+        let tok_a = mgr
+            .check_out("prod-a", worker(1), None, None)
             .expect("checkout prod-a should succeed");
         mgr.check_out("prod-b", worker(2), None, None)
             .expect("checkout prod-b should succeed");
@@ -567,7 +581,8 @@ mod tests {
         let err = mgr.check_out("prod-b", worker(3), None, None);
         assert!(matches!(err, Err(FarmError::ResourceExhausted(_))));
 
-        mgr.check_in("prod-a", tok_a.id).expect("check-in prod-a should succeed");
+        mgr.check_in("prod-a", tok_a.id)
+            .expect("check-in prod-a should succeed");
 
         let stats = mgr.aggregate_stats();
         assert_eq!(stats.total_checkouts, 2);
@@ -587,9 +602,15 @@ mod tests {
     #[test]
     fn test_peak_concurrent_tracking() {
         let mut pool = make_pool(5);
-        let t1 = pool.check_out(worker(1), None, None).expect("checkout 1 should succeed");
-        let t2 = pool.check_out(worker(2), None, None).expect("checkout 2 should succeed");
-        let _t3 = pool.check_out(worker(3), None, None).expect("checkout 3 should succeed");
+        let t1 = pool
+            .check_out(worker(1), None, None)
+            .expect("checkout 1 should succeed");
+        let t2 = pool
+            .check_out(worker(2), None, None)
+            .expect("checkout 2 should succeed");
+        let _t3 = pool
+            .check_out(worker(3), None, None)
+            .expect("checkout 3 should succeed");
         pool.check_in(t1.id).expect("check-in t1 should succeed");
         pool.check_in(t2.id).expect("check-in t2 should succeed");
         assert_eq!(pool.stats().peak_concurrent, 3);

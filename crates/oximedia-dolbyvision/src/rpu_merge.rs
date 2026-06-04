@@ -3,7 +3,7 @@
 //! Real-world workflows sometimes produce separate RPU streams (e.g. one from an
 //! on-set grading tool, another from a mastering system) that must be reconciled
 //! into a single authoritative RPU per frame.  This module provides the
-//! [`RpuMerger`] type which implements configurable merge strategies for each
+//! `RpuMerger` type which implements configurable merge strategies for each
 //! metadata level.
 
 use crate::{DolbyVisionError, DolbyVisionRpu, Level1Metadata, Result};

@@ -135,7 +135,11 @@ impl MultiAngleAudioMixer {
     ///
     /// If an angle with the same `angle_id` already exists it is replaced.
     pub fn add_angle(&mut self, angle: AudioAngle) {
-        if let Some(existing) = self.angles.iter_mut().find(|a| a.angle_id == angle.angle_id) {
+        if let Some(existing) = self
+            .angles
+            .iter_mut()
+            .find(|a| a.angle_id == angle.angle_id)
+        {
             *existing = angle;
         } else {
             self.angles.push(angle);
@@ -251,7 +255,9 @@ mod tests {
     #[test]
     fn test_current_audio_info_found() {
         let mixer = make_mixer();
-        let info = mixer.current_audio_info().expect("angle 0 should be registered");
+        let info = mixer
+            .current_audio_info()
+            .expect("angle 0 should be registered");
         assert_eq!(info.angle_id, 0);
         assert_eq!(info.channels, 2);
     }
@@ -275,7 +281,11 @@ mod tests {
     fn test_add_angle_replace() {
         let mut mixer = make_mixer();
         mixer.add_angle(AudioAngle::new(0, 6, 96_000)); // replace id=0
-        let found = mixer.angles.iter().find(|a| a.angle_id == 0).expect("should exist");
+        let found = mixer
+            .angles
+            .iter()
+            .find(|a| a.angle_id == 0)
+            .expect("should exist");
         assert_eq!(found.channels, 6);
     }
 

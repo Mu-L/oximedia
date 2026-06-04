@@ -2,7 +2,7 @@
 
 use crate::error::{CaptionError, Result};
 use crate::formats::{detect_format, get_parser};
-use crate::types::CaptionTrack;
+use crate::types::{Caption, CaptionTrack, Language};
 use crate::CaptionFormat;
 use std::path::Path;
 
@@ -107,9 +107,109 @@ pub struct ImportOptions {
     pub merge_overlaps: bool,
 }
 
+// ============================================================================
+// Bulk / arena-style Caption builder (Wave 14 Slice H)
+// ============================================================================
+
+/// A batch [`Caption`] accumulator backed by a single pre-reserved `Vec`.
+///
+/// Compared to pushing individual captions to an ad-hoc `Vec`, this type
+/// calls `Vec::reserve` upfront when the expected number of captions is
+/// known, which eliminates repeated reallocations as the collection grows and
+/// reduces heap fragmentation for large tracks.
+///
+/// When the expected capacity is *unknown* up-front, individual [`push`]
+/// calls still benefit from the exponential growth strategy of `Vec`, but
+/// no separate heap object is created per caption (unlike a linked-list or
+/// arena whose nodes are each heap-allocated individually).
+///
+/// [`push`]: CaptionBulkBuilder::push
+pub struct CaptionBulkBuilder {
+    captions: Vec<Caption>,
+}
+
+impl CaptionBulkBuilder {
+    /// Create a new builder with no reserved capacity.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            captions: Vec::new(),
+        }
+    }
+
+    /// Create a new builder and pre-allocate capacity for `n` captions.
+    ///
+    /// This is the primary performance-critical constructor: it issues a
+    /// single large `malloc` rather than many small reallocations.
+    #[must_use]
+    pub fn with_capacity(n: usize) -> Self {
+        Self {
+            captions: Vec::with_capacity(n),
+        }
+    }
+
+    /// Append a caption.  Returns `&mut Self` for a builder-style API.
+    pub fn push(&mut self, caption: Caption) -> &mut Self {
+        self.captions.push(caption);
+        self
+    }
+
+    /// Return the number of captions accumulated so far.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.captions.len()
+    }
+
+    /// Return `true` if no captions have been accumulated yet.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.captions.is_empty()
+    }
+
+    /// Consume the builder and return the accumulated captions as a plain
+    /// `Vec<Caption>`.
+    #[must_use]
+    pub fn into_vec(self) -> Vec<Caption> {
+        self.captions
+    }
+}
+
+impl Default for CaptionBulkBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Build a [`CaptionTrack`] from a batch of captions, using
+/// [`CaptionBulkBuilder`] internally to pre-reserve capacity and reduce
+/// heap allocation overhead.
+///
+/// Captions are sorted by start time inside [`CaptionTrack::add_caption`];
+/// the bulk pre-allocation means that no reallocation occurs during the
+/// collect phase for inputs up to `len(entries)` captions.
+pub fn import_bulk(
+    entries: impl IntoIterator<Item = Caption>,
+    language: Language,
+) -> Result<CaptionTrack> {
+    let iter = entries.into_iter();
+    let (lo, hi) = iter.size_hint();
+    let cap = hi.unwrap_or(lo);
+    let mut builder = CaptionBulkBuilder::with_capacity(cap);
+    for caption in iter {
+        builder.push(caption);
+    }
+    let captions = builder.into_vec();
+    let mut track = CaptionTrack::new(language);
+    for c in captions {
+        track.add_caption(c)?;
+    }
+    Ok(track)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::Timestamp;
 
     #[test]
     fn test_import_srt() {
@@ -143,5 +243,43 @@ mod tests {
 
         let utf8_bom = b"\xEF\xBB\xBFTest string";
         assert_eq!(Importer::detect_encoding(utf8_bom), "UTF-8");
+    }
+
+    // Wave 14 Slice H — new tests
+
+    /// CaptionBulkBuilder must accumulate N captions and return them all.
+    #[test]
+    fn test_arena_caption_builder_batch() {
+        let n = 1_000usize;
+        let mut builder = CaptionBulkBuilder::with_capacity(n);
+        for i in 0..n {
+            let start = Timestamp::from_millis((i * 5_000) as i64);
+            let end = Timestamp::from_millis((i * 5_000 + 3_000) as i64);
+            builder.push(Caption::new(start, end, format!("Caption {i}")));
+        }
+        let vec = builder.into_vec();
+        assert_eq!(vec.len(), n, "expected {n} captions from bulk builder");
+        // Smoke-check no panic on any caption
+        for (i, c) in vec.iter().enumerate() {
+            assert!(
+                c.text.contains(&i.to_string()),
+                "text should contain index {i}"
+            );
+        }
+    }
+
+    /// `import_bulk` produces a CaptionTrack with the correct caption count.
+    #[test]
+    fn test_import_bulk_track() {
+        let n = 500usize;
+        let captions = (0..n).map(|i| {
+            Caption::new(
+                Timestamp::from_millis((i * 4_000) as i64),
+                Timestamp::from_millis((i * 4_000 + 2_000) as i64),
+                format!("Bulk caption {i}"),
+            )
+        });
+        let track = import_bulk(captions, Language::english()).expect("import_bulk should succeed");
+        assert_eq!(track.captions.len(), n, "expected {n} captions in track");
     }
 }

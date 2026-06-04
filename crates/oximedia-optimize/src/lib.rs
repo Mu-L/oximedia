@@ -128,6 +128,13 @@ pub mod vmaf_predict;
 #[allow(unsafe_code)]
 pub mod simd_metrics;
 
+/// HDR-aware psychovisual masking for PQ and HLG transfer functions.
+pub mod hdr_masking;
+
+/// Wave 13 integration tests.
+#[cfg(test)]
+pub mod wave13_tests;
+
 use oximedia_core::OxiResult;
 
 /// Optimization level presets.
@@ -348,8 +355,11 @@ impl Optimizer {
 // Re-export commonly used types
 pub use aq::{AqEngine, AqMode, AqResult};
 pub use benchmark::{BenchmarkConfig, BenchmarkResult, BenchmarkRunner, Profiler};
+#[cfg(feature = "ml-decision")]
+pub use decision::MlModeDecider;
 pub use decision::{
-    DecisionContext, DecisionStrategy, ModeDecision, ReferenceDecision, SplitDecision,
+    DecisionContext, DecisionStrategy, ModeDecision, PipelineModeDecider, ReferenceDecision,
+    SplitDecision,
 };
 pub use entropy::{ContextModel, ContextOptimizer, EntropyStats};
 pub use filter::{DeblockOptimizer, FilterDecision, SaoOptimizer};
@@ -357,15 +367,21 @@ pub use gop_optimizer::{
     ContentAdaptiveGop, ContentGopDecision, GopOptimizer, GopPattern, GopPlan,
 };
 pub use intra::{AngleOptimizer, IntraModeDecision, ModeOptimizer};
-pub use lookahead::{GopStructure, LookaheadAnalyzer, LookaheadFrame};
+pub use lookahead::{
+    apply_scene_cut_qp_curve, complexity_to_qp_delta, estimate_frame_complexity,
+    ComplexityQpConfig, GopStructure, LookaheadAnalyzer, LookaheadFrame, SceneCutQpConfig,
+};
 pub use motion::{
-    BidirectionalOptimizer, MotionOptimizer, MotionSearchResult, MotionVector, MvPredictor,
-    SubpelOptimizer,
+    parallel_motion_search, BidirectionalOptimizer, MotionOptimizer, MotionSearchResult,
+    MotionVector, MvPredictor, ParallelSearchResult, SubpelOptimizer,
 };
 pub use partition::{ComplexityAnalyzer, PartitionDecision, SplitOptimizer};
 pub use presets::{OptimizationPresets, TunePresets};
 pub use psycho::{ContrastSensitivity, PsychoAnalyzer, VisualMasking};
-pub use rdo::{CostEstimate, LambdaCalculator, RdoEngine, RdoResult, RdoqOptimizer};
+pub use rdo::{
+    rdo_with_early_termination, CachedRdoEngine, CostEstimate, EarlyTermConfig, LambdaCalculator,
+    PartitionRdo, PartitionType, RdoCacheEntry, RdoConfig, RdoEngine, RdoResult, RdoqOptimizer,
+};
 pub use reference::{DpbOptimizer, ReferenceSelection};
 pub use roi_encode::{QpDeltaMap, RoiEncoder, RoiEncoderConfig, RoiOptimizeResult, RoiRegion};
 pub use scene_encode::{LookaheadSceneQp, SceneEncodeParams, SceneEncoder, SceneMetrics};

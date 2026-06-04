@@ -92,6 +92,7 @@ impl RealtimeConfig {
 /// Real-time normalizer.
 ///
 /// Provides low-latency normalization with lookahead buffering and smooth gain transitions.
+/// Buffer recycling via `process_into` avoids heap allocation on the hot path after warm-up.
 pub struct RealtimeNormalizer {
     config: RealtimeConfig,
     meter: LoudnessMeter,
@@ -101,6 +102,8 @@ pub struct RealtimeNormalizer {
     target_gain: f64,
     smoothing_coeff: f64,
     samples_processed: usize,
+    /// Scratch buffer for allocation-free `process_into` recycling.
+    scratch_out: Vec<f32>,
 }
 
 impl RealtimeNormalizer {
@@ -140,6 +143,7 @@ impl RealtimeNormalizer {
             target_gain: 1.0,
             smoothing_coeff,
             samples_processed: 0,
+            scratch_out: Vec::new(),
         })
     }
 
@@ -206,6 +210,24 @@ impl RealtimeNormalizer {
         Ok(())
     }
 
+    /// Process a chunk of audio into a caller-supplied `Vec<f32>`, recycling its allocation.
+    ///
+    /// Clears `out` and writes exactly `input.len()` samples.  After the first call with a given
+    /// `input.len()`, subsequent calls with the same length will **not** grow `out.capacity()`,
+    /// eliminating heap allocation on the hot path.
+    ///
+    /// Returns an error under the same conditions as [`process_chunk`].
+    pub fn process_into(&mut self, input: &[f32], out: &mut Vec<f32>) -> NormalizeResult<()> {
+        out.clear();
+        // Ensure capacity without re-allocating on subsequent calls.
+        if out.capacity() < input.len() {
+            out.reserve(input.len() - out.capacity());
+        }
+        // Extend to the required length with zeros so we can index it directly.
+        out.resize(input.len(), 0.0_f32);
+        self.process_chunk(input, out.as_mut_slice())
+    }
+
     /// Update the target gain based on current loudness measurement.
     fn update_target_gain(&mut self) {
         let metrics = self.meter.metrics();
@@ -241,6 +263,9 @@ impl RealtimeNormalizer {
     }
 
     /// Reset the normalizer state.
+    ///
+    /// The internal `scratch_out` buffer retains its allocation so that subsequent calls
+    /// to `process_into` do not need to re-allocate.
     pub fn reset(&mut self) {
         self.meter.reset();
         if let Some(ref mut limiter) = self.limiter {
@@ -250,6 +275,8 @@ impl RealtimeNormalizer {
         self.current_gain = 1.0;
         self.target_gain = 1.0;
         self.samples_processed = 0;
+        // Intentionally keep scratch_out capacity; clear length only.
+        self.scratch_out.clear();
     }
 
     /// Get the current gain in dB.

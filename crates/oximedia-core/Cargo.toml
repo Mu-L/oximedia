@@ -23,5 +23,6 @@ wasm = ["wasm-bindgen", "console_error_panic_hook"]
 thiserror.workspace = true
 bitflags.workspace = true
 serde = { workspace = true, features = ["derive"] }
+crossbeam-deque.workspace = true
 wasm-bindgen = { workspace = true, optional = true }
 console_error_panic_hook = { workspace = true, optional = true }

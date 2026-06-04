@@ -267,9 +267,7 @@ impl GlyphAtlas {
         let mut shelf = Shelf::new(new_shelf_y, shelf_height);
         let x = shelf
             .try_allocate(width, padding, self.config.width)
-            .ok_or_else(|| {
-                SubtitleError::Internal("glyph wider than atlas".to_string())
-            })?;
+            .ok_or_else(|| SubtitleError::Internal("glyph wider than atlas".to_string()))?;
 
         self.next_shelf_y += shelf_height;
         self.shelves.push(shelf);
@@ -331,12 +329,7 @@ impl GlyphAtlas {
     /// # Errors
     ///
     /// Returns an error if the bitmap length does not match the slot dimensions.
-    pub fn insert(
-        &mut self,
-        key: GlyphKey,
-        slot: AtlasSlot,
-        bitmap: &[u8],
-    ) -> SubtitleResult<()> {
+    pub fn insert(&mut self, key: GlyphKey, slot: AtlasSlot, bitmap: &[u8]) -> SubtitleResult<()> {
         let expected = (slot.width * slot.height) as usize;
         if bitmap.len() != expected {
             return Err(SubtitleError::Internal(format!(

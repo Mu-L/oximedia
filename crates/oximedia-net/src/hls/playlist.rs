@@ -1202,4 +1202,91 @@ video.mp4
         let total = playlist.total_duration();
         assert!((total.as_secs_f64() - 19.5).abs() < 0.001);
     }
+
+    #[test]
+    fn test_hls_m3u8_format_compliance() {
+        let mut playlist = MediaPlaylist::new();
+        playlist.version = 3;
+        playlist.target_duration = 10;
+        playlist.media_sequence = 0;
+        playlist.ended = true;
+        playlist.segments.push(Segment::new(
+            Duration::from_secs_f64(9.5),
+            "seg0.ts".to_string(),
+        ));
+        playlist.segments.push(Segment::new(
+            Duration::from_secs_f64(10.0),
+            "seg1.ts".to_string(),
+        ));
+        playlist.segments.push(Segment::new(
+            Duration::from_secs_f64(8.8),
+            "seg2.ts".to_string(),
+        ));
+
+        let m3u8 = playlist.to_m3u8();
+        let lines: Vec<&str> = m3u8.lines().collect();
+
+        // 1. First line is exactly "#EXTM3U"
+        assert_eq!(
+            lines.first().copied(),
+            Some("#EXTM3U"),
+            "first line must be #EXTM3U"
+        );
+
+        // 2. Contains "#EXT-X-VERSION:N" where N >= 3
+        let version_line = lines
+            .iter()
+            .find(|l| l.starts_with("#EXT-X-VERSION:"))
+            .expect("#EXT-X-VERSION tag must be present");
+        let version_num: u8 = version_line
+            .strip_prefix("#EXT-X-VERSION:")
+            .expect("prefix present")
+            .parse()
+            .expect("version must be numeric");
+        assert!(
+            version_num >= 3,
+            "#EXT-X-VERSION must be >= 3, got {version_num}"
+        );
+
+        // 3. Contains "#EXT-X-TARGETDURATION:N"
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("#EXT-X-TARGETDURATION:")),
+            "#EXT-X-TARGETDURATION tag must be present"
+        );
+
+        // 4. Contains "#EXT-X-MEDIA-SEQUENCE:0"
+        assert!(
+            lines.iter().any(|l| *l == "#EXT-X-MEDIA-SEQUENCE:0"),
+            "#EXT-X-MEDIA-SEQUENCE:0 must be present"
+        );
+
+        // 5. Each segment entry has "#EXTINF:<duration>," followed immediately by a URI line
+        let mut i = 0usize;
+        let mut extinf_count = 0usize;
+        while i < lines.len() {
+            if lines[i].starts_with("#EXTINF:") {
+                assert!(
+                    lines[i].contains(','),
+                    "#EXTINF line must contain a comma: {}",
+                    lines[i]
+                );
+                assert!(
+                    i + 1 < lines.len(),
+                    "#EXTINF at line {i} must be followed by a URI line"
+                );
+                let uri_line = lines[i + 1];
+                assert!(
+                    !uri_line.is_empty() && !uri_line.starts_with('#'),
+                    "URI line after #EXTINF must be non-empty and not a tag, got: {uri_line}"
+                );
+                extinf_count += 1;
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+        assert_eq!(extinf_count, 3, "expected 3 segments, found {extinf_count}");
+    }
 }

@@ -71,7 +71,15 @@ impl Biquad {
     /// Note: `a1` and `a2` are the *positive* denominator coefficients
     /// (the sign convention `1 + a1·z⁻¹ + a2·z⁻²` is used).
     pub fn new(b0: f32, b1: f32, b2: f32, a1: f32, a2: f32) -> Self {
-        Self { b0, b1, b2, a1, a2, s1: 0.0, s2: 0.0 }
+        Self {
+            b0,
+            b1,
+            b2,
+            a1,
+            a2,
+            s1: 0.0,
+            s2: 0.0,
+        }
     }
 
     /// Process one sample (Transposed Direct-Form II).
@@ -451,12 +459,17 @@ impl XtcConvolver {
     ) -> Result<Self, SpatialError> {
         let len = h_sl_l.len();
         if len == 0 {
-            return Err(SpatialError::InvalidConfig("kernels must not be empty".to_string()));
+            return Err(SpatialError::InvalidConfig(
+                "kernels must not be empty".to_string(),
+            ));
         }
         if h_sl_r.len() != len || h_sr_l.len() != len || h_sr_r.len() != len {
             return Err(SpatialError::InvalidConfig(format!(
                 "all four kernels must have equal length (got {}, {}, {}, {})",
-                len, h_sl_r.len(), h_sr_l.len(), h_sr_r.len()
+                len,
+                h_sl_r.len(),
+                h_sr_l.len(),
+                h_sr_r.len()
             )));
         }
         Ok(Self {
@@ -566,12 +579,20 @@ pub fn design_ctc_fir(
     let mut h_direct = vec![0.0_f32; kernel_len];
     let eps = regularisation;
     let denom = (1.0 + eps) * (1.0 + eps) - ild * ild;
-    let d_gain = if denom.abs() > 1e-9 { (1.0 + eps) / denom } else { 1.0 };
+    let d_gain = if denom.abs() > 1e-9 {
+        (1.0 + eps) / denom
+    } else {
+        1.0
+    };
     h_direct[0] = d_gain;
 
     // Cross kernel: delayed impulse with negative cross gain and ILD.
     let mut h_cross = vec![0.0_f32; kernel_len];
-    let c_gain = if denom.abs() > 1e-9 { -ild / denom } else { 0.0 };
+    let c_gain = if denom.abs() > 1e-9 {
+        -ild / denom
+    } else {
+        0.0
+    };
     if delay_samp < kernel_len {
         h_cross[delay_samp] = c_gain;
     }
@@ -685,7 +706,8 @@ mod tests {
             h_cross.clone(),
             h_cross.clone(),
             h_direct.clone(),
-        ).unwrap();
+        )
+        .unwrap();
 
         // After len-1 warm-up samples, output should equal input.
         for _ in 0..(len - 1) {
@@ -718,7 +740,10 @@ mod tests {
         let samples = [0.1, 0.5, -0.3, 0.9, -0.7];
         for &s in &samples {
             let out = bq.process(s);
-            assert!((out - s).abs() < 1e-6, "identity biquad should pass through: {out} vs {s}");
+            assert!(
+                (out - s).abs() < 1e-6,
+                "identity biquad should pass through: {out} vs {s}"
+            );
         }
     }
 }

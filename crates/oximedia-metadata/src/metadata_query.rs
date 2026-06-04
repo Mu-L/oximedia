@@ -81,7 +81,11 @@ pub enum Predicate {
     NumericRange { field: String, min: f64, max: f64 },
 
     /// Field value length is within `[min, max]` characters (inclusive).
-    LengthRange { field: String, min: usize, max: usize },
+    LengthRange {
+        field: String,
+        min: usize,
+        max: usize,
+    },
 
     /// Both sub-predicates must hold.
     And(Box<Predicate>, Box<Predicate>),
@@ -101,22 +105,20 @@ impl Predicate {
             Self::True => true,
             Self::False => false,
 
-            Self::FieldEquals { field, value } => {
-                fields.get(field).map_or(false, |v| v == value)
-            }
+            Self::FieldEquals { field, value } => fields.get(field).map_or(false, |v| v == value),
             Self::FieldEqualsIgnoreCase { field, value } => fields
                 .get(field)
                 .map_or(false, |v| v.to_lowercase() == value.to_lowercase()),
 
-            Self::FieldContains { field, substring } => {
-                fields.get(field).map_or(false, |v| v.contains(substring.as_str()))
-            }
-            Self::FieldStartsWith { field, prefix } => {
-                fields.get(field).map_or(false, |v| v.starts_with(prefix.as_str()))
-            }
-            Self::FieldEndsWith { field, suffix } => {
-                fields.get(field).map_or(false, |v| v.ends_with(suffix.as_str()))
-            }
+            Self::FieldContains { field, substring } => fields
+                .get(field)
+                .map_or(false, |v| v.contains(substring.as_str())),
+            Self::FieldStartsWith { field, prefix } => fields
+                .get(field)
+                .map_or(false, |v| v.starts_with(prefix.as_str())),
+            Self::FieldEndsWith { field, suffix } => fields
+                .get(field)
+                .map_or(false, |v| v.ends_with(suffix.as_str())),
 
             Self::FieldExists { field } => fields.contains_key(field),
             Self::FieldAbsent { field } => !fields.contains_key(field),
@@ -181,13 +183,19 @@ impl SortKey {
     /// Create an ascending sort key.
     #[must_use]
     pub fn asc(field: impl Into<String>) -> Self {
-        Self { field: field.into(), order: SortOrder::Ascending }
+        Self {
+            field: field.into(),
+            order: SortOrder::Ascending,
+        }
     }
 
     /// Create a descending sort key.
     #[must_use]
     pub fn desc(field: impl Into<String>) -> Self {
-        Self { field: field.into(), order: SortOrder::Descending }
+        Self {
+            field: field.into(),
+            order: SortOrder::Descending,
+        }
     }
 }
 
@@ -432,10 +440,7 @@ impl QueryEngine {
 }
 
 /// Apply a field projection to a map.  Empty projection = return all fields.
-fn project_fields(
-    fields: &HashMap<String, String>,
-    keys: &[String],
-) -> HashMap<String, String> {
+fn project_fields(fields: &HashMap<String, String>, keys: &[String]) -> HashMap<String, String> {
     if keys.is_empty() {
         return fields.clone();
     }
@@ -456,24 +461,39 @@ mod tests {
         vec![
             (
                 1,
-                [("title", "Alpha"), ("artist", "Alice"), ("year", "2018"), ("genre", "Jazz")]
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect(),
+                [
+                    ("title", "Alpha"),
+                    ("artist", "Alice"),
+                    ("year", "2018"),
+                    ("genre", "Jazz"),
+                ]
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             ),
             (
                 2,
-                [("title", "Beta"), ("artist", "Bob"), ("year", "2020"), ("genre", "Rock")]
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect(),
+                [
+                    ("title", "Beta"),
+                    ("artist", "Bob"),
+                    ("year", "2020"),
+                    ("genre", "Rock"),
+                ]
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             ),
             (
                 3,
-                [("title", "Gamma"), ("artist", "Alice"), ("year", "2022"), ("genre", "Jazz")]
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect(),
+                [
+                    ("title", "Gamma"),
+                    ("artist", "Alice"),
+                    ("year", "2022"),
+                    ("genre", "Jazz"),
+                ]
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             ),
             (
                 4,
@@ -488,8 +508,10 @@ mod tests {
     #[test]
     fn test_predicate_field_equals() {
         let records = make_records();
-        let query = MetadataQuery::new()
-            .filter(Predicate::FieldEquals { field: "artist".to_string(), value: "Alice".to_string() });
+        let query = MetadataQuery::new().filter(Predicate::FieldEquals {
+            field: "artist".to_string(),
+            value: "Alice".to_string(),
+        });
         let results = QueryEngine::execute(&query, &records);
         assert_eq!(results.len(), 2);
         assert!(results.iter().any(|(id, _)| *id == 1));
@@ -499,8 +521,9 @@ mod tests {
     #[test]
     fn test_predicate_field_absent() {
         let records = make_records();
-        let query = MetadataQuery::new()
-            .filter(Predicate::FieldAbsent { field: "artist".to_string() });
+        let query = MetadataQuery::new().filter(Predicate::FieldAbsent {
+            field: "artist".to_string(),
+        });
         let results = QueryEngine::execute(&query, &records);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, 4);
@@ -509,8 +532,11 @@ mod tests {
     #[test]
     fn test_predicate_numeric_range() {
         let records = make_records();
-        let query = MetadataQuery::new()
-            .filter(Predicate::NumericRange { field: "year".to_string(), min: 2019.0, max: 2021.0 });
+        let query = MetadataQuery::new().filter(Predicate::NumericRange {
+            field: "year".to_string(),
+            min: 2019.0,
+            max: 2021.0,
+        });
         let results = QueryEngine::execute(&query, &records);
         // Records 2 (2020) and 4 (2019) match.
         assert_eq!(results.len(), 2);
@@ -523,8 +549,14 @@ mod tests {
     fn test_predicate_and_or() {
         let records = make_records();
         // Jazz OR Rock
-        let jazz = Predicate::FieldEquals { field: "genre".to_string(), value: "Jazz".to_string() };
-        let rock = Predicate::FieldEquals { field: "genre".to_string(), value: "Rock".to_string() };
+        let jazz = Predicate::FieldEquals {
+            field: "genre".to_string(),
+            value: "Jazz".to_string(),
+        };
+        let rock = Predicate::FieldEquals {
+            field: "genre".to_string(),
+            value: "Rock".to_string(),
+        };
         let query = MetadataQuery::new().filter(jazz.or(rock));
         let results = QueryEngine::execute(&query, &records);
         assert_eq!(results.len(), 3); // Records 1, 2, 3
@@ -533,10 +565,10 @@ mod tests {
     #[test]
     fn test_sort_ascending() {
         let records = make_records();
-        let query = MetadataQuery::new()
-            .sort(SortKey::asc("title"));
+        let query = MetadataQuery::new().sort(SortKey::asc("title"));
         let results = QueryEngine::execute(&query, &records);
-        let titles: Vec<&str> = results.iter()
+        let titles: Vec<&str> = results
+            .iter()
             .map(|(_, f)| f.get("title").map(String::as_str).unwrap_or(""))
             .collect();
         assert_eq!(titles, vec!["Alpha", "Beta", "Delta", "Gamma"]);
@@ -547,7 +579,8 @@ mod tests {
         let records = make_records();
         let query = MetadataQuery::new().sort(SortKey::desc("year"));
         let results = QueryEngine::execute(&query, &records);
-        let years: Vec<&str> = results.iter()
+        let years: Vec<&str> = results
+            .iter()
             .map(|(_, f)| f.get("year").map(String::as_str).unwrap_or(""))
             .collect();
         assert_eq!(years, vec!["2022", "2020", "2019", "2018"]);
@@ -562,7 +595,8 @@ mod tests {
             .limit(2);
         let results = QueryEngine::execute(&query, &records);
         assert_eq!(results.len(), 2);
-        let titles: Vec<&str> = results.iter()
+        let titles: Vec<&str> = results
+            .iter()
             .map(|(_, f)| f.get("title").map(String::as_str).unwrap_or(""))
             .collect();
         assert_eq!(titles, vec!["Beta", "Delta"]);
@@ -584,8 +618,10 @@ mod tests {
     #[test]
     fn test_aggregation_count() {
         let records = make_records();
-        let query = MetadataQuery::new()
-            .filter(Predicate::FieldEquals { field: "genre".to_string(), value: "Jazz".to_string() });
+        let query = MetadataQuery::new().filter(Predicate::FieldEquals {
+            field: "genre".to_string(),
+            value: "Jazz".to_string(),
+        });
         let agg = Aggregation::Count;
         let result = QueryEngine::aggregate(&query, &records, &agg);
         assert_eq!(result, AggregationResult::Count(2));
@@ -595,7 +631,9 @@ mod tests {
     fn test_aggregation_count_distinct() {
         let records = make_records();
         let query = MetadataQuery::new();
-        let agg = Aggregation::CountDistinct { field: "artist".to_string() };
+        let agg = Aggregation::CountDistinct {
+            field: "artist".to_string(),
+        };
         let result = QueryEngine::aggregate(&query, &records, &agg);
         // Alice, Bob, and record 4 has no artist → 2 distinct
         assert_eq!(result, AggregationResult::Count(2));
@@ -605,8 +643,20 @@ mod tests {
     fn test_aggregation_min_max() {
         let records = make_records();
         let query = MetadataQuery::new();
-        let min = QueryEngine::aggregate(&query, &records, &Aggregation::Min { field: "year".to_string() });
-        let max = QueryEngine::aggregate(&query, &records, &Aggregation::Max { field: "year".to_string() });
+        let min = QueryEngine::aggregate(
+            &query,
+            &records,
+            &Aggregation::Min {
+                field: "year".to_string(),
+            },
+        );
+        let max = QueryEngine::aggregate(
+            &query,
+            &records,
+            &Aggregation::Max {
+                field: "year".to_string(),
+            },
+        );
         assert_eq!(min, AggregationResult::Number(2018.0));
         assert_eq!(max, AggregationResult::Number(2022.0));
     }
@@ -615,20 +665,26 @@ mod tests {
     fn test_predicate_contains_starts_ends() {
         let records = make_records();
 
-        let contains_query = MetadataQuery::new()
-            .filter(Predicate::FieldContains { field: "title".to_string(), substring: "lph".to_string() });
+        let contains_query = MetadataQuery::new().filter(Predicate::FieldContains {
+            field: "title".to_string(),
+            substring: "lph".to_string(),
+        });
         let r = QueryEngine::execute(&contains_query, &records);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].0, 1);
 
-        let starts_query = MetadataQuery::new()
-            .filter(Predicate::FieldStartsWith { field: "title".to_string(), prefix: "G".to_string() });
+        let starts_query = MetadataQuery::new().filter(Predicate::FieldStartsWith {
+            field: "title".to_string(),
+            prefix: "G".to_string(),
+        });
         let r2 = QueryEngine::execute(&starts_query, &records);
         assert_eq!(r2.len(), 1);
         assert_eq!(r2[0].0, 3);
 
-        let ends_query = MetadataQuery::new()
-            .filter(Predicate::FieldEndsWith { field: "genre".to_string(), suffix: "azz".to_string() });
+        let ends_query = MetadataQuery::new().filter(Predicate::FieldEndsWith {
+            field: "genre".to_string(),
+            suffix: "azz".to_string(),
+        });
         let r3 = QueryEngine::execute(&ends_query, &records);
         assert_eq!(r3.len(), 2);
     }

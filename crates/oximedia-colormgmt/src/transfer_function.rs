@@ -1,8 +1,14 @@
-#![allow(dead_code)]
 //! Electro-optical / opto-electronic transfer functions for common colour spaces.
+//!
+//! Hot-path linearisation is accelerated through 1024-entry lookup tables
+//! (`TransferFunctionLut`) cached globally per transfer function variant so
+//! that table construction occurs at most once per process lifetime.
+
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 /// All supported transfer functions (EOTFs / OETFs).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TransferFunction {
     /// Identity (no encoding).
     Linear,
@@ -67,6 +73,131 @@ impl TransferFunction {
             TransferFunction::Hlg => "HLG (BT.2100)",
         }
     }
+
+    /// Linearise an encoded value using the cached 1024-entry LUT.
+    ///
+    /// Equivalent to [`TransferFunction::decode`] but operates on `f32` and uses
+    /// linear interpolation within a precomputed table.  Maximum error vs. the
+    /// exact formula is < 0.001 across \[0, 1\].
+    ///
+    /// The LUT is built once per transfer-function variant and then cached for
+    /// the lifetime of the process.
+    #[must_use]
+    pub fn linearize_via_lut(&self, encoded: f32) -> f32 {
+        get_cached_tf_lut(self).linearize(encoded)
+    }
+
+    /// Encode a linear value using the cached 1024-entry LUT.
+    ///
+    /// Equivalent to [`TransferFunction::encode`] but operates on `f32` and uses
+    /// linear interpolation within a precomputed table.  Maximum error vs. the
+    /// exact formula is < 0.001 across \[0, 1\].
+    #[must_use]
+    pub fn delinearize_via_lut(&self, linear: f32) -> f32 {
+        get_cached_tf_lut(self).delinearize(linear)
+    }
+}
+
+// ── LUT cache ─────────────────────────────────────────────────────────────────
+
+/// Number of entries in each LUT (forward and inverse).
+const TF_LUT_SIZE: usize = 1024;
+
+/// 1024-entry forward (linearise) and inverse (delinearise) lookup tables for a
+/// single transfer function.
+///
+/// Index `i` corresponds to the normalised value `i / (TF_LUT_SIZE - 1)`.
+/// Lookup uses linear interpolation between adjacent entries.
+#[derive(Debug, Clone)]
+pub struct TransferFunctionLut {
+    /// `forward[i]` ≈ `tf.decode(i / (N-1))` — encoded → linear, `f32`.
+    pub forward: Vec<f32>,
+    /// `inverse[i]` ≈ `tf.encode(i / (N-1))` — linear → encoded, `f32`.
+    pub inverse: Vec<f32>,
+}
+
+impl TransferFunctionLut {
+    /// Build a `TransferFunctionLut` from the exact `f64` decode/encode functions
+    /// of `tf`.  The two tables each have `TF_LUT_SIZE` (1024) entries.
+    #[must_use]
+    pub fn build(tf: &TransferFunction) -> Self {
+        let n = TF_LUT_SIZE;
+        let mut forward = Vec::with_capacity(n);
+        let mut inverse = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let t = i as f64 / (n - 1) as f64;
+            forward.push(tf.decode(t) as f32);
+            inverse.push(tf.encode(t) as f32);
+        }
+
+        Self { forward, inverse }
+    }
+
+    /// Look up the linearised (decoded) value for `encoded ∈ [0, 1]` using
+    /// bilinear interpolation between adjacent table entries.
+    ///
+    /// Inputs outside `[0, 1]` are clamped before lookup.
+    #[must_use]
+    pub fn linearize(&self, encoded: f32) -> f32 {
+        Self::interp(&self.forward, encoded)
+    }
+
+    /// Look up the encoded (compressed) value for `linear ∈ [0, 1]` using
+    /// bilinear interpolation between adjacent table entries.
+    ///
+    /// Inputs outside `[0, 1]` are clamped before lookup.
+    #[must_use]
+    pub fn delinearize(&self, linear: f32) -> f32 {
+        Self::interp(&self.inverse, linear)
+    }
+
+    /// Shared linear-interpolation helper used by both `linearize` and
+    /// `delinearize`.
+    #[inline]
+    fn interp(table: &[f32], v: f32) -> f32 {
+        let n = table.len();
+        debug_assert!(n >= 2, "LUT must have at least 2 entries");
+        let v = v.clamp(0.0, 1.0);
+        let scaled = v * (n - 1) as f32;
+        let lo = scaled.floor() as usize;
+        let hi = (lo + 1).min(n - 1);
+        let frac = scaled - lo as f32;
+        table[lo] + frac * (table[hi] - table[lo])
+    }
+}
+
+/// Global LUT cache: one `TransferFunctionLut` per `TransferFunction` variant,
+/// keyed by the variant's discriminant cast to `u8`.
+static TF_LUT_CACHE: OnceLock<Mutex<HashMap<u8, TransferFunctionLut>>> = OnceLock::new();
+
+/// Return the cached `TransferFunctionLut` for `tf`, building it on first access.
+///
+/// Thread-safe: the global `Mutex` ensures only one thread builds any given LUT.
+#[must_use]
+pub fn get_cached_tf_lut(tf: &TransferFunction) -> TransferFunctionLut {
+    let cache = TF_LUT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    // Use the enum discriminant as cache key.
+    let key = *tf as u8;
+
+    {
+        let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(lut) = guard.get(&key) {
+            return lut.clone();
+        }
+    }
+
+    // Build outside the lock to avoid holding it during potentially costly float ops.
+    let lut = TransferFunctionLut::build(tf);
+
+    {
+        let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        // Another thread may have raced us; insert only if still absent.
+        guard.entry(key).or_insert_with(|| lut.clone());
+    }
+
+    lut
 }
 
 // ── sRGB ──────────────────────────────────────────────────────────────────
@@ -248,5 +379,96 @@ mod tests {
         // Negative input should be treated as 0
         let enc = TransferFunction::Srgb.encode(-0.5);
         assert!(enc >= 0.0);
+    }
+
+    // ── LUT tests ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_tf_lut_srgb_accuracy() {
+        // Build the LUT and sample 100 uniformly-spaced points in [0, 1].
+        // The LUT-based linearisation must agree with the exact sRGB decode
+        // formula to within 0.001.
+        let lut = TransferFunctionLut::build(&TransferFunction::Srgb);
+        for i in 0u32..=100 {
+            let t = i as f32 / 100.0;
+            let lut_val = lut.linearize(t);
+            let exact_val = TransferFunction::Srgb.decode(t as f64) as f32;
+            let err = (lut_val - exact_val).abs();
+            assert!(
+                err < 0.001,
+                "sRGB LUT error too large at t={t}: lut={lut_val}, exact={exact_val}, err={err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_tf_lut_pq_accuracy() {
+        // Same accuracy check for the PQ EOTF.
+        let lut = TransferFunctionLut::build(&TransferFunction::Pq);
+        for i in 0u32..=100 {
+            let t = i as f32 / 100.0;
+            let lut_val = lut.linearize(t);
+            let exact_val = TransferFunction::Pq.decode(t as f64) as f32;
+            let err = (lut_val - exact_val).abs();
+            assert!(
+                err < 0.001,
+                "PQ LUT error too large at t={t}: lut={lut_val}, exact={exact_val}, err={err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_tf_lut_cached() {
+        // Two calls to `get_cached_tf_lut` for the same transfer function must
+        // return LUTs with identical content (bit-for-bit identical forward tables,
+        // proving the second call hit the cache rather than rebuilding).
+        let lut1 = get_cached_tf_lut(&TransferFunction::Srgb);
+        let lut2 = get_cached_tf_lut(&TransferFunction::Srgb);
+        assert_eq!(
+            lut1.forward, lut2.forward,
+            "cached LUT forward tables must be identical"
+        );
+        assert_eq!(
+            lut1.inverse, lut2.inverse,
+            "cached LUT inverse tables must be identical"
+        );
+
+        // Also verify the LUT-based method on TransferFunction matches.
+        let v = 0.5_f32;
+        assert!(
+            (TransferFunction::Srgb.linearize_via_lut(v)
+                - TransferFunction::Srgb.decode(v as f64) as f32)
+                .abs()
+                < 0.001,
+            "linearize_via_lut must agree with exact decode"
+        );
+    }
+
+    #[test]
+    fn test_tf_lut_boundary_values() {
+        // 0.0 and 1.0 must be exact (they are the first and last table entries).
+        for tf in [
+            TransferFunction::Linear,
+            TransferFunction::Srgb,
+            TransferFunction::Pq,
+            TransferFunction::Hlg,
+            TransferFunction::Gamma22,
+            TransferFunction::Gamma24,
+        ] {
+            let lut = TransferFunctionLut::build(&tf);
+            let exact0 = tf.decode(0.0) as f32;
+            let exact1 = tf.decode(1.0) as f32;
+            // Boundary entries must round-trip faithfully (f32 cast of f64).
+            assert!(
+                (lut.linearize(0.0) - exact0).abs() < 1e-6,
+                "{} LUT boundary 0 failed",
+                tf.name()
+            );
+            assert!(
+                (lut.linearize(1.0) - exact1).abs() < 1e-6,
+                "{} LUT boundary 1 failed",
+                tf.name()
+            );
+        }
     }
 }

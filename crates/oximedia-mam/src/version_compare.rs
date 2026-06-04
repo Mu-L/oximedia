@@ -1,10 +1,8 @@
 //! Asset version comparison for the MAM system.
 //!
-//! Computes a structured diff between two [`AssetVersion`] snapshots,
-//! returning a list of [`FieldChange`] entries that describe which fields
+//! Computes a structured diff between two [`crate::version_control::AssetVersion`] snapshots,
+//! returning a list of `FieldChange` entries that describe which fields
 //! changed, were added, or were removed.
-
-#![allow(dead_code)]
 
 use crate::version_control::AssetVersion;
 
@@ -123,10 +121,7 @@ impl AssetVersionDiff {
     /// Returns the names of all fields that changed.
     #[must_use]
     pub fn changed_fields(v1: &AssetVersion, v2: &AssetVersion) -> Vec<String> {
-        Self::compute(v1, v2)
-            .into_iter()
-            .map(|c| c.field)
-            .collect()
+        Self::compute(v1, v2).into_iter().map(|c| c.field).collect()
     }
 
     /// Returns `true` if `v1` and `v2` are identical in all tracked fields.
@@ -200,8 +195,14 @@ mod tests {
         let v2 = make_version(2, 2, VersionAction::Edited, 2000, 2048, "/v2.mp4");
         let changes = AssetVersionDiff::compute(&v1, &v2);
         let fields: Vec<&str> = changes.iter().map(|c| c.field.as_str()).collect();
-        assert!(fields.contains(&"version_num"), "version_num should be in changes");
-        assert!(fields.contains(&"size_bytes"), "size_bytes should be in changes");
+        assert!(
+            fields.contains(&"version_num"),
+            "version_num should be in changes"
+        );
+        assert!(
+            fields.contains(&"size_bytes"),
+            "size_bytes should be in changes"
+        );
         assert!(fields.contains(&"path"), "path should be in changes");
     }
 
@@ -219,7 +220,10 @@ mod tests {
         let v1 = make_version(1, 1, VersionAction::Created, 1000, 100, "/old.mp4");
         let v2 = make_version(1, 1, VersionAction::Created, 1000, 100, "/new.mp4");
         let changes = AssetVersionDiff::compute(&v1, &v2);
-        let path_change = changes.iter().find(|c| c.field == "path").expect("path change expected");
+        let path_change = changes
+            .iter()
+            .find(|c| c.field == "path")
+            .expect("path change expected");
         assert!(path_change.is_modification());
         assert_eq!(path_change.old_value.as_deref(), Some("/old.mp4"));
         assert_eq!(path_change.new_value.as_deref(), Some("/new.mp4"));

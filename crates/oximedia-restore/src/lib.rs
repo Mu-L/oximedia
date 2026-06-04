@@ -498,6 +498,66 @@ impl RestoreChain {
         Ok(output)
     }
 
+    /// Process mono samples using block-based overlap-add streaming.
+    ///
+    /// Divides the input into overlapping blocks of `block_size` samples
+    /// (default 4096) with 50 % overlap.  Each block is independently passed
+    /// through the full enabled step chain, then overlap-added back into the
+    /// output.  This avoids holding the entire processed buffer of every step
+    /// simultaneously when the input is long, reducing peak memory usage while
+    /// keeping the full restoration quality of the sequential chain.
+    ///
+    /// # Notes
+    ///
+    /// - The output length equals the input length.
+    /// - Steps that have state (e.g. DC offset accumulators) see only the
+    ///   per-block view; for those steps prefer [`process`][Self::process].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RestoreError`] from any step that fails.
+    pub fn process_streaming(
+        &mut self,
+        samples: &[f32],
+        sample_rate: u32,
+        block_size: Option<usize>,
+    ) -> RestoreResult<Vec<f32>> {
+        let block_size = block_size.unwrap_or(4096).max(2);
+        let hop_size = block_size / 2;
+
+        let mut ola = overlap_add::OverlapAdd::new(block_size, hop_size);
+        // Pre-allocate output to input length.
+        let mut output: Vec<f32> = Vec::with_capacity(samples.len());
+
+        let mut pos = 0usize;
+        while pos < samples.len() {
+            let end = (pos + block_size).min(samples.len());
+            let chunk = &samples[pos..end];
+
+            // Apply the full chain to this block.
+            let mut processed = chunk.to_vec();
+            for chain_step in &mut self.steps {
+                if !chain_step.enabled {
+                    continue;
+                }
+                processed = Self::process_step_mono(&mut chain_step.step, &processed, sample_rate)?;
+            }
+
+            // Overlap-add reconstruction.
+            let ola_out = ola.process(&processed);
+            output.extend_from_slice(&ola_out);
+
+            pos += hop_size;
+        }
+
+        // Truncate to input length (OLA may produce slightly more samples).
+        output.truncate(samples.len());
+        // Pad with zeros if OLA produced fewer than input length (short inputs).
+        output.resize(samples.len(), 0.0);
+
+        Ok(output)
+    }
+
     fn process_step_mono(
         step: &mut RestorationStep,
         samples: &[f32],
@@ -1071,6 +1131,67 @@ mod tests {
         let samples = vec![0.1f32; 4096];
         let output = chain.process(&samples, 44100).expect("should succeed");
         assert_eq!(output.len(), samples.len());
+    }
+
+    // -----------------------------------------------------------------------
+    // Block-based streaming processing test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_restore_chain_streaming_length_preserved() {
+        use std::f32::consts::PI;
+
+        // A sine wave at 440 Hz, 16384 samples at 44100 Hz.
+        let sr = 44100u32;
+        let n = 16384usize;
+        let samples: Vec<f32> = (0..n)
+            .map(|i| (2.0 * PI * 440.0 * i as f32 / sr as f32).sin())
+            .collect();
+
+        // Empty chain — streaming should return output of the same length.
+        let mut chain = RestoreChain::new();
+        let out = chain
+            .process_streaming(&samples, sr, Some(4096))
+            .expect("streaming process should succeed");
+
+        assert_eq!(
+            out.len(),
+            n,
+            "streaming output length must equal input length"
+        );
+    }
+
+    #[test]
+    fn test_restore_chain_streaming_vs_sequential_dc() {
+        // With a DC removal step, both sequential and streaming paths should
+        // remove the DC offset.  The output must be finite and mostly zero-mean.
+        let sr = 44100u32;
+        let n = 8192usize;
+        // A signal with a large DC offset.
+        let samples: Vec<f32> = (0..n).map(|i| 0.5 + (i as f32 * 0.001).sin()).collect();
+
+        let mut chain_seq = RestoreChain::new();
+        chain_seq.add_step(RestorationStep::DcRemoval(DcRemover::new(10.0, sr)));
+        let out_seq = chain_seq
+            .process(&samples, sr)
+            .expect("sequential process ok");
+
+        let mut chain_str = RestoreChain::new();
+        chain_str.add_step(RestorationStep::DcRemoval(DcRemover::new(10.0, sr)));
+        let out_str = chain_str
+            .process_streaming(&samples, sr, Some(2048))
+            .expect("streaming process ok");
+
+        assert_eq!(out_seq.len(), n, "sequential output length ok");
+        assert_eq!(out_str.len(), n, "streaming output length ok");
+
+        // Both outputs must be finite.
+        for (i, &v) in out_seq.iter().enumerate() {
+            assert!(v.is_finite(), "seq output[{i}] is not finite: {v}");
+        }
+        for (i, &v) in out_str.iter().enumerate() {
+            assert!(v.is_finite(), "streaming output[{i}] is not finite: {v}");
+        }
     }
 
     #[test]

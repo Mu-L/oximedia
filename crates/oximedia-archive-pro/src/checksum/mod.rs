@@ -13,7 +13,10 @@ pub mod verify;
 
 pub use generate::{ChecksumGenerator, FileChecksum};
 pub use tree::{MerkleNode, MerkleProofStep, MerkleTree, ProofDirection};
-pub use verify::{ChecksumVerifier, VerificationReport, VerificationResult};
+pub use verify::{
+    AlgoVerificationResult, ChecksumVerifier, ConcurrentVerificationReport, FileVerificationReport,
+    VerificationReport, VerificationResult,
+};
 
 use serde::{Deserialize, Serialize};
 use std::fmt;

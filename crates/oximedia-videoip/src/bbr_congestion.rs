@@ -29,8 +29,7 @@ pub const PROBE_BW_CYCLE_LEN: usize = 8;
 
 /// Pacing gain values for each ProbeBw phase.
 /// Phase 0: probe-up (+25 %), phase 1: drain (-25 %), phases 2–7: steady.
-pub const PROBE_BW_GAINS: [f64; PROBE_BW_CYCLE_LEN] =
-    [1.25, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+pub const PROBE_BW_GAINS: [f64; PROBE_BW_CYCLE_LEN] = [1.25, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
 
 /// Duration of a single ProbeBw gain phase in round trips.
 pub const PROBE_BW_PHASE_DURATION_ROUNDS: u64 = 1;
@@ -659,10 +658,9 @@ mod tests {
         // First sample should trigger a new record (prev_peak = 0).
         let events = ctrl.on_ack(sample(1_000_000, 0.001, 0.01));
         assert!(
-            events.iter().any(|e| matches!(
-                e,
-                BandwidthProbeEvent::NewBandwidthRecord { .. }
-            )),
+            events
+                .iter()
+                .any(|e| matches!(e, BandwidthProbeEvent::NewBandwidthRecord { .. })),
             "expected a NewBandwidthRecord event on first high-bw sample"
         );
     }
@@ -680,7 +678,10 @@ mod tests {
         let ctrl = default_ctrl();
         // In startup the pacing gain is ≈ 2.885.
         let gain = ctrl.effective_pacing_gain();
-        assert!(gain > 1.5, "startup gain should be well above 1.0, got {gain}");
+        assert!(
+            gain > 1.5,
+            "startup gain should be well above 1.0, got {gain}"
+        );
     }
 
     // ── Many ACKs stability ───────────────────────────────────────────────────

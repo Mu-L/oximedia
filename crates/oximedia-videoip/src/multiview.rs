@@ -114,9 +114,7 @@ impl MosaicLayout {
     #[must_use]
     pub fn build_cells(&self, canvas_w: u32, canvas_h: u32) -> Vec<MultiviewCell> {
         match self {
-            Self::Single => vec![
-                MultiviewCell::new("0", 0, 0, canvas_w, canvas_h),
-            ],
+            Self::Single => vec![MultiviewCell::new("0", 0, 0, canvas_w, canvas_h)],
             Self::Side2 => {
                 let half = canvas_w / 2;
                 vec![
@@ -141,13 +139,7 @@ impl MosaicLayout {
                     .map(|i| {
                         let row = i / 3;
                         let col = i % 3;
-                        MultiviewCell::new(
-                            format!("{i}"),
-                            col * cw,
-                            row * ch,
-                            cw,
-                            ch,
-                        )
+                        MultiviewCell::new(format!("{i}"), col * cw, row * ch, cw, ch)
                     })
                     .collect()
             }
@@ -158,13 +150,7 @@ impl MosaicLayout {
                     .map(|i| {
                         let row = i / 4;
                         let col = i % 4;
-                        MultiviewCell::new(
-                            format!("{i}"),
-                            col * cw,
-                            row * ch,
-                            cw,
-                            ch,
-                        )
+                        MultiviewCell::new(format!("{i}"), col * cw, row * ch, cw, ch)
                     })
                     .collect()
             }
@@ -222,8 +208,7 @@ impl MultiviewCompositor {
             if !cell.fits_in_canvas(canvas_width, canvas_height) {
                 return Err(MultiviewError::InvalidLayout(format!(
                     "cell '{}' at ({},{}) {}x{} exceeds canvas {}x{}",
-                    cell.id, cell.x, cell.y, cell.width, cell.height,
-                    canvas_width, canvas_height
+                    cell.id, cell.x, cell.y, cell.width, cell.height, canvas_width, canvas_height
                 )));
             }
         }
@@ -253,19 +238,17 @@ impl MultiviewCompositor {
 
     /// Registers a new source stream.  The expected frame dimensions must be
     /// supplied so the compositor can validate incoming frames.
-    pub fn register_source(
-        &mut self,
-        source_id: impl Into<String>,
-        width: u32,
-        height: u32,
-    ) {
+    pub fn register_source(&mut self, source_id: impl Into<String>, width: u32, height: u32) {
         let id = source_id.into();
-        self.sources.insert(id, RegisteredSource {
-            frame: vec![0u8; (width * height * 4) as usize],
-            width,
-            height,
-            frame_count: 0,
-        });
+        self.sources.insert(
+            id,
+            RegisteredSource {
+                frame: vec![0u8; (width * height * 4) as usize],
+                width,
+                height,
+                frame_count: 0,
+            },
+        );
     }
 
     /// Removes a source stream.
@@ -276,11 +259,7 @@ impl MultiviewCompositor {
     /// Updates the frame buffer for a source.
     ///
     /// `rgba` must be `width * height * 4` bytes in RGBA8 format.
-    pub fn update_source_frame(
-        &mut self,
-        source_id: &str,
-        rgba: &[u8],
-    ) -> MultiviewResult<()> {
+    pub fn update_source_frame(&mut self, source_id: &str, rgba: &[u8]) -> MultiviewResult<()> {
         let src = self
             .sources
             .get_mut(source_id)
@@ -472,8 +451,8 @@ mod tests {
         comp.register_source("cam1", 4, 4);
         let mut cells = MosaicLayout::Single.build_cells(4, 4);
         cells[0].source_id = Some("cam1".to_owned());
-        let mut comp2 = MultiviewCompositor::new(4, 4, cells)
-            .expect("valid cells fit within canvas");
+        let mut comp2 =
+            MultiviewCompositor::new(4, 4, cells).expect("valid cells fit within canvas");
         comp2.register_source("cam1", 4, 4);
         let frame = vec![255u8; 4 * 4 * 4];
         comp2

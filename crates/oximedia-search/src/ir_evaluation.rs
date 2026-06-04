@@ -177,8 +177,7 @@ impl AggregateMetrics {
         let n_f = n as f64;
         let map = per_query.iter().map(|m| m.average_precision).sum::<f64>() / n_f;
         let mrr = per_query.iter().map(|m| m.reciprocal_rank).sum::<f64>() / n_f;
-        let mean_precision_at_k =
-            per_query.iter().map(|m| m.precision_at_k).sum::<f64>() / n_f;
+        let mean_precision_at_k = per_query.iter().map(|m| m.precision_at_k).sum::<f64>() / n_f;
         let mean_recall_at_k = per_query.iter().map(|m| m.recall_at_k).sum::<f64>() / n_f;
         let mean_f1_at_k = per_query.iter().map(|m| m.f1_at_k).sum::<f64>() / n_f;
         let mean_ndcg_at_k = per_query.iter().map(|m| m.ndcg_at_k).sum::<f64>() / n_f;
@@ -359,18 +358,15 @@ fn compute_dcg(qrels: &RelevanceJudgements, query_id: &str, top_k: &[&str]) -> f
 
 /// Compute NDCG\@k by dividing DCG by the ideal DCG (iDCG).
 #[allow(clippy::cast_precision_loss)]
-fn compute_ndcg(
-    qrels: &RelevanceJudgements,
-    query_id: &str,
-    top_k: &[&str],
-    k: usize,
-) -> f64 {
+fn compute_ndcg(qrels: &RelevanceJudgements, query_id: &str, top_k: &[&str], k: usize) -> f64 {
     let dcg = compute_dcg(qrels, query_id, top_k);
     // Build ideal ranking: sort all judged docs for this query by grade desc.
     if let Some(docs_map) = qrels.data.get(query_id) {
         let mut ideal: Vec<RelevanceGrade> = docs_map.values().copied().collect();
         ideal.sort_unstable_by(|a, b| b.cmp(a));
-        let ideal_top: Vec<&str> = std::iter::repeat("__ideal__").take(ideal.len().min(k)).collect();
+        let ideal_top: Vec<&str> = std::iter::repeat("__ideal__")
+            .take(ideal.len().min(k))
+            .collect();
         // We need to compute iDCG directly from the grade vector, not from doc
         // lookups, because the ideal docs are synthetic.
         let idcg: f64 = ideal
@@ -531,7 +527,11 @@ mod tests {
             "NDCG should be < 1 for imperfect ranking got {}",
             m.ndcg_at_k
         );
-        assert!(m.ndcg_at_k >= 0.0, "NDCG should be >= 0 got {}", m.ndcg_at_k);
+        assert!(
+            m.ndcg_at_k >= 0.0,
+            "NDCG should be >= 0 got {}",
+            m.ndcg_at_k
+        );
     }
 
     #[test]

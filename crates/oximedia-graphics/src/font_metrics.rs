@@ -275,7 +275,7 @@ impl TextMeasurer {
 /// panels to triple the effective horizontal resolution.  The result is sharper
 /// text at small sizes at the cost of slight colour fringing on non-white
 /// backgrounds — a well-understood trade-off in broadcast CG systems.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SubPixelMode {
     /// No sub-pixel rendering (full-pixel greyscale anti-aliasing).
     None,

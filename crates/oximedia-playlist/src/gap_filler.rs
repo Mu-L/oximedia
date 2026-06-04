@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Automatic gap detection and filler content insertion for broadcast playlists.
 //!
 //! When a broadcast schedule has gaps between programs, this module identifies
@@ -81,6 +80,8 @@ pub struct FillerItem {
     pub recent_play_count: u32,
     /// Whether this filler is currently enabled.
     pub enabled: bool,
+    /// Genre/mood tags for context-aware selection.
+    pub tags: Vec<String>,
 }
 
 impl FillerItem {
@@ -93,6 +94,7 @@ impl FillerItem {
             priority: 1,
             recent_play_count: 0,
             enabled: true,
+            tags: Vec::new(),
         }
     }
 
@@ -101,6 +103,35 @@ impl FillerItem {
         self.priority = priority;
         self
     }
+
+    /// Set the genre/mood tags.
+    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = tags;
+        self
+    }
+}
+
+/// Compute the Jaccard overlap between two tag slices.
+///
+/// Returns a value in `[0.0, 1.0]`; returns `0.0` if either slice is empty.
+#[must_use]
+fn jaccard_overlap(a: &[String], b: &[String]) -> f32 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let intersection = a.iter().filter(|t| b.contains(t)).count();
+    let union = a.len() + b.len() - intersection;
+    if union == 0 {
+        return 1.0;
+    }
+    intersection as f32 / union as f32
+}
+
+/// Context for gap-filling, carrying tags from the surrounding playlist items.
+#[derive(Debug, Clone, Default)]
+pub struct GapContext {
+    /// Genre/mood tags gathered from the items surrounding the gap.
+    pub context_tags: Vec<String>,
 }
 
 /// A detected gap in the playlist timeline.
@@ -224,9 +255,19 @@ impl GapFiller {
     }
 
     /// Fill a single gap with filler content.
+    ///
+    /// Equivalent to `fill_gap_with_context(gap, &GapContext::default())`.
     pub fn fill_gap(&self, gap: &Gap) -> FillResult {
+        self.fill_gap_with_context(gap, &GapContext::default())
+    }
+
+    /// Fill a single gap with context-aware filler selection.
+    ///
+    /// When `context.context_tags` is non-empty, candidates are scored by
+    /// Jaccard tag overlap (boosting matching items) before the priority sort.
+    pub fn fill_gap_with_context(&self, gap: &Gap, context: &GapContext) -> FillResult {
         let gap_ms = gap.duration_ms();
-        let all_fillers = self.all_enabled_fillers_sorted();
+        let all_fillers = self.all_enabled_fillers_sorted_with_context(context);
 
         match self.strategy {
             FillStrategy::BestFit => self.best_fit(&all_fillers, gap_ms),
@@ -236,18 +277,36 @@ impl GapFiller {
         }
     }
 
-    /// Get all enabled fillers sorted by priority descending, then duration descending.
-    fn all_enabled_fillers_sorted(&self) -> Vec<&FillerItem> {
+    /// Get all enabled fillers sorted by (jaccard_boost * context_weight + priority) descending.
+    ///
+    /// When `context.context_tags` is empty, falls back to pure priority + duration order.
+    fn all_enabled_fillers_sorted_with_context<'a>(
+        &'a self,
+        context: &GapContext,
+    ) -> Vec<&'a FillerItem> {
         let mut all: Vec<&FillerItem> = self
             .fillers
             .values()
             .flat_map(|v| v.iter())
             .filter(|f| f.enabled)
             .collect();
+
+        let use_context = !context.context_tags.is_empty();
         all.sort_by(|a, b| {
-            b.priority
-                .cmp(&a.priority)
-                .then_with(|| b.duration_ms.cmp(&a.duration_ms))
+            if use_context {
+                let score_a =
+                    jaccard_overlap(&a.tags, &context.context_tags) * 10.0 + a.priority as f32;
+                let score_b =
+                    jaccard_overlap(&b.tags, &context.context_tags) * 10.0 + b.priority as f32;
+                score_b
+                    .partial_cmp(&score_a)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| b.duration_ms.cmp(&a.duration_ms))
+            } else {
+                b.priority
+                    .cmp(&a.priority)
+                    .then_with(|| b.duration_ms.cmp(&a.duration_ms))
+            }
         });
         all
     }
@@ -511,5 +570,69 @@ mod tests {
         let result = gf.fill_gap(&gap);
         // Should pick item_b first (lower play count)
         assert_eq!(result.items[0].id, "b");
+    }
+
+    #[test]
+    fn test_gap_filler_genre_preference() {
+        // Two fillers with the same priority and duration.
+        // One has a matching genre tag, the other does not.
+        let mut gf = GapFiller::new(FillStrategy::BestFit);
+        let drama_filler = FillerItem::new("drama_promo", 5_000, FillerCategory::Promo)
+            .with_priority(2)
+            .with_tags(vec!["drama".to_string()]);
+        let music_filler = FillerItem::new("music_promo", 5_000, FillerCategory::Promo)
+            .with_priority(2)
+            .with_tags(vec!["music".to_string()]);
+        gf.add_filler(drama_filler);
+        gf.add_filler(music_filler);
+
+        let gap = Gap::new(0, 5_000);
+        let context = GapContext {
+            context_tags: vec!["drama".to_string()],
+        };
+        let result = gf.fill_gap_with_context(&gap, &context);
+        // The drama-tagged filler should be preferred
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].id, "drama_promo");
+    }
+
+    #[test]
+    fn test_gap_filler_empty_context_uses_priority() {
+        // Without context tags the existing priority order must be respected.
+        let mut gf = GapFiller::new(FillStrategy::BestFit);
+        let low_prio = FillerItem::new("low", 5_000, FillerCategory::Promo)
+            .with_priority(1)
+            .with_tags(vec!["drama".to_string()]);
+        let high_prio = FillerItem::new("high", 5_000, FillerCategory::Bumper).with_priority(5);
+        gf.add_filler(low_prio);
+        gf.add_filler(high_prio);
+
+        let gap = Gap::new(0, 5_000);
+        let context = GapContext::default(); // empty context
+        let result = gf.fill_gap_with_context(&gap, &context);
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].id, "high");
+    }
+
+    #[test]
+    fn test_jaccard_overlap_identical() {
+        let a = vec!["drama".to_string(), "action".to_string()];
+        let b = a.clone();
+        assert!((jaccard_overlap(&a, &b) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_jaccard_overlap_disjoint() {
+        let a = vec!["drama".to_string()];
+        let b = vec!["comedy".to_string()];
+        assert!((jaccard_overlap(&a, &b) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_jaccard_overlap_empty() {
+        let a: Vec<String> = vec![];
+        let b = vec!["drama".to_string()];
+        assert_eq!(jaccard_overlap(&a, &b), 0.0);
+        assert_eq!(jaccard_overlap(&b, &a), 0.0);
     }
 }

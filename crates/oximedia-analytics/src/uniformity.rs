@@ -230,14 +230,8 @@ pub fn bucket_uniformity_test(
         ));
     }
 
-    let min = values
-        .iter()
-        .cloned()
-        .fold(f64::INFINITY, f64::min);
-    let max = values
-        .iter()
-        .cloned()
-        .fold(f64::NEG_INFINITY, f64::max);
+    let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
     if (max - min).abs() < f64::EPSILON {
         return Err(AnalyticsError::InsufficientData(
@@ -297,14 +291,13 @@ pub fn chi_squared_critical_value(df: u32, alpha: f64) -> f64 {
             } else {
                 1.282
             };
-            let cv = k
-                * (1.0 - 2.0 / (9.0 * k) + normal_z * (2.0 / (9.0 * k)).sqrt()).powi(3);
+            let cv = k * (1.0 - 2.0 / (9.0 * k) + normal_z * (2.0 / (9.0 * k)).sqrt()).powi(3);
             let cv = cv.max(0.0);
             // Return approximate values for all three levels.
             let z10 = 1.282_f64;
-            let cv10 = k * (1.0 - 2.0/(9.0*k) + z10 * (2.0/(9.0*k)).sqrt()).powi(3);
+            let cv10 = k * (1.0 - 2.0 / (9.0 * k) + z10 * (2.0 / (9.0 * k)).sqrt()).powi(3);
             let z05 = 1.645_f64;
-            let cv05 = k * (1.0 - 2.0/(9.0*k) + z05 * (2.0/(9.0*k)).sqrt()).powi(3);
+            let cv05 = k * (1.0 - 2.0 / (9.0 * k) + z05 * (2.0 / (9.0 * k)).sqrt()).powi(3);
             let _ = cv;
             (cv10.max(0.0), cv05.max(0.0), 0.0)
         });
@@ -342,9 +335,9 @@ fn normal_sf(z: f64) -> f64 {
     // Abramowitz & Stegun erf approximation (7.1.26), max |error| < 1.5×10⁻⁷.
     let p = 0.3275911_f64;
     let t = 1.0 / (1.0 + p * x.abs());
-    let poly = t * (0.254829592
-        + t * (-0.284496736
-            + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+    let poly = t
+        * (0.254829592
+            + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
     let erf_abs = 1.0 - poly * (-x * x).exp();
     let erf = if x >= 0.0 { erf_abs } else { -erf_abs };
     (1.0 - erf) / 2.0
@@ -501,8 +494,8 @@ mod tests {
             counts[variant] += 1;
         }
 
-        let result = chi_squared_uniformity(&counts, None, 0.05)
-            .expect("chi-squared test should succeed");
+        let result =
+            chi_squared_uniformity(&counts, None, 0.05).expect("chi-squared test should succeed");
 
         assert!(
             result.is_uniform,

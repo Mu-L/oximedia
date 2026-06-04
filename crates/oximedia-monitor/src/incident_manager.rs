@@ -96,10 +96,10 @@ impl IncidentSeverity {
     #[must_use]
     pub fn escalation_timeout_secs(self) -> f64 {
         match self {
-            Self::Sev4 => 3600.0,  // 1 h
-            Self::Sev3 => 1800.0,  // 30 min
-            Self::Sev2 => 900.0,   // 15 min
-            Self::Sev1 => 300.0,   // 5 min
+            Self::Sev4 => 3600.0, // 1 h
+            Self::Sev3 => 1800.0, // 30 min
+            Self::Sev2 => 900.0,  // 15 min
+            Self::Sev1 => 300.0,  // 5 min
         }
     }
 
@@ -164,8 +164,11 @@ impl EscalationChain {
     /// Add a tier (sorted by `after_secs` ascending).
     pub fn add_tier(&mut self, tier: EscalationTier) {
         self.tiers.push(tier);
-        self.tiers
-            .sort_by(|a, b| a.after_secs.partial_cmp(&b.after_secs).unwrap_or(std::cmp::Ordering::Equal));
+        self.tiers.sort_by(|a, b| {
+            a.after_secs
+                .partial_cmp(&b.after_secs)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 
     /// Return tiers that should be notified given `elapsed_secs` since
@@ -368,7 +371,12 @@ impl ManagedIncident {
     }
 
     /// Assign to an engineer.
-    pub fn assign(&mut self, assignee: impl Into<String>, timestamp_secs: f64, author: impl Into<String>) {
+    pub fn assign(
+        &mut self,
+        assignee: impl Into<String>,
+        timestamp_secs: f64,
+        author: impl Into<String>,
+    ) {
         let name: String = assignee.into();
         let entry = format!("Assigned to {name}");
         self.assignee = Some(name);
@@ -520,7 +528,13 @@ impl IncidentManager {
         timestamp_secs: f64,
         note: impl Into<String>,
     ) -> bool {
-        self.transition(id, IncidentLifecycle::Resolved, author, timestamp_secs, note)
+        self.transition(
+            id,
+            IncidentLifecycle::Resolved,
+            author,
+            timestamp_secs,
+            note,
+        )
     }
 
     /// Return all active incidents (sorted by severity descending).
@@ -567,8 +581,16 @@ impl IncidentManager {
     #[must_use]
     pub fn statistics(&self) -> IncidentStats {
         let total = self.incidents.len();
-        let active = self.incidents.values().filter(|i| i.lifecycle.is_active()).count();
-        let resolved = self.incidents.values().filter(|i| i.lifecycle.is_resolved()).count();
+        let active = self
+            .incidents
+            .values()
+            .filter(|i| i.lifecycle.is_active())
+            .count();
+        let resolved = self
+            .incidents
+            .values()
+            .filter(|i| i.lifecycle.is_resolved())
+            .count();
 
         // MTTD — all incidents.
         let mttd_values: Vec<f64> = self.incidents.values().map(|i| i.mttd_secs()).collect();
@@ -629,8 +651,7 @@ impl IncidentManager {
     pub fn purge_before(&mut self, cutoff_secs: f64) -> usize {
         let before = self.incidents.len();
         self.incidents.retain(|_, i| {
-            i.lifecycle.is_active()
-                || i.resolved_at_secs.map_or(true, |t| t >= cutoff_secs)
+            i.lifecycle.is_active() || i.resolved_at_secs.map_or(true, |t| t >= cutoff_secs)
         });
         before - self.incidents.len()
     }
@@ -826,12 +847,7 @@ mod tests {
 
     #[test]
     fn test_total_duration() {
-        let inc = ManagedIncident::new(
-            1, "test", "desc",
-            IncidentSeverity::Sev3,
-            1000.0,
-            1100.0,
-        );
+        let inc = ManagedIncident::new(1, "test", "desc", IncidentSeverity::Sev3, 1000.0, 1100.0);
         // Not yet resolved — duration from event_start to "now".
         assert!((inc.total_duration_secs(1600.0) - 600.0).abs() < f64::EPSILON);
     }

@@ -100,8 +100,7 @@ impl ChromaVector {
     pub fn transposed(&self, semitones: i32) -> Self {
         let mut bins = [0.0; CHROMA_BINS];
         for i in 0..CHROMA_BINS {
-            let target =
-                ((i as i32 + semitones).rem_euclid(CHROMA_BINS as i32)) as usize;
+            let target = ((i as i32 + semitones).rem_euclid(CHROMA_BINS as i32)) as usize;
             bins[target] = self.bins[i];
         }
         Self { bins }
@@ -222,18 +221,21 @@ impl ChromagramAnalyzer {
                 continue;
             }
 
-            // Goertzel-like magnitude estimate for bin k
+            // Goertzel magnitude estimate for bin k.
+            // s_cur and s_prev are the two-sample Goertzel state;
+            // s_prev2 is the oldest value used in the final magnitude formula.
             let omega = 2.0 * std::f64::consts::PI * k as f64 / n as f64;
-            let mut s0 = 0.0f64;
-            let mut s1 = 0.0f64;
-            let mut s2 = 0.0f64;
             let coeff = 2.0 * omega.cos();
+            let mut s_prev2 = 0.0f64;
+            let mut s_prev = 0.0f64;
             for sample in frame {
-                s0 = f64::from(*sample) + coeff * s1 - s2;
-                s2 = s1;
-                s1 = s0;
+                let s_cur = f64::from(*sample) + coeff * s_prev - s_prev2;
+                s_prev2 = s_prev;
+                s_prev = s_cur;
             }
-            let magnitude = (s1 * s1 + s2 * s2 - coeff * s1 * s2).abs().sqrt();
+            let magnitude = (s_prev * s_prev + s_prev2 * s_prev2 - coeff * s_prev * s_prev2)
+                .abs()
+                .sqrt();
 
             let pitch_class = self.freq_to_chroma(freq);
             chroma[pitch_class] += magnitude;
@@ -403,5 +405,27 @@ mod tests {
         assert!((cfg.sample_rate - 44100.0).abs() < f32::EPSILON);
         assert_eq!(cfg.window_size, 4096);
         assert_eq!(cfg.hop_size, 512);
+    }
+
+    /// Synthesise one second of a 440 Hz sine wave, compute the chromagram,
+    /// and verify that the mean chroma vector's dominant pitch class is A (index 9).
+    ///
+    /// Pitch class mapping (C = 0 convention):
+    /// C=0, C#=1, D=2, D#=3, E=4, F=5, F#=6, G=7, G#=8, **A=9**, A#=10, B=11
+    #[test]
+    fn test_chromagram_a4_440hz_pitch_class_a() {
+        let sample_rate = 44100_u32;
+        let freq = 440.0_f32; // A4
+        let samples: Vec<f32> = (0..sample_rate)
+            .map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / sample_rate as f32).sin())
+            .collect();
+
+        let analyzer = ChromagramAnalyzer::with_sample_rate(sample_rate as f32);
+        let mean = analyzer.mean_chroma(&samples);
+        let dominant = mean.dominant_pitch_class();
+        assert_eq!(
+            dominant, 9,
+            "440 Hz sine wave should produce dominant pitch class A (9), got {dominant}"
+        );
     }
 }

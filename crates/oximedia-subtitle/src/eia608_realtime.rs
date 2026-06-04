@@ -324,9 +324,18 @@ mod tests {
 
     #[test]
     fn test_decode_tab_offset() {
-        assert_eq!(Eia608Command::decode(0x17, 0x21), Eia608Command::TabOffset(1));
-        assert_eq!(Eia608Command::decode(0x17, 0x22), Eia608Command::TabOffset(2));
-        assert_eq!(Eia608Command::decode(0x17, 0x23), Eia608Command::TabOffset(3));
+        assert_eq!(
+            Eia608Command::decode(0x17, 0x21),
+            Eia608Command::TabOffset(1)
+        );
+        assert_eq!(
+            Eia608Command::decode(0x17, 0x22),
+            Eia608Command::TabOffset(2)
+        );
+        assert_eq!(
+            Eia608Command::decode(0x17, 0x23),
+            Eia608Command::TabOffset(3)
+        );
     }
 
     #[test]
@@ -370,9 +379,9 @@ mod tests {
     fn test_carriage_return_scrolls_lines() {
         let mut dec = Eia608Decoder::new();
         dec.push_pair(b'H', b'i'); // "Hi"
-        // Force last_pair reset so CR is accepted (different byte pair)
+                                   // Force last_pair reset so CR is accepted (different byte pair)
         dec.push_pair(0x14, 0x2D); // CarriageReturn
-        // "Hi" should now be in lines, current_line empty
+                                   // "Hi" should now be in lines, current_line empty
         assert!(dec.current_line().is_empty());
         let display = dec.current_display();
         assert_eq!(display, vec!["Hi"]);

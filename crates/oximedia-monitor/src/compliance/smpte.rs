@@ -1,7 +1,7 @@
 //! SMPTE compliance checking.
 
-use super::{ComplianceViolation, ViolationSeverity};
-use crate::{MonitorError, MonitorResult};
+use super::ComplianceViolation;
+use crate::MonitorResult;
 
 /// SMPTE compliance checker.
 pub struct SmpteChecker {

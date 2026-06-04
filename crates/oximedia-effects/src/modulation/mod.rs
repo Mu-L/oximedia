@@ -13,7 +13,7 @@ pub mod tremolo;
 pub mod vibrato;
 
 // Re-exports
-pub use chorus::{ChorusConfig, StereoChorus, MAX_VOICES, MIN_VOICES};
+pub use chorus::{ChorusConfig, StereoChorus, WavetableChorus, MAX_VOICES, MIN_VOICES};
 pub use ringmod::{RingModConfig, RingModulator};
 pub use tremolo::{StereoTremolo, TremoloConfig};
 pub use vibrato::{StereoVibrato, VibratoConfig};

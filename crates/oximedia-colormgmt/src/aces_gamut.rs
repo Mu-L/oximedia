@@ -28,6 +28,7 @@
 #![allow(clippy::cast_precision_loss)]
 
 use std::f32;
+use std::sync::OnceLock;
 
 /// A cusp point on the ACES gamut boundary in a perceptual colorspace.
 ///
@@ -504,31 +505,81 @@ impl AcesCuspTable {
 
     /// Construct a default ACEScg cusp table based on the AP1 (ACEScg) primaries.
     ///
-    /// This table is derived from the perceptual analysis of the ACEScg gamut
-    /// hull in JzCzhz space at a standard viewing condition. The six cardinal
-    /// hue angles correspond to the primary and secondary colors of the ACEScg
-    /// gamut triangle:
+    /// This table is **computed** from the AP1 (ACEScg) primary chromaticities
+    /// using the CIECAM02 perceptual colour model — the same mechanism used by
+    /// [`crate::cusp_gamut::CuspGamutMapper`] for Rec.709/P3/Rec.2020.
     ///
-    /// - Red primary (~20°): high chroma, medium-low lightness
-    /// - Yellow (~85°): high chroma, medium-high lightness
-    /// - Green primary (~140°): high chroma, medium lightness
-    /// - Cyan (~195°): medium chroma, medium lightness
-    /// - Blue primary (~250°): medium chroma, low-medium lightness
-    /// - Magenta (~320°): medium chroma, low-medium lightness
+    /// AP1 (ACEScg) primary CIE xy chromaticities (D65 white point):
     ///
-    /// In a real implementation this would be derived analytically from the
-    /// ACEScg primaries using the JzAzBz or ICtCp colorspace transform.
+    /// | Primary | x     | y     |
+    /// |---------|-------|-------|
+    /// | R       | 0.713 | 0.293 |
+    /// | G       | 0.165 | 0.830 |
+    /// | B       | 0.128 | 0.044 |
+    /// | White   | 0.3127| 0.3290|
+    ///
+    /// Six representative hue angles (0°, 60°, 120°, 180°, 240°, 300°) in
+    /// CIECAM02 hue space are sampled and the resulting cusps are returned,
+    /// sorted by hue.  The CIECAM02 lightness (J ∈ [0,100]) and chroma (C) are
+    /// normalised into the \[0,1\] convention used by [`AcesCuspPoint`]:
+    ///
+    /// - `lightness = J / 100`
+    /// - `chroma = C / C_NORM` where `C_NORM = 100.0` (typical CIECAM02 chroma
+    ///   range for highly saturated colours is ~10–80; dividing by 100 gives a
+    ///   normalised value in roughly \[0.1, 0.8\])
+    ///
+    /// The result is cached in a `OnceLock` so the (relatively expensive) cusp
+    /// scan is only performed once per process lifetime.
     #[must_use]
     pub fn acescg_default() -> Self {
-        let cusps = vec![
-            AcesCuspPoint::new(20.0, 0.45, 0.38),  // Red
-            AcesCuspPoint::new(85.0, 0.72, 0.34),  // Yellow
-            AcesCuspPoint::new(140.0, 0.62, 0.32), // Green
-            AcesCuspPoint::new(195.0, 0.52, 0.22), // Cyan
-            AcesCuspPoint::new(250.0, 0.35, 0.28), // Blue
-            AcesCuspPoint::new(320.0, 0.38, 0.30), // Magenta
+        /// Normalisation divisor for CIECAM02 chroma → [0,1].
+        const CHROMA_NORM: f64 = 100.0;
+        /// Normalisation divisor for CIECAM02 lightness → [0,1].
+        const LIGHTNESS_NORM: f64 = 100.0;
+
+        // AP1 (ACEScg) CIE xy primaries and D65 white point.
+        const AP1_PRIMARIES: [[f64; 2]; 3] = [
+            [0.713, 0.293], // R
+            [0.165, 0.830], // G
+            [0.128, 0.044], // B
         ];
-        Self::new(cusps)
+        const D65_WHITE: [f64; 2] = [0.3127, 0.3290];
+
+        // Six representative CIECAM02 hue angles (degrees).
+        const HUE_SAMPLES: [f64; 6] = [0.0, 60.0, 120.0, 180.0, 240.0, 300.0];
+
+        // Global cache — computed at most once per process.
+        static CACHE: OnceLock<Vec<AcesCuspPoint>> = OnceLock::new();
+
+        let computed = CACHE.get_or_init(|| {
+            use crate::ciecam02::{CiecamModel, CiecamViewingConditions, SurroundCondition};
+            use crate::cusp_gamut::find_cusp_at_hue_for_primaries;
+
+            let viewing = CiecamViewingConditions {
+                adapting_luminance_la: 64.0,
+                background_relative_lum_yb: 20.0,
+                surround: SurroundCondition::Average,
+            };
+            let model = CiecamModel::new(viewing);
+
+            HUE_SAMPLES
+                .iter()
+                .map(|&hue_target| {
+                    let cusp = find_cusp_at_hue_for_primaries(
+                        hue_target,
+                        &AP1_PRIMARIES,
+                        D65_WHITE,
+                        &model,
+                    );
+                    // Normalise CIECAM02 J → [0,1] and C → [0,∞) normalised.
+                    let lightness = (cusp.lightness / LIGHTNESS_NORM).clamp(0.0, 1.0) as f32;
+                    let chroma = (cusp.max_chroma / CHROMA_NORM).max(0.0) as f32;
+                    AcesCuspPoint::new(cusp.hue_angle as f32, lightness, chroma)
+                })
+                .collect()
+        });
+
+        Self::new(computed.clone())
     }
 
     /// Find the cusp point for an arbitrary hue angle by linear interpolation.
@@ -913,15 +964,28 @@ mod tests {
     #[test]
     fn test_cusp_table_interpolate_midpoint() {
         let table = AcesCuspTable::acescg_default();
-        // Midpoint between 20° (lightness=0.45) and 85° (lightness=0.72)
-        // should be approximately 0.585
-        let mid = table.interpolate(52.5);
-        let expected_l = (0.45 + 0.72) / 2.0;
+        let cusps = table.cusps();
+
+        // Pick the first two adjacent entries and interpolate their midpoint hue.
+        // The interpolated lightness must be between the two endpoint lightnesses
+        // (linear interpolation property).
+        assert!(cusps.len() >= 2, "need at least 2 cusps for midpoint test");
+        let a = cusps[0];
+        let b = cusps[1];
+
+        let mid_hue = (a.hue + b.hue) / 2.0;
+        let mid = table.interpolate(mid_hue);
+
+        let lo_l = a.lightness.min(b.lightness);
+        let hi_l = a.lightness.max(b.lightness);
+
         assert!(
-            (mid.lightness - expected_l).abs() < 0.02,
-            "midpoint lightness: {} (expected ~{})",
+            mid.lightness >= lo_l - 0.01 && mid.lightness <= hi_l + 0.01,
+            "midpoint lightness {:.4} not in [{lo_l:.4}, {hi_l:.4}] \
+             (interpolated between hue {:.1}° and {:.1}° at mid {mid_hue:.1}°)",
             mid.lightness,
-            expected_l
+            a.hue,
+            b.hue
         );
     }
 
@@ -1008,5 +1072,133 @@ mod tests {
                 "in-gamut pixel ({r},{g},{b}) should remain in gamut, got ({ro},{go},{bo})"
             );
         }
+    }
+
+    // ── Computed AP1 cusp tests ────────────────────────────────────────────
+
+    /// Verify that `acescg_default()` returns computed (not hardcoded) cusps.
+    ///
+    /// The old hardcoded values were exactly-round numbers like 20.0° / 0.45 / 0.38.
+    /// The computed values must:
+    /// - Span a reasonable range of hue angles across [0°, 360°)
+    /// - Have positive, physically plausible chroma (> 0.01)
+    /// - Differ from the former round-number defaults on at least one axis
+    #[test]
+    fn test_acescg_cusps_are_computed_not_hardcoded() {
+        let table = AcesCuspTable::acescg_default();
+        let cusps = table.cusps();
+
+        assert_eq!(cusps.len(), 6, "should have 6 representative hue samples");
+
+        // All hues must be in [0, 360) and span the circle reasonably.
+        let min_hue = cusps.iter().map(|c| c.hue).fold(f32::INFINITY, f32::min);
+        let max_hue = cusps
+            .iter()
+            .map(|c| c.hue)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(min_hue >= 0.0, "min hue should be >= 0, got {min_hue}");
+        assert!(max_hue < 360.0, "max hue should be < 360, got {max_hue}");
+        assert!(
+            max_hue - min_hue > 200.0,
+            "cusps should span > 200° but span only {:.1}°",
+            max_hue - min_hue
+        );
+
+        // All chroma values must be positive and physically plausible.
+        for c in cusps {
+            assert!(
+                c.chroma > 0.01,
+                "cusp at hue {:.1}° has implausibly small chroma {:.4}",
+                c.hue,
+                c.chroma
+            );
+            assert!(
+                c.lightness > 0.0 && c.lightness <= 1.0,
+                "lightness {} out of (0, 1] at hue {:.1}°",
+                c.lightness,
+                c.hue
+            );
+        }
+
+        // The computed table must differ from the former hardcoded constants on
+        // at least one representative value.  The original red cusp was (20.0°,
+        // 0.45, 0.38); any computed hue for the 0° sample will be exactly 0.0°
+        // (the hue_target fed to `find_cusp_at_hue`), so check chroma instead.
+        // The hardcoded red chroma was 0.38 (a round number); the computed value
+        // must be something different (real AP1 CIECAM02 cusp chroma will be
+        // well above or below this depending on viewing conditions).
+        let first = &cusps[0]; // sorted by hue → the 0° sample is first
+        assert_ne!(
+            (first.chroma * 100.0).round(),
+            38.0,
+            "computed AP1 red cusp chroma {:.4} matches old hardcoded 0.38 — \
+             this suggests the table was not recomputed",
+            first.chroma
+        );
+    }
+
+    /// `aces_gamut_compress_pixel` (from `gamut_mapping`) must leave a
+    /// mid-grey color completely unchanged (all channels equal → distance = 0).
+    #[test]
+    fn test_aces_gamut_compress_roundtrip_infield() {
+        use crate::gamut_mapping::{aces_gamut_compress_pixel, AcesGamutCompressConfig};
+
+        let cfg = AcesGamutCompressConfig::default();
+        // Mid-grey: all channels equal → per-channel distance from achromatic
+        // axis is 0 for all channels → the compressor leaves it completely unchanged.
+        let input = [0.5_f32, 0.5, 0.5];
+        let output = aces_gamut_compress_pixel(input, &cfg);
+
+        for i in 0..3 {
+            assert!(
+                (output[i] - input[i]).abs() < 1e-5,
+                "in-gamut channel {i}: expected ~{:.3}, got {:.3} (shift {:.6})",
+                input[i],
+                output[i],
+                (output[i] - input[i]).abs()
+            );
+        }
+
+        // Also verify that a slightly desaturated color (all channels > threshold
+        // of the distance metric, i.e. all channels within cfg.threshold of max)
+        // is mostly unchanged.  With max=0.8 and threshold=0.815, any channel
+        // satisfying (0.8 - c) <= 0.815 (i.e. c >= -0.015) passes unchanged.
+        // Use [0.8, 0.75, 0.70]: distances are 0.0, 0.05, 0.10 — all < 0.815.
+        let near_grey = [0.8_f32, 0.75, 0.70];
+        let near_out = aces_gamut_compress_pixel(near_grey, &cfg);
+        for i in 0..3 {
+            assert!(
+                (near_out[i] - near_grey[i]).abs() < 0.01,
+                "near-grey channel {i}: unexpected shift {:.4}",
+                (near_out[i] - near_grey[i]).abs()
+            );
+        }
+    }
+
+    /// `aces_gamut_compress_pixel` must bring an out-of-AP1-gamut color
+    /// (negative channel) into non-negative range.
+    #[test]
+    fn test_aces_gamut_compress_oob_clamped() {
+        use crate::gamut_mapping::{aces_gamut_compress_pixel, AcesGamutCompressConfig};
+
+        let cfg = AcesGamutCompressConfig::default();
+        // Highly saturated cyan that produces a large negative red channel.
+        let input = [0.0_f32, 1.2, 0.9];
+        let output = aces_gamut_compress_pixel(input, &cfg);
+
+        // All channels must be non-negative after compression.
+        for i in 0..3 {
+            assert!(
+                output[i] >= 0.0,
+                "channel {i} still negative after compression: {:.4}",
+                output[i]
+            );
+        }
+        // The input has a channel > 1.0; the compressor should have reduced it.
+        let max_out = output.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            max_out <= 1.5,
+            "compressed max channel {max_out:.4} unexpectedly large"
+        );
     }
 }

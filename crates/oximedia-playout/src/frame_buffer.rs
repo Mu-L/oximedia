@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Frame buffer management for broadcast playout.
 //!
 //! Provides a fixed-capacity ring buffer of video frames with pre-roll
@@ -25,7 +24,6 @@ pub enum PixelFormat {
 
 impl PixelFormat {
     /// Bytes per pixel (approximate for planar formats).
-    #[allow(clippy::cast_precision_loss)]
     pub fn bytes_per_pixel(&self) -> usize {
         match self {
             Self::Yuv422P8 => 2,
@@ -254,12 +252,105 @@ impl FrameBuffer {
     }
 
     /// Fill percentage as a value in [0.0, 1.0].
-    #[allow(clippy::cast_precision_loss)]
+    ///
+    /// Frame-buffer capacities are always small (≪ 2^53), so the usize→f64
+    /// cast is exact on any platform with a 64-bit usize or smaller.
     pub fn fill_ratio(&self) -> f64 {
         if self.config.capacity == 0 {
             return 0.0;
         }
-        self.ring.len() as f64 / self.config.capacity as f64
+        // SAFETY: broadcast playout capacities (< 10 000 frames) fit exactly in f64.
+        let len = self.ring.len() as f64;
+        let cap = self.config.capacity as f64;
+        len / cap
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PlayoutFrameBuffer — simple capacity-limited frame queue
+// ---------------------------------------------------------------------------
+
+/// A thread-safe, capacity-limited FIFO queue of raw video frame bytes.
+///
+/// Designed for simple playout pipelines where a single producer encodes
+/// frames and a single consumer delivers them. Uses a `Mutex<VecDeque>` for
+/// simplicity; for ultra-low-latency SPSC use [`crate::lockfree_frame_ring`].
+///
+/// # Example
+///
+/// ```
+/// use oximedia_playout::frame_buffer::PlayoutFrameBuffer;
+/// let buf = PlayoutFrameBuffer::new(10);
+/// assert!(buf.push(vec![0u8; 1920 * 1080 * 3]));
+/// let frame = buf.pop();
+/// assert!(frame.is_some());
+/// ```
+pub struct PlayoutFrameBuffer {
+    capacity: usize,
+    inner: std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>,
+}
+
+impl PlayoutFrameBuffer {
+    /// Create a new buffer that holds at most `capacity` frames.
+    ///
+    /// A capacity of 0 means no frames can ever be pushed (every push returns
+    /// `false`), which is useful as a "disabled" sentinel.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            inner: std::sync::Mutex::new(std::collections::VecDeque::with_capacity(capacity)),
+        }
+    }
+
+    /// Push a frame into the buffer.
+    ///
+    /// Returns `true` on success, or `false` if the buffer is already at
+    /// capacity (the frame is silently dropped).
+    pub fn push(&self, frame: Vec<u8>) -> bool {
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if guard.len() >= self.capacity {
+            return false;
+        }
+        guard.push_back(frame);
+        true
+    }
+
+    /// Pop the oldest frame from the buffer.
+    ///
+    /// Returns `None` if the buffer is empty.
+    pub fn pop(&self) -> Option<Vec<u8>> {
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.pop_front()
+    }
+
+    /// Current number of frames queued in the buffer.
+    pub fn len(&self) -> usize {
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.len()
+    }
+
+    /// Returns `true` if the buffer contains no frames.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Returns `true` if the buffer is at capacity (next push will fail).
+    pub fn is_full(&self) -> bool {
+        self.len() >= self.capacity
+    }
+
+    /// The maximum number of frames this buffer can hold.
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
 }
 
@@ -267,23 +358,23 @@ impl FrameBuffer {
 // Tests
 // ---------------------------------------------------------------------------
 
-fn make_frame(idx: u64) -> BufferedFrame {
-    BufferedFrame {
-        meta: FrameMeta {
-            frame_index: idx,
-            pts_us: (idx as i64) * 40_000,
-            is_key: idx.is_multiple_of(10),
-            width: 1920,
-            height: 1080,
-            format: PixelFormat::Yuv422P8,
-        },
-        data: vec![0u8; 64],
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_frame(idx: u64) -> BufferedFrame {
+        BufferedFrame {
+            meta: FrameMeta {
+                frame_index: idx,
+                pts_us: (idx as i64) * 40_000,
+                is_key: idx.is_multiple_of(10),
+                width: 1920,
+                height: 1080,
+                format: PixelFormat::Yuv422P8,
+            },
+            data: vec![0u8; 64],
+        }
+    }
 
     #[test]
     fn test_default_config() {
@@ -590,5 +681,58 @@ mod tests {
             assert!(r.is_some());
             assert_eq!(buf.stats().underrun_count, i);
         }
+    }
+
+    // --- PlayoutFrameBuffer tests ---
+
+    #[test]
+    fn test_frame_buffer_push_pop() {
+        let buf = PlayoutFrameBuffer::new(10);
+        // Push 3 distinct frames and verify FIFO pop order.
+        assert!(buf.push(vec![1u8; 64]));
+        assert!(buf.push(vec![2u8; 64]));
+        assert!(buf.push(vec![3u8; 64]));
+        assert_eq!(buf.len(), 3);
+
+        let f1 = buf.pop().expect("should pop first frame");
+        assert_eq!(f1[0], 1, "first pop should return the first pushed frame");
+        let f2 = buf.pop().expect("should pop second frame");
+        assert_eq!(f2[0], 2, "second pop should return the second pushed frame");
+        let f3 = buf.pop().expect("should pop third frame");
+        assert_eq!(f3[0], 3, "third pop should return the third pushed frame");
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_frame_buffer_capacity() {
+        let buf = PlayoutFrameBuffer::new(2);
+        assert!(buf.push(vec![0u8; 32]));
+        assert!(buf.push(vec![0u8; 32]));
+        // Buffer is now full — next push must return false.
+        assert!(
+            !buf.push(vec![0u8; 32]),
+            "push beyond capacity should return false"
+        );
+        assert!(buf.is_full());
+        assert_eq!(buf.len(), 2);
+    }
+
+    #[test]
+    fn test_frame_buffer_pop_empty() {
+        let buf = PlayoutFrameBuffer::new(5);
+        assert!(
+            buf.pop().is_none(),
+            "pop on empty buffer should return None"
+        );
+    }
+
+    #[test]
+    fn test_frame_buffer_zero_capacity() {
+        let buf = PlayoutFrameBuffer::new(0);
+        assert!(
+            !buf.push(vec![1u8]),
+            "capacity-0 buffer should reject all pushes"
+        );
+        assert!(buf.is_empty());
     }
 }

@@ -38,7 +38,9 @@
 
 use std::collections::HashMap;
 
-use crate::scoreboard::{GameClock, ScoreboardConfig, ScoreboardUpdate, ScoreboardRenderer as StaticRenderer};
+use crate::scoreboard::{
+    GameClock, ScoreboardConfig, ScoreboardRenderer as StaticRenderer, ScoreboardUpdate,
+};
 
 // ---------------------------------------------------------------------------
 // Public data types
@@ -518,7 +520,11 @@ mod tests {
         // render_frame() must poll the source and apply the update.
         let pixels = r.render_frame(320, 240);
         assert!(!pixels.is_empty());
-        assert_eq!(r.home_score(), 99, "score must be updated after render_frame");
+        assert_eq!(
+            r.home_score(),
+            99,
+            "score must be updated after render_frame"
+        );
     }
 
     // 10. After detach, further source pushes don't affect render.

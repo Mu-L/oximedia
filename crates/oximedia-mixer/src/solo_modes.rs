@@ -294,8 +294,16 @@ impl SoloRouter {
         let mon_gain = self.monitor_bus_gain(channel_id);
 
         // Main mix (with SIP dim if applicable).
-        let main_left: Vec<f32> = post_fader_left.iter().take(n).map(|&s| s * main_gain).collect();
-        let main_right: Vec<f32> = post_fader_right.iter().take(n).map(|&s| s * main_gain).collect();
+        let main_left: Vec<f32> = post_fader_left
+            .iter()
+            .take(n)
+            .map(|&s| s * main_gain)
+            .collect();
+        let main_right: Vec<f32> = post_fader_right
+            .iter()
+            .take(n)
+            .map(|&s| s * main_gain)
+            .collect();
 
         // Monitor bus.
         let (monitor_left, monitor_right) = if mon_gain.abs() < f32::EPSILON {
@@ -306,8 +314,16 @@ impl SoloRouter {
             (scaled.clone(), scaled)
         } else {
             // AFL: post-fader stereo.
-            let l: Vec<f32> = post_fader_left.iter().take(n).map(|&s| s * mon_gain).collect();
-            let r: Vec<f32> = post_fader_right.iter().take(n).map(|&s| s * mon_gain).collect();
+            let l: Vec<f32> = post_fader_left
+                .iter()
+                .take(n)
+                .map(|&s| s * mon_gain)
+                .collect();
+            let r: Vec<f32> = post_fader_right
+                .iter()
+                .take(n)
+                .map(|&s| s * mon_gain)
+                .collect();
             (l, r)
         };
 
@@ -545,7 +561,10 @@ mod tests {
 
         let result = router.route(muted, &pre, &post_l, &post_r);
         for &s in &result.main_left {
-            assert!(s.abs() < f32::EPSILON, "SIP should mute non-soloed channel main");
+            assert!(
+                s.abs() < f32::EPSILON,
+                "SIP should mute non-soloed channel main"
+            );
         }
         for &s in &result.monitor_left {
             assert!(

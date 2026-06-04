@@ -44,16 +44,14 @@ pub enum ValidationContext {
 
 /// Known valid ID3v2 v2.3/v2.4 frame IDs (a representative set).
 const KNOWN_ID3V2_FRAMES: &[&str] = &[
-    "AENC", "APIC", "ASPI", "CHAP", "COMM", "COMR", "CTOC", "ENCR", "EQU2", "EQUA",
-    "ETCO", "GEOB", "GRID", "IPLS", "LINK", "MCDI", "MLLT", "OWNE", "PCNT", "POPM",
-    "POSS", "PRIV", "RBUF", "RVA2", "RVAD", "RVRB", "SEEK", "SIGN", "SYLT", "SYTC",
-    "TALB", "TBPM", "TCOM", "TCON", "TCOP", "TDAT", "TDEN", "TDLY", "TDOR", "TDRC",
-    "TDRL", "TDTG", "TENC", "TEXT", "TFLT", "TIPL", "TIT1", "TIT2", "TIT3", "TKEY",
-    "TLAN", "TLEN", "TMCL", "TMED", "TMOO", "TOAL", "TOFN", "TOLY", "TOPE", "TORY",
-    "TOWN", "TPE1", "TPE2", "TPE3", "TPE4", "TPOS", "TPRO", "TPUB", "TRCK", "TRDA",
-    "TRSN", "TRSO", "TSIZ", "TSOA", "TSOP", "TSOT", "TSRC", "TSSE", "TSST", "TYER",
-    "TXXX", "UFID", "USER", "USLT", "WCOM", "WCOP", "WOAF", "WOAR", "WOAS", "WORS",
-    "WPAY", "WPUB", "WXXX",
+    "AENC", "APIC", "ASPI", "CHAP", "COMM", "COMR", "CTOC", "ENCR", "EQU2", "EQUA", "ETCO", "GEOB",
+    "GRID", "IPLS", "LINK", "MCDI", "MLLT", "OWNE", "PCNT", "POPM", "POSS", "PRIV", "RBUF", "RVA2",
+    "RVAD", "RVRB", "SEEK", "SIGN", "SYLT", "SYTC", "TALB", "TBPM", "TCOM", "TCON", "TCOP", "TDAT",
+    "TDEN", "TDLY", "TDOR", "TDRC", "TDRL", "TDTG", "TENC", "TEXT", "TFLT", "TIPL", "TIT1", "TIT2",
+    "TIT3", "TKEY", "TLAN", "TLEN", "TMCL", "TMED", "TMOO", "TOAL", "TOFN", "TOLY", "TOPE", "TORY",
+    "TOWN", "TPE1", "TPE2", "TPE3", "TPE4", "TPOS", "TPRO", "TPUB", "TRCK", "TRDA", "TRSN", "TRSO",
+    "TSIZ", "TSOA", "TSOP", "TSOT", "TSRC", "TSSE", "TSST", "TYER", "TXXX", "UFID", "USER", "USLT",
+    "WCOM", "WCOP", "WOAF", "WOAR", "WOAS", "WORS", "WPAY", "WPUB", "WXXX",
 ];
 
 /// Maximum value length in bytes for text frames (ID3v2 spec recommends < 1 MB).
@@ -161,10 +159,9 @@ fn validate_vorbis_key(key: &str) -> Result<(), Error> {
 
 /// Well-known iTunes metadata atom names (non-© atoms).
 const ITUNES_STANDARD_ATOMS: &[&str] = &[
-    "aART", "cpil", "disk", "gnre", "pgap", "rtng", "tmpo", "trkn", "soal", "soar",
-    "soaa", "sonm", "soco", "sosn", "tvsh", "tvsn", "tvep", "tvnn", "desc", "ldes",
-    "purd", "apID", "cmID", "plID", "cnID", "sfID", "atID", "geID", "akID", "catg",
-    "hdvd", "stik", "pcst", "keyw", "itnu",
+    "aART", "cpil", "disk", "gnre", "pgap", "rtng", "tmpo", "trkn", "soal", "soar", "soaa", "sonm",
+    "soco", "sosn", "tvsh", "tvsn", "tvep", "tvnn", "desc", "ldes", "purd", "apID", "cmID", "plID",
+    "cnID", "sfID", "atID", "geID", "akID", "catg", "hdvd", "stik", "pcst", "keyw", "itnu",
 ];
 
 /// Maximum iTunes atom value payload size (16 MiB).
@@ -227,9 +224,7 @@ fn validate_itunes_value(key: &str, value: &str) -> Result<(), Error> {
 // ─── APEv2 ───────────────────────────────────────────────────────────────────
 
 /// Reserved APEv2 item keys that must not be used as user tags.
-const APE_RESERVED_KEYS: &[&str] = &[
-    "Id3v1Comment", "Id", "Tag", "OggS",
-];
+const APE_RESERVED_KEYS: &[&str] = &["Id3v1Comment", "Id", "Tag", "OggS"];
 
 /// Maximum APEv2 item key length (255 bytes per spec).
 const APE_MAX_KEY_LEN: usize = 255;
@@ -359,7 +354,8 @@ mod tests {
     fn test_id3v2_key_invalid_chars() {
         assert!(validate_field("tit2", "x", ValidationContext::Id3v2).is_err()); // lowercase
         assert!(validate_field("TIT!", "x", ValidationContext::Id3v2).is_err()); // symbol
-        assert!(validate_field("TIT\n", "x", ValidationContext::Id3v2).is_err()); // control
+        assert!(validate_field("TIT\n", "x", ValidationContext::Id3v2).is_err());
+        // control
     }
 
     #[test]
@@ -428,7 +424,8 @@ mod tests {
     #[test]
     fn test_itunes_valid_copyright_atom() {
         assert!(validate_field("\u{00A9}nam", "Song", ValidationContext::Itunes).is_ok()); // ©nam
-        assert!(validate_field("\u{00A9}ART", "Band", ValidationContext::Itunes).is_ok()); // ©ART
+        assert!(validate_field("\u{00A9}ART", "Band", ValidationContext::Itunes).is_ok());
+        // ©ART
     }
 
     #[test]
@@ -449,7 +446,12 @@ mod tests {
 
     #[test]
     fn test_itunes_invalid_atom() {
-        assert!(validate_field("not_a_valid_atom_name_long", "val", ValidationContext::Itunes).is_err());
+        assert!(validate_field(
+            "not_a_valid_atom_name_long",
+            "val",
+            ValidationContext::Itunes
+        )
+        .is_err());
     }
 
     // ── APEv2 ────────────────────────────────────────────────────────────────
@@ -474,7 +476,8 @@ mod tests {
     #[test]
     fn test_apev2_reserved_key_rejected() {
         assert!(validate_field("Id3v1Comment", "val", ValidationContext::Apev2).is_err());
-        assert!(validate_field("id3v1comment", "val", ValidationContext::Apev2).is_err()); // case-insensitive
+        assert!(validate_field("id3v1comment", "val", ValidationContext::Apev2).is_err());
+        // case-insensitive
     }
 
     #[test]

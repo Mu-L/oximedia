@@ -212,14 +212,11 @@ impl LinkManager {
     /// Add a member to an existing group.
     ///
     /// Returns `true` if the group was found and the member was added.
-    pub fn add_to_group(
-        &mut self,
-        group_id: LinkGroupId,
-        member: LinkMember,
-    ) -> bool {
+    pub fn add_to_group(&mut self, group_id: LinkGroupId, member: LinkMember) -> bool {
         if let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) {
             group.add_member(member);
-            self.index.insert((member.track_id, member.clip_id), group_id);
+            self.index
+                .insert((member.track_id, member.clip_id), group_id);
             true
         } else {
             false
@@ -332,17 +329,8 @@ impl LinkManager {
 
     /// Returns `true` if two clips are in the same link group.
     #[must_use]
-    pub fn are_linked(
-        &self,
-        t1: TrackId,
-        c1: ClipId,
-        t2: TrackId,
-        c2: ClipId,
-    ) -> bool {
-        match (
-            self.index.get(&(t1, c1)),
-            self.index.get(&(t2, c2)),
-        ) {
+    pub fn are_linked(&self, t1: TrackId, c1: ClipId, t2: TrackId, c2: ClipId) -> bool {
+        match (self.index.get(&(t1, c1)), self.index.get(&(t2, c2))) {
             (Some(g1), Some(g2)) => g1 == g2,
             _ => false,
         }

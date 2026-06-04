@@ -30,7 +30,8 @@ pub fn check_1d_monotone(lut: &[f32]) -> bool {
 #[must_use]
 pub fn check_no_clipping(lut: &[f32]) -> bool {
     const TOLERANCE: f32 = 1e-6;
-    lut.iter().all(|&v| !v.is_nan() && v >= -TOLERANCE && v <= 1.0 + TOLERANCE)
+    lut.iter()
+        .all(|&v| !v.is_nan() && v >= -TOLERANCE && v <= 1.0 + TOLERANCE)
 }
 
 /// Check both monotonicity and absence of clipping.

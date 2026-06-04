@@ -350,11 +350,7 @@ impl SlaTracker {
     /// period (used to timestamp any breach events).
     ///
     /// Returns `None` if the service is not registered.
-    pub fn close_period(
-        &mut self,
-        service_id: &str,
-        detected_at_secs: f64,
-    ) -> Option<SlaReport> {
+    pub fn close_period(&mut self, service_id: &str, detected_at_secs: f64) -> Option<SlaReport> {
         let state = self.services.get_mut(service_id)?;
         let achieved = state.current_window.uptime_pct();
         let required = state.tier.required_uptime_pct();
@@ -417,9 +413,7 @@ impl SlaTracker {
     /// Number of historical closed periods for a service.
     #[must_use]
     pub fn closed_period_count(&self, service_id: &str) -> usize {
-        self.services
-            .get(service_id)
-            .map_or(0, |s| s.history.len())
+        self.services.get(service_id).map_or(0, |s| s.history.len())
     }
 
     /// Retrieve all closed-period reports for a service (oldest first).
@@ -565,7 +559,10 @@ mod tests {
         w.record_interval(0.0, 100.0, false);
         w.record_interval(100.0, MONTH, true);
         let remaining = w.remaining_downtime_budget(SlaTier::Gold);
-        assert!(remaining > 0.0, "should have budget remaining; got {remaining}");
+        assert!(
+            remaining > 0.0,
+            "should have budget remaining; got {remaining}"
+        );
     }
 
     #[test]
@@ -633,7 +630,9 @@ mod tests {
     fn test_tracker_current_report_does_not_close() {
         let mut t = make_tracker_with_gold();
         t.record_interval("svc", 0.0, 1000.0, false);
-        let snap = t.current_report("svc").expect("current_report should succeed");
+        let snap = t
+            .current_report("svc")
+            .expect("current_report should succeed");
         assert!(snap.uptime_pct() < 100.0);
         // Period is still open — history is empty.
         assert_eq!(t.closed_period_count("svc"), 0);

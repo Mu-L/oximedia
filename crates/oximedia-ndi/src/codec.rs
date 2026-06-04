@@ -771,6 +771,171 @@ impl Default for SpeedHqCodec {
     }
 }
 
+// ── Parallel SpeedHQ slice encoding ──────────────────────────────────────────
+
+/// A raw video frame suitable for parallel slice encoding.
+///
+/// This is a lightweight type used by [`encode_speedhq_parallel`] that avoids
+/// depending on the full NDI protocol types.
+#[derive(Debug, Clone)]
+pub struct VideoFrame {
+    /// Frame width in pixels.
+    pub width: u32,
+    /// Frame height in pixels.
+    pub height: u32,
+    /// Raw UYVY422 pixel data (2 bytes per pixel, row-major).
+    pub data: Vec<u8>,
+}
+
+impl VideoFrame {
+    /// Create a new [`VideoFrame`] with the given dimensions and UYVY422 data.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `data.len() < width * height * 2`.
+    #[must_use]
+    pub fn new(width: u32, height: u32, data: Vec<u8>) -> Self {
+        assert!(
+            data.len() >= (width as usize) * (height as usize) * 2,
+            "VideoFrame: data too short for UYVY422 at {width}×{height}"
+        );
+        Self {
+            width,
+            height,
+            data,
+        }
+    }
+
+    /// Create a zero-filled test frame.
+    #[must_use]
+    pub fn new_test(width: u32, height: u32) -> Self {
+        let data = vec![128u8; (width as usize) * (height as usize) * 2];
+        Self {
+            width,
+            height,
+            data,
+        }
+    }
+}
+
+/// Encode a [`VideoFrame`] using parallel horizontal slice encoding.
+///
+/// The frame is divided into `slices` horizontal strips (each covering
+/// `height / slices` rows, rounded to whole rows).  Each strip is encoded
+/// independently as an OXIT (DCT-based intra) bitstream and the results are
+/// collected into a `Vec<Vec<u8>>` where `result[i]` is the compressed data
+/// for slice `i` (top-to-bottom).
+///
+/// # Arguments
+///
+/// * `frame` — the input frame (UYVY422 pixel format).
+/// * `slices` — number of horizontal partitions.  Clamped to `[1, height]`.
+///
+/// # Returns
+///
+/// A `Vec` of `slices` compressed byte vectors (in top-to-bottom order).
+///
+/// # Panics
+///
+/// Does not panic; returns empty slices if the frame height is zero.
+///
+/// # Example
+///
+/// ```
+/// use oximedia_ndi::codec::{VideoFrame, encode_speedhq_parallel};
+///
+/// let frame = VideoFrame::new_test(320, 240);
+/// let encoded_4 = encode_speedhq_parallel(&frame, 4);
+/// let encoded_1 = encode_speedhq_parallel(&frame, 1);
+/// assert_eq!(encoded_4.len(), 4);
+/// assert_eq!(encoded_1.len(), 1);
+/// // Total bytes encoded should be similar (within 5x) between 1 and 4 slices.
+/// let total_4: usize = encoded_4.iter().map(|s| s.len()).sum();
+/// let total_1: usize = encoded_1.iter().map(|s| s.len()).sum();
+/// assert!(total_4 > 0 && total_1 > 0);
+/// ```
+pub fn encode_speedhq_parallel(frame: &VideoFrame, slices: usize) -> Vec<Vec<u8>> {
+    let height = frame.height as usize;
+    let width = frame.width as usize;
+
+    if height == 0 || width == 0 || slices == 0 {
+        return Vec::new();
+    }
+
+    let n = slices.clamp(1, height);
+    let stride = width * 2; // UYVY422: 2 bytes per pixel
+    let base_rows = height / n;
+    let remainder = height % n;
+
+    // Build per-slice row ranges.
+    let mut row_starts: Vec<usize> = Vec::with_capacity(n);
+    let mut row_counts: Vec<usize> = Vec::with_capacity(n);
+    let mut row = 0usize;
+    for i in 0..n {
+        let extra = if i < remainder { 1 } else { 0 };
+        let count = base_rows + extra;
+        row_starts.push(row);
+        row_counts.push(count);
+        row += count;
+    }
+
+    // Encode each slice.  We use rayon's parallel iterator to exploit all
+    // available CPU cores while keeping the result ordering deterministic.
+    use rayon::prelude::*;
+    let codec = SpeedHqCodec::new(80);
+
+    (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let first_row = row_starts[i];
+            let count = row_counts[i];
+            if count == 0 {
+                return Vec::new();
+            }
+            // Extract the rows for this slice.
+            let byte_start = first_row * stride;
+            let byte_end = (first_row + count) * stride;
+            let byte_end = byte_end.min(frame.data.len());
+            let slice_data = &frame.data[byte_start..byte_end];
+
+            // Re-pack UYVY422 slice data as pseudo-RGB for the OXIT codec.
+            // UYVY422 → 3-byte-per-pixel pseudo-planar (Y, U, V extracted).
+            let slice_width = width as u32;
+            let slice_height = count as u32;
+            let rgb_len = (slice_width as usize) * (slice_height as usize) * 3;
+            let mut rgb = vec![0u8; rgb_len];
+
+            for row_idx in 0..(count) {
+                for col in 0..(width / 2) {
+                    let src_base = row_idx * stride + col * 4;
+                    if src_base + 3 >= slice_data.len() {
+                        break;
+                    }
+                    let u_val = slice_data[src_base];
+                    let y0 = slice_data[src_base + 1];
+                    let v_val = slice_data[src_base + 2];
+                    let y1 = slice_data[src_base + 3];
+
+                    let dst_base = (row_idx * width + col * 2) * 3;
+                    if dst_base + 5 < rgb.len() {
+                        rgb[dst_base] = y0;
+                        rgb[dst_base + 1] = u_val;
+                        rgb[dst_base + 2] = v_val;
+                        rgb[dst_base + 3] = y1;
+                        rgb[dst_base + 4] = u_val;
+                        rgb[dst_base + 5] = v_val;
+                    }
+                }
+            }
+
+            codec
+                .compress(&rgb, slice_width, slice_height)
+                .map(|b| b.to_vec())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
 // ── YUV format converter ──────────────────────────────────────────────────────
 
 /// YUV format converter

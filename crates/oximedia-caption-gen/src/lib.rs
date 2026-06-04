@@ -90,8 +90,8 @@ pub use diarization::{
     SpeakerGender, SpeakerStats, SpeakerTurn,
 };
 pub use line_breaking::{
-    compute_cps, greedy_break, optimal_break, optimal_break_smawk, reading_speed_ok,
-    rebalance_lines, LineBalance, LineBreakAlgorithm, LineBreakConfig,
+    compute_cps, greedy_break, optimal_break, optimal_break_larsch, optimal_break_smawk,
+    reading_speed_ok, rebalance_lines, Larsch, LineBalance, LineBreakAlgorithm, LineBreakConfig,
 };
 pub use wcag::{
     check_caption_coverage, check_cps, check_live_latency, check_min_duration, check_sign_language,

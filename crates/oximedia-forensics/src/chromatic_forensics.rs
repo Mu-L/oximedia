@@ -350,7 +350,11 @@ pub fn analyze_chromatic_aberration(
 
     let n = residuals.len() as f64;
     let mean_res = residuals.iter().sum::<f64>() / n;
-    let var_res = residuals.iter().map(|r| (r - mean_res).powi(2)).sum::<f64>() / n;
+    let var_res = residuals
+        .iter()
+        .map(|r| (r - mean_res).powi(2))
+        .sum::<f64>()
+        / n;
     let std_res = var_res.sqrt();
 
     let threshold = mean_res + config.anomaly_sigma * std_res;

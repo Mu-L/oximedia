@@ -371,3 +371,121 @@ pub fn decode_html_entities(text: &str) -> String {
         .replace("&apos;", "'")
         .replace("&nbsp;", " ")
 }
+
+// ============================================================================
+// Bidirectional text tests
+// ============================================================================
+
+#[cfg(test)]
+mod bidi_tests {
+    use unicode_bidi::BidiInfo;
+
+    /// The mixed string starts with a Latin 'H' (strong LTR), so the paragraph
+    /// base direction must be detected as LTR (even level 0).
+    #[test]
+    fn test_bidi_paragraph_direction_ltr_first() {
+        let text = "Hello \u{0645}\u{0631}\u{062D}\u{0628}\u{0627} World";
+        let bidi = BidiInfo::new(text, None);
+        assert_eq!(
+            bidi.paragraphs.len(),
+            1,
+            "should form exactly one paragraph"
+        );
+        let para = &bidi.paragraphs[0];
+        // LTR paragraph: level is even (0).
+        assert!(
+            !para.level.is_rtl(),
+            "paragraph base direction should be LTR when first strong char is Latin"
+        );
+    }
+
+    /// Reorder the visual runs of the mixed string and verify that Arabic
+    /// characters appear between the two English word groups.
+    #[test]
+    fn test_bidi_mixed_arabic_latin_visual_order() {
+        // "Hello مرحبا World"
+        // In logical order: H e l l o   [arabic 5 chars]   W o r l d
+        let text = "Hello \u{0645}\u{0631}\u{062D}\u{0628}\u{0627} World";
+        let bidi = BidiInfo::new(text, None);
+        let para = &bidi.paragraphs[0];
+
+        // Reorder the whole paragraph into visual order.
+        let reordered: String = bidi.reorder_line(para, para.range.clone()).to_string();
+
+        // In visual (left-to-right display) order for an LTR paragraph:
+        // "Hello" comes first, then Arabic (which renders RTL internally),
+        // then "World" comes last. The reordered string must contain all three
+        // segments.
+        assert!(
+            reordered.contains("Hello"),
+            "reordered string must contain 'Hello'"
+        );
+        assert!(
+            reordered.contains("World"),
+            "reordered string must contain 'World'"
+        );
+        // Arabic characters must still be present.
+        let arabic_chars: String = reordered
+            .chars()
+            .filter(|c| ('\u{0600}'..='\u{06FF}').contains(c))
+            .collect();
+        assert_eq!(
+            arabic_chars.chars().count(),
+            5,
+            "all 5 Arabic characters must survive reordering"
+        );
+    }
+
+    /// Verify that a purely LTR string is unchanged after reordering.
+    #[test]
+    fn test_bidi_pure_ltr_unchanged() {
+        let text = "Hello World";
+        let bidi = BidiInfo::new(text, None);
+        let para = &bidi.paragraphs[0];
+        let reordered: String = bidi.reorder_line(para, para.range.clone()).to_string();
+        assert_eq!(
+            reordered, text,
+            "purely LTR text should be unchanged after reorder"
+        );
+    }
+
+    /// Verify that a purely RTL string is reversed by reorder_line.
+    #[test]
+    fn test_bidi_pure_rtl_reversal() {
+        // A string with only Arabic characters: "مرحبا" (Marhaba = Hello)
+        let text = "\u{0645}\u{0631}\u{062D}\u{0628}\u{0627}";
+        let bidi = BidiInfo::new(text, None);
+        let para = &bidi.paragraphs[0];
+        // Paragraph level should be RTL (odd level).
+        assert!(para.level.is_rtl(), "purely Arabic paragraph should be RTL");
+        let reordered: String = bidi.reorder_line(para, para.range.clone()).to_string();
+        // All Arabic chars still present.
+        let count = reordered
+            .chars()
+            .filter(|c| ('\u{0600}'..='\u{06FF}').contains(c))
+            .count();
+        assert_eq!(count, 5, "all 5 Arabic chars present after RTL reorder");
+    }
+
+    /// BidiLevel wrapper correctly reports direction.
+    #[test]
+    fn test_bidi_level_wrapper() {
+        use super::BidiLevel;
+        assert!(!BidiLevel::ltr().is_rtl());
+        assert!(BidiLevel::rtl().is_rtl());
+        assert!(!BidiLevel::new(0).is_rtl());
+        assert!(BidiLevel::new(1).is_rtl());
+        assert!(!BidiLevel::new(2).is_rtl());
+        assert!(BidiLevel::new(3).is_rtl());
+    }
+
+    /// From&lt;unicode_bidi::Level&gt; conversion preserves the level number.
+    #[test]
+    fn test_bidi_level_from_unicode_bidi() {
+        use super::BidiLevel;
+        use unicode_bidi::Level;
+        let ul = Level::ltr();
+        let bl = BidiLevel::from(ul);
+        assert_eq!(bl.value(), ul.number());
+    }
+}

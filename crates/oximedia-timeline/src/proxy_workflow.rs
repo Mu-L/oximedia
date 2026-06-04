@@ -67,7 +67,11 @@ pub struct ProxyEntry {
 impl ProxyEntry {
     /// Create a new proxy entry (proxy not yet generated).
     #[must_use]
-    pub fn new(clip_id: ClipId, source_path: impl Into<String>, proxy_path: impl Into<String>) -> Self {
+    pub fn new(
+        clip_id: ClipId,
+        source_path: impl Into<String>,
+        proxy_path: impl Into<String>,
+    ) -> Self {
         Self {
             clip_id,
             source_path: source_path.into(),

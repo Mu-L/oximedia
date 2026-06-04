@@ -228,7 +228,26 @@ pub const DEFAULT_INTER_TX_TYPE: [[u16; 17]; TX_TYPE_CONTEXTS] = [
 // =============================================================================
 
 /// Number of EOB multi contexts per plane type.
+///
+/// Per AV1 Annex F §9.5, EOB symbol coding is parameterised by the transform
+/// area class. The seven classes correspond to areas 16, 32, 64, 128, 256,
+/// 512, and 1024+ — matching the seven distinct `eob_multi*_cdf` tables in
+/// the reference decoder (`EobMultiSize16Cdf` through `EobMultiSize1024Cdf`).
 pub const EOB_MULTI_CONTEXTS: usize = 7;
+
+/// Number of transform sizes in AV1 (matches `TxSize` enum, indices 0..=18).
+pub const TX_SIZE_COUNT: usize = 19;
+
+/// Number of plane types (luma vs. one of two chroma planes).
+pub const EOB_PLANE_COUNT: usize = 3;
+
+/// Number of `(tx_size, plane)` contexts addressed by the caller.
+///
+/// The decoder/encoder packs the EOB context as
+/// `ctx = tx_size_idx * EOB_PLANE_COUNT + plane`, with `tx_size_idx` in
+/// `0..TX_SIZE_COUNT` and `plane` in `0..EOB_PLANE_COUNT`. The product is
+/// the number of distinct CDF slots maintained per frame.
+pub const EOB_MULTI_TOTAL_CONTEXTS: usize = TX_SIZE_COUNT * EOB_PLANE_COUNT;
 
 /// Default CDF for EOB multi (2 symbols).
 pub const DEFAULT_EOB_MULTI_2: [u16; 3] = [16384, 32768, 0];
@@ -244,6 +263,60 @@ pub const DEFAULT_EOB_MULTI_16: [u16; 17] = [
     2048, 4096, 6144, 8192, 10240, 12288, 14336, 16384, 18432, 20480, 22528, 24576, 26624, 28672,
     30720, 32768, 0,
 ];
+
+/// Map a `TxSize` integer index to the appropriate default EOB-multi CDF.
+///
+/// The class is chosen by transform area, matching the maximum value of
+/// [`crate::av1::coefficients::EobPt::from_eob`] for that area:
+///
+/// | Area   | TxSizes                       | max `EobPt` | CDF picked |
+/// |--------|-------------------------------|-------------|------------|
+/// | 16     | 4×4                           | 5           | `_8` (9)   |
+/// | 32     | 4×8, 8×4                      | 6           | `_8` (9)   |
+/// | 64     | 8×8, 4×16, 16×4               | 7           | `_8` (9)   |
+/// | 128    | 8×16, 16×8                    | 8           | `_16` (17) |
+/// | 256    | 16×16, 8×32, 32×8             | 9           | `_16` (17) |
+/// | 512    | 16×32, 32×16                  | 10          | `_16` (17) |
+/// | ≥ 1024 | 32×32, 32×64, 64×32, 64×64, … | 11          | `_16` (17) |
+///
+/// `DEFAULT_EOB_MULTI_2` and `DEFAULT_EOB_MULTI_4` are retained for
+/// reference (they appear in the public spec text) but are not selected
+/// because no transform area yields a max EOB point ≤ 3 in the present
+/// decoder.
+#[must_use]
+fn default_eob_multi_for_tx_size_idx(tx_size_idx: usize) -> Vec<u16> {
+    // Areas of TxSize variants in declaration order. Out-of-range
+    // indices fall through to the safest (largest) bucket.
+    const TX_SIZE_AREAS: [u32; TX_SIZE_COUNT] = [
+        16,   // Tx4x4
+        64,   // Tx8x8
+        256,  // Tx16x16
+        1024, // Tx32x32
+        4096, // Tx64x64
+        32,   // Tx4x8
+        32,   // Tx8x4
+        128,  // Tx8x16
+        128,  // Tx16x8
+        512,  // Tx16x32
+        512,  // Tx32x16
+        2048, // Tx32x64
+        2048, // Tx64x32
+        64,   // Tx4x16
+        64,   // Tx16x4
+        256,  // Tx8x32
+        256,  // Tx32x8
+        1024, // Tx16x64
+        1024, // Tx64x16
+    ];
+
+    let area = TX_SIZE_AREAS.get(tx_size_idx).copied().unwrap_or(4096);
+
+    if area <= 64 {
+        DEFAULT_EOB_MULTI_8.to_vec()
+    } else {
+        DEFAULT_EOB_MULTI_16.to_vec()
+    }
+}
 
 /// Number of coefficient base contexts.
 pub const COEFF_BASE_CTX_COUNT: usize = 42;
@@ -582,12 +655,23 @@ pub struct CdfContext {
     pub coeff_base: Vec<[u16; 5]>,
     /// Coefficient base range CDFs.
     pub coeff_br: Vec<[u16; 4]>,
+    /// EOB multi-symbol CDFs.
+    ///
+    /// Indexed by `ctx = tx_size_idx * EOB_PLANE_COUNT + plane` (see
+    /// [`EOB_MULTI_TOTAL_CONTEXTS`]). Each inner `Vec<u16>` is a CDF whose
+    /// length is selected per transform area — `_8` (9 entries) for small
+    /// blocks (area ≤ 64) and `_16` (17 entries) for larger blocks.
+    pub eob_multi: Vec<Vec<u16>>,
 }
 
 impl CdfContext {
     /// Create a new CDF context with default values.
     #[must_use]
     pub fn new() -> Self {
+        let eob_multi = (0..EOB_MULTI_TOTAL_CONTEXTS)
+            .map(|ctx| default_eob_multi_for_tx_size_idx(ctx / EOB_PLANE_COUNT))
+            .collect();
+
         Self {
             partition: DEFAULT_PARTITION_CDFS,
             y_mode: DEFAULT_Y_MODE_CDFS,
@@ -598,6 +682,7 @@ impl CdfContext {
             dc_sign: [DEFAULT_DC_SIGN_CDF; DC_SIGN_CTX_COUNT],
             coeff_base: vec![DEFAULT_COEFF_BASE_CDF; COEFF_BASE_CTX_COUNT],
             coeff_br: vec![DEFAULT_COEFF_BR_CDF; COEFF_BR_CTX_COUNT],
+            eob_multi,
         }
     }
 
@@ -617,6 +702,15 @@ impl CdfContext {
 
         for cdf in &mut self.coeff_br {
             *cdf = DEFAULT_COEFF_BR_CDF;
+        }
+
+        // Rebuild EOB multi CDFs so each ctx is reset to the proper default
+        // for its `(tx_size, plane)` pair. We resize first to guarantee
+        // length invariants even if a caller previously shrank the Vec.
+        self.eob_multi
+            .resize_with(EOB_MULTI_TOTAL_CONTEXTS, Vec::new);
+        for (ctx, cdf) in self.eob_multi.iter_mut().enumerate() {
+            *cdf = default_eob_multi_for_tx_size_idx(ctx / EOB_PLANE_COUNT);
         }
     }
 
@@ -644,10 +738,20 @@ impl CdfContext {
     }
 
     /// Get EOB multi CDF for a context.
+    ///
+    /// The context is `tx_size_idx * EOB_PLANE_COUNT + plane`. Indices that
+    /// fall outside [`EOB_MULTI_TOTAL_CONTEXTS`] are clamped to the final
+    /// slot, which holds the largest-area default CDF (see
+    /// [`default_eob_multi_for_tx_size_idx`]).
     #[must_use]
-    pub fn get_eob_multi_cdf(&self, _ctx: usize) -> &[u16] {
-        // Stub: Return default uniform CDF
-        &[8192, 16384, 24576, 32768]
+    pub fn get_eob_multi_cdf(&self, ctx: usize) -> &[u16] {
+        let idx = ctx.min(self.eob_multi.len().saturating_sub(1));
+        // The Vec is always populated in `new()`/`reset()`, but defend
+        // against degenerate states without unwrap.
+        match self.eob_multi.get(idx) {
+            Some(cdf) => cdf.as_slice(),
+            None => &DEFAULT_EOB_MULTI_16,
+        }
     }
 
     /// Get coefficient base CDF for a context.
@@ -686,21 +790,25 @@ impl CdfContext {
     // Mutable versions for updating CDFs during decoding
 
     /// Get mutable EOB multi CDF for a context.
-    pub fn get_eob_multi_cdf_mut(&mut self, _ctx: usize) -> &mut [u16] {
-        // Stub: Return a mutable slice (can't return static, so use first coeff_base)
-        if !self.coeff_base.is_empty() {
-            let len = self.coeff_base[0].len();
-            let max_len = 4.min(len);
-            if max_len > 0 {
-                return &mut self.coeff_base[0][..max_len];
-            }
+    ///
+    /// Mirrors [`Self::get_eob_multi_cdf`] but yields a mutable slice so
+    /// the arithmetic coder can adapt the CDF after each symbol. Returns a
+    /// slice into the largest-area slot when `ctx` is out of range.
+    pub fn get_eob_multi_cdf_mut(&mut self, ctx: usize) -> &mut [u16] {
+        if self.eob_multi.is_empty() {
+            // Guarantee the invariant: rebuild from defaults rather than
+            // returning an empty slice that would crash arithmetic coding.
+            self.eob_multi = (0..EOB_MULTI_TOTAL_CONTEXTS)
+                .map(|c| default_eob_multi_for_tx_size_idx(c / EOB_PLANE_COUNT))
+                .collect();
         }
-        // Return an empty slice from dc_sign as fallback
-        if !self.dc_sign.is_empty() {
-            &mut self.dc_sign[0][..0]
-        } else {
-            &mut []
-        }
+        let len = self.eob_multi.len();
+        let idx = ctx.min(len - 1);
+        // `idx < len` after the clamp above, so the indexed access is safe.
+        // We use direct indexing because `get_mut` returns `Option<&mut Vec>`
+        // which complicates the slice return without unwrap; the bound is
+        // already enforced.
+        self.eob_multi[idx].as_mut_slice()
     }
 
     /// Get mutable coefficient base CDF for a context.
@@ -867,5 +975,179 @@ mod tests {
         assert_eq!(MV_JOINTS, 4);
         assert_eq!(MV_CLASSES, 11);
         assert_eq!(MV_OFFSET_BITS, 10);
+    }
+
+    // -------------------------------------------------------------------
+    // EOB multi-symbol CDF context routing tests
+    // -------------------------------------------------------------------
+
+    /// Tx-size indices match the `TxSize` enum order (0..=18).
+    const TX_4X4: usize = 0;
+    const TX_8X8: usize = 1;
+    const TX_16X16: usize = 2;
+    const TX_32X32: usize = 3;
+    const TX_64X64: usize = 4;
+    const TX_4X8: usize = 5;
+    const TX_8X4: usize = 6;
+    const TX_8X16: usize = 7;
+    const TX_16X8: usize = 8;
+    const TX_16X32: usize = 9;
+    const TX_32X16: usize = 10;
+    const TX_4X16: usize = 13;
+    const TX_16X4: usize = 14;
+
+    fn eob_ctx_for(tx_size_idx: usize, plane: usize) -> usize {
+        tx_size_idx * EOB_PLANE_COUNT + plane
+    }
+
+    #[test]
+    fn test_eob_multi_total_contexts() {
+        // 19 transform sizes × 3 plane types = 57 contexts.
+        assert_eq!(EOB_MULTI_TOTAL_CONTEXTS, 57);
+        assert_eq!(TX_SIZE_COUNT, 19);
+        assert_eq!(EOB_PLANE_COUNT, 3);
+    }
+
+    #[test]
+    fn test_eob_multi_vec_populated() {
+        let ctx = CdfContext::new();
+        assert_eq!(ctx.eob_multi.len(), EOB_MULTI_TOTAL_CONTEXTS);
+        for cdf in &ctx.eob_multi {
+            assert!(
+                cdf.len() == DEFAULT_EOB_MULTI_8.len() || cdf.len() == DEFAULT_EOB_MULTI_16.len(),
+                "EOB CDF must be 9 or 17 entries, got {}",
+                cdf.len()
+            );
+        }
+    }
+
+    #[test]
+    fn test_eob_multi_cdf_length_small_blocks() {
+        // Areas ≤ 64 (4×4, 4×8, 8×4, 8×8, 4×16, 16×4) use the 9-entry CDF.
+        let ctx = CdfContext::new();
+        for plane in 0..EOB_PLANE_COUNT {
+            for tx in [TX_4X4, TX_4X8, TX_8X4, TX_8X8, TX_4X16, TX_16X4] {
+                let cdf = ctx.get_eob_multi_cdf(eob_ctx_for(tx, plane));
+                assert_eq!(
+                    cdf.len(),
+                    DEFAULT_EOB_MULTI_8.len(),
+                    "tx_size_idx={tx} plane={plane} expected 9-entry CDF"
+                );
+                assert_eq!(cdf, &DEFAULT_EOB_MULTI_8[..]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_eob_multi_cdf_length_large_blocks() {
+        // Areas ≥ 128 use the 17-entry CDF.
+        let ctx = CdfContext::new();
+        for plane in 0..EOB_PLANE_COUNT {
+            for tx in [
+                TX_8X16, TX_16X8, TX_16X16, TX_16X32, TX_32X16, TX_32X32, TX_64X64,
+            ] {
+                let cdf = ctx.get_eob_multi_cdf(eob_ctx_for(tx, plane));
+                assert_eq!(
+                    cdf.len(),
+                    DEFAULT_EOB_MULTI_16.len(),
+                    "tx_size_idx={tx} plane={plane} expected 17-entry CDF"
+                );
+                assert_eq!(cdf, &DEFAULT_EOB_MULTI_16[..]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_eob_multi_cdf_out_of_range_clamps() {
+        let ctx = CdfContext::new();
+        // ctx values ≥ EOB_MULTI_TOTAL_CONTEXTS clamp to the last slot.
+        let clamped = ctx.get_eob_multi_cdf(EOB_MULTI_TOTAL_CONTEXTS + 100);
+        let last = ctx.get_eob_multi_cdf(EOB_MULTI_TOTAL_CONTEXTS - 1);
+        assert_eq!(clamped, last);
+    }
+
+    #[test]
+    fn test_eob_multi_cdf_adapts_via_mut() {
+        // Mutate via the mutable getter and verify persistence through the
+        // immutable getter. This is what the arithmetic coder relies on.
+        let mut ctx = CdfContext::new();
+        let key = eob_ctx_for(TX_4X4, 0);
+
+        let initial = ctx.get_eob_multi_cdf(key).to_vec();
+        {
+            let cdf_mut = ctx.get_eob_multi_cdf_mut(key);
+            assert_eq!(cdf_mut.len(), DEFAULT_EOB_MULTI_8.len());
+            let len = cdf_mut.len();
+            // Bump every non-terminator entry; terminator is the count.
+            for v in &mut cdf_mut[..len - 1] {
+                *v = v.saturating_add(1);
+            }
+            cdf_mut[len - 1] = 5; // simulate adaptation count
+        }
+        let after = ctx.get_eob_multi_cdf(key).to_vec();
+        assert_ne!(
+            initial, after,
+            "mutation must be visible via immutable getter"
+        );
+        assert_eq!(after.len(), initial.len());
+        assert_eq!(after[after.len() - 1], 5);
+    }
+
+    #[test]
+    fn test_eob_multi_distinct_slots_per_plane() {
+        // Mutating one (tx_size, plane) must not affect a different plane.
+        let mut ctx = CdfContext::new();
+        let key_luma = eob_ctx_for(TX_16X16, 0);
+        let key_chroma = eob_ctx_for(TX_16X16, 1);
+
+        let chroma_before = ctx.get_eob_multi_cdf(key_chroma).to_vec();
+        {
+            let luma_mut = ctx.get_eob_multi_cdf_mut(key_luma);
+            luma_mut[0] = 42;
+        }
+        let chroma_after = ctx.get_eob_multi_cdf(key_chroma).to_vec();
+        let luma_after = ctx.get_eob_multi_cdf(key_luma).to_vec();
+
+        assert_eq!(chroma_before, chroma_after, "chroma slot untouched");
+        assert_eq!(luma_after[0], 42, "luma mutation visible");
+    }
+
+    #[test]
+    fn test_eob_multi_reset_restores_defaults() {
+        let mut ctx = CdfContext::new();
+        let key = eob_ctx_for(TX_32X32, 2);
+        {
+            let cdf_mut = ctx.get_eob_multi_cdf_mut(key);
+            cdf_mut[0] = 99;
+            cdf_mut[1] = 100;
+        }
+        ctx.reset();
+        let after = ctx.get_eob_multi_cdf(key);
+        assert_eq!(
+            after,
+            &DEFAULT_EOB_MULTI_16[..],
+            "reset must rebuild large-block default"
+        );
+    }
+
+    #[test]
+    fn test_eob_multi_cdf_mut_recovers_after_clear() {
+        // Defensive: if external code drains `eob_multi`, the mutable
+        // getter must rebuild the table rather than panic / unwrap.
+        let mut ctx = CdfContext::new();
+        ctx.eob_multi.clear();
+        let cdf = ctx.get_eob_multi_cdf_mut(0);
+        assert!(!cdf.is_empty());
+        assert_eq!(ctx.eob_multi.len(), EOB_MULTI_TOTAL_CONTEXTS);
+    }
+
+    #[test]
+    fn test_eob_multi_default_cdfs_are_valid() {
+        // The EOB multi defaults must be monotonic and terminate at the
+        // probability cap.
+        assert!(is_valid_cdf(&DEFAULT_EOB_MULTI_2));
+        assert!(is_valid_cdf(&DEFAULT_EOB_MULTI_4));
+        assert!(is_valid_cdf(&DEFAULT_EOB_MULTI_8));
+        assert!(is_valid_cdf(&DEFAULT_EOB_MULTI_16));
     }
 }

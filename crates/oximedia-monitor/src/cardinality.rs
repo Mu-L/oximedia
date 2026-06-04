@@ -165,10 +165,7 @@ impl CardinalityGuard {
         }
 
         // Check per-metric limit.
-        let per_metric_count = self
-            .series_count
-            .get(metric_name)
-            .map_or(0, HashSet::len);
+        let per_metric_count = self.series_count.get(metric_name).map_or(0, HashSet::len);
         if per_metric_count >= self.config.max_label_values_per_metric {
             return self.overflow(metric_name, label_combo);
         }
@@ -209,9 +206,7 @@ impl CardinalityGuard {
     fn overflow(&self, metric_name: &str, label_combo: &str) -> CardinalityResult {
         match self.config.overflow_action {
             OverflowAction::Drop => CardinalityResult::Overflow(label_combo.to_string()),
-            OverflowAction::UseOverflow => {
-                CardinalityResult::Overflow("__overflow__".to_string())
-            }
+            OverflowAction::UseOverflow => CardinalityResult::Overflow("__overflow__".to_string()),
             OverflowAction::Error => CardinalityResult::Error(format!(
                 "cardinality limit exceeded for metric '{metric_name}': \
                  label_combo='{label_combo}' \
@@ -397,10 +392,7 @@ mod tests {
     fn test_new_series_under_limit_is_allowed() {
         let mut guard = CardinalityGuard::new(CardinalityConfig::default_safe());
         let result = guard.check_and_record("cpu_usage", "host=node1");
-        assert_eq!(
-            result,
-            CardinalityResult::Allowed("host=node1".to_string())
-        );
+        assert_eq!(result, CardinalityResult::Allowed("host=node1".to_string()));
         assert_eq!(guard.series_count_for("cpu_usage"), 1);
     }
 
@@ -480,7 +472,10 @@ mod tests {
         let result = guard.check_and_record("m", "b");
         match result {
             CardinalityResult::Error(msg) => {
-                assert!(msg.contains("cardinality limit"), "error should describe the limit");
+                assert!(
+                    msg.contains("cardinality limit"),
+                    "error should describe the limit"
+                );
                 assert!(msg.contains("'m'"), "error should include the metric name");
             }
             other => panic!("expected Error, got {other:?}"),

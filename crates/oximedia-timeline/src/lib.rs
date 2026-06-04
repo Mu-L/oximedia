@@ -55,8 +55,12 @@
 #![allow(clippy::missing_panics_doc)]
 
 pub mod adjustment_layer;
+pub mod asymmetric_transition;
 pub mod audio;
+pub mod auto_sequence;
+pub mod beat_markers;
 pub mod cache;
+pub mod cache_warming;
 pub mod clip;
 pub mod clip_metadata;
 pub mod clip_sequence;
@@ -69,22 +73,30 @@ pub mod effects;
 pub mod error;
 pub mod export;
 pub mod export_settings;
+pub mod fcpxml_export;
 pub mod freeze_frame;
 pub mod gap_filler;
 pub mod import;
+pub mod incremental_render;
 pub mod interval_tree;
 pub mod keyframe;
 pub mod keyframe_animation;
+pub mod lazy_clip;
+pub mod linked_clips;
 pub mod marker;
 pub mod markers;
 pub mod metadata;
 pub mod mixer;
+pub mod multi_select;
 pub mod multicam;
 pub mod nested;
 pub mod nested_compound;
 pub mod nested_timeline;
+pub mod otio_export;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod playback;
+pub mod point_edit;
+pub mod proxy_workflow;
 pub mod razor_tool;
 pub mod render;
 pub mod render_queue;
@@ -92,8 +104,10 @@ pub mod renderer;
 pub mod sequence;
 pub mod sequence_range;
 pub mod snap_grid;
+pub mod speed_ramp;
 pub mod timecode;
 pub mod timeline;
+pub mod timeline_compare;
 pub mod timeline_diff;
 pub mod timeline_event;
 pub mod timeline_exporter;
@@ -108,6 +122,7 @@ pub mod types;
 pub mod version_snapshot;
 
 // Re-export commonly used items
+pub use asymmetric_transition::{AsymmetricTransition, AsymmetricTransitionWrapper, EasingCurve};
 pub use clip::{Clip, ClipId, MediaSource};
 pub use edit::{EditMode, EditOperation};
 pub use effects::{Effect, EffectId, EffectStack};
@@ -116,7 +131,10 @@ pub use keyframe::{Keyframe, KeyframeInterpolation, KeyframeValue};
 pub use marker::{Marker, MarkerType};
 pub use metadata::Metadata;
 pub use mixer::{AudioFrame, MixResult, TrackMixParams, TrackMixer};
-pub use renderer::{FrameRenderSettings, PixelBuffer, RenderedFrame, TimelineRenderer};
+pub use renderer::{
+    render_frame_parallel, CompositeFrame, FrameRenderSettings, PixelBuffer, RenderConfig,
+    RenderedFrame, TimelineRenderer,
+};
 pub use timecode::{TimecodeFormat, TimecodeValue};
 pub use timeline::Timeline;
 pub use timeline_exporter::{

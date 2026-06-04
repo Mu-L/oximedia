@@ -3,16 +3,22 @@
 use crate::Playlist;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// A single program entry in the EPG.
+///
+/// Titles and descriptions are stored as `BTreeMap<language_code, text>` to
+/// support XMLTV multi-language output.  Use `"en"` as the default language
+/// key; `title_for` will fall back to `"en"` when the requested language is
+/// absent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgramEntry {
-    /// Program title.
-    pub title: String,
+    /// Program titles keyed by BCP-47 language code (e.g. `"en"`, `"ja"`).
+    pub title: BTreeMap<String, String>,
 
-    /// Program description.
-    pub description: Option<String>,
+    /// Program descriptions keyed by BCP-47 language code.
+    pub description: BTreeMap<String, String>,
 
     /// Start time.
     pub start_time: DateTime<Utc>,
@@ -49,7 +55,7 @@ pub struct ProgramEntry {
 }
 
 impl ProgramEntry {
-    /// Creates a new program entry.
+    /// Creates a new program entry with an English title.
     #[must_use]
     pub fn new<S: Into<String>>(
         title: S,
@@ -61,9 +67,12 @@ impl ProgramEntry {
         let end_time = start_time
             + chrono::Duration::from_std(duration).unwrap_or_else(|_| chrono::Duration::zero());
 
+        let mut title_map = BTreeMap::new();
+        title_map.insert("en".to_string(), title.into());
+
         Self {
-            title: title.into(),
-            description: None,
+            title: title_map,
+            description: BTreeMap::new(),
             start_time: start_time_copy,
             end_time,
             duration,
@@ -78,11 +87,49 @@ impl ProgramEntry {
         }
     }
 
-    /// Sets the description.
+    /// Add or replace the title for a specific language.
+    #[must_use]
+    pub fn with_title(mut self, lang: impl Into<String>, title: impl Into<String>) -> Self {
+        self.title.insert(lang.into(), title.into());
+        self
+    }
+
+    /// Return the title for `lang`, falling back to the `"en"` entry if not
+    /// found, or `None` if neither exists.
+    #[must_use]
+    pub fn title_for(&self, lang: &str) -> Option<&str> {
+        self.title
+            .get(lang)
+            .map(String::as_str)
+            .or_else(|| self.title.get("en").map(String::as_str))
+    }
+
+    /// Sets the description for a specific language.
     #[must_use]
     pub fn with_description<S: Into<String>>(mut self, description: S) -> Self {
-        self.description = Some(description.into());
+        self.description
+            .insert("en".to_string(), description.into());
         self
+    }
+
+    /// Add or replace the description for a specific language.
+    #[must_use]
+    pub fn with_description_lang(
+        mut self,
+        lang: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        self.description.insert(lang.into(), description.into());
+        self
+    }
+
+    /// Return the description for `lang`, falling back to `"en"`, or `None`.
+    #[must_use]
+    pub fn description_for(&self, lang: &str) -> Option<&str> {
+        self.description
+            .get(lang)
+            .map(String::as_str)
+            .or_else(|| self.description.get("en").map(String::as_str))
     }
 
     /// Sets episode and season numbers.
@@ -168,7 +215,7 @@ impl EpgGenerator {
                 ProgramEntry::new(title, channel_id.to_string(), current_time, item.duration);
 
             if let Some(desc) = &item.metadata.description {
-                entry = entry.with_description(desc);
+                entry = entry.with_description(desc.as_str());
             }
 
             if let Some(rating) = &item.metadata.rating {
@@ -272,9 +319,25 @@ mod tests {
         .with_rating("TV-PG")
         .with_genre("Drama");
 
-        assert_eq!(entry.title, "Test Program");
+        assert_eq!(entry.title_for("en"), Some("Test Program"));
         assert_eq!(entry.season, Some(1));
         assert_eq!(entry.episode, Some(5));
+    }
+
+    #[test]
+    fn test_epg_multilang_title() {
+        let entry = ProgramEntry::new("Morning News", "ch1", Utc::now(), Duration::from_secs(1800))
+            .with_title("ja", "モーニングニュース");
+        assert_eq!(entry.title_for("en"), Some("Morning News"));
+        assert_eq!(entry.title_for("ja"), Some("モーニングニュース"));
+    }
+
+    #[test]
+    fn test_epg_title_for_fallback() {
+        // When "fr" is absent, title_for should fall back to "en".
+        let entry = ProgramEntry::new("Fallback Title", "ch1", Utc::now(), Duration::from_secs(60));
+        assert_eq!(entry.title_for("fr"), Some("Fallback Title"));
+        assert_eq!(entry.title_for("en"), Some("Fallback Title"));
     }
 
     #[test]

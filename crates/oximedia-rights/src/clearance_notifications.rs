@@ -163,7 +163,9 @@ impl ClearanceNotifier {
         // Compute which level index would apply based on elapsed time.
         let raw_level = (elapsed_ms / config.pending_threshold_ms) as usize;
         // Cap to the last defined level (no level beyond the list).
-        let level = raw_level.min(config.escalation_levels.len()).saturating_sub(1);
+        let level = raw_level
+            .min(config.escalation_levels.len())
+            .saturating_sub(1);
         let level_name = config.level_name(level)?;
         let message = format!(
             "Clearance '{}' has been pending for {} ms — escalating to level {} ({})",

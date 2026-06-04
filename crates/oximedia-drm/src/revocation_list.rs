@@ -78,7 +78,12 @@ pub struct RevocationEntry {
 impl RevocationEntry {
     /// Create a new revocation entry.
     #[must_use]
-    pub fn new(entity_id: &str, reason: RevocationReason, revoked_at_ms: u64, issuer: &str) -> Self {
+    pub fn new(
+        entity_id: &str,
+        reason: RevocationReason,
+        revoked_at_ms: u64,
+        issuer: &str,
+    ) -> Self {
         Self {
             entity_id: entity_id.to_string(),
             reason,
@@ -216,7 +221,10 @@ impl RevocationList {
     /// All entries matching a given reason.
     #[must_use]
     pub fn by_reason(&self, reason: RevocationReason) -> Vec<&RevocationEntry> {
-        self.entries.values().filter(|e| e.reason == reason).collect()
+        self.entries
+            .values()
+            .filter(|e| e.reason == reason)
+            .collect()
     }
 
     /// Remove all expired entries.  Returns the number removed.
@@ -256,10 +264,9 @@ impl RevocationList {
     /// Merge another revocation list into this one.  Newer entries win.
     pub fn merge(&mut self, other: &RevocationList) {
         for (id, entry) in &other.entries {
-            let dominated = self
-                .entries
-                .get(id)
-                .map_or(true, |existing| entry.revoked_at_ms > existing.revoked_at_ms);
+            let dominated = self.entries.get(id).map_or(true, |existing| {
+                entry.revoked_at_ms > existing.revoked_at_ms
+            });
             if dominated {
                 self.entries.insert(id.clone(), entry.clone());
             }
@@ -321,8 +328,8 @@ mod tests {
 
     #[test]
     fn test_entry_expiry() {
-        let e = RevocationEntry::new("x", RevocationReason::CertificateHold, 100, "a")
-            .with_expiry(500);
+        let e =
+            RevocationEntry::new("x", RevocationReason::CertificateHold, 100, "a").with_expiry(500);
         assert!(!e.is_expired(400));
         assert!(e.is_active(400));
         assert!(e.is_expired(500));
@@ -349,7 +356,12 @@ mod tests {
     #[test]
     fn test_list_unrevoke() {
         let mut list = RevocationList::new();
-        list.revoke(RevocationEntry::new("a", RevocationReason::CertificateHold, 100, "x"));
+        list.revoke(RevocationEntry::new(
+            "a",
+            RevocationReason::CertificateHold,
+            100,
+            "x",
+        ));
         assert!(list.is_revoked("a", 200));
         let removed = list.unrevoke("a");
         assert!(removed.is_some());
@@ -364,7 +376,12 @@ mod tests {
         list.revoke(
             RevocationEntry::new("a", RevocationReason::CertificateHold, 100, "x").with_expiry(500),
         );
-        list.revoke(RevocationEntry::new("b", RevocationReason::KeyCompromise, 200, "x"));
+        list.revoke(RevocationEntry::new(
+            "b",
+            RevocationReason::KeyCompromise,
+            200,
+            "x",
+        ));
         assert_eq!(list.len(), 2);
         let purged = list.purge_expired(600);
         assert_eq!(purged, 1);
@@ -375,9 +392,24 @@ mod tests {
     #[test]
     fn test_list_by_reason() {
         let mut list = RevocationList::new();
-        list.revoke(RevocationEntry::new("a", RevocationReason::KeyCompromise, 100, "x"));
-        list.revoke(RevocationEntry::new("b", RevocationReason::Superseded, 200, "x"));
-        list.revoke(RevocationEntry::new("c", RevocationReason::KeyCompromise, 300, "x"));
+        list.revoke(RevocationEntry::new(
+            "a",
+            RevocationReason::KeyCompromise,
+            100,
+            "x",
+        ));
+        list.revoke(RevocationEntry::new(
+            "b",
+            RevocationReason::Superseded,
+            200,
+            "x",
+        ));
+        list.revoke(RevocationEntry::new(
+            "c",
+            RevocationReason::KeyCompromise,
+            300,
+            "x",
+        ));
         let compromised = list.by_reason(RevocationReason::KeyCompromise);
         assert_eq!(compromised.len(), 2);
     }
@@ -385,7 +417,12 @@ mod tests {
     #[test]
     fn test_list_stats() {
         let mut list = RevocationList::new();
-        list.revoke(RevocationEntry::new("a", RevocationReason::KeyCompromise, 100, "x"));
+        list.revoke(RevocationEntry::new(
+            "a",
+            RevocationReason::KeyCompromise,
+            100,
+            "x",
+        ));
         list.revoke(
             RevocationEntry::new("b", RevocationReason::CertificateHold, 200, "x").with_expiry(500),
         );
@@ -403,17 +440,40 @@ mod tests {
     #[test]
     fn test_list_merge() {
         let mut list1 = RevocationList::new();
-        list1.revoke(RevocationEntry::new("a", RevocationReason::KeyCompromise, 100, "x"));
-        list1.revoke(RevocationEntry::new("b", RevocationReason::Superseded, 200, "x"));
+        list1.revoke(RevocationEntry::new(
+            "a",
+            RevocationReason::KeyCompromise,
+            100,
+            "x",
+        ));
+        list1.revoke(RevocationEntry::new(
+            "b",
+            RevocationReason::Superseded,
+            200,
+            "x",
+        ));
 
         let mut list2 = RevocationList::new();
         // Newer entry for "a" wins.
-        list2.revoke(RevocationEntry::new("a", RevocationReason::PolicyViolation, 300, "y"));
-        list2.revoke(RevocationEntry::new("c", RevocationReason::CaCompromise, 400, "y"));
+        list2.revoke(RevocationEntry::new(
+            "a",
+            RevocationReason::PolicyViolation,
+            300,
+            "y",
+        ));
+        list2.revoke(RevocationEntry::new(
+            "c",
+            RevocationReason::CaCompromise,
+            400,
+            "y",
+        ));
 
         list1.merge(&list2);
         assert_eq!(list1.len(), 3);
-        assert_eq!(list1.get("a").expect("entry should exist").reason, RevocationReason::PolicyViolation);
+        assert_eq!(
+            list1.get("a").expect("entry should exist").reason,
+            RevocationReason::PolicyViolation
+        );
         assert!(list1.get("c").is_some());
     }
 
@@ -421,7 +481,12 @@ mod tests {
     fn test_list_version_increments() {
         let mut list = RevocationList::new();
         assert_eq!(list.version(), 1);
-        list.revoke(RevocationEntry::new("a", RevocationReason::KeyCompromise, 100, "x"));
+        list.revoke(RevocationEntry::new(
+            "a",
+            RevocationReason::KeyCompromise,
+            100,
+            "x",
+        ));
         assert_eq!(list.version(), 2);
         list.unrevoke("a");
         assert_eq!(list.version(), 3);
@@ -430,8 +495,18 @@ mod tests {
     #[test]
     fn test_list_clear() {
         let mut list = RevocationList::new();
-        list.revoke(RevocationEntry::new("a", RevocationReason::KeyCompromise, 100, "x"));
-        list.revoke(RevocationEntry::new("b", RevocationReason::Superseded, 200, "x"));
+        list.revoke(RevocationEntry::new(
+            "a",
+            RevocationReason::KeyCompromise,
+            100,
+            "x",
+        ));
+        list.revoke(RevocationEntry::new(
+            "b",
+            RevocationReason::Superseded,
+            200,
+            "x",
+        ));
         assert!(!list.is_empty());
         list.clear();
         assert!(list.is_empty());
@@ -441,8 +516,18 @@ mod tests {
     #[test]
     fn test_list_entity_ids() {
         let mut list = RevocationList::new();
-        list.revoke(RevocationEntry::new("alpha", RevocationReason::KeyCompromise, 100, "x"));
-        list.revoke(RevocationEntry::new("beta", RevocationReason::Superseded, 200, "x"));
+        list.revoke(RevocationEntry::new(
+            "alpha",
+            RevocationReason::KeyCompromise,
+            100,
+            "x",
+        ));
+        list.revoke(RevocationEntry::new(
+            "beta",
+            RevocationReason::Superseded,
+            200,
+            "x",
+        ));
         let mut ids = list.entity_ids();
         ids.sort();
         assert_eq!(ids, vec!["alpha", "beta"]);

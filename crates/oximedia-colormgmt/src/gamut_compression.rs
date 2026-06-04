@@ -412,7 +412,11 @@ mod tests {
 
     #[test]
     fn test_soft_clip_all_methods() {
-        let methods = [KneeMethod::Parabolic, KneeMethod::Reinhard, KneeMethod::CubicHermite];
+        let methods = [
+            KneeMethod::Parabolic,
+            KneeMethod::Reinhard,
+            KneeMethod::CubicHermite,
+        ];
         for method in methods {
             let config = CompressorConfig {
                 knee_method: method,
@@ -422,7 +426,10 @@ mod tests {
             let pixel = [1.3, 0.9, 0.4];
             let out = c.compress_soft_clip(pixel);
             for v in out {
-                assert!(v <= 1.0 + 1e-10, "Method {method:?}: output must be <= 1.0: {v}");
+                assert!(
+                    v <= 1.0 + 1e-10,
+                    "Method {method:?}: output must be <= 1.0: {v}"
+                );
             }
         }
     }
@@ -465,8 +472,14 @@ mod tests {
         let ratio = c.compress_rgb_ratio(pixel);
 
         for i in 0..3 {
-            assert!((out0[i] - achro[i]).abs() < 1e-10, "blend=0 should match achromatic");
-            assert!((out1[i] - ratio[i]).abs() < 1e-10, "blend=1 should match rgb_ratio");
+            assert!(
+                (out0[i] - achro[i]).abs() < 1e-10,
+                "blend=0 should match achromatic"
+            );
+            assert!(
+                (out1[i] - ratio[i]).abs() < 1e-10,
+                "blend=1 should match rgb_ratio"
+            );
             // blended should be between achromatic and ratio
             let lo = out0[i].min(out1[i]);
             let hi = out0[i].max(out1[i]);
@@ -511,6 +524,9 @@ mod tests {
             out < 1.0 + 1e-10,
             "Reinhard should be bounded at 1.0, got {out}"
         );
-        assert!(out > 0.9, "Reinhard of very large value should be close to 1.0");
+        assert!(
+            out > 0.9,
+            "Reinhard of very large value should be close to 1.0"
+        );
     }
 }

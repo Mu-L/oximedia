@@ -138,12 +138,16 @@ impl<'a> PipelineReplayer<'a> {
 
         for (order, stage) in plan.stages.iter().enumerate() {
             for &node_id in &stage.nodes {
-                let node_spec = self.graph.nodes.get(&node_id).ok_or_else(|| {
-                    PipelineError::NodeNotFound(node_id.to_string())
-                })?;
+                let node_spec = self
+                    .graph
+                    .nodes
+                    .get(&node_id)
+                    .ok_or_else(|| PipelineError::NodeNotFound(node_id.to_string()))?;
 
                 let node_start = Instant::now();
-                let sim_dur = self.simulated_node_duration.unwrap_or(Duration::from_micros(50));
+                let sim_dur = self
+                    .simulated_node_duration
+                    .unwrap_or(Duration::from_micros(50));
                 // Simulate work via a no-op busy loop tracked by Instant.
                 let _ = sim_dur; // In a real replay we'd call node.execute()
                 let elapsed = node_start.elapsed();
@@ -204,11 +208,14 @@ mod tests {
             .build()
             .expect("valid graph");
 
-        let replayer = PipelineReplayer::new(&graph)
-            .with_simulated_duration(Duration::from_micros(10));
+        let replayer =
+            PipelineReplayer::new(&graph).with_simulated_duration(Duration::from_micros(10));
         let result = replayer.replay().expect("replay should succeed");
         assert!(result.success, "all nodes should succeed");
-        assert!(result.nodes_executed >= 3, "at least src, scale, sink executed");
+        assert!(
+            result.nodes_executed >= 3,
+            "at least src, scale, sink executed"
+        );
     }
 
     #[test]
@@ -222,8 +229,14 @@ mod tests {
         let replayer = PipelineReplayer::new(&graph);
         let result = replayer.replay().expect("replay should succeed");
         let summary = result.summary();
-        assert!(summary.contains("SUCCESS"), "summary should mention SUCCESS");
-        assert!(summary.contains("Replay"), "summary should start with Replay");
+        assert!(
+            summary.contains("SUCCESS"),
+            "summary should mention SUCCESS"
+        );
+        assert!(
+            summary.contains("Replay"),
+            "summary should start with Replay"
+        );
     }
 
     #[test]
@@ -235,8 +248,8 @@ mod tests {
             .build()
             .expect("valid graph");
 
-        let replayer = PipelineReplayer::new(&graph)
-            .with_simulated_duration(Duration::from_micros(100));
+        let replayer =
+            PipelineReplayer::new(&graph).with_simulated_duration(Duration::from_micros(100));
         let result = replayer.replay().expect("replay should succeed");
         // slowest_node should return Some since records are non-empty.
         assert!(result.slowest_node().is_some());
@@ -246,7 +259,9 @@ mod tests {
     fn test_replay_empty_graph() {
         let graph = PipelineGraph::new();
         let replayer = PipelineReplayer::new(&graph);
-        let result = replayer.replay().expect("replay of empty graph should succeed");
+        let result = replayer
+            .replay()
+            .expect("replay of empty graph should succeed");
         assert_eq!(result.nodes_executed, 0);
         assert!(result.success);
     }

@@ -49,7 +49,10 @@ impl PtpTimestamp {
     /// Create a new timestamp.
     #[must_use]
     pub const fn new(seconds: u64, nanoseconds: u32) -> Self {
-        Self { seconds, nanoseconds }
+        Self {
+            seconds,
+            nanoseconds,
+        }
     }
 
     /// Total nanoseconds from the epoch (saturating).
@@ -376,7 +379,10 @@ impl SyncMessage {
             44,
         );
         hdr.log_message_interval = sync_interval_log;
-        Self { header: hdr, origin_timestamp }
+        Self {
+            header: hdr,
+            origin_timestamp,
+        }
     }
 
     /// Construct a two-step Sync message (origin_timestamp = 0, follow-up to follow).
@@ -387,13 +393,7 @@ impl SyncMessage {
         sequence_id: u16,
         sync_interval_log: i8,
     ) -> Self {
-        let mut hdr = MessageHeader::new(
-            MessageType::Sync,
-            source,
-            domain,
-            sequence_id,
-            44,
-        );
+        let mut hdr = MessageHeader::new(MessageType::Sync, source, domain, sequence_id, 44);
         hdr.log_message_interval = sync_interval_log;
         hdr.flags |= MessageHeader::FLAG_TWO_STEP;
         Self {
@@ -434,7 +434,10 @@ impl FollowUpMessage {
             // Wire length = 34 + 10 = 44 bytes
             44,
         );
-        Self { header: hdr, precise_origin_timestamp }
+        Self {
+            header: hdr,
+            precise_origin_timestamp,
+        }
     }
 }
 
@@ -458,14 +461,11 @@ impl DelayReqMessage {
         sequence_id: u16,
         origin_timestamp: PtpTimestamp,
     ) -> Self {
-        let hdr = MessageHeader::new(
-            MessageType::DelayReq,
-            source,
-            domain,
-            sequence_id,
-            44,
-        );
-        Self { header: hdr, origin_timestamp }
+        let hdr = MessageHeader::new(MessageType::DelayReq, source, domain, sequence_id, 44);
+        Self {
+            header: hdr,
+            origin_timestamp,
+        }
     }
 }
 
@@ -641,8 +641,8 @@ impl ClockServo {
         let e = offset_ns as f64;
 
         // Integrate with anti-windup.
-        self.integral_ns = (self.integral_ns + e)
-            .clamp(-self.integral_clamp_ns, self.integral_clamp_ns);
+        self.integral_ns =
+            (self.integral_ns + e).clamp(-self.integral_clamp_ns, self.integral_clamp_ns);
 
         let correction = self.kp * e + self.ki * self.integral_ns;
         self.last_correction_ppb = correction;
@@ -834,11 +834,7 @@ mod tests {
     #[test]
     fn test_announce_message_validates_ok() {
         let src = port(0x1234_5678_9ABC_DEF0, 1);
-        let msg = AnnounceMessage::new(
-            src, 0, 1, ts(1_000_000, 0),
-            [0u8; 8],
-            128, 128, 135, 0, 0,
-        );
+        let msg = AnnounceMessage::new(src, 0, 1, ts(1_000_000, 0), [0u8; 8], 128, 128, 135, 0, 0);
         assert!(msg.validate().is_ok());
     }
 
@@ -1017,7 +1013,7 @@ mod tests {
     #[test]
     fn test_servo_integral_clamp() {
         let mut servo = ClockServo::new(0.0, 1.0, 100.0); // kp=0, ki=1, clamp=100
-        // After many large offsets, integral should be clamped.
+                                                          // After many large offsets, integral should be clamped.
         for _ in 0..1000 {
             servo.update(10_000);
         }

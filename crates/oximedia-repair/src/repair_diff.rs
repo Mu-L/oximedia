@@ -37,17 +37,15 @@ impl ByteDiffSummary {
     ///
     /// Reads up to `max_sample_bytes` bytes from both files at evenly spaced
     /// offsets and counts differences.
-    pub fn compute(
-        original: &Path,
-        repaired: &Path,
-        max_sample_bytes: usize,
-    ) -> Result<Self> {
+    pub fn compute(original: &Path, repaired: &Path, max_sample_bytes: usize) -> Result<Self> {
         use std::io::{Read, Seek, SeekFrom};
 
         let orig_size = std::fs::metadata(original).map(|m| m.len()).unwrap_or(0);
         let rep_size = std::fs::metadata(repaired).map(|m| m.len()).unwrap_or(0);
 
-        let sample_count = max_sample_bytes.min(orig_size as usize).min(rep_size as usize);
+        let sample_count = max_sample_bytes
+            .min(orig_size as usize)
+            .min(rep_size as usize);
 
         let mut orig_file = std::fs::File::open(original)?;
         let mut rep_file = std::fs::File::open(repaired)?;
@@ -147,7 +145,11 @@ impl RepairDiffReport {
 
         out.push_str("--- Issues ---\n");
         for (i, cmp) in self.issue_comparisons.iter().enumerate() {
-            let status = if cmp.resolved { "RESOLVED" } else { "UNRESOLVED" };
+            let status = if cmp.resolved {
+                "RESOLVED"
+            } else {
+                "UNRESOLVED"
+            };
             out.push_str(&format!(
                 "  [{i}] {:?} ({:?}) — {status}: {}\n",
                 cmp.issue.issue_type, cmp.issue.severity, cmp.note
@@ -198,14 +200,12 @@ impl RepairDiff {
 
     /// Build the diff report.
     pub fn build(self) -> Result<RepairDiffReport> {
-        let byte_diff = if self.include_byte_diff
-            && self.original.exists()
-            && self.repaired.exists()
-        {
-            ByteDiffSummary::compute(&self.original, &self.repaired, self.byte_diff_sample).ok()
-        } else {
-            None
-        };
+        let byte_diff =
+            if self.include_byte_diff && self.original.exists() && self.repaired.exists() {
+                ByteDiffSummary::compute(&self.original, &self.repaired, self.byte_diff_sample).ok()
+            } else {
+                None
+            };
 
         let mut issue_comparisons = Vec::with_capacity(self.issues.len());
         let mut resolved_count = 0usize;
@@ -323,7 +323,11 @@ mod tests {
         let orig = temp_file("diff_byte_diff_orig.bin", &[0x00u8; 512]);
         let rep = temp_file("diff_byte_diff_rep.bin", &[0xFFu8; 512]);
         let summary = ByteDiffSummary::compute(&orig, &rep, 512).expect("compute");
-        assert!(summary.diff_ratio > 0.9, "diff_ratio={}", summary.diff_ratio);
+        assert!(
+            summary.diff_ratio > 0.9,
+            "diff_ratio={}",
+            summary.diff_ratio
+        );
         let _ = std::fs::remove_file(orig);
         let _ = std::fs::remove_file(rep);
     }

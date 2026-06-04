@@ -7,7 +7,7 @@
 //! upstream connections to the origin.  This dramatically reduces origin load
 //! during cache-miss storms or cold-start events.
 //!
-//! [`OriginShield`] provides:
+//! `OriginShield` provides:
 //!
 //! - Per-region node selection (`ShieldNode`).
 //! - Asset tracking: once an asset is "stored" in a node its subsequent
@@ -49,11 +49,7 @@ pub struct ShieldNode {
 
 impl ShieldNode {
     /// Create a new node.
-    pub fn new(
-        id: impl Into<String>,
-        region: impl Into<String>,
-        cache_size_gb: f64,
-    ) -> Self {
+    pub fn new(id: impl Into<String>, region: impl Into<String>, cache_size_gb: f64) -> Self {
         Self {
             id: id.into(),
             region: region.into(),
@@ -341,8 +337,8 @@ impl OriginShield {
 
     /// Compute aggregate statistics.
     pub fn stats(&self) -> ShieldStats {
-        let total: u64 = self.nodes.iter().map(|n| n.requests_served).sum::<u64>()
-            + self.origin_fetch_count;
+        let total: u64 =
+            self.nodes.iter().map(|n| n.requests_served).sum::<u64>() + self.origin_fetch_count;
         let hits: u64 = self.nodes.iter().map(|n| n.cache_hits).sum();
         ShieldStats::compute(total, hits, self.origin_fetch_count)
     }
@@ -435,7 +431,10 @@ mod tests {
         let eu_node = s.get_node("shield-eu").expect("node");
         assert!(eu_node.has_asset("eu-asset"), "asset should be in eu node");
         let us_node = s.get_node("shield-us").expect("node");
-        assert!(!us_node.has_asset("eu-asset"), "asset must NOT be in us node");
+        assert!(
+            !us_node.has_asset("eu-asset"),
+            "asset must NOT be in us node"
+        );
     }
 
     // 7. capacity tracking: current_fill_gb increases on store
@@ -465,8 +464,10 @@ mod tests {
             s.handle_request(&req(&format!("asset-{i}"), "us-east-1", size_bytes), i);
         }
         let node = s.get_node("tiny").expect("tiny");
-        assert!(!node.is_near_full() || node.asset_count() <= 9,
-            "should have evicted or kept fill below maximum");
+        assert!(
+            !node.is_near_full() || node.asset_count() <= 9,
+            "should have evicted or kept fill below maximum"
+        );
 
         // Add one more — should trigger eviction
         s.handle_request(&req("overflow", "us-east-1", size_bytes), 9);

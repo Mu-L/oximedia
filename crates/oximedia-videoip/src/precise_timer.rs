@@ -173,9 +173,7 @@ impl PreciseSleeper {
         }
 
         let elapsed = start.elapsed();
-        let overshoot_ns = elapsed
-            .as_nanos()
-            .saturating_sub(target.as_nanos()) as i64;
+        let overshoot_ns = elapsed.as_nanos().saturating_sub(target.as_nanos()) as i64;
 
         self.accumulated_overshoot_ns = overshoot_ns;
         self.sleep_count += 1;
@@ -521,9 +519,9 @@ impl DeadlineScheduler {
     #[must_use]
     pub fn time_until_next(&self) -> Option<Duration> {
         let now_ns = self.clock.elapsed_ns();
-        self.deadlines.first().map(|d| {
-            Duration::from_nanos(d.target_ns.saturating_sub(now_ns))
-        })
+        self.deadlines
+            .first()
+            .map(|d| Duration::from_nanos(d.target_ns.saturating_sub(now_ns)))
     }
 }
 
@@ -664,10 +662,7 @@ mod tests {
 
     #[test]
     fn test_frame_pacer_wait() {
-        let mut pacer = FramePacer::with_strategy(
-            FrameRate::Fps60,
-            SleepStrategy::SpinWait,
-        );
+        let mut pacer = FramePacer::with_strategy(FrameRate::Fps60, SleepStrategy::SpinWait);
         let result = pacer.wait_for_next_frame();
         assert_eq!(result.frame_number, 0);
         assert!(!result.was_late);
@@ -687,7 +682,7 @@ mod tests {
     #[test]
     fn test_deadline_scheduler_schedule_and_check() {
         let mut sched = DeadlineScheduler::new(5_000_000); // 5ms tolerance
-        // Schedule deadlines in the past (should be immediately due).
+                                                           // Schedule deadlines in the past (should be immediately due).
         sched.schedule(0, "first");
         sched.schedule(0, "second");
         let (met, missed) = sched.check_due();

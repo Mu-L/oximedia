@@ -177,10 +177,7 @@ pub enum ExportStatus {
 impl ExportStatus {
     /// Returns `true` if the job has reached a terminal state.
     pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            Self::Completed | Self::Cancelled | Self::Failed(_)
-        )
+        matches!(self, Self::Completed | Self::Cancelled | Self::Failed(_))
     }
 }
 
@@ -299,8 +296,7 @@ impl ExportProgress {
     ///
     /// `percent` is clamped to `[0, 100]`.
     pub fn update(&self, percent: u8, eta_secs: Option<u16>, message: impl Into<String>) {
-        self.percent
-            .store(percent.min(100), Ordering::Relaxed);
+        self.percent.store(percent.min(100), Ordering::Relaxed);
         *self.eta_secs.lock() = eta_secs;
         *self.message.lock() = message.into();
     }
@@ -516,11 +512,7 @@ impl ExportCoordinator {
                 job.status = ExportStatus::Cancelled;
                 job.finished_at_ms = Some(now_ms);
                 let project_id = job.project_id;
-                inner
-                    .history
-                    .entry(project_id)
-                    .or_default()
-                    .push(job);
+                inner.history.entry(project_id).or_default().push(job);
                 let max = self.config.history_per_project;
                 inner.trim_history(project_id, max);
                 Ok(())
@@ -709,7 +701,9 @@ mod tests {
     fn test_submit_and_queue_length() {
         let coord = ExportCoordinator::new();
         let job = simple_job();
-        let job_id = coord.submit(job).expect("submit should succeed with empty queue");
+        let job_id = coord
+            .submit(job)
+            .expect("submit should succeed with empty queue");
         assert_eq!(coord.queue_len(), 1);
         assert!(coord.queued_jobs().iter().any(|j| j.id == job_id));
     }
@@ -730,10 +724,14 @@ mod tests {
     fn test_complete_job() {
         let coord = ExportCoordinator::new();
         let job_id = coord.submit(simple_job()).expect("submit should succeed");
-        let (running_job, _) = coord.start_next(now()).expect("start_next should return the queued job");
+        let (running_job, _) = coord
+            .start_next(now())
+            .expect("start_next should return the queued job");
         assert_eq!(running_job.id, job_id);
 
-        coord.complete(job_id, now() + 1000).expect("complete should succeed for running job");
+        coord
+            .complete(job_id, now() + 1000)
+            .expect("complete should succeed for running job");
         assert_eq!(coord.running_count(), 0);
 
         let history = coord.project_history(project());
@@ -745,9 +743,13 @@ mod tests {
     fn test_fail_job() {
         let coord = ExportCoordinator::new();
         let job_id = coord.submit(simple_job()).expect("submit should succeed");
-        coord.start_next(now()).expect("start_next should dequeue job");
+        coord
+            .start_next(now())
+            .expect("start_next should dequeue job");
 
-        coord.fail(job_id, "codec error", now() + 500).expect("fail should succeed for running job");
+        coord
+            .fail(job_id, "codec error", now() + 500)
+            .expect("fail should succeed for running job");
 
         let history = coord.project_history(project());
         assert!(matches!(history[0].status, ExportStatus::Failed(_)));
@@ -758,7 +760,9 @@ mod tests {
         let coord = ExportCoordinator::new();
         let job_id = coord.submit(simple_job()).expect("submit should succeed");
 
-        coord.cancel(job_id, now()).expect("cancel should succeed for queued job");
+        coord
+            .cancel(job_id, now())
+            .expect("cancel should succeed for queued job");
         assert_eq!(coord.queue_len(), 0);
         let history = coord.project_history(project());
         assert_eq!(history[0].status, ExportStatus::Cancelled);
@@ -768,9 +772,13 @@ mod tests {
     fn test_cancel_running_job() {
         let coord = ExportCoordinator::new();
         let job_id = coord.submit(simple_job()).expect("submit should succeed");
-        coord.start_next(now()).expect("start_next should dequeue job");
+        coord
+            .start_next(now())
+            .expect("start_next should dequeue job");
 
-        coord.cancel(job_id, now() + 200).expect("cancel should succeed for running job");
+        coord
+            .cancel(job_id, now() + 200)
+            .expect("cancel should succeed for running job");
         assert_eq!(coord.running_count(), 0);
         let history = coord.project_history(project());
         assert_eq!(history[0].status, ExportStatus::Cancelled);
@@ -782,7 +790,9 @@ mod tests {
         let j1 = simple_job();
         let j2 = simple_job(); // same project
         coord.submit(j1).expect("submit j1 should succeed");
-        coord.start_next(now()).expect("start_next should dequeue j1"); // j1 now Running
+        coord
+            .start_next(now())
+            .expect("start_next should dequeue j1"); // j1 now Running
 
         // Submitting j2 for the same project should fail.
         let result = coord.submit(j2);
@@ -793,9 +803,13 @@ mod tests {
     fn test_export_progress_tracking() {
         let coord = ExportCoordinator::new();
         let job_id = coord.submit(simple_job()).expect("submit should succeed");
-        coord.start_next(now()).expect("start_next should dequeue job");
+        coord
+            .start_next(now())
+            .expect("start_next should dequeue job");
 
-        let progress = coord.progress(job_id).expect("progress should be available for running job");
+        let progress = coord
+            .progress(job_id)
+            .expect("progress should be available for running job");
         progress.update(42, Some(30), "encoding audio");
         assert_eq!(progress.percent(), 42);
         assert_eq!(progress.eta_secs(), Some(30));
@@ -811,8 +825,12 @@ mod tests {
         let id1 = coord.submit(j1).expect("submit j1 should succeed");
         coord.submit(j2).expect("submit j2 should succeed"); // queued
 
-        coord.start_next(now()).expect("start_next should dequeue j1"); // id1 now running
-        coord.complete(id1, now() + 1000).expect("complete should succeed for running job");
+        coord
+            .start_next(now())
+            .expect("start_next should dequeue j1"); // id1 now running
+        coord
+            .complete(id1, now() + 1000)
+            .expect("complete should succeed for running job");
 
         let stats = coord.project_stats(project());
         assert_eq!(stats.queued, 1);

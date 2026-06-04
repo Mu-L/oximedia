@@ -140,10 +140,7 @@ impl EnergyReport {
     pub fn summary(&self) -> String {
         format!(
             "Energy: {} µJ | Avg power: {:.1} mW | Peak: {:.1} mW | Samples: {}",
-            self.total_energy_uj,
-            self.average_power_mw,
-            self.peak_power_mw,
-            self.sample_count
+            self.total_energy_uj, self.average_power_mw, self.peak_power_mw, self.sample_count
         )
     }
 
@@ -378,11 +375,8 @@ impl EnergyProfiler {
             }
         };
 
-        self.samples.push(EnergySample::new(
-            timestamp_ns,
-            domain_uj,
-            domain_mw,
-        ));
+        self.samples
+            .push(EnergySample::new(timestamp_ns, domain_uj, domain_mw));
     }
 
     /// Stops the profiling session and returns the aggregated [`EnergyReport`].

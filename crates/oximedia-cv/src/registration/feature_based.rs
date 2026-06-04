@@ -207,7 +207,13 @@ impl FeatureDetector {
         let mut keypoints = Vec::new();
 
         // Build Gaussian pyramid
-        let pyramid = build_gaussian_pyramid(image, width, height, self.num_octaves, self.scales_per_octave);
+        let pyramid = build_gaussian_pyramid(
+            image,
+            width,
+            height,
+            self.num_octaves,
+            self.scales_per_octave,
+        );
 
         // Detect DoG extrema
         for octave in 0..self.num_octaves {
@@ -264,7 +270,11 @@ impl FeatureDetector {
         }
 
         // Sort by response and limit
-        keypoints.sort_by(|a, b| b.response.partial_cmp(&a.response).unwrap_or(std::cmp::Ordering::Equal));
+        keypoints.sort_by(|a, b| {
+            b.response
+                .partial_cmp(&a.response)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         keypoints.truncate(self.max_features);
 
         Ok(keypoints)
@@ -312,7 +322,11 @@ impl FeatureDetector {
         keypoints = non_maximum_suppression(&keypoints, 10.0);
 
         // Sort and limit
-        keypoints.sort_by(|a, b| b.response.partial_cmp(&a.response).unwrap_or(std::cmp::Ordering::Equal));
+        keypoints.sort_by(|a, b| {
+            b.response
+                .partial_cmp(&a.response)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         keypoints.truncate(self.max_features);
 
         Ok(keypoints)
@@ -343,7 +357,11 @@ impl FeatureDetector {
         }
 
         // Sort and limit
-        keypoints.sort_by(|a, b| b.response.partial_cmp(&a.response).unwrap_or(std::cmp::Ordering::Equal));
+        keypoints.sort_by(|a, b| {
+            b.response
+                .partial_cmp(&a.response)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         keypoints.truncate(self.max_features);
 
         // Compute orientations
@@ -392,7 +410,7 @@ impl FeatureDetector {
                 let trace = m_xx + m_yy;
                 let response = det - 0.04 * trace * trace;
 
-                if response > self.threshold * 10000.0 {
+                if response > self.threshold as f64 * 10000.0 {
                     let kp = Keypoint::new(x as f32, y as f32, 1.0, 0.0, response as f32, 0);
                     keypoints.push(kp);
                 }
@@ -403,7 +421,11 @@ impl FeatureDetector {
         keypoints = non_maximum_suppression(&keypoints, 5.0);
 
         // Sort and limit
-        keypoints.sort_by(|a, b| b.response.partial_cmp(&a.response).unwrap_or(std::cmp::Ordering::Equal));
+        keypoints.sort_by(|a, b| {
+            b.response
+                .partial_cmp(&a.response)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         keypoints.truncate(self.max_features);
 
         Ok(keypoints)
@@ -521,11 +543,7 @@ impl FeatureMatcher {
 
     /// Match descriptors using brute-force method.
     #[must_use]
-    pub fn match_descriptors(
-        &self,
-        query: &[Descriptor],
-        train: &[Descriptor],
-    ) -> Vec<Match> {
+    pub fn match_descriptors(&self, query: &[Descriptor], train: &[Descriptor]) -> Vec<Match> {
         let mut matches = Vec::new();
 
         for (q_idx, q_desc) in query.iter().enumerate() {
@@ -610,7 +628,9 @@ pub fn estimate_homography(
     dst_points: &[(f64, f64)],
 ) -> CvResult<TransformMatrix> {
     if src_points.len() < 4 || src_points.len() != dst_points.len() {
-        return Err(CvError::computation("need at least 4 point correspondences"));
+        return Err(CvError::matrix_error(
+            "need at least 4 point correspondences",
+        ));
     }
 
     let n = src_points.len();
@@ -657,7 +677,9 @@ pub fn estimate_affine(
     dst_points: &[(f64, f64)],
 ) -> CvResult<TransformMatrix> {
     if src_points.len() < 3 || src_points.len() != dst_points.len() {
-        return Err(CvError::computation("need at least 3 point correspondences"));
+        return Err(CvError::matrix_error(
+            "need at least 3 point correspondences",
+        ));
     }
 
     // Solve for affine parameters using least squares
@@ -712,11 +734,10 @@ pub fn ransac_homography(
     confidence: f64,
 ) -> CvResult<(TransformMatrix, Vec<bool>)> {
     if src_points.len() < 4 {
-        return Err(CvError::computation("insufficient points for RANSAC"));
+        return Err(CvError::matrix_error("insufficient points for RANSAC"));
     }
 
     let mut best_inliers = Vec::new();
-    let mut best_model = TransformMatrix::identity();
     let mut best_count = 0;
 
     for _ in 0..max_iterations {
@@ -736,7 +757,8 @@ pub fn ransac_homography(
                 let (x_prime, y_prime) = model.transform_point(x, y);
                 let (x_expected, y_expected) = dst_points[i];
 
-                let error = ((x_prime - x_expected).powi(2) + (y_prime - y_expected).powi(2)).sqrt();
+                let error =
+                    ((x_prime - x_expected).powi(2) + (y_prime - y_expected).powi(2)).sqrt();
                 if error < threshold {
                     inliers[i] = true;
                     count += 1;
@@ -746,7 +768,6 @@ pub fn ransac_homography(
             if count > best_count {
                 best_count = count;
                 best_inliers = inliers;
-                best_model = model;
 
                 // Early termination check
                 let inlier_ratio = count as f64 / src_points.len() as f64;
@@ -758,7 +779,9 @@ pub fn ransac_homography(
     }
 
     if best_count < 4 {
-        return Err(CvError::computation("RANSAC failed to find sufficient inliers"));
+        return Err(CvError::matrix_error(
+            "RANSAC failed to find sufficient inliers",
+        ));
     }
 
     // Refine using all inliers
@@ -800,7 +823,7 @@ pub fn register_feature_based(
     let (tgt_kps, tgt_descs) = detector.detect_and_compute(target, width, height)?;
 
     if ref_kps.is_empty() || tgt_kps.is_empty() {
-        return Err(CvError::computation("no features detected"));
+        return Err(CvError::matrix_error("no features detected"));
     }
 
     // Match features
@@ -808,7 +831,7 @@ pub fn register_feature_based(
     let matches = matcher.match_descriptors(&ref_descs, &tgt_descs);
 
     if matches.len() < 4 {
-        return Err(CvError::computation("insufficient matches"));
+        return Err(CvError::matrix_error("insufficient matches"));
     }
 
     // Extract point correspondences
@@ -915,7 +938,7 @@ fn ransac_affine(
     }
 
     if best_count < 3 {
-        return Err(CvError::computation("RANSAC affine failed"));
+        return Err(CvError::matrix_error("RANSAC affine failed"));
     }
 
     Ok((best_model, best_inliers))
@@ -974,9 +997,9 @@ fn downsample_image(image: &[u8], width: u32, height: u32) -> Vec<u8> {
             let idx3 = ((sy + 1) * width + sx) as usize;
             let idx4 = ((sy + 1) * width + sx + 1) as usize;
 
-            let avg = (image[idx1] as u32 + image[idx2] as u32 + image[idx3] as u32
-                + image[idx4] as u32)
-                / 4;
+            let avg =
+                (image[idx1] as u32 + image[idx2] as u32 + image[idx3] as u32 + image[idx4] as u32)
+                    / 4;
             result[(y * new_w + x) as usize] = avg as u8;
         }
     }
@@ -1342,7 +1365,7 @@ fn solve_dlt(a: &[f64], rows: usize, cols: usize) -> CvResult<[f64; 9]> {
     // For now, use a simplified least squares approach
 
     if rows < cols {
-        return Err(CvError::computation("underdetermined system"));
+        return Err(CvError::matrix_error("underdetermined system"));
     }
 
     // Use normal equations A^T * A * x = 0
@@ -1358,13 +1381,18 @@ fn solve_dlt(a: &[f64], rows: usize, cols: usize) -> CvResult<[f64; 9]> {
     // Find eigenvector for smallest eigenvalue (simplified - just use last column)
     let mut h = [0.0; 9];
     for i in 0..9 {
-        h[i] = if i < cols { ata[i * cols + (cols - 1)] } else { 0.0 };
+        h[i] = if i < cols {
+            ata[i * cols + (cols - 1)]
+        } else {
+            0.0
+        };
     }
 
     // Normalize
     if h[8].abs() > f64::EPSILON {
-        for val in &mut h {
-            *val /= h[8];
+        let scale = h[8];
+        for val in h.iter_mut() {
+            *val /= scale;
         }
     }
 
@@ -1394,7 +1422,9 @@ fn solve_linear_system_6x6(a: &[f64; 36], b: &[f64; 6]) -> CvResult<[f64; 6]> {
         aug.swap(i, max_row);
 
         if aug[i][i].abs() < f64::EPSILON {
-            return Err(CvError::computation("singular matrix in affine estimation"));
+            return Err(CvError::matrix_error(
+                "singular matrix in affine estimation",
+            ));
         }
 
         for k in i + 1..6 {

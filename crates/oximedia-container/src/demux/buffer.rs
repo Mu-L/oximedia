@@ -1,9 +1,11 @@
-//! Packet buffering for demuxers.
+//! Packet buffering and read-ahead I/O for demuxers.
 //!
-//! Provides per-stream packet queues with seek support and configurable
-//! maximum buffer depths.
-
-#![allow(dead_code)]
+//! Provides:
+//! - [`PacketBuffer`] — per-stream packet queues with seek support and
+//!   configurable maximum buffer depths.
+//! - [`ReadAheadBuffer`] — a sequential read-ahead I/O buffer that fills a
+//!   large internal ring buffer from any [`std::io::Read`] source, amortising
+//!   small read calls and tracking hit/miss statistics.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -196,6 +198,169 @@ impl Default for PacketBuffer {
     }
 }
 
+// ─── ReadAheadBuffer ─────────────────────────────────────────────────────────
+
+/// Default read-ahead buffer size: 256 KiB.
+pub const DEFAULT_READ_AHEAD_SIZE: usize = 256 * 1024;
+
+/// Accumulated I/O statistics for a [`ReadAheadBuffer`].
+#[derive(Debug, Clone, Default)]
+pub struct BufferStats {
+    /// Number of read requests satisfied entirely from the internal buffer
+    /// (no underlying `Read` call needed).
+    pub cache_hits: u64,
+    /// Number of read requests that required filling (or partially filling)
+    /// the internal buffer from the underlying source.
+    pub cache_misses: u64,
+    /// Total bytes fetched from the underlying source during fill operations.
+    pub bytes_read_ahead: u64,
+}
+
+/// A sequential read-ahead I/O buffer.
+///
+/// `ReadAheadBuffer` wraps any [`std::io::Read`] source.  On each cache miss
+/// it fills a large internal buffer (`read_ahead_size` bytes) from the source
+/// so that subsequent reads are served from memory.  This amortises the
+/// per-call overhead of small reads (e.g. reading fixed-size headers in a
+/// tight loop) and gives the kernel a chance to issue efficient large reads.
+///
+/// # Example
+///
+/// ```no_run
+/// use oximedia_container::demux::buffer::{ReadAheadBuffer, DEFAULT_READ_AHEAD_SIZE};
+/// use std::io::Read;
+///
+/// let file = std::fs::File::open("video.mkv").expect("open");
+/// let mut rab = ReadAheadBuffer::new(DEFAULT_READ_AHEAD_SIZE);
+/// let mut header = [0u8; 16];
+/// let mut src = Box::new(file) as Box<dyn Read>;
+/// rab.read(&mut *src, &mut header).expect("read header");
+/// println!("hit_rate: {:.1}%", rab.hit_rate() * 100.0);
+/// ```
+pub struct ReadAheadBuffer {
+    /// Internal ring buffer: bytes at `[read_pos, fill_pos)` are valid data.
+    buf: Vec<u8>,
+    /// Next byte to hand to the caller.
+    read_pos: usize,
+    /// One past the last valid byte in `buf`.
+    fill_pos: usize,
+    /// Number of bytes to fetch from the source per fill operation.
+    read_ahead_size: usize,
+    /// Accumulated statistics.
+    stats: BufferStats,
+}
+
+impl ReadAheadBuffer {
+    /// Creates a new `ReadAheadBuffer` with the given fill size.
+    ///
+    /// `read_ahead_size` controls how many bytes are fetched from the
+    /// underlying source on each cache miss.  Use
+    /// [`DEFAULT_READ_AHEAD_SIZE`] (256 KiB) for most workloads.
+    #[must_use]
+    pub fn new(read_ahead_size: usize) -> Self {
+        let size = read_ahead_size.max(1);
+        Self {
+            buf: vec![0u8; size],
+            read_pos: 0,
+            fill_pos: 0,
+            read_ahead_size: size,
+            stats: BufferStats::default(),
+        }
+    }
+
+    /// Returns the number of bytes currently available in the buffer without
+    /// reading from the source.
+    #[inline]
+    fn available(&self) -> usize {
+        self.fill_pos.saturating_sub(self.read_pos)
+    }
+
+    /// Refill the internal buffer from `src`.
+    ///
+    /// Copies any unread tail bytes to the front of the buffer, then reads
+    /// up to `read_ahead_size` bytes from `src` into the remaining space.
+    fn refill(&mut self, src: &mut dyn std::io::Read) -> std::io::Result<()> {
+        // Shift leftover bytes to the front.
+        let leftover = self.fill_pos - self.read_pos;
+        if leftover > 0 {
+            self.buf.copy_within(self.read_pos..self.fill_pos, 0);
+        }
+        self.read_pos = 0;
+        self.fill_pos = leftover;
+
+        // Fill the rest of the buffer.
+        let space = self.buf.len() - self.fill_pos;
+        if space == 0 {
+            return Ok(());
+        }
+        let n = src.read(&mut self.buf[self.fill_pos..self.fill_pos + space])?;
+        self.fill_pos += n;
+        self.stats.bytes_read_ahead = self.stats.bytes_read_ahead.saturating_add(n as u64);
+        Ok(())
+    }
+
+    /// Reads up to `buf.len()` bytes into `buf`, refilling from `src` if
+    /// necessary.
+    ///
+    /// Returns the number of bytes actually written into `buf` (which may be
+    /// less than `buf.len()` at end-of-source or if the source returns fewer
+    /// bytes than requested).
+    ///
+    /// # Errors
+    ///
+    /// Propagates any I/O error returned by the underlying source during a
+    /// refill.
+    pub fn read(&mut self, src: &mut dyn std::io::Read, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        // Fast path: buffer already has enough data.
+        if self.available() >= buf.len() {
+            let n = buf.len();
+            buf.copy_from_slice(&self.buf[self.read_pos..self.read_pos + n]);
+            self.read_pos += n;
+            self.stats.cache_hits = self.stats.cache_hits.saturating_add(1);
+            return Ok(n);
+        }
+
+        // Slow path: need a refill.
+        self.stats.cache_misses = self.stats.cache_misses.saturating_add(1);
+        self.refill(src)?;
+
+        let n = buf.len().min(self.available());
+        buf[..n].copy_from_slice(&self.buf[self.read_pos..self.read_pos + n]);
+        self.read_pos += n;
+        Ok(n)
+    }
+
+    /// Returns the configured read-ahead fill size in bytes.
+    #[must_use]
+    #[inline]
+    pub fn read_ahead_size(&self) -> usize {
+        self.read_ahead_size
+    }
+
+    /// Returns a reference to the accumulated I/O statistics.
+    #[must_use]
+    pub fn stats(&self) -> &BufferStats {
+        &self.stats
+    }
+
+    /// Returns the fraction of reads satisfied from the internal buffer.
+    ///
+    /// The value is in `[0.0, 1.0]`.  Returns `0.0` before any reads have
+    /// been performed (to avoid division by zero).
+    #[must_use]
+    pub fn hit_rate(&self) -> f64 {
+        let total = self.stats.cache_hits + self.stats.cache_misses;
+        if total == 0 {
+            return 0.0;
+        }
+        self.stats.cache_hits as f64 / total as f64
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,5 +501,105 @@ mod tests {
             assert!(p.pts >= last_pts, "out of order");
             last_pts = p.pts;
         }
+    }
+
+    // ── ReadAheadBuffer tests ─────────────────────────────────────────────
+
+    use std::io::{Cursor, Write};
+
+    /// Write `n` bytes (0x00..0xFF cycling) to a temp file and return the path.
+    fn make_sequential_temp_file(n: usize) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        path.push(format!(
+            "oximedia_rab_test_{}_{}.bin",
+            std::process::id(),
+            nanos,
+        ));
+        let data: Vec<u8> = (0..n).map(|i| (i & 0xFF) as u8).collect();
+        let mut f = std::fs::File::create(&path).expect("create temp file");
+        f.write_all(&data).expect("write temp file");
+        f.flush().expect("flush");
+        path
+    }
+
+    #[test]
+    fn test_read_ahead_sequential() {
+        // Write 64 KiB of data. Use a 4 KiB read-ahead buffer.
+        // After the first miss (fills 4 KiB), subsequent small reads (16 bytes
+        // each) should be hits → hit_rate > 0.5.
+        let total = 64 * 1024usize;
+        let path = make_sequential_temp_file(total);
+        let mut file = std::fs::File::open(&path).expect("open");
+        let mut rab = ReadAheadBuffer::new(4 * 1024);
+
+        let mut small_buf = [0u8; 16];
+        let mut bytes_read = 0usize;
+        while bytes_read < total {
+            let n = rab
+                .read(&mut file, &mut small_buf)
+                .expect("read should not fail");
+            if n == 0 {
+                break;
+            }
+            bytes_read += n;
+        }
+
+        let rate = rab.hit_rate();
+        assert!(
+            rate > 0.5,
+            "hit_rate {rate} should be > 0.5 after warmup (reads: {bytes_read})",
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_read_ahead_stats() {
+        // 100 reads of 1 byte each from an in-memory cursor; after warmup the
+        // stats.bytes_read_ahead must be > 0 (the buffer fetched ahead).
+        let data: Vec<u8> = (0u8..=255).cycle().take(1024).collect();
+        let mut src = Cursor::new(data.clone());
+        let mut rab = ReadAheadBuffer::new(512);
+        let mut one = [0u8; 1];
+        for _ in 0..100 {
+            let n = rab.read(&mut src, &mut one).expect("read ok");
+            if n == 0 {
+                break;
+            }
+        }
+        assert!(
+            rab.stats().bytes_read_ahead > 0,
+            "bytes_read_ahead should be > 0 after reads",
+        );
+        assert!(
+            rab.stats().cache_hits + rab.stats().cache_misses >= 100,
+            "total reads should be >= 100",
+        );
+    }
+
+    #[test]
+    fn test_read_ahead_correctness() {
+        // Verify data integrity: all bytes read must match the source pattern.
+        let data: Vec<u8> = (0u8..=255).cycle().take(2048).collect();
+        let mut src = Cursor::new(data.clone());
+        let mut rab = ReadAheadBuffer::new(256);
+        let mut result = Vec::new();
+        let mut chunk = [0u8; 37]; // prime-sized reads to stress alignment
+        loop {
+            let n = rab.read(&mut src, &mut chunk).expect("read ok");
+            if n == 0 {
+                break;
+            }
+            result.extend_from_slice(&chunk[..n]);
+        }
+        assert_eq!(result, data, "read bytes must exactly match source");
+    }
+
+    #[test]
+    fn test_hit_rate_zero_before_reads() {
+        let rab = ReadAheadBuffer::new(1024);
+        assert_eq!(rab.hit_rate(), 0.0, "hit_rate must be 0.0 before any reads");
     }
 }

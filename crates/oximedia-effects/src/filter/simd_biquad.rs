@@ -300,6 +300,8 @@ impl SimdBiquad {
 }
 
 impl crate::AudioEffect for SimdBiquad {
+    const EFFECT_ID: &'static str = "simd_biquad";
+
     fn process_sample(&mut self, input: f32) -> f32 {
         SimdBiquad::process_sample(self, input)
     }

@@ -1,4 +1,12 @@
 //! Lanczos resampling filter for high-quality image scaling.
+//!
+//! # SIMD acceleration
+//! The horizontal and vertical separable filter passes in `scale_image` and
+//! `resample_1d_simd` are dispatched through
+//! `simd_interp::separable_filter_pass_simd`, which selects AVX2+FMA3 at
+//! runtime on x86/x86_64 or falls back to the generic scalar path on all
+//! other platforms.  The original pure-scalar `resample_1d` remains available
+//! for reference and for the bit-close regression test.
 
 #![allow(dead_code)]
 #![allow(clippy::cast_precision_loss)]
@@ -6,6 +14,8 @@
 #![allow(clippy::cast_sign_loss)]
 
 use std::f64::consts::PI;
+
+use crate::simd_interp::separable_filter_pass_simd;
 
 /// Lanczos kernel with configurable `a` parameter.
 ///
@@ -99,6 +109,71 @@ impl std::fmt::Display for LanczosWindowSize {
     }
 }
 
+// ── SIMD separable-filter helpers ────────────────────────────────────────────
+
+/// Build per-output-sample Lanczos weights and source offsets for a 1-D pass.
+///
+/// For each destination sample `d` in `[0, dst_len)` this evaluates the Lanczos
+/// kernel for every **in-bounds** tap within the support window `[center-a, center+a]`,
+/// normalises the tap weights so they sum to 1.0, and records the index of the
+/// first contributing source sample as `offset[d]`.
+///
+/// Only in-bounds source indices (`j` in `[0, src_len)`) are included; this
+/// matches the boundary handling of `LanczosResampler::resample_1d`.
+///
+/// Returns `(weights, offsets)` ready for `separable_filter_pass_simd`.
+fn build_lanczos_filter_weights(
+    kernel: &LanczosKernel,
+    src_len: usize,
+    dst_len: usize,
+) -> (Vec<Vec<f32>>, Vec<usize>) {
+    let scale = src_len as f64 / dst_len as f64;
+    let a = kernel.a as i64;
+    let mut weights: Vec<Vec<f32>> = Vec::with_capacity(dst_len);
+    let mut offsets: Vec<usize> = Vec::with_capacity(dst_len);
+
+    for d in 0..dst_len {
+        let center = (d as f64 + 0.5) * scale - 0.5;
+        let start = (center - a as f64).ceil() as i64;
+        let end = (center + a as f64).floor() as i64;
+
+        // Collect only in-bounds taps (matching resample_1d behaviour)
+        let mut first_src: Option<usize> = None;
+        let mut tap_weights: Vec<f32> = Vec::new();
+
+        for j in start..=end {
+            if j < 0 || j >= src_len as i64 {
+                continue;
+            }
+            let src_idx = j as usize;
+            if first_src.is_none() {
+                first_src = Some(src_idx);
+            }
+            let w = kernel.kernel_value(center - j as f64) as f32;
+            tap_weights.push(w);
+        }
+
+        // Normalise
+        let sum: f32 = tap_weights.iter().sum();
+        if sum.abs() > 1e-8 {
+            for w in &mut tap_weights {
+                *w /= sum;
+            }
+        }
+
+        // If no in-bounds tap, emit a single zero-weight tap at source index 0
+        let offset = first_src.unwrap_or(0);
+        if tap_weights.is_empty() {
+            tap_weights.push(0.0);
+        }
+
+        offsets.push(offset);
+        weights.push(tap_weights);
+    }
+
+    (weights, offsets)
+}
+
 /// Lanczos resampler that applies the Lanczos filter for image scaling.
 #[derive(Debug, Clone)]
 pub struct LanczosResampler {
@@ -134,8 +209,9 @@ impl LanczosResampler {
 
     /// Resample a 1D signal from its current length to `dst_len` samples.
     ///
-    /// Uses the Lanczos filter to compute each output sample by weighting
-    /// nearby input samples.
+    /// Uses the scalar Lanczos filter to compute each output sample by
+    /// weighting nearby input samples.  This is the reference scalar path;
+    /// for the SIMD-dispatched variant see [`LanczosResampler::resample_1d_simd`].
     pub fn resample_1d(&self, src: &[f32], dst_len: usize) -> Vec<f32> {
         if src.is_empty() || dst_len == 0 {
             return Vec::new();
@@ -173,10 +249,25 @@ impl LanczosResampler {
         dst
     }
 
-    /// Scale an image using Lanczos resampling.
+    /// Resample a 1D signal using SIMD-dispatched Lanczos filtering.
+    ///
+    /// Identical numerics to `resample_1d` but delegates the inner
+    /// multiply-accumulate loop to `separable_filter_pass_simd`, which
+    /// selects AVX2+FMA3 at runtime on x86/x86_64 or scalar otherwise.
+    pub fn resample_1d_simd(&self, src: &[f32], dst_len: usize) -> Vec<f32> {
+        if src.is_empty() || dst_len == 0 {
+            return Vec::new();
+        }
+        let src_len = src.len();
+        let (weights, offsets) = build_lanczos_filter_weights(&self.kernel, src_len, dst_len);
+        separable_filter_pass_simd(src, &weights, &offsets)
+    }
+
+    /// Scale an image using Lanczos resampling with SIMD acceleration.
     ///
     /// The image is assumed to be stored in row-major order with 1 byte per pixel
-    /// (grayscale). Performs a two-pass horizontal then vertical resample.
+    /// (grayscale). Performs a two-pass horizontal then vertical resample using
+    /// `separable_filter_pass_simd` for both passes.
     ///
     /// # Arguments
     /// - `pixels`: Source pixel data (grayscale, 1 byte per pixel)
@@ -185,6 +276,51 @@ impl LanczosResampler {
     /// - `dst_w`: Destination image width
     /// - `dst_h`: Destination image height
     pub fn scale_image(
+        &self,
+        pixels: &[u8],
+        src_w: usize,
+        src_h: usize,
+        dst_w: usize,
+        dst_h: usize,
+    ) -> Vec<u8> {
+        if pixels.is_empty() || dst_w == 0 || dst_h == 0 {
+            return Vec::new();
+        }
+
+        // Convert to f32 for processing
+        let src_f32: Vec<f32> = pixels.iter().map(|&p| p as f32 / 255.0).collect();
+
+        // Pre-compute horizontal and vertical filter weights once
+        let (h_weights, h_offsets) = build_lanczos_filter_weights(&self.kernel, src_w, dst_w);
+        let (v_weights, v_offsets) = build_lanczos_filter_weights(&self.kernel, src_h, dst_h);
+
+        // Horizontal pass: resample each row from src_w to dst_w using SIMD
+        let mut h_pass = vec![0.0f32; src_h * dst_w];
+        for row in 0..src_h {
+            let src_row = &src_f32[row * src_w..(row + 1) * src_w];
+            let dst_row = separable_filter_pass_simd(src_row, &h_weights, &h_offsets);
+            h_pass[row * dst_w..(row + 1) * dst_w].copy_from_slice(&dst_row);
+        }
+
+        // Vertical pass: resample each column from src_h to dst_h using SIMD
+        let mut result = vec![0u8; dst_w * dst_h];
+        for col in 0..dst_w {
+            let col_data: Vec<f32> = (0..src_h).map(|row| h_pass[row * dst_w + col]).collect();
+            let resampled_col = separable_filter_pass_simd(&col_data, &v_weights, &v_offsets);
+            for (row, &val) in resampled_col.iter().enumerate() {
+                let clamped = val.clamp(0.0, 1.0);
+                result[row * dst_w + col] = (clamped * 255.0) as u8;
+            }
+        }
+
+        result
+    }
+
+    /// Scalar-only image scaling using `resample_1d`.
+    ///
+    /// Identical algorithm to `scale_image` but bypasses SIMD dispatch.
+    /// Useful for bit-close regression tests.
+    pub fn scale_image_scalar(
         &self,
         pixels: &[u8],
         src_w: usize,
@@ -475,6 +611,70 @@ mod tests {
             let r = LanczosResampler::from_window_size(*ws);
             let dst = r.resample_1d(&src, 12);
             assert_eq!(dst.len(), 12, "{} should produce 12 samples", ws);
+        }
+    }
+
+    // ── SIMD dispatch tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_resample_1d_simd_matches_scalar() {
+        let r = LanczosResampler::new();
+        let src: Vec<f32> = (0..32).map(|i| (i * 7 % 100) as f32 / 99.0).collect();
+        let scalar_out = r.resample_1d(&src, 16);
+        let simd_out = r.resample_1d_simd(&src, 16);
+        assert_eq!(scalar_out.len(), simd_out.len());
+        for (i, (&s, &v)) in scalar_out.iter().zip(simd_out.iter()).enumerate() {
+            assert!(
+                (s - v).abs() < 1e-4,
+                "scalar/simd mismatch at {i}: scalar={s} simd={v}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_lanczos_filter_weights_normalised() {
+        let k = LanczosKernel::default();
+        let (weights, offsets) = build_lanczos_filter_weights(&k, 16, 8);
+        assert_eq!(weights.len(), 8);
+        assert_eq!(offsets.len(), 8);
+        for (i, w) in weights.iter().enumerate() {
+            let sum: f32 = w.iter().sum();
+            assert!(
+                (sum - 1.0).abs() < 1e-5,
+                "weights[{i}] must sum to 1, got {sum}"
+            );
+        }
+    }
+
+    /// SIMD path must produce the same results (within ±1 per pixel) as the
+    /// scalar path on a gradient image scaled from 200×150 → 100×75.
+    #[test]
+    fn test_lanczos_simd_vs_scalar_bitclose() {
+        let sw = 200usize;
+        let sh = 150usize;
+        let dw = 100usize;
+        let dh = 75usize;
+
+        let src: Vec<u8> = (0..sw * sh)
+            .map(|i| {
+                let x = i % sw;
+                let y = i / sw;
+                (((x * 255) / sw + (y * 128) / sh) % 256) as u8
+            })
+            .collect();
+
+        let r = LanczosResampler::new();
+        let simd_out = r.scale_image(&src, sw, sh, dw, dh);
+        let scalar_out = r.scale_image_scalar(&src, sw, sh, dw, dh);
+
+        assert_eq!(simd_out.len(), dw * dh);
+        assert_eq!(scalar_out.len(), dw * dh);
+
+        for (i, (&s, &r)) in simd_out.iter().zip(scalar_out.iter()).enumerate() {
+            assert!(
+                (s as i32 - r as i32).abs() <= 1,
+                "pixel mismatch at {i}: simd={s}, scalar={r}"
+            );
         }
     }
 }

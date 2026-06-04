@@ -132,6 +132,8 @@ impl ChorusProcessor {
 }
 
 impl crate::AudioEffect for ChorusProcessor {
+    const EFFECT_ID: &'static str = "chorus_processor";
+
     fn process_sample(&mut self, input: f32) -> f32 {
         #[allow(clippy::cast_possible_truncation)]
         let out = self.process_sample(input as f64);

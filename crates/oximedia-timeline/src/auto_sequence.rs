@@ -366,10 +366,7 @@ impl AutoSequencer {
         // Build assembled clips.
         let mut cursor = config.start_position;
         let mut assembled = Vec::new();
-        let crossfade_overlap = config
-            .crossfade
-            .as_ref()
-            .map_or(0, |cf| cf.duration_frames);
+        let crossfade_overlap = config.crossfade.as_ref().map_or(0, |cf| cf.duration_frames);
 
         for (idx, m) in filtered.iter().enumerate() {
             let dur = m.duration();
@@ -415,8 +412,7 @@ mod tests {
     }
 
     fn make_marker(cid: ClipId, name: &str, in_f: i64, out_f: i64, rating: u8) -> SubclipMarker {
-        SubclipMarker::new(cid, name, Position::new(in_f), Position::new(out_f))
-            .with_rating(rating)
+        SubclipMarker::new(cid, name, Position::new(in_f), Position::new(out_f)).with_rating(rating)
     }
 
     #[test]
@@ -430,7 +426,9 @@ mod tests {
         let track = TrackId::new();
         let config = AutoSequenceConfig::new(track);
         let seq = AutoSequencer::new();
-        let result = seq.assemble(&markers, &config).expect("should succeed in test");
+        let result = seq
+            .assemble(&markers, &config)
+            .expect("should succeed in test");
         assert_eq!(result.clips.len(), 3);
         assert_eq!(result.clips[0].label, "a");
         assert_eq!(result.clips[1].timeline_position.0, 100);
@@ -447,7 +445,9 @@ mod tests {
         ];
         let track = TrackId::new();
         let config = AutoSequenceConfig::new(track).with_strategy(AssemblyStrategy::ByRating);
-        let result = AutoSequencer::new().assemble(&markers, &config).expect("should succeed in test");
+        let result = AutoSequencer::new()
+            .assemble(&markers, &config)
+            .expect("should succeed in test");
         assert_eq!(result.clips[0].label, "high");
     }
 
@@ -455,13 +455,15 @@ mod tests {
     fn test_assemble_by_duration_shortest_first() {
         let id = cid();
         let markers = vec![
-            make_marker(id, "long", 0, 200, 3),   // 200 frames
+            make_marker(id, "long", 0, 200, 3),    // 200 frames
             make_marker(id, "short", 200, 250, 3), // 50 frames
             make_marker(id, "mid", 250, 350, 3),   // 100 frames
         ];
         let track = TrackId::new();
         let config = AutoSequenceConfig::new(track).with_strategy(AssemblyStrategy::ByDuration);
-        let result = AutoSequencer::new().assemble(&markers, &config).expect("should succeed in test");
+        let result = AutoSequencer::new()
+            .assemble(&markers, &config)
+            .expect("should succeed in test");
         assert_eq!(result.clips[0].label, "short");
         assert_eq!(result.clips[1].label, "mid");
         assert_eq!(result.clips[2].label, "long");
@@ -476,7 +478,9 @@ mod tests {
         ];
         let track = TrackId::new();
         let config = AutoSequenceConfig::new(track).with_min_rating(3);
-        let result = AutoSequencer::new().assemble(&markers, &config).expect("should succeed in test");
+        let result = AutoSequencer::new()
+            .assemble(&markers, &config)
+            .expect("should succeed in test");
         assert_eq!(result.clips.len(), 1);
         assert_eq!(result.clips[0].label, "good");
         assert_eq!(result.skipped_count, 1);
@@ -501,7 +505,9 @@ mod tests {
         ];
         let track = TrackId::new();
         let config = AutoSequenceConfig::new(track).with_gap(10);
-        let result = AutoSequencer::new().assemble(&markers, &config).expect("should succeed in test");
+        let result = AutoSequencer::new()
+            .assemble(&markers, &config)
+            .expect("should succeed in test");
         // First clip at 0, duration 100; second clip at 110 (100 + 10 gap)
         assert_eq!(result.clips[1].timeline_position.0, 110);
     }
@@ -516,7 +522,9 @@ mod tests {
         ];
         let track = TrackId::new();
         let config = AutoSequenceConfig::new(track).with_max_clips(2);
-        let result = AutoSequencer::new().assemble(&markers, &config).expect("should succeed in test");
+        let result = AutoSequencer::new()
+            .assemble(&markers, &config)
+            .expect("should succeed in test");
         assert_eq!(result.clips.len(), 2);
     }
 
@@ -536,7 +544,9 @@ mod tests {
         ];
         let track = TrackId::new();
         let config = AutoSequenceConfig::new(track).with_strategy(AssemblyStrategy::Interleaved);
-        let result = AutoSequencer::new().assemble(&markers, &config).expect("should succeed in test");
+        let result = AutoSequencer::new()
+            .assemble(&markers, &config)
+            .expect("should succeed in test");
         // Interleaved: A(a1), B(b1), A(a2)
         assert_eq!(result.clips[0].label, "a1");
         assert_eq!(result.clips[1].label, "b1");
@@ -552,8 +562,7 @@ mod tests {
             make_marker(id, "c", 200, 300, 3),
         ];
         let track = TrackId::new();
-        let config = AutoSequenceConfig::new(track)
-            .with_crossfade(CrossfadeConfig::linear(10));
+        let config = AutoSequenceConfig::new(track).with_crossfade(CrossfadeConfig::linear(10));
         let result = AutoSequencer::new()
             .assemble(&markers, &config)
             .expect("should succeed in test");
@@ -572,8 +581,7 @@ mod tests {
         let id = cid();
         let markers = vec![make_marker(id, "only", 0, 100, 3)];
         let track = TrackId::new();
-        let config = AutoSequenceConfig::new(track)
-            .with_crossfade(CrossfadeConfig::s_curve(24));
+        let config = AutoSequenceConfig::new(track).with_crossfade(CrossfadeConfig::s_curve(24));
         let result = AutoSequencer::new()
             .assemble(&markers, &config)
             .expect("should succeed in test");

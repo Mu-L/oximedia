@@ -4,9 +4,6 @@
 //! any byte slice or cursor, offering configurable buffer sizes, read-ahead
 //! semantics, and write coalescing to reduce syscall overhead.
 
-#![allow(dead_code)]
-#![allow(clippy::cast_precision_loss)]
-
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 
@@ -269,6 +266,247 @@ impl Write for MemCursor {
 }
 
 // ---------------------------------------------------------------------------
+// Double-buffered reader
+// ---------------------------------------------------------------------------
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+
+/// Shared state between the caller and the background fill thread.
+struct SharedState<R: Read + Send + 'static> {
+    /// The underlying reader, moved here so the background thread can own it.
+    reader: Mutex<Option<R>>,
+    /// The back buffer being filled by the background thread.
+    back_buf: Mutex<BackBuf>,
+    /// Condvar signalled by the background thread when `back_buf` is ready,
+    /// and by the caller when the back buffer should be refilled.
+    condvar: Condvar,
+    /// Set to `true` by `Drop` to ask the background thread to stop.
+    cancelled: AtomicBool,
+}
+
+/// Contents of the back buffer.
+struct BackBuf {
+    data: Vec<u8>,
+    len: usize,
+    /// `true` once the background thread has finished a fill pass.
+    ready: bool,
+    /// `true` if the underlying reader returned 0 bytes (EOF).
+    eof: bool,
+    /// `true` if the underlying reader returned an error.
+    error: bool,
+}
+
+/// A reader that uses two alternating buffers so a background thread can fill
+/// the next buffer while the caller drains the current one, hiding I/O latency.
+///
+/// # Concurrency model
+///
+/// * The **background thread** owns the reader (via `SharedState::reader`).
+///   It loops: fill the back buffer → lock `back_buf`, set `ready=true`,
+///   signal the condvar → wait until `ready` is cleared again before refilling.
+/// * The **foreground (caller)** drains the front buffer via [`Read::read`].
+///   When the front is exhausted it waits on the condvar for `ready=true`,
+///   swaps front and back, clears `ready`, signals the condvar (let background
+///   refill), then continues serving bytes from the new front.
+pub struct DoubleBufferedReader<R: Read + Send + 'static> {
+    /// Buffer being consumed by the caller.
+    front: Vec<u8>,
+    /// How many valid bytes are in `front`.
+    front_len: usize,
+    /// Next unread offset within `front`.
+    front_pos: usize,
+    /// Shared state for coordination with the background thread.
+    shared: Arc<SharedState<R>>,
+    /// Handle to the background fill thread.
+    fill_thread: Option<std::thread::JoinHandle<()>>,
+    /// Set once we have drained the very last filled buffer.
+    eof: bool,
+}
+
+impl<R: Read + Send + 'static> DoubleBufferedReader<R> {
+    /// Create a new `DoubleBufferedReader` wrapping `reader` with two buffers
+    /// of `buf_size` bytes each, and spawn the background fill thread.
+    pub fn new(reader: R, buf_size: usize) -> Self {
+        let buf_size = buf_size.max(1);
+
+        let shared = Arc::new(SharedState {
+            reader: Mutex::new(Some(reader)),
+            back_buf: Mutex::new(BackBuf {
+                data: vec![0u8; buf_size],
+                len: 0,
+                ready: false,
+                eof: false,
+                error: false,
+            }),
+            condvar: Condvar::new(),
+            cancelled: AtomicBool::new(false),
+        });
+
+        let shared_clone = Arc::clone(&shared);
+        let fill_thread = std::thread::spawn(move || {
+            Self::fill_loop(shared_clone, buf_size);
+        });
+
+        // The front buffer starts empty; the first `read()` call will block
+        // until the background thread completes its first fill.
+        Self {
+            front: vec![0u8; buf_size],
+            front_len: 0,
+            front_pos: 0,
+            shared,
+            fill_thread: Some(fill_thread),
+            eof: false,
+        }
+    }
+
+    /// Background thread loop: fill the back buffer then wait to be asked again.
+    fn fill_loop(shared: Arc<SharedState<R>>, buf_size: usize) {
+        loop {
+            if shared.cancelled.load(Ordering::Acquire) {
+                break;
+            }
+
+            // Read into a temporary local buffer to avoid holding the lock
+            // during I/O.
+            let mut tmp = vec![0u8; buf_size];
+            let (n, eof, error) = {
+                let mut guard = shared.reader.lock().unwrap_or_else(|e| e.into_inner());
+                match guard.as_mut() {
+                    None => (0, true, false),
+                    Some(r) => match r.read(&mut tmp) {
+                        Ok(0) => (0, true, false),
+                        Ok(n) => (n, false, false),
+                        Err(_) => (0, false, true),
+                    },
+                }
+            };
+
+            // Publish results into the back buffer and signal the caller.
+            {
+                let mut back = shared.back_buf.lock().unwrap_or_else(|e| e.into_inner());
+                back.data[..n].copy_from_slice(&tmp[..n]);
+                back.len = n;
+                back.ready = true;
+                back.eof = eof;
+                back.error = error;
+            }
+            shared.condvar.notify_one();
+
+            if eof || error || shared.cancelled.load(Ordering::Acquire) {
+                break;
+            }
+
+            // Wait until the caller swaps and clears `ready` before we
+            // overwrite the back buffer.
+            let mut back = shared.back_buf.lock().unwrap_or_else(|e| e.into_inner());
+            back = shared
+                .condvar
+                .wait_while(back, |b| {
+                    b.ready && !shared.cancelled.load(Ordering::Acquire)
+                })
+                .unwrap_or_else(|e| e.into_inner());
+            drop(back);
+        }
+    }
+
+    /// Wait for the back buffer to be ready, then swap it with the front.
+    /// Returns `false` if the back buffer signals EOF or error.
+    fn swap_buffers(&mut self) -> io::Result<bool> {
+        let mut back = self
+            .shared
+            .back_buf
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        // Wait until the background thread marks back as ready.
+        back = self
+            .shared
+            .condvar
+            .wait_while(back, |b| !b.ready)
+            .unwrap_or_else(|e| e.into_inner());
+
+        if back.error {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "background fill thread encountered a read error",
+            ));
+        }
+
+        let filled = back.len;
+        let eof = back.eof;
+
+        // Swap front and back buffers.
+        std::mem::swap(&mut self.front, &mut back.data);
+        self.front_len = filled;
+        self.front_pos = 0;
+
+        // Signal the background thread that it may refill the back buffer.
+        back.ready = false;
+        drop(back);
+        self.shared.condvar.notify_one();
+
+        if eof && filled == 0 {
+            self.eof = true;
+            return Ok(false);
+        }
+
+        Ok(true)
+    }
+}
+
+impl<R: Read + Send + 'static> Read for DoubleBufferedReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.eof {
+            return Ok(0);
+        }
+
+        // Refill front if exhausted (including the very first call).
+        while self.front_pos >= self.front_len {
+            if !self.swap_buffers()? {
+                return Ok(0); // EOF
+            }
+            if self.front_len > 0 {
+                break;
+            }
+        }
+
+        let available = self.front_len - self.front_pos;
+        let n = buf.len().min(available);
+        buf[..n].copy_from_slice(&self.front[self.front_pos..self.front_pos + n]);
+        self.front_pos += n;
+        Ok(n)
+    }
+}
+
+impl<R: Read + Send + 'static> Drop for DoubleBufferedReader<R> {
+    fn drop(&mut self) {
+        // Signal the background thread to stop.
+        self.shared.cancelled.store(true, Ordering::Release);
+
+        // Drop the inner reader so any blocked `read()` in the background
+        // thread will get an error / return 0 (for Cursor-like sources it
+        // returns immediately).
+        if let Ok(mut guard) = self.shared.reader.lock() {
+            *guard = None;
+        }
+
+        // Wake the background thread in case it is waiting on the condvar.
+        {
+            if let Ok(mut back) = self.shared.back_buf.lock() {
+                back.ready = false; // allow the thread to exit its wait_while
+            }
+        }
+        self.shared.condvar.notify_all();
+
+        // Join the fill thread.
+        if let Some(handle) = self.fill_thread.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -401,5 +639,39 @@ mod tests {
     fn test_mem_cursor_from_bytes() {
         let cur = MemCursor::from_bytes(vec![5, 6]);
         assert_eq!(cur.as_slice(), &[5, 6]);
+    }
+
+    // -----------------------------------------------------------------------
+    // DoubleBufferedReader tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_double_buffered_same_as_plain_read() {
+        let original: Vec<u8> = (0u8..=255).collect();
+        let cursor = std::io::Cursor::new(original.clone());
+        let mut dbr = DoubleBufferedReader::new(cursor, 64);
+        let mut out = Vec::new();
+        io::Read::read_to_end(&mut dbr, &mut out).expect("read_to_end should succeed");
+        assert_eq!(out, original);
+    }
+
+    #[test]
+    fn test_double_buffered_empty() {
+        let cursor = std::io::Cursor::new(Vec::<u8>::new());
+        let mut dbr = DoubleBufferedReader::new(cursor, 64);
+        let mut out = Vec::new();
+        io::Read::read_to_end(&mut dbr, &mut out).expect("read_to_end should succeed");
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_double_buffered_larger_than_buf() {
+        // Source is 1 KiB, buffer size is 32 bytes — many swap cycles.
+        let original: Vec<u8> = (0u8..=255).cycle().take(1024).collect();
+        let cursor = std::io::Cursor::new(original.clone());
+        let mut dbr = DoubleBufferedReader::new(cursor, 32);
+        let mut out = Vec::new();
+        io::Read::read_to_end(&mut dbr, &mut out).expect("read_to_end should succeed");
+        assert_eq!(out, original);
     }
 }

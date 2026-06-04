@@ -332,7 +332,9 @@ impl EquipmentInventory {
     pub fn status_summary(&self) -> HashMap<String, usize> {
         let mut summary: HashMap<String, usize> = HashMap::new();
         for record in self.records.values() {
-            *summary.entry(record.status.label().to_string()).or_insert(0) += 1;
+            *summary
+                .entry(record.status.label().to_string())
+                .or_insert(0) += 1;
         }
         summary
     }
@@ -418,7 +420,10 @@ mod tests {
         let mut inv = EquipmentInventory::new();
         inv.upsert(make_record("ch", "1.0.0"));
         assert!(inv.set_status("ch", EquipmentStatus::Faulted));
-        assert_eq!(inv.get("ch").expect("should exist").status, EquipmentStatus::Faulted);
+        assert_eq!(
+            inv.get("ch").expect("should exist").status,
+            EquipmentStatus::Faulted
+        );
         assert!(!inv.set_status("nonexistent", EquipmentStatus::Faulted));
     }
 

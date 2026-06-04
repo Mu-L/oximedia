@@ -1,6 +1,6 @@
 //! CDN failover manager — select the healthiest CDN provider.
 //!
-//! [`CdnFailoverManager`] tracks a pool of CDN providers with health scores
+//! `CdnFailoverManager` tracks a pool of CDN providers with health scores
 //! and always routes to the provider with the highest health.
 
 /// A CDN failover manager that routes to the healthiest available provider.

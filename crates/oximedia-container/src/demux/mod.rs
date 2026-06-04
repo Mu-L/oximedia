@@ -23,6 +23,9 @@
 
 pub mod avi;
 pub mod buffer;
+pub use buffer::{
+    BufferStats, BufferedPacket, PacketBuffer, ReadAheadBuffer, DEFAULT_READ_AHEAD_SIZE,
+};
 pub mod flac;
 pub mod flv;
 pub mod matroska;

@@ -64,7 +64,13 @@ impl MulticamCutExporter {
     pub fn to_csv(cuts: &[(u64, u64, u64)]) -> String {
         let mut out = String::from("event,camera_id,offset_ms,timecode_ms\n");
         for (idx, &(offset_ms, camera_id, tc_ms)) in cuts.iter().enumerate() {
-            out.push_str(&format!("{},{},{},{}\n", idx + 1, camera_id, offset_ms, tc_ms));
+            out.push_str(&format!(
+                "{},{},{},{}\n",
+                idx + 1,
+                camera_id,
+                offset_ms,
+                tc_ms
+            ));
         }
         out
     }
@@ -82,9 +88,7 @@ impl MulticamCutExporter {
     #[must_use]
     pub fn total_duration_ms(cuts: &[(u64, u64, u64)]) -> u64 {
         match (cuts.first(), cuts.last()) {
-            (Some(&(first_off, _, _)), Some(&(last_off, _, _))) => {
-                (last_off - first_off) + 5_000
-            }
+            (Some(&(first_off, _, _)), Some(&(last_off, _, _))) => (last_off - first_off) + 5_000,
             _ => 0,
         }
     }
@@ -130,14 +134,20 @@ mod tests {
     fn test_to_edl_empty() {
         let cuts: [(u64, u64, u64); 0] = [];
         let edl = MulticamCutExporter::to_edl(&cuts);
-        assert!(edl.contains("TITLE"), "Empty cut list should still produce header");
+        assert!(
+            edl.contains("TITLE"),
+            "Empty cut list should still produce header"
+        );
     }
 
     #[test]
     fn test_to_edl_single_cut() {
         let cuts = [(1_000, 3, 0)];
         let edl = MulticamCutExporter::to_edl(&cuts);
-        assert!(edl.contains("CAM003"), "Camera ID should appear as reel name");
+        assert!(
+            edl.contains("CAM003"),
+            "Camera ID should appear as reel name"
+        );
     }
 
     #[test]
@@ -146,7 +156,10 @@ mod tests {
         let csv = MulticamCutExporter::to_csv(&cuts);
         assert!(csv.starts_with("event,camera_id,offset_ms,timecode_ms\n"));
         assert!(csv.contains("1,1,0,0"), "First row should match cut data");
-        assert!(csv.contains("2,2,5000,5000"), "Second row should match cut data");
+        assert!(
+            csv.contains("2,2,5000,5000"),
+            "Second row should match cut data"
+        );
     }
 
     #[test]

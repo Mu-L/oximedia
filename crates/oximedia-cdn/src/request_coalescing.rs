@@ -6,14 +6,14 @@
 //!
 //! When many clients simultaneously request content that is not yet in cache, a
 //! CDN without coalescing would issue one origin fetch per client, overloading
-//! the origin and wasting bandwidth.  [`CoalescingRegistry`] tracks in-flight
+//! the origin and wasting bandwidth.  `CoalescingRegistry` tracks in-flight
 //! fetches keyed by a normalised request key and returns a
-//! [`CoalesceHandle`] that the caller uses to either:
+//! `CoalesceHandle` that the caller uses to either:
 //!
 //! - **Lead** the fetch (first waiter) — perform the actual origin request and
-//!   call [`CoalesceHandle::complete`] or [`CoalesceHandle::fail`].
+//!   call `CoalesceHandle::complete` or `CoalesceHandle::fail`.
 //! - **Follow** the fetch (subsequent waiters) — block on the shared result via
-//!   [`CoalesceHandle::wait`].
+//!   `CoalesceHandle::wait`.
 //!
 //! The implementation is purely synchronous and lock-based so it works without
 //! an async runtime.  Each in-flight slot uses a `std::sync::Condvar` for
@@ -22,7 +22,7 @@
 //! # Coalescing key normalisation
 //!
 //! Keys are normalised to remove query parameters that should not differentiate
-//! cache variants (configurable via [`CoalescingConfig::ignored_query_params`]).
+//! cache variants (configurable via `CoalescingConfig::ignored_query_params`).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
@@ -248,7 +248,11 @@ impl CoalesceHandle {
 
     /// Number of requests coalesced into this slot (includes this caller).
     pub fn coalesced_count(&self) -> usize {
-        *self.slot.coalesced_count.lock().unwrap_or_else(|e| e.into_inner())
+        *self
+            .slot
+            .coalesced_count
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 }
 

@@ -489,7 +489,10 @@ mod tests {
     fn test_color_primaries_and_trc_strings() {
         assert_eq!(HdrFormat::Hdr10.color_primaries(), "bt2020");
         assert_eq!(HdrFormat::Hdr10.transfer_characteristics(), "smpte2084");
-        assert_eq!(HdrFormat::HlgBt2100.transfer_characteristics(), "arib-std-b67");
+        assert_eq!(
+            HdrFormat::HlgBt2100.transfer_characteristics(),
+            "arib-std-b67"
+        );
         assert_eq!(HdrFormat::None.color_primaries(), "bt709");
     }
 }

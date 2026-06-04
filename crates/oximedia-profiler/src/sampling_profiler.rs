@@ -2,12 +2,36 @@
 //!
 //! Records periodic stack snapshots and aggregates them into a call-frequency
 //! histogram without requiring code instrumentation.
-
-#![allow(dead_code)]
+//!
+//! # Thread-local design
+//!
+//! Hot-path recording writes to per-thread `thread_local!` buffers — no
+//! synchronisation required on the record path.  When `stop()` or
+//! `merge_thread_local()` is called, the **current thread's** TLS buffers are
+//! drained into the profiler's global aggregate (`samples` Vec and
+//! `hit_counts` HashMap).  For a multi-threaded workload each worker thread
+//! should call `merge_thread_local()` before the orchestrator thread reads
+//! results, or results should be read only from the orchestrator thread
+//! after all workers have finished.
 
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+
+// ---------------------------------------------------------------------------
+// Thread-local recording buffers
+//
+// Each thread accumulates events and hit-counts independently.
+// `merge_thread_local()` drains them into the profiler struct.
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// Per-thread sample-event staging buffer.
+    static TL_SAMPLES: RefCell<Vec<SampleEvent>> = const { RefCell::new(Vec::new()) };
+    /// Per-thread per-function hit-count staging buffer.
+    static TL_HIT_COUNTS: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
+}
 
 /// A single sample event captured by the sampling profiler.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,13 +133,21 @@ impl SamplingConfig {
 ///
 /// Collects `SampleEvent`s at a configurable rate and provides aggregated
 /// call-frequency statistics without source-level instrumentation.
+///
+/// ## Thread-local buffering
+///
+/// `record()` writes to the calling thread's TLS buffers with zero
+/// synchronisation cost.  Call `merge_thread_local()` (or `stop()`) from a
+/// given thread to drain that thread's buffers into the global aggregate
+/// stored in `self`.
 #[derive(Debug)]
 pub struct SamplingProfiler {
     config: SamplingConfig,
+    /// Global aggregate — populated by `merge_thread_local()` / `stop()`.
     samples: Vec<SampleEvent>,
     running: bool,
     start_time: Option<Instant>,
-    /// Per-function hit counts accumulated from all samples.
+    /// Per-function hit counts accumulated from all merged samples.
     hit_counts: HashMap<String, u64>,
 }
 
@@ -151,16 +183,45 @@ impl SamplingProfiler {
     }
 
     /// Starts the profiler session.
+    ///
+    /// Clears both the global aggregate and the calling thread's TLS buffers.
     pub fn start(&mut self) {
         self.running = true;
         self.start_time = Some(Instant::now());
         self.samples.clear();
         self.hit_counts.clear();
+        // Also clear this thread's TLS staging buffers so a reused profiler
+        // starts with a clean slate.
+        TL_SAMPLES.with(|s| s.borrow_mut().clear());
+        TL_HIT_COUNTS.with(|h| h.borrow_mut().clear());
     }
 
-    /// Stops the profiler session.
+    /// Stops the profiler session, merging the calling thread's TLS buffers
+    /// into the global aggregate first.
     pub fn stop(&mut self) {
+        self.merge_thread_local();
         self.running = false;
+    }
+
+    /// Drains the **calling thread's** TLS sample/hit-count buffers into the
+    /// profiler's global aggregate (`self.samples` / `self.hit_counts`).
+    ///
+    /// This is a no-op with respect to any other thread's TLS state.  In a
+    /// multi-threaded scenario each worker thread should call this method
+    /// (or a cooperative flush path) before the orchestrator reads results.
+    pub fn merge_thread_local(&mut self) {
+        // Drain per-thread samples into global Vec.
+        TL_SAMPLES.with(|s| {
+            let mut local = s.borrow_mut();
+            self.samples.append(&mut *local);
+        });
+        // Merge per-thread hit-counts into global HashMap.
+        TL_HIT_COUNTS.with(|h| {
+            let mut local = h.borrow_mut();
+            for (key, count) in local.drain() {
+                *self.hit_counts.entry(key).or_insert(0) += count;
+            }
+        });
     }
 
     /// Returns `true` if the profiler is currently running.
@@ -169,25 +230,34 @@ impl SamplingProfiler {
         self.running
     }
 
-    /// Records a pre-built `SampleEvent`.
+    /// Records a pre-built `SampleEvent` into the calling thread's TLS buffer.
     ///
-    /// Updates the internal hit-count histogram for every frame in the event's
-    /// stack.  Truncates the stack to [`SamplingConfig::max_stack_depth`].
+    /// Truncates the stack to [`SamplingConfig::max_stack_depth`] and updates
+    /// the per-thread hit-count histogram.  No locking is required — each
+    /// thread writes to its own private buffer.
     pub fn record(&mut self, mut event: SampleEvent) {
         event.stack.truncate(self.config.max_stack_depth);
-        for frame in &event.stack {
-            *self.hit_counts.entry(frame.clone()).or_insert(0) += 1;
-        }
-        self.samples.push(event);
+        // Write hit-counts into the calling thread's TLS map.
+        TL_HIT_COUNTS.with(|h| {
+            let mut local = h.borrow_mut();
+            for frame in &event.stack {
+                *local.entry(frame.clone()).or_insert(0) += 1;
+            }
+        });
+        // Push event into the calling thread's TLS staging buffer.
+        TL_SAMPLES.with(|s| s.borrow_mut().push(event));
     }
 
-    /// Returns a reference to all recorded samples.
+    /// Returns a reference to all recorded samples in the **global aggregate**.
+    ///
+    /// Samples written via `record()` on the current thread are moved into
+    /// this aggregate by `stop()` / `merge_thread_local()`.
     #[must_use]
     pub fn samples(&self) -> &[SampleEvent] {
         &self.samples
     }
 
-    /// Returns the total number of samples collected.
+    /// Returns the total number of samples in the global aggregate.
     #[must_use]
     pub fn sample_count(&self) -> usize {
         self.samples.len()
@@ -199,7 +269,8 @@ impl SamplingProfiler {
         self.start_time.map(|t| t.elapsed())
     }
 
-    /// Returns the hit count for a specific function name.
+    /// Returns the hit count for a specific function name from the global
+    /// aggregate.
     #[must_use]
     pub fn hit_count(&self, function_name: &str) -> u64 {
         self.hit_counts.get(function_name).copied().unwrap_or(0)
@@ -385,6 +456,128 @@ mod tests {
         let cfg = SamplingConfig::high_frequency();
         let p = SamplingProfiler::new(cfg.clone());
         assert_eq!(p.config().sample_rate_hz, cfg.sample_rate_hz);
+    }
+
+    // -----------------------------------------------------------------------
+    // Thread-local concurrency tests (Wave 15, Slice H)
+    // -----------------------------------------------------------------------
+
+    /// Single-threaded round-trip: verify that `record()` writes to TLS and
+    /// `merge_thread_local()` drains them into the global aggregate exactly
+    /// once.
+    #[test]
+    fn test_merge_thread_local_drains_to_aggregate() {
+        let mut p = SamplingProfiler::default_config();
+        p.start();
+
+        // Record 10 events — these go into TLS, not yet visible in aggregate.
+        for i in 0..10u64 {
+            p.record(SampleEvent::new(
+                i,
+                vec!["fn_a".to_string(), "fn_b".to_string()],
+                1,
+                0,
+            ));
+        }
+
+        // Global aggregate is still empty before explicit merge.
+        // (samples() reads the aggregate, not TLS)
+        // After stop() — which calls merge_thread_local() — all 10 arrive.
+        p.stop();
+
+        assert_eq!(p.sample_count(), 10, "stop() must drain TLS into aggregate");
+        assert_eq!(p.hit_count("fn_a"), 10);
+        assert_eq!(p.hit_count("fn_b"), 10);
+    }
+
+    /// Single-threaded: calling `merge_thread_local()` explicitly then `stop()`
+    /// must not double-count.
+    #[test]
+    fn test_explicit_merge_then_stop_no_double_count() {
+        let mut p = SamplingProfiler::default_config();
+        p.start();
+
+        for i in 0..5u64 {
+            p.record(SampleEvent::new(i, vec!["work".to_string()], 1, 0));
+        }
+
+        // First merge — moves 5 events into aggregate.
+        p.merge_thread_local();
+        assert_eq!(p.sample_count(), 5);
+        assert_eq!(p.hit_count("work"), 5);
+
+        // Record 3 more (go into TLS again).
+        for i in 5..8u64 {
+            p.record(SampleEvent::new(i, vec!["work".to_string()], 1, 0));
+        }
+
+        // stop() merges the remaining 3 — total must be 8, not 5+8.
+        p.stop();
+        assert_eq!(p.sample_count(), 8);
+        assert_eq!(p.hit_count("work"), 8);
+    }
+
+    /// Multi-threaded: each thread calls `merge_thread_local()` on the shared
+    /// `&mut SamplingProfiler` via a `Mutex` wrapper, so the total across all
+    /// threads reaches the expected count.
+    ///
+    /// Because `thread_local!` is per-thread and merging requires `&mut self`,
+    /// each thread holds the Mutex for its `record` + `merge` pair.  The sum
+    /// of all thread contributions must equal N_THREADS × EVENTS_PER_THREAD.
+    #[test]
+    fn test_thread_local_sampling_concurrent() {
+        use std::sync::{Arc, Mutex};
+
+        const N_THREADS: usize = 4;
+        const EVENTS_PER_THREAD: usize = 100;
+
+        let profiler = Arc::new(Mutex::new(SamplingProfiler::default_config()));
+        {
+            profiler.lock().expect("lock").start();
+        }
+
+        let handles: Vec<_> = (0..N_THREADS)
+            .map(|tid| {
+                let p = Arc::clone(&profiler);
+                std::thread::spawn(move || {
+                    // Each thread records its events into its own TLS buffer.
+                    // We then lock the profiler and merge this thread's TLS
+                    // into the global aggregate.
+                    for i in 0..EVENTS_PER_THREAD {
+                        let event = SampleEvent::new(
+                            i as u64,
+                            vec![format!("thread_{}", tid)],
+                            tid as u64,
+                            0,
+                        );
+                        // Lock → record (writes to this thread's TLS) →
+                        // merge (drains this thread's TLS to aggregate) →
+                        // unlock so the next iteration can proceed.
+                        let mut guard = p.lock().expect("lock");
+                        guard.record(event);
+                        guard.merge_thread_local();
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+
+        let mut guard = profiler.lock().expect("lock");
+        // stop() calls merge_thread_local() — TLS is already empty here,
+        // so this is a no-op but must not double-count.
+        guard.stop();
+
+        let total = guard.sample_count();
+        assert_eq!(
+            total,
+            N_THREADS * EVENTS_PER_THREAD,
+            "expected {} total samples, got {}",
+            N_THREADS * EVENTS_PER_THREAD,
+            total
+        );
     }
 }
 

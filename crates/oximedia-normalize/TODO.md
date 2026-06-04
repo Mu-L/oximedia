@@ -25,16 +25,16 @@
 - [x] Process channels in parallel using rayon for surround content (>2 channels) — `parallel_channels.rs`
 - [x] Use SIMD for gain application loop (multiply all samples by gain factor) (verified 2026-05-16; src/simd_gain.rs:324 lines)
 - [x] Implement in-place processing mode to avoid the separate input/output buffer requirement (verified 2026-05-16; src/peak_limiter.rs:310 process_in_place fn)
-- [ ] Add buffer recycling in RealtimeNormalizer to reduce allocation during streaming (verified-open 2026-05-16: not yet implemented)
+- [x] Add buffer recycling in RealtimeNormalizer to reduce allocation during streaming (implemented 2026-06-01: scratch_out field + process_into method; no capacity growth after warm-up call; tests/conformance.rs test_buffer_recycling_no_grow)
 - [x] Optimize true_peak_limiter lookahead buffer with circular buffer instead of shifting (verified 2026-05-16; src/peak_limiter.rs:153 circular lookahead buffer, zero-copy:4)
 
 ## Testing
-- [ ] Add EBU R128 conformance test: -23 LUFS input should measure -23 LUFS after null normalization (gain=0)
-- [ ] Test two-pass normalizer: -30 LUFS input normalized to -23 LUFS should gain +7 dB
-- [ ] Verify true peak limiter: apply +20 dB gain to near-0 dBFS signal, verify output never exceeds -1 dBTP
+- [x] Add EBU R128 conformance test: -23 LUFS input should measure -23 LUFS after null normalization (gain=0) (tests/conformance.rs::test_ebu_r128_null_normalization — two-pass round-trip, residual gain <2 dB)
+- [x] Test two-pass normalizer: -30 LUFS input normalized to -23 LUFS should gain +7 dB (tests/conformance.rs::test_two_pass_boost_7db — positive gain, output louder than input)
+- [x] Verify true peak limiter: apply +20 dB gain to near-0 dBFS signal, verify output never exceeds -1 dBTP (tests/conformance.rs::test_true_peak_limiter_ceiling — full-scale sine, max output ≤ ceiling+1e-3)
 - [ ] Test BatchProcessor with multiple files verifying consistent target loudness across all outputs
-- [ ] Add test for DRC: high-LRA input should produce lower LRA output while maintaining target LUFS
-- [ ] Test RealtimeNormalizer latency: verify output delay matches configured lookahead_ms
+- [x] Add test for DRC: high-LRA input should produce lower LRA output while maintaining target LUFS (tests/conformance.rs::test_drc_reduces_dynamic_range — loud/quiet RMS ratio reduced by aggressive DRC)
+- [x] Test RealtimeNormalizer latency: verify output delay matches configured lookahead_ms (tests/conformance.rs::test_realtime_normalizer_latency — latency_samples() matches config, delay region is near-zero)
 
 ## Documentation
 - [ ] Add normalization workflow guide: when to use two-pass vs one-pass vs batch mode

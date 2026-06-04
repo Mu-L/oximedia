@@ -170,12 +170,13 @@ impl EssenceProbe {
         let meta = std::fs::metadata(path).map_err(|e| ImfError::Other(e.to_string()))?;
         let file_size = meta.len();
 
-        let mut file =
-            std::fs::File::open(path).map_err(|e| ImfError::Other(e.to_string()))?;
+        let mut file = std::fs::File::open(path).map_err(|e| ImfError::Other(e.to_string()))?;
 
         let read_len = file_size.min(65536) as usize;
         let mut buf = vec![0u8; read_len];
-        let n = file.read(&mut buf).map_err(|e| ImfError::Other(e.to_string()))?;
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| ImfError::Other(e.to_string()))?;
         buf.truncate(n);
 
         if buf.len() < 4 || buf[..4] != MXF_KEY_PREFIX {
@@ -249,8 +250,14 @@ fn detect_operational_pattern(buf: &[u8]) -> OperationalPattern {
 
 fn detect_edit_rate(buf: &[u8]) -> Option<(u32, u32)> {
     let common_rates: &[(u32, u32)] = &[
-        (24, 1), (25, 1), (30, 1), (48, 1), (50, 1), (60, 1),
-        (24000, 1001), (30000, 1001),
+        (24, 1),
+        (25, 1),
+        (30, 1),
+        (48, 1),
+        (50, 1),
+        (60, 1),
+        (24000, 1001),
+        (30000, 1001),
     ];
     for &(n, d) in common_rates {
         let n_bytes = n.to_be_bytes();
@@ -507,18 +514,17 @@ fn extract_resources(seq_xml: &str) -> Vec<ResourceInfo> {
             break;
         };
 
-        let source_encoding = extract_text(block, "SourceEncoding")
-            .unwrap_or_else(|| extract_text(block, "SourceEncoding")
-                .unwrap_or_else(|| format!("unknown-{}", resources.len())));
+        let source_encoding = extract_text(block, "SourceEncoding").unwrap_or_else(|| {
+            extract_text(block, "SourceEncoding")
+                .unwrap_or_else(|| format!("unknown-{}", resources.len()))
+        });
         let duration = extract_text(block, "Duration")
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
-        let bit_depth = extract_text(block, "BitDepth")
-            .and_then(|s| s.parse::<u8>().ok());
-        let sample_rate = extract_text(block, "AudioSampleRate")
-            .and_then(|s| s.parse::<u32>().ok());
-        let channel_count = extract_text(block, "ChannelCount")
-            .and_then(|s| s.parse::<u8>().ok());
+        let bit_depth = extract_text(block, "BitDepth").and_then(|s| s.parse::<u8>().ok());
+        let sample_rate =
+            extract_text(block, "AudioSampleRate").and_then(|s| s.parse::<u32>().ok());
+        let channel_count = extract_text(block, "ChannelCount").and_then(|s| s.parse::<u8>().ok());
 
         resources.push(ResourceInfo {
             source_encoding,
@@ -541,7 +547,9 @@ fn extract_text(xml: &str, tag: &str) -> Option<String> {
     let after_open = xml[start_tag..].find('>')?;
     let content_start = start_tag + after_open + 1;
     let close_pos = xml[content_start..].find(&close)?;
-    let text = xml[content_start..content_start + close_pos].trim().to_string();
+    let text = xml[content_start..content_start + close_pos]
+        .trim()
+        .to_string();
     if text.is_empty() {
         None
     } else {
@@ -567,8 +575,10 @@ fn infer_codec(sequence_tag: &str) -> String {
     match sequence_tag {
         "MainImageSequence" => "JPEG2000".to_string(),
         "MainAudioSequence" => "PCM".to_string(),
-        "SubtitlesSequence" | "HearingImpairedCaptionsSequence"
-        | "VisuallyImpairedTextSequence" | "CommentarySequence"
+        "SubtitlesSequence"
+        | "HearingImpairedCaptionsSequence"
+        | "VisuallyImpairedTextSequence"
+        | "CommentarySequence"
         | "KaraokeSequence" => "IMSC1".to_string(),
         "DataEssenceSequence" => "Data".to_string(),
         _ => "Unknown".to_string(),
@@ -703,8 +713,16 @@ mod tests {
     fn test_cpl_probe_video_audio() {
         let xml = video_audio_cpl(240, 240);
         let result = EssenceProber::probe_from_cpl_xml(&xml).expect("should parse");
-        let video_tracks: Vec<_> = result.tracks.iter().filter(|t| t.essence_type == EssenceType::Video).collect();
-        let audio_tracks: Vec<_> = result.tracks.iter().filter(|t| t.essence_type == EssenceType::Audio).collect();
+        let video_tracks: Vec<_> = result
+            .tracks
+            .iter()
+            .filter(|t| t.essence_type == EssenceType::Video)
+            .collect();
+        let audio_tracks: Vec<_> = result
+            .tracks
+            .iter()
+            .filter(|t| t.essence_type == EssenceType::Audio)
+            .collect();
         assert_eq!(video_tracks.len(), 1);
         assert_eq!(audio_tracks.len(), 1);
         assert!(result.primary_video_track.is_some());

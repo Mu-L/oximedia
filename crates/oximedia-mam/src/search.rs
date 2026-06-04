@@ -205,13 +205,19 @@ impl SearchEngine {
             ],
         );
 
-        Ok(Self {
+        let engine = Self {
             index,
             reader,
             writer: Arc::new(RwLock::new(writer)),
             schema,
             query_parser,
-        })
+        };
+
+        // Warm the index so the first user query is not cold.
+        // Ignore errors — if the index is brand-new there is nothing to warm.
+        let _ = engine.warm();
+
+        Ok(engine)
     }
 
     /// Index a document
@@ -594,6 +600,82 @@ impl SearchEngine {
             num_segments: searcher.segment_readers().len(),
             segment_ids,
         })
+    }
+
+    // -------------------------------------------------------------------------
+    // Incremental index update methods (Wave 15)
+    // -------------------------------------------------------------------------
+
+    /// Add a single document to the index and commit immediately.
+    ///
+    /// This is the incremental equivalent of [`Self::index_document`] + [`Self::commit`]:
+    /// after a successful call the document is visible to subsequent searchers
+    /// (after the reader reloads).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the document cannot be built, written, or committed.
+    pub fn add_document_incremental(&self, doc: IndexDocument) -> Result<()> {
+        self.index_document(doc)?;
+        self.commit()?;
+        self.reader.reload()?;
+        Ok(())
+    }
+
+    /// Replace a document identified by `asset_id` with new content.
+    ///
+    /// The old document is deleted by term before the replacement is inserted,
+    /// ensuring that a single logical asset has at most one index entry after
+    /// the operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the delete, insert, or commit fails.
+    pub fn update_document_incremental(&self, doc: IndexDocument) -> Result<()> {
+        // Delete the existing entry for this asset_id.
+        self.delete_document(doc.asset_id)?;
+        // Insert the new version.
+        self.index_document(doc)?;
+        self.commit()?;
+        self.reader.reload()?;
+        Ok(())
+    }
+
+    /// Remove a document from the index by asset ID and commit immediately.
+    ///
+    /// After a successful call the document is no longer returned by subsequent
+    /// searchers (after the reader reloads).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the delete or commit fails.
+    pub fn delete_document_incremental(&self, asset_id: Uuid) -> Result<()> {
+        self.delete_document(asset_id)?;
+        self.commit()?;
+        self.reader.reload()?;
+        Ok(())
+    }
+
+    /// Warm the index by reloading the reader and executing a lightweight
+    /// probe query to prime OS page caches.
+    ///
+    /// Call this once after constructing the [`SearchEngine`] so that the very
+    /// first real user query does not pay the cold-start penalty.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the reader reload or the probe search fails.
+    pub fn warm(&self) -> Result<()> {
+        // Ensure the reader has the latest committed segments.
+        self.reader.reload()?;
+
+        // Execute a low-cost wildcard probe with limit=0 to page in segment
+        // metadata and term dictionaries without allocating large result sets.
+        let searcher = self.reader.searcher();
+        let probe = self.query_parser.parse_query("*")?;
+        let _ = searcher.search(&probe, &tantivy::collector::Count)?;
+
+        Ok(())
     }
 }
 

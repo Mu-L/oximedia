@@ -793,6 +793,84 @@ fn fps_from_f64(fps: f64) -> FrameRate {
     FrameRate::Custom(fps)
 }
 
+// ─── FingerprintCache ─────────────────────────────────────────────────────────
+
+/// A bounded cache that memoises `Fingerprint` results keyed by
+/// `(PathBuf, mtime_unix_secs)`.
+///
+/// When `max_entries` is reached the entry that was inserted *first* (oldest by
+/// insertion order) is evicted to make room.  Eviction uses a `VecDeque` as a
+/// FIFO insertion-order tracker alongside the `HashMap` for O(1) lookup.
+///
+/// The cache is not thread-safe by design — wrap in a `Mutex` if shared across
+/// threads.
+pub struct FingerprintCache {
+    map: std::collections::HashMap<(std::path::PathBuf, u64), Fingerprint>,
+    order: std::collections::VecDeque<(std::path::PathBuf, u64)>,
+    max_entries: usize,
+}
+
+impl FingerprintCache {
+    /// Create a new cache with `max_entries` capacity.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_entries == 0`.
+    #[must_use]
+    pub fn new(max_entries: usize) -> Self {
+        assert!(max_entries > 0, "max_entries must be > 0");
+        Self {
+            map: std::collections::HashMap::new(),
+            order: std::collections::VecDeque::new(),
+            max_entries,
+        }
+    }
+
+    /// Return the cached `Fingerprint` for `(path, mtime)` if present, or call
+    /// `compute` to produce one, insert it, and return it.
+    ///
+    /// `mtime` should be the file's modification time expressed as Unix seconds.
+    ///
+    /// When the cache is full (i.e. `map.len() == max_entries`) the oldest
+    /// entry is evicted before the new entry is stored.
+    pub fn get_or_compute<F>(&mut self, path: &Path, mtime: u64, compute: F) -> Fingerprint
+    where
+        F: FnOnce() -> Fingerprint,
+    {
+        let key = (path.to_path_buf(), mtime);
+
+        if let Some(cached) = self.map.get(&key) {
+            return cached.clone();
+        }
+
+        // Cache miss — compute the fingerprint.
+        let result = compute();
+
+        // Evict oldest entry if at capacity.
+        if self.map.len() >= self.max_entries {
+            if let Some(oldest_key) = self.order.pop_front() {
+                self.map.remove(&oldest_key);
+            }
+        }
+
+        self.order.push_back(key.clone());
+        self.map.insert(key, result.clone());
+        result
+    }
+
+    /// Number of entries currently cached.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    /// Returns `true` if the cache contains no entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+}
+
 /// Extract duration from a media file.
 ///
 /// # Errors
@@ -872,5 +950,102 @@ mod tests {
         let info = extract_media_info(temp_file.path()).expect("info should be valid");
         // Placeholder returns None values
         assert!(info.duration.is_none());
+    }
+
+    // ── FingerprintCache tests ─────────────────────────────────────────────────
+
+    /// Cache hit: the second call must return the identical fingerprint without
+    /// invoking the compute closure (verified via a call counter).
+    #[test]
+    fn test_fingerprint_cache_hit_skips_recompute() {
+        use std::cell::Cell;
+        use std::path::PathBuf;
+
+        let call_count = Cell::new(0u32);
+        let path = PathBuf::from("/virtual/test_hit.mov");
+        let mtime: u64 = 1_717_200_000;
+
+        let mut cache = FingerprintCache::new(16);
+
+        // First call — cache miss, compute must run.
+        let fp1 = cache.get_or_compute(&path, mtime, || {
+            call_count.set(call_count.get() + 1);
+            Fingerprint {
+                md5: "aabbcc".to_string(),
+                xxhash: "112233".to_string(),
+            }
+        });
+        assert_eq!(call_count.get(), 1, "compute must be called on cache miss");
+
+        // Second call with the same (path, mtime) — cache hit, compute must NOT run.
+        let fp2 = cache.get_or_compute(&path, mtime, || {
+            call_count.set(call_count.get() + 1);
+            Fingerprint {
+                md5: "should_not_be_returned".to_string(),
+                xxhash: "deadbeef".to_string(),
+            }
+        });
+        assert_eq!(
+            call_count.get(),
+            1,
+            "compute must NOT be called on cache hit"
+        );
+        assert_eq!(
+            fp1.md5, fp2.md5,
+            "cache hit must return identical fingerprint"
+        );
+        assert_eq!(
+            fp1.xxhash, fp2.xxhash,
+            "cache hit must return identical xxhash"
+        );
+    }
+
+    /// Cache miss on mtime change: when the mtime advances the old entry must
+    /// not be returned and the compute closure must be called again.
+    #[test]
+    fn test_fingerprint_cache_miss_on_mtime_change() {
+        use std::cell::Cell;
+        use std::path::PathBuf;
+
+        let call_count = Cell::new(0u32);
+        let path = PathBuf::from("/virtual/test_miss.mxf");
+        let mtime_v1: u64 = 1_717_200_000;
+        let mtime_v2: u64 = mtime_v1 + 120; // file was modified 2 minutes later
+
+        let mut cache = FingerprintCache::new(16);
+
+        // Insert with original mtime.
+        let fp_v1 = cache.get_or_compute(&path, mtime_v1, || {
+            call_count.set(call_count.get() + 1);
+            Fingerprint {
+                md5: "old_md5".to_string(),
+                xxhash: "old_xx".to_string(),
+            }
+        });
+        assert_eq!(call_count.get(), 1);
+
+        // Query with updated mtime — must trigger recompute.
+        let fp_v2 = cache.get_or_compute(&path, mtime_v2, || {
+            call_count.set(call_count.get() + 1);
+            Fingerprint {
+                md5: "new_md5".to_string(),
+                xxhash: "new_xx".to_string(),
+            }
+        });
+        assert_eq!(
+            call_count.get(),
+            2,
+            "compute must be called again for new mtime"
+        );
+        assert_ne!(
+            fp_v1.md5, fp_v2.md5,
+            "new mtime must return the freshly computed fingerprint"
+        );
+        assert_eq!(fp_v2.md5, "new_md5");
+        assert_eq!(
+            cache.len(),
+            2,
+            "both (path, mtime_v1) and (path, mtime_v2) should be cached"
+        );
     }
 }

@@ -434,11 +434,24 @@ mod tests {
     use super::*;
 
     fn make_rect(layer: i32) -> DrawCommand {
-        DrawCommand::Rect(FillRect::new(0.0, 0.0, 100.0, 50.0, [255, 0, 0, 255], layer))
+        DrawCommand::Rect(FillRect::new(
+            0.0,
+            0.0,
+            100.0,
+            50.0,
+            [255, 0, 0, 255],
+            layer,
+        ))
     }
 
     fn make_ellipse(layer: i32) -> DrawCommand {
-        DrawCommand::Ellipse(FillEllipse::circle(50.0, 50.0, 25.0, [0, 255, 0, 255], layer))
+        DrawCommand::Ellipse(FillEllipse::circle(
+            50.0,
+            50.0,
+            25.0,
+            [0, 255, 0, 255],
+            layer,
+        ))
     }
 
     // --- BlendMode ---
@@ -562,7 +575,12 @@ mod tests {
     fn test_batch_total_bounds_single() {
         let mut batch = DrawBatch::new();
         batch.push(DrawCommand::Rect(FillRect::new(
-            10.0, 20.0, 100.0, 50.0, [0, 0, 0, 0], 0,
+            10.0,
+            20.0,
+            100.0,
+            50.0,
+            [0, 0, 0, 0],
+            0,
         )));
         let (x, y, xm, ym) = batch.total_bounds().expect("should have bounds");
         assert!((x - 10.0).abs() < f32::EPSILON);
@@ -574,9 +592,21 @@ mod tests {
     #[test]
     fn test_batch_total_bounds_multi() {
         let mut batch = DrawBatch::new();
-        batch.push(DrawCommand::Rect(FillRect::new(0.0, 0.0, 50.0, 50.0, [0, 0, 0, 0], 0)));
         batch.push(DrawCommand::Rect(FillRect::new(
-            100.0, 100.0, 50.0, 50.0, [0, 0, 0, 0], 1,
+            0.0,
+            0.0,
+            50.0,
+            50.0,
+            [0, 0, 0, 0],
+            0,
+        )));
+        batch.push(DrawCommand::Rect(FillRect::new(
+            100.0,
+            100.0,
+            50.0,
+            50.0,
+            [0, 0, 0, 0],
+            1,
         )));
         let (x, y, xm, ym) = batch.total_bounds().expect("should have bounds");
         assert!((x - 0.0).abs() < f32::EPSILON);
@@ -635,7 +665,9 @@ mod tests {
     #[test]
     fn test_batch_all_command_types() {
         let mut batch = DrawBatch::new();
-        batch.push(DrawCommand::Rect(FillRect::new(0.0, 0.0, 10.0, 10.0, [0; 4], 0)));
+        batch.push(DrawCommand::Rect(FillRect::new(
+            0.0, 0.0, 10.0, 10.0, [0; 4], 0,
+        )));
         batch.push(DrawCommand::Ellipse(FillEllipse::circle(
             5.0, 5.0, 3.0, [0; 4], 1,
         )));
@@ -691,9 +723,30 @@ mod tests {
     fn test_batch_stable_sort_within_layer() {
         // Commands at the same layer should preserve insertion order.
         let mut batch = DrawBatch::new();
-        batch.push(DrawCommand::Rect(FillRect::new(0.0, 0.0, 10.0, 10.0, [1, 0, 0, 255], 5)));
-        batch.push(DrawCommand::Rect(FillRect::new(0.0, 0.0, 10.0, 10.0, [2, 0, 0, 255], 5)));
-        batch.push(DrawCommand::Rect(FillRect::new(0.0, 0.0, 10.0, 10.0, [3, 0, 0, 255], 5)));
+        batch.push(DrawCommand::Rect(FillRect::new(
+            0.0,
+            0.0,
+            10.0,
+            10.0,
+            [1, 0, 0, 255],
+            5,
+        )));
+        batch.push(DrawCommand::Rect(FillRect::new(
+            0.0,
+            0.0,
+            10.0,
+            10.0,
+            [2, 0, 0, 255],
+            5,
+        )));
+        batch.push(DrawCommand::Rect(FillRect::new(
+            0.0,
+            0.0,
+            10.0,
+            10.0,
+            [3, 0, 0, 255],
+            5,
+        )));
         let flushed = batch.flush();
         // All three are at layer 5; insertion order must be preserved.
         if let DrawCommand::Rect(r0) = &flushed[0] {

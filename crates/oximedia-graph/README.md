@@ -1,7 +1,7 @@
 # oximedia-graph
 
 ![Status: Stable](https://img.shields.io/badge/status-stable-green)
-![Version: 0.1.7](https://img.shields.io/badge/version-0.1.7-blue)
+![Version: 0.1.8](https://img.shields.io/badge/version-0.1.8-blue)
 ![Tests: 692](https://img.shields.io/badge/tests-692-brightgreen)
 ![Updated: 2026-05-21](https://img.shields.io/badge/updated-2026--05--21-blue)
 
@@ -50,7 +50,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-graph = "0.1.7"
+oximedia-graph = "0.1.8"
 ```
 
 ```rust

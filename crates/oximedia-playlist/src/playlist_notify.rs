@@ -268,9 +268,7 @@ impl NotificationHub {
 
     /// Return the elapsed time since the last event, if any.
     pub fn time_since_last_event(&self) -> Option<Duration> {
-        self.history
-            .last()
-            .and_then(|e| e.timestamp.elapsed().ok())
+        self.history.last().and_then(|e| e.timestamp.elapsed().ok())
     }
 }
 

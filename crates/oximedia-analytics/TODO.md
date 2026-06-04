@@ -16,7 +16,7 @@
 - Watch-time attribution, multivariate testing, content recommendation
 
 ## Enhancements
-- [ ] Add configurable significance level (alpha) to `winning_variant` in `ab_testing` (verified-open 2026-05-16: hardcoded in ab_testing.rs)
+- [x] Add configurable significance level (alpha) to `winning_variant` in `ab_testing` (implemented 2026-06-01: alpha_to_critical_z gating in winning_variant_with_alpha; src/ab_testing.rs:306)
 - [x] Implement Bayesian A/B testing as alternative to frequentist z-test in `ab_testing` (verified 2026-05-16; src/ab_testing.rs — bandit.rs Thompson sampling wired)
 - [x] Add multi-armed bandit (epsilon-greedy, Thompson sampling) for adaptive experiments in `ab_testing` (verified 2026-05-16; src/bandit.rs)
 - [x] Implement segment-level retention analysis in `retention` (retention by content chapter/segment) (verified 2026-05-16; src/segment_retention.rs)
@@ -28,26 +28,26 @@
 
 ## New Features
 - [x] Add cohort analysis module: group viewers by first-view date and track retention over time (verified 2026-05-16; src/cohort.rs)
-- [ ] Implement churn prediction based on engagement score decline patterns (verified-open 2026-05-16: not found as separate module)
+- [x] Implement churn prediction based on engagement score decline patterns (verified 2026-06-01: predict_churn/ChurnConfig/ChurnRisk/ChurnAssessment — src/funnel.rs:152-230)
 - [x] Add real-time analytics aggregation: sliding window metrics (concurrent viewers, bitrate stats) (verified 2026-05-16; src/realtime.rs)
 - [x] Implement content recommendation scoring based on engagement similarity (verified 2026-05-16; src/recommendation.rs)
 - [x] Add geographic/device breakdowns for session metrics
 - [x] Implement watch time attribution: allocate credit to content segments for total engagement (verified 2026-05-16; src/attribution.rs)
 - [x] Add multivariate testing support (test multiple variables simultaneously) in `ab_testing` (verified 2026-05-16; src/multivariate.rs)
 - [x] Implement click-through rate (CTR) tracking for thumbnails and previews (verified 2026-05-16; src/ctr.rs)
-- [ ] Add viewer loyalty scoring: frequency, recency, duration weighted composite (verified-open 2026-05-16: no loyalty_score.rs found)
+- [x] Add viewer loyalty scoring: frequency, recency, duration weighted composite (verified 2026-06-01: compute_loyalty/LoyaltyScore/LoyaltyComponents/LoyaltyWeights — src/funnel.rs:242-345)
 
 ## Performance
-- [ ] Add streaming/incremental computation to `compute_retention` for large viewer datasets (verified-open 2026-05-16: not yet implemented)
+- [x] Add streaming/incremental computation to `compute_retention` for large viewer datasets (verified 2026-06-01: IncrementalRetentionState/compute_retention_incremental — src/retention.rs:142,257)
 - [x] Implement approximate quantile computation (t-digest) for percentile metrics at scale (verified 2026-05-16; src/quantile.rs, src/percentile.rs)
 - [ ] Use integer arithmetic for `assign_variant` FNV-1a hash instead of string operations (verified-open 2026-05-16: not yet optimized)
-- [ ] Add batch processing for `analyze_session` across multiple sessions in parallel (verified-open 2026-05-16: not yet implemented)
+- [x] Add batch processing for `analyze_session` across multiple sessions in parallel (implemented 2026-06-01: rayon par_iter in analyze_sessions_batch; src/session.rs:206)
 - [x] Implement reservoir sampling for memory-bounded attention heatmap generation
 
 ## Testing
-- [ ] Test `assign_variant` distribution uniformity with chi-squared test over 10K+ assignments
-- [ ] Add tests for `winning_variant` with known p-value outcomes (verify statistical correctness)
-- [ ] Test `compute_retention` with synthetic viewer data: 100% retention, 50% linear drop, step function
+- [x] Test `assign_variant` distribution uniformity with chi-squared test over 10K+ assignments (added 2026-06-01: test_assign_variant_chi_squared_uniformity — tests/wave15_tests.rs)
+- [x] Add tests for `winning_variant` with known p-value outcomes (verify statistical correctness) (added 2026-06-01: test_winning_variant_known_z_score, test_winning_variant_alpha_gates_significance — tests/wave15_tests.rs)
+- [x] Test `compute_retention` with synthetic viewer data: 100% retention, 50% linear drop, step function (added 2026-06-01: test_compute_retention_synthetic_curves — tests/wave15_tests.rs)
 - [ ] Test `drop_off_points` detection accuracy with synthetic retention curves
 - [ ] Test `linear_regression_slope` against known regression datasets
 - [ ] Add test for `attention_heatmap` with overlapping and non-overlapping session segments

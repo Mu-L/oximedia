@@ -1,11 +1,13 @@
-//! Frequency domain image processing using 2D Discrete Fourier Transform.
+//! Frequency domain image processing using OxiFFT-accelerated 2D FFT.
 //!
-//! Provides DFT-based analysis and filtering for single-channel (grayscale)
-//! images.  The 2D DFT is computed via row-column decomposition: a 1D DFT is
-//! applied to every row, then every column of the intermediate result.  This
-//! gives an O(N² · M²) algorithm — correct and transparent for moderate image
-//! sizes; for very large images a fast-convolution approach would be preferable
-//! but is outside the scope of this module.
+//! Provides FFT-based analysis and filtering for single-channel (grayscale)
+//! images.  The 2D forward transform uses `oxifft::fft2d` (complex-to-complex),
+//! converting the real-valued input to complex form first and extracting
+//! real/imaginary parts afterwards.  The inverse uses `oxifft::ifft2d` with
+//! identical dimensions.
+//!
+//! This replaces the prior O(N²·M²) hand-rolled DFT with an O(NM·log(NM))
+//! FFT, satisfying the Pure-Rust / OxiFFT policy for COOLJAPAN projects.
 //!
 //! # Coordinate convention
 //!
@@ -17,7 +19,7 @@
 
 #![allow(dead_code)]
 
-use std::f32::consts::PI;
+use oxifft::{fft2d, ifft2d, Complex};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -88,11 +90,14 @@ impl FrequencyDomain {
     // Construction / transforms
     // -----------------------------------------------------------------------
 
-    /// Compute the 2D DFT of a row-major grayscale image.
+    /// Compute the 2D FFT of a row-major grayscale image via OxiFFT.
     ///
     /// `pixels` must have length `width * height`.  Values are expected in an
     /// arbitrary finite range (typically `[0.0, 1.0]`); scaling is handled
     /// internally.
+    ///
+    /// Internally, the real-valued pixels are promoted to complex numbers
+    /// (imaginary part = 0) and passed to `oxifft::fft2d`.
     ///
     /// # Panics
     ///
@@ -103,36 +108,15 @@ impl FrequencyDomain {
         let h = height as usize;
         assert_eq!(pixels.len(), w * h, "pixel buffer length mismatch");
 
-        // --- Step 1: 1D DFT over every row -----------------------------------
-        // After this step `re_rows[y*w + x]` and `im_rows[y*w + x]` hold the
-        // row-wise DFT coefficient at column-frequency `x` for row `y`.
-        let mut re_rows = vec![0.0_f32; w * h];
-        let mut im_rows = vec![0.0_f32; w * h];
+        // Promote real pixels → complex (imag = 0).
+        let complex_in: Vec<Complex<f32>> = pixels.iter().map(|&v| Complex::new(v, 0.0)).collect();
 
-        for y in 0..h {
-            let row: Vec<f32> = pixels[y * w..(y + 1) * w].to_vec();
-            let (re, im) = dft_row(&row);
-            re_rows[y * w..(y + 1) * w].copy_from_slice(&re);
-            im_rows[y * w..(y + 1) * w].copy_from_slice(&im);
-        }
+        // Execute the 2D forward FFT (row-major: n0 = height rows, n1 = width cols).
+        let spectrum = fft2d(&complex_in, h, w);
 
-        // --- Step 2: 1D DFT over every column --------------------------------
-        // We extract each column from the row-wise result and DFT it.
-        let mut real = vec![0.0_f32; w * h];
-        let mut imag = vec![0.0_f32; w * h];
-
-        for x in 0..w {
-            // Gather the complex column values.
-            let col_re: Vec<f32> = (0..h).map(|y| re_rows[y * w + x]).collect();
-            let col_im: Vec<f32> = (0..h).map(|y| im_rows[y * w + x]).collect();
-
-            let (re2, im2) = dft_complex_row(&col_re, &col_im);
-
-            for y in 0..h {
-                real[y * w + x] = re2[y];
-                imag[y * w + x] = im2[y];
-            }
-        }
+        // Unpack interleaved Complex<f32> into separate real/imag arrays.
+        let real: Vec<f32> = spectrum.iter().map(|c| c.re).collect();
+        let imag: Vec<f32> = spectrum.iter().map(|c| c.im).collect();
 
         Self {
             width,
@@ -143,44 +127,29 @@ impl FrequencyDomain {
     }
 
     /// Reconstruct a spatial-domain grayscale image from DFT coefficients via
-    /// the inverse DFT.
+    /// the inverse FFT.
     ///
-    /// The output is normalised so that values match the original input range.
+    /// The output is normalised so that values match the original input range
+    /// (`oxifft::ifft2d` divides by `N = width * height` automatically).
     /// The returned slice has length `width * height`.
     #[must_use]
     pub fn to_gray(&self) -> Vec<f32> {
         let w = self.width as usize;
         let h = self.height as usize;
 
-        // --- IDFT over columns ----------------------------------------------
-        let mut re_cols = vec![0.0_f32; w * h];
-        let mut im_cols = vec![0.0_f32; w * h];
+        // Re-pack separate real/imag arrays into Complex<f32>.
+        let complex_in: Vec<Complex<f32>> = self
+            .real
+            .iter()
+            .zip(self.imag.iter())
+            .map(|(&re, &im)| Complex::new(re, im))
+            .collect();
 
-        for x in 0..w {
-            let col_re: Vec<f32> = (0..h).map(|y| self.real[y * w + x]).collect();
-            let col_im: Vec<f32> = (0..h).map(|y| self.imag[y * w + x]).collect();
+        // Execute the 2D inverse FFT (normalised: divided by n0*n1 inside ifft2d).
+        let recovered = ifft2d(&complex_in, h, w);
 
-            let (re2, im2) = idft_complex_row(&col_re, &col_im);
-
-            for y in 0..h {
-                re_cols[y * w + x] = re2[y];
-                im_cols[y * w + x] = im2[y];
-            }
-        }
-
-        // --- IDFT over rows -------------------------------------------------
-        let mut output = vec![0.0_f32; w * h];
-
-        for y in 0..h {
-            let row_re: Vec<f32> = re_cols[y * w..(y + 1) * w].to_vec();
-            let row_im: Vec<f32> = im_cols[y * w..(y + 1) * w].to_vec();
-
-            let (re2, _im2) = idft_complex_row(&row_re, &row_im);
-
-            output[y * w..(y + 1) * w].copy_from_slice(&re2);
-        }
-
-        output
+        // Return only the real part (imaginary should be ≈ 0 for a valid spectrum).
+        recovered.iter().map(|c| c.re).collect()
     }
 
     // -----------------------------------------------------------------------
@@ -320,20 +289,17 @@ impl FrequencyDomain {
 }
 
 // ---------------------------------------------------------------------------
-// Free functions — 1D DFT / IDFT
+// Legacy public 1D DFT helper (kept for API compatibility)
 // ---------------------------------------------------------------------------
 
-/// Compute the 1D DFT of a real-valued sequence.
+/// Compute the 1D DFT of a real-valued sequence using the direct O(N²) formula.
 ///
-/// Returns `(real, imag)` each of length `samples.len()`.
-///
-/// Uses the direct O(N²) summation formula:
-/// ```text
-/// X[k] = Σ_{n=0}^{N-1}  x[n] · exp(-j 2π k n / N)
-///       = Σ x[n] · (cos(2π k n / N)  -  j·sin(2π k n / N))
-/// ```
+/// This function is provided for API compatibility; for large sequences prefer
+/// `oxifft::fft` directly.  Returns `(real, imag)` each of length
+/// `samples.len()`.
 #[must_use]
 pub fn dft_row(samples: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    use std::f32::consts::PI;
     let n = samples.len();
     if n == 0 {
         return (vec![], vec![]);
@@ -353,53 +319,6 @@ pub fn dft_row(samples: &[f32]) -> (Vec<f32>, Vec<f32>) {
         im[k] = sum_im;
     }
     (re, im)
-}
-
-/// 1D DFT of a complex-valued sequence `(re_in, im_in)`.
-///
-/// Returns `(re_out, im_out)` each of length `re_in.len()`.
-fn dft_complex_row(re_in: &[f32], im_in: &[f32]) -> (Vec<f32>, Vec<f32>) {
-    let n = re_in.len();
-    if n == 0 {
-        return (vec![], vec![]);
-    }
-    let mut re_out = vec![0.0_f32; n];
-    let mut im_out = vec![0.0_f32; n];
-    let n_f = n as f32;
-    for k in 0..n {
-        let mut sum_re = 0.0_f32;
-        let mut sum_im = 0.0_f32;
-        for t in 0..n {
-            let angle = 2.0 * PI * k as f32 * t as f32 / n_f;
-            let cos_a = angle.cos();
-            let sin_a = angle.sin();
-            // (a + jb)(cos - j·sin) = a·cos + b·sin + j(b·cos - a·sin)
-            sum_re += re_in[t] * cos_a + im_in[t] * sin_a;
-            sum_im += im_in[t] * cos_a - re_in[t] * sin_a;
-        }
-        re_out[k] = sum_re;
-        im_out[k] = sum_im;
-    }
-    (re_out, im_out)
-}
-
-/// 1D inverse DFT of a complex-valued sequence.
-///
-/// Uses the conjugate DFT approach: `IDFT{X} = conj(DFT{conj(X)}) / N`.
-fn idft_complex_row(re_in: &[f32], im_in: &[f32]) -> (Vec<f32>, Vec<f32>) {
-    let n = re_in.len();
-    if n == 0 {
-        return (vec![], vec![]);
-    }
-    // Conjugate the input
-    let conj_im: Vec<f32> = im_in.iter().map(|&v| -v).collect();
-    // Forward DFT of conjugated input
-    let (re_tmp, im_tmp) = dft_complex_row(re_in, &conj_im);
-    // Conjugate and scale
-    let n_f = n as f32;
-    let re_out: Vec<f32> = re_tmp.iter().map(|&v| v / n_f).collect();
-    let im_out: Vec<f32> = im_tmp.iter().map(|&v| -v / n_f).collect();
-    (re_out, im_out)
 }
 
 // ---------------------------------------------------------------------------
@@ -663,6 +582,7 @@ mod tests {
 
     #[test]
     fn test_dominant_frequency_not_dc() {
+        use std::f32::consts::PI;
         let w = 8u32;
         let h = 1u32;
         // Single sinusoid at frequency 2/8 = 0.25 cycles/pixel
@@ -707,5 +627,77 @@ mod tests {
             "gain at cutoff should be 1/√2, got {}",
             gain
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // OxiFFT migration regression tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_oxifft_roundtrip_uniform() {
+        // Uniform image: all energy in DC, round-trip must be exact.
+        let w = 8u32;
+        let h = 8u32;
+        let pixels = flat_image(w, h, 0.75);
+        let fd = FrequencyDomain::from_gray(&pixels, w, h);
+        let recovered = fd.to_gray();
+        for (orig, rec) in pixels.iter().zip(recovered.iter()) {
+            assert!(
+                (orig - rec).abs() < 1e-4,
+                "OxiFFT round-trip uniform: {} vs {}",
+                orig,
+                rec
+            );
+        }
+    }
+
+    #[test]
+    fn test_oxifft_roundtrip_sinusoid() {
+        use std::f32::consts::PI;
+        // 2D sinusoidal pattern.
+        let w = 16u32;
+        let h = 16u32;
+        let pixels: Vec<f32> = (0..(w * h) as usize)
+            .map(|i| {
+                let x = (i % w as usize) as f32;
+                let y = (i / w as usize) as f32;
+                (2.0 * PI * 3.0 * x / w as f32).sin() * (2.0 * PI * 2.0 * y / h as f32).cos()
+            })
+            .collect();
+        let fd = FrequencyDomain::from_gray(&pixels, w, h);
+        let recovered = fd.to_gray();
+        for (orig, rec) in pixels.iter().zip(recovered.iter()) {
+            assert!(
+                (orig - rec).abs() < 1e-3,
+                "OxiFFT round-trip sinusoid: {} vs {}",
+                orig,
+                rec
+            );
+        }
+    }
+
+    #[test]
+    fn test_oxifft_dc_energy_only_in_dc_bin() {
+        // A constant image has all energy in the DC bin [0, 0].
+        let w = 4u32;
+        let h = 4u32;
+        let val = 2.0_f32;
+        let fd = FrequencyDomain::from_gray(&flat_image(w, h, val), w, h);
+        // DC magnitude = N * val (unnormalised forward FFT).
+        let n = (w * h) as f32;
+        let dc_expected = n * val;
+        assert!(
+            (fd.real[0] - dc_expected).abs() < 1e-2,
+            "DC real expected {dc_expected}, got {}",
+            fd.real[0]
+        );
+        assert!(fd.imag[0].abs() < 1e-3, "DC imag should be ~0");
+        // All other bins should be ~0.
+        for k in 1..(w * h) as usize {
+            assert!(
+                fd.real[k].abs() < 1e-2 && fd.imag[k].abs() < 1e-2,
+                "bin {k} should be ~0"
+            );
+        }
     }
 }

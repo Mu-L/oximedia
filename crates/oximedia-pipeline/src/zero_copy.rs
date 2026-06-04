@@ -346,12 +346,7 @@ impl ZeroCopyBus {
     /// Add a named channel between two nodes.
     ///
     /// If the channel already exists it is replaced by the new one.
-    pub fn add_channel(
-        &mut self,
-        from: impl AsRef<str>,
-        to: impl AsRef<str>,
-        capacity: usize,
-    ) {
+    pub fn add_channel(&mut self, from: impl AsRef<str>, to: impl AsRef<str>, capacity: usize) {
         let key = format!("{}→{}", from.as_ref(), to.as_ref());
         self.channels.insert(key, ZeroCopyChannel::new(capacity));
     }
@@ -385,11 +380,7 @@ impl ZeroCopyBus {
     /// # Errors
     ///
     /// Returns [`PipelineError::NodeNotFound`] when the channel doesn't exist.
-    pub fn pop(
-        &mut self,
-        from: &str,
-        to: &str,
-    ) -> Result<Option<ZeroCopyFrame>, PipelineError> {
+    pub fn pop(&mut self, from: &str, to: &str) -> Result<Option<ZeroCopyFrame>, PipelineError> {
         let key = Self::channel_key(from, to);
         let chan = self
             .channels
@@ -462,8 +453,7 @@ mod tests {
 
     #[test]
     fn descriptor_with_source_label() {
-        let d = FrameDescriptor::video(FrameFormat::Yuv420p, 640, 480, 0)
-            .with_source("decoder");
+        let d = FrameDescriptor::video(FrameFormat::Yuv420p, 640, 480, 0).with_source("decoder");
         assert_eq!(d.source_label, "decoder");
     }
 
@@ -581,9 +571,12 @@ mod tests {
         let mut bus = ZeroCopyBus::new();
         bus.add_channel("src", "filter", 8);
         bus.add_channel("filter", "sink", 8);
-        bus.push("src", "filter", make_video_frame(0, 4)).expect("ok");
-        bus.push("src", "filter", make_video_frame(1, 4)).expect("ok");
-        bus.push("filter", "sink", make_video_frame(0, 4)).expect("ok");
+        bus.push("src", "filter", make_video_frame(0, 4))
+            .expect("ok");
+        bus.push("src", "filter", make_video_frame(1, 4))
+            .expect("ok");
+        bus.push("filter", "sink", make_video_frame(0, 4))
+            .expect("ok");
         let (pushed, popped, dropped) = bus.aggregate_counters();
         assert_eq!(pushed, 3);
         assert_eq!(popped, 0);

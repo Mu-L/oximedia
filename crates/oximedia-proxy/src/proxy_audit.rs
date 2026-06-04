@@ -175,8 +175,7 @@ impl AuditLog {
     ) -> u64 {
         let seq = self.next_seq;
         self.next_seq += 1;
-        let entry =
-            AuditEntry::new(seq, action, proxy_path, actor).with_detail(detail);
+        let entry = AuditEntry::new(seq, action, proxy_path, actor).with_detail(detail);
         self.entries.push(entry);
         self.enforce_limit();
         seq
@@ -296,7 +295,10 @@ mod tests {
     #[test]
     fn test_action_display() {
         assert_eq!(format!("{}", AuditAction::Created), "CREATED");
-        assert_eq!(format!("{}", AuditAction::VerificationFailed), "VERIFICATION_FAILED");
+        assert_eq!(
+            format!("{}", AuditAction::VerificationFailed),
+            "VERIFICATION_FAILED"
+        );
     }
 
     #[test]

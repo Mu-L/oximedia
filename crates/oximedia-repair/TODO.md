@@ -44,7 +44,7 @@
 - [x] Test `repair_batch` error handling when some files in the batch are unrecoverable (implemented 2026-05-15; test_repair_batch_partial_unrecoverable verifies repair_batch_all returns one entry per input, no panics for empty file)
 - [x] Add roundtrip tests: corrupt a valid file, repair it, verify playback (implemented 2026-05-15; test_roundtrip_corrupt_repair_verify injects bit-flips then asserts issue count does not increase after repair)
 - [x] Test `backup` creation and skip-backup threshold logic with files of varying sizes (implemented 2026-05-15; test_backup_creation_and_skip checks .bak created when create_backup=true and skipped when file > skip_backup_threshold)
-- [ ] Add fuzz tests for `header` repair modules with random byte sequences
+- [x] Add fuzz tests for `header` repair modules with random byte sequences (implemented 2026-05-31; src/header/repair.rs `fuzz_tests` module: 7 test groups — repair_header random sequences, mp4 corrupted ftyp/size/truncated/random, avi bad RIFF/fourcc/random/tiny, matroska corrupted EBML/zeros/valid/random, repair_magic_number boundary cases, repair_size_field LE/BE/zero/saturate, copy_with_repair output integrity; deterministic LCG PRNG; no new deps)
 - [x] Regression test for deep-scan runtime budget (planned 2026-05-14)
   - **Goal:** Assert 5 MiB deep_scan completes in <30s debug / <5s release; locks in the algorithmic speedup
   - **Files:** crates/oximedia-repair/tests/perf_deep_scan_budget.rs (new file)

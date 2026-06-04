@@ -5,7 +5,6 @@
 
 /// The kind of a package version
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum VersionKind {
     /// Original package - no base version
     Original,
@@ -29,8 +28,7 @@ impl VersionKind {
 }
 
 /// A single version of an IMF package
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PackageVersion {
     /// Unique identifier for this version
     pub id: String,
@@ -60,9 +58,19 @@ impl PackageVersion {
     }
 }
 
+/// A change between two consecutive package versions in a chain.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VersionChange {
+    /// The earlier version.
+    pub from_version: PackageVersion,
+    /// The later version.
+    pub to_version: PackageVersion,
+    /// Annotation of the newer version (description field).
+    pub annotation: Option<String>,
+}
+
 /// A chain of package versions
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct VersionChain {
     /// All versions in this chain, ordered by insertion
     pub versions: Vec<PackageVersion>,
@@ -93,11 +101,73 @@ impl VersionChain {
     pub fn full_chain(&self) -> Vec<&PackageVersion> {
         self.versions.iter().collect()
     }
+
+    /// Returns the next version derived from the current latest and the given kind.
+    ///
+    /// The new version is *not* automatically added to the chain; call
+    /// [`add_version`] with the returned value if desired.
+    ///
+    /// The `id` of the new version is derived by appending `"-next"` to the
+    /// latest `id` (or `"v1"` if the chain is empty).  The `base_version_id`
+    /// is set to the latest version's `id`.
+    ///
+    /// # Version-kind semantics
+    /// | Kind           | Description suffix |
+    /// |----------------|--------------------|
+    /// | Original       | "Original version" |
+    /// | Extension      | "Extension"        |
+    /// | Supplement     | "Supplement"       |
+    /// | Substitution   | "Substitution"     |
+    #[must_use]
+    pub fn next_version(&self, kind: VersionKind) -> PackageVersion {
+        match self.latest() {
+            None => PackageVersion::new(
+                "v1".to_string(),
+                None,
+                VersionKind::Original,
+                "Original version".to_string(),
+            ),
+            Some(latest) => {
+                let new_id = format!("{}-next", latest.id);
+                let description = match &kind {
+                    VersionKind::Original => "Original version".to_string(),
+                    VersionKind::Extension => format!("Extension of {}", latest.id),
+                    VersionKind::Supplement => format!("Supplement to {}", latest.id),
+                    VersionKind::Substitution => format!("Substitution for {}", latest.id),
+                };
+                PackageVersion::new(new_id, Some(latest.id.clone()), kind, description)
+            }
+        }
+    }
+
+    /// Returns a changelog diffing consecutive [`PackageVersion`] entries.
+    ///
+    /// Each entry describes the transition from one version to the next.
+    /// An empty chain or a single-element chain returns an empty `Vec`.
+    #[must_use]
+    pub fn change_log(&self) -> Vec<VersionChange> {
+        self.versions
+            .windows(2)
+            .map(|w| {
+                let from = w[0].clone();
+                let to = w[1].clone();
+                let annotation = if to.description.is_empty() {
+                    None
+                } else {
+                    Some(to.description.clone())
+                };
+                VersionChange {
+                    from_version: from,
+                    to_version: to,
+                    annotation,
+                }
+            })
+            .collect()
+    }
 }
 
 /// A resource reference within a composition segment
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Resource {
     /// Unique identifier for this resource reference
     pub id: String,
@@ -144,7 +214,6 @@ impl Resource {
 
 /// A composition segment containing ordered resource references for a virtual track
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct CompositionSegment {
     /// Virtual track ID this segment belongs to
     pub virtual_track_id: String,
@@ -170,7 +239,6 @@ impl CompositionSegment {
 
 /// Validates track file resources in a composition
 #[derive(Debug, Default)]
-#[allow(dead_code)]
 pub struct TrackFileValidator;
 
 impl TrackFileValidator {
@@ -357,5 +425,106 @@ mod tests {
         )];
         let errors = TrackFileValidator::verify_resources(&resources);
         assert!(!errors.is_empty());
+    }
+
+    // ── next_version / change_log ─────────────────────────────────────────
+
+    #[test]
+    fn test_next_version_patch() {
+        let mut chain = VersionChain::new();
+        chain.add_version(PackageVersion::new(
+            "v1".to_string(),
+            None,
+            VersionKind::Original,
+            "Initial".to_string(),
+        ));
+
+        let next = chain.next_version(VersionKind::Extension);
+        // The next version should reference the latest as its base
+        assert_eq!(
+            next.base_version_id.as_deref(),
+            Some("v1"),
+            "base_version_id must point to latest"
+        );
+        assert_eq!(
+            next.kind,
+            VersionKind::Extension,
+            "kind must match requested kind"
+        );
+        // The id should be derived from the latest id
+        assert!(
+            next.id.contains("v1"),
+            "next id should be derived from latest id"
+        );
+    }
+
+    #[test]
+    fn test_next_version_empty_chain() {
+        let chain = VersionChain::new();
+        let next = chain.next_version(VersionKind::Original);
+        assert_eq!(next.kind, VersionKind::Original);
+        assert!(next.base_version_id.is_none());
+    }
+
+    #[test]
+    fn test_change_log_three_versions() {
+        let mut chain = VersionChain::new();
+        chain.add_version(PackageVersion::new(
+            "v1".to_string(),
+            None,
+            VersionKind::Original,
+            "First release".to_string(),
+        ));
+        chain.add_version(PackageVersion::new(
+            "v2".to_string(),
+            Some("v1".to_string()),
+            VersionKind::Extension,
+            "Second release".to_string(),
+        ));
+        chain.add_version(PackageVersion::new(
+            "v3".to_string(),
+            Some("v2".to_string()),
+            VersionKind::Supplement,
+            "Third release".to_string(),
+        ));
+
+        let log = chain.change_log();
+        assert_eq!(
+            log.len(),
+            2,
+            "3-version chain must yield 2 changelog entries"
+        );
+
+        // First change: v1 -> v2
+        assert_eq!(log[0].from_version.id, "v1");
+        assert_eq!(log[0].to_version.id, "v2");
+        assert_eq!(
+            log[0].annotation.as_deref(),
+            Some("Second release"),
+            "annotation must be the description of the newer version"
+        );
+
+        // Second change: v2 -> v3
+        assert_eq!(log[1].from_version.id, "v2");
+        assert_eq!(log[1].to_version.id, "v3");
+        assert_eq!(log[1].annotation.as_deref(), Some("Third release"));
+    }
+
+    #[test]
+    fn test_change_log_empty_chain() {
+        let chain = VersionChain::new();
+        assert!(chain.change_log().is_empty());
+    }
+
+    #[test]
+    fn test_change_log_single_version() {
+        let mut chain = VersionChain::new();
+        chain.add_version(PackageVersion::new(
+            "v1".to_string(),
+            None,
+            VersionKind::Original,
+            "Only version".to_string(),
+        ));
+        assert!(chain.change_log().is_empty());
     }
 }

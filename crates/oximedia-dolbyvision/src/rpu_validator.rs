@@ -156,7 +156,10 @@ impl RpuValidationResult {
     /// Return `true` if no [`IssueSeverity::Error`] issues were found.
     #[must_use]
     pub fn is_valid(&self) -> bool {
-        !self.issues.iter().any(|i| i.severity == IssueSeverity::Error)
+        !self
+            .issues
+            .iter()
+            .any(|i| i.severity == IssueSeverity::Error)
     }
 
     /// Return all issues with at least the specified severity.
@@ -287,9 +290,7 @@ impl RpuValidator {
                     frame,
                     RpuIssueType::InvalidL1Range,
                     IssueSeverity::Error,
-                    format!(
-                        "L1 {name} value {val:.6} is outside normalised PQ range [0.0, 1.0]"
-                    ),
+                    format!("L1 {name} value {val:.6} is outside normalised PQ range [0.0, 1.0]"),
                 ))
             } else {
                 None
@@ -564,14 +565,9 @@ mod tests {
         let issues = validator.validate_shot(&shot, 0);
         let errors: Vec<_> = issues
             .iter()
-            .filter(|i| {
-                i.severity == IssueSeverity::Error && i.description.contains("trim_offset")
-            })
+            .filter(|i| i.severity == IssueSeverity::Error && i.description.contains("trim_offset"))
             .collect();
-        assert!(
-            !errors.is_empty(),
-            "expected trim_offset error: {issues:?}"
-        );
+        assert!(!errors.is_empty(), "expected trim_offset error: {issues:?}");
     }
 
     // -- Sequence validation / pass rate ----------------------------------------
@@ -667,6 +663,9 @@ mod tests {
         shot.l1_max = 2.0;
         let shots = vec![shot];
         let result = validator.validate_sequence(&shots);
-        assert!(!result.is_valid(), "should be invalid due to L1 range error");
+        assert!(
+            !result.is_valid(),
+            "should be invalid due to L1 range error"
+        );
     }
 }

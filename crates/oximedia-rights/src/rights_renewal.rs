@@ -229,8 +229,7 @@ impl RenewalScheduler {
         monthly_revenue_usd: f64,
     ) {
         let record_id = record_id.into();
-        let annual_cost =
-            self.config.cost_per_day_usd * 365.0;
+        let annual_cost = self.config.cost_per_day_usd * 365.0;
         // Priority: inverse of days remaining (closer = higher priority)
         // + revenue contribution.  We use a reference "now" of 0; the score
         // is recomputed lazily in `due_for_renewal`.
@@ -312,9 +311,7 @@ impl RenewalScheduler {
         let mut due: Vec<&RenewalCandidate> = self
             .candidates
             .values()
-            .filter(|c| {
-                !c.status.is_terminal() && c.expires_at > now && c.expires_at <= window_end
-            })
+            .filter(|c| !c.status.is_terminal() && c.expires_at > now && c.expires_at <= window_end)
             .collect();
 
         due.sort_by(|a, b| {
@@ -454,8 +451,10 @@ mod tests {
     fn test_terminal_blocks_all_transitions() {
         let mut s = make_scheduler();
         s.add_record("r", "a", "h", true, BASE + DAY, 0.0);
-        s.transition("r", RenewalStatus::InProgress, 1, "").expect("transition should succeed");
-        s.transition("r", RenewalStatus::Renewed, 2, "").expect("transition should succeed");
+        s.transition("r", RenewalStatus::InProgress, 1, "")
+            .expect("transition should succeed");
+        s.transition("r", RenewalStatus::Renewed, 2, "")
+            .expect("transition should succeed");
         let c = s.candidates.get("r").expect("record should exist");
         assert!(!c.can_transition_to(RenewalStatus::Pending));
     }
@@ -480,7 +479,11 @@ mod tests {
         // r1 expires sooner → higher urgency → higher priority
         let priorities: Vec<f64> = due.iter().map(|c| c.priority_score).collect();
         for pair in priorities.windows(2) {
-            assert!(pair[0] >= pair[1], "not sorted descending: {:?}", priorities);
+            assert!(
+                pair[0] >= pair[1],
+                "not sorted descending: {:?}",
+                priorities
+            );
         }
     }
 

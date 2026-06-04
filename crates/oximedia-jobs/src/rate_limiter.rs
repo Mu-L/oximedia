@@ -242,6 +242,143 @@ impl RateLimitTracker {
     }
 }
 
+// ===========================================================================
+// Keyed (per-user / per-tag / global) rate limiter
+// ===========================================================================
+
+/// Discriminator for a rate-limit bucket.
+///
+/// A request may carry multiple keys (e.g. a global key plus a per-user key
+/// plus one or more per-tag keys).  [`KeyedRateLimiter::check_all`] enforces
+/// **all** matching limits — the most restrictive wins.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RateKey {
+    /// The global catch-all bucket.
+    Global,
+    /// A per-user bucket identified by an arbitrary string identifier.
+    User(String),
+    /// A per-tag bucket identified by a tag string.
+    Tag(String),
+}
+
+/// A rate limiter that maintains independent token buckets for multiple
+/// [`RateKey`]s.
+///
+/// # Map growth
+///
+/// One bucket is created per unique [`RateKey`] via [`add_limit`].  Callers
+/// are responsible for removing obsolete keys with [`remove_limit`] when a
+/// user or tag is no longer active.  The map is not automatically evicted to
+/// avoid complexity; use a background sweep or TTL-aware wrapper when dealing
+/// with large, churning key spaces.
+///
+/// [`add_limit`]: KeyedRateLimiter::add_limit
+/// [`remove_limit`]: KeyedRateLimiter::remove_limit
+#[derive(Debug)]
+pub struct KeyedRateLimiter {
+    buckets: std::collections::HashMap<RateKey, RateLimiter>,
+}
+
+impl KeyedRateLimiter {
+    /// Create a new keyed limiter with a single `Global` bucket seeded from
+    /// `global_config`.
+    pub fn new(global_config: RateLimitConfig) -> Self {
+        let mut buckets = std::collections::HashMap::new();
+        buckets.insert(RateKey::Global, RateLimiter::new(global_config));
+        Self { buckets }
+    }
+
+    /// Register an additional rate-limit bucket for the given key.
+    ///
+    /// If a bucket for `key` already exists it is **replaced**.
+    pub fn add_limit(&mut self, key: RateKey, config: RateLimitConfig) {
+        self.buckets.insert(key, RateLimiter::new(config));
+    }
+
+    /// Remove the bucket for `key`.  Returns `true` if a bucket was present.
+    pub fn remove_limit(&mut self, key: &RateKey) -> bool {
+        self.buckets.remove(key).is_some()
+    }
+
+    /// Check whether **all** supplied `keys` have tokens available, consuming
+    /// one token from each bucket that has capacity.
+    ///
+    /// The check is done in two passes to keep the operation as atomic as the
+    /// single-threaded token-bucket model allows:
+    ///
+    /// 1. **Probe pass** — refill all relevant buckets and check availability
+    ///    without consuming.
+    /// 2. **Consume pass** — consume one token from every bucket that had
+    ///    capacity (only executed when *all* probes passed).
+    ///
+    /// Returns `false` (blocked) if *any* relevant bucket cannot satisfy the
+    /// request.  Unknown keys (no registered bucket) are silently ignored —
+    /// they do not block the request.
+    pub fn check_all(&mut self, keys: &[RateKey]) -> bool {
+        // Gather the subset of keys that have registered buckets.
+        let relevant: Vec<&RateKey> = keys
+            .iter()
+            .filter(|k| self.buckets.contains_key(*k))
+            .collect();
+
+        // Probe: refill and check availability without consuming.
+        for key in &relevant {
+            let limiter = self
+                .buckets
+                .get_mut(*key)
+                .expect("existence confirmed above");
+            // Trigger refill by peeking at tokens_f64 after calling refill via a
+            // no-cost try_acquire(0) equivalent.  We use `tokens_f64()` after an
+            // explicit refill call.
+            limiter.refill_only();
+            if limiter.tokens_f64() < 1.0 {
+                return false;
+            }
+        }
+
+        // Consume: all probes passed, burn one token from each bucket.
+        for key in &relevant {
+            let limiter = self
+                .buckets
+                .get_mut(*key)
+                .expect("existence confirmed above");
+            limiter.consume_one();
+        }
+        true
+    }
+
+    /// Return the number of registered buckets (including `Global`).
+    pub fn bucket_count(&self) -> usize {
+        self.buckets.len()
+    }
+
+    /// Return the available tokens for `key`, or `None` if not registered.
+    pub fn available_tokens(&self, key: &RateKey) -> Option<u64> {
+        self.buckets.get(key).map(|l| l.available_tokens())
+    }
+}
+
+// We need two additional methods on `RateLimiter` to enable the two-pass
+// check.  They are intentionally not part of the public API of `RateLimiter`
+// itself but are exposed here via an extension approach by adding methods
+// to the struct (both are in the same module).
+impl RateLimiter {
+    /// Perform only the refill step without acquiring any tokens.
+    pub(crate) fn refill_only(&mut self) {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        let rate = self.config.rate_per_second();
+        self.tokens = (self.tokens + elapsed * rate).min(self.config.limit as f64);
+        self.last_refill = now;
+    }
+
+    /// Consume exactly one token.  Caller must ensure at least one token is
+    /// available (i.e. call `refill_only` + check `tokens_f64() >= 1.0` first).
+    pub(crate) fn consume_one(&mut self) {
+        self.tokens = (self.tokens - 1.0).max(0.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,5 +527,101 @@ mod tests {
         t.record_request(true, 1);
         t.clear();
         assert_eq!(t.total(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // KeyedRateLimiter tests
+    // -----------------------------------------------------------------------
+
+    fn make_cfg(name: &str, limit: u64) -> RateLimitConfig {
+        RateLimitConfig::new(
+            name,
+            limit,
+            Duration::from_secs(1),
+            RateLimitAlgorithm::TokenBucket,
+        )
+    }
+
+    /// Two user buckets with different capacities must be isolated — depleting
+    /// user-A's bucket must not affect user-B.
+    #[test]
+    fn test_keyed_per_user_isolation() {
+        let mut klr = KeyedRateLimiter::new(make_cfg("global", 1000));
+        klr.add_limit(RateKey::User("alice".to_string()), make_cfg("alice", 2));
+        klr.add_limit(RateKey::User("bob".to_string()), make_cfg("bob", 100));
+
+        let alice_keys = vec![RateKey::Global, RateKey::User("alice".to_string())];
+        let bob_keys = vec![RateKey::Global, RateKey::User("bob".to_string())];
+
+        // Exhaust alice's 2 tokens.
+        assert!(klr.check_all(&alice_keys), "alice request 1 should pass");
+        assert!(klr.check_all(&alice_keys), "alice request 2 should pass");
+        assert!(
+            !klr.check_all(&alice_keys),
+            "alice request 3 should be blocked"
+        );
+
+        // Bob is unaffected.
+        assert!(
+            klr.check_all(&bob_keys),
+            "bob should still pass after alice is blocked"
+        );
+    }
+
+    /// A per-tag bucket limits requests tagged with that tag while an
+    /// unrelated tag flows freely.
+    #[test]
+    fn test_keyed_per_tag_independence() {
+        let mut klr = KeyedRateLimiter::new(make_cfg("global", 1000));
+        klr.add_limit(RateKey::Tag("gpu".to_string()), make_cfg("gpu", 1));
+        klr.add_limit(RateKey::Tag("cpu".to_string()), make_cfg("cpu", 50));
+
+        let gpu_keys = vec![RateKey::Tag("gpu".to_string())];
+        let cpu_keys = vec![RateKey::Tag("cpu".to_string())];
+
+        // Exhaust the gpu bucket.
+        assert!(klr.check_all(&gpu_keys), "first gpu request should pass");
+        assert!(
+            !klr.check_all(&gpu_keys),
+            "second gpu request should be blocked"
+        );
+
+        // CPU tag is independent.
+        assert!(
+            klr.check_all(&cpu_keys),
+            "cpu request should pass regardless of gpu"
+        );
+    }
+
+    /// When a request carries multiple keys the *most restrictive* bucket wins:
+    /// if any one bucket is exhausted the whole request is denied.
+    #[test]
+    fn test_keyed_most_restrictive_wins() {
+        let mut klr = KeyedRateLimiter::new(make_cfg("global", 1000));
+        klr.add_limit(RateKey::User("dave".to_string()), make_cfg("dave", 5));
+        klr.add_limit(RateKey::Tag("batch".to_string()), make_cfg("batch", 1));
+
+        let all_keys = vec![
+            RateKey::Global,
+            RateKey::User("dave".to_string()),
+            RateKey::Tag("batch".to_string()),
+        ];
+
+        // First request passes all three buckets.
+        assert!(klr.check_all(&all_keys), "combined request 1 should pass");
+
+        // The 'batch' bucket is now exhausted (limit=1).  Even though global
+        // and user still have capacity, the combined request must be blocked.
+        assert!(
+            !klr.check_all(&all_keys),
+            "combined request 2 should be blocked because 'batch' tag is exhausted"
+        );
+
+        // A request that does NOT carry the 'batch' tag still flows through.
+        let user_only = vec![RateKey::Global, RateKey::User("dave".to_string())];
+        assert!(
+            klr.check_all(&user_only),
+            "user-only request should pass because batch key is not checked"
+        );
     }
 }

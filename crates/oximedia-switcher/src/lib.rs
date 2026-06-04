@@ -137,7 +137,12 @@ use thiserror::Error;
 /// Re-export commonly used types.
 pub use audio_follow::{AudioFollowError, AudioFollowMode};
 pub use bus::{BusError, BusType};
-pub use chroma::{ChromaColor, ChromaKey, ChromaKeyError, ChromaKeyParams};
+pub use chroma::{
+    ChromaColor, ChromaKey, ChromaKeyError, ChromaKeyParams, ChromaKeyYcbcr, ChromaKeyYcbcrParams,
+};
+pub use crosspoint::{
+    CrosspointError, CrosspointMatrix, CrosspointMatrixConfig, RouteRequest, SignalLayer,
+};
 pub use dve::{DveError, DveParams, DvePosition, DveScale};
 pub use input::{InputConfig, InputError, InputType};
 pub use keyer::{KeyerError, KeyerType};

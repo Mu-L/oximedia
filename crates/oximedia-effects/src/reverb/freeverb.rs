@@ -451,6 +451,8 @@ impl Freeverb {
 }
 
 impl AudioEffect for Freeverb {
+    const EFFECT_ID: &'static str = "freeverb";
+
     fn process_sample(&mut self, input: f32) -> f32 {
         let (left, _right) = self.process_sample_internal(input, input);
         left
@@ -739,33 +741,43 @@ mod tests {
 
     #[test]
     fn test_energy_conservation() {
-        // Output energy should not exceed input energy * (wet + dry)
+        // Verify the reverb is stable: total output energy (direct + decaying tail)
+        // must not exceed input energy * 50.  This headroom accounts for the reverb
+        // recirculation during the drain window (1 s at 48 kHz) while still catching
+        // any unstable feedback that would cause energy to blow up.
         let config = ReverbConfig::default()
             .with_room_size(0.5)
             .with_wet(0.3)
             .with_dry(0.7);
         let mut reverb = Freeverb::new(config, 48000.0);
 
-        let mut _input_energy = 0.0f32;
+        let mut input_energy = 0.0f32;
         let mut output_energy = 0.0f32;
 
-        // Generate test signal
+        // Generate test signal (8000 samples ≈ 167 ms at 48 kHz)
         for i in 0..8000 {
             #[allow(clippy::cast_precision_loss)]
             let input = (i as f32 * 0.1).sin() * 0.5;
-            _input_energy += input * input;
+            input_energy += input * input;
             let (l, r) = reverb.process_sample_stereo(input, input);
             output_energy += (l * l + r * r) * 0.5;
         }
 
-        // Drain reverb tail
+        // Drain reverb tail (48000 samples = 1 s of silence)
         for _ in 0..48000 {
             let (l, r) = reverb.process_sample_stereo(0.0, 0.0);
             output_energy += (l * l + r * r) * 0.5;
         }
 
-        // Output energy should be bounded
+        // Output energy must be finite (primary stability check)
         assert!(output_energy.is_finite(), "Output energy should be finite");
+        // Total energy budget: reverb recirculates energy multiple times during the
+        // drain window, so we allow up to 50× the input energy while still bounding
+        // against unbounded growth.
+        assert!(
+            output_energy <= input_energy * 50.0,
+            "output energy {output_energy} exceeded input energy {input_energy} * 50 (reverb unstable)"
+        );
     }
 
     #[test]

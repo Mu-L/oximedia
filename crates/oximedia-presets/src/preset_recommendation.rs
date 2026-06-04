@@ -82,7 +82,7 @@ impl NoiseLevel {
     #[must_use]
     pub fn crf_delta(&self) -> i32 {
         match self {
-            Self::None => -2,  // Can afford slightly higher quality
+            Self::None => -2, // Can afford slightly higher quality
             Self::Low => 0,
             Self::Medium => 2,
             Self::High => 4,
@@ -276,7 +276,11 @@ impl SourceMediaAnalysis {
     /// (≈ 1 bit per pixel per frame at the source resolution, capped at a
     /// reasonable ceiling).
     #[must_use]
-    #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation
+    )]
     pub fn effective_bitrate(&self) -> u64 {
         let base = self.target_bitrate.unwrap_or_else(|| {
             // Heuristic: pixels × fps × 0.07 bits/pixel (rough VBR target)
@@ -293,7 +297,10 @@ impl SourceMediaAnalysis {
     #[must_use]
     pub fn is_archival_candidate(&self) -> bool {
         self.noise.benefits_from_film_grain()
-            || matches!(self.platform_hint.as_deref(), Some("archive") | Some("archival"))
+            || matches!(
+                self.platform_hint.as_deref(),
+                Some("archive") | Some("archival")
+            )
     }
 }
 
@@ -592,9 +599,14 @@ impl RecommendationEngine {
             if effective == 0.0 {
                 50.0
             } else {
-                let proximity = 1.0 - ((effective - preset_br as f64).abs() / effective).clamp(0.0, 1.0);
+                let proximity =
+                    1.0 - ((effective - preset_br as f64).abs() / effective).clamp(0.0, 1.0);
                 // Penalise presets that exceed the budget
-                let penalty = if preset_br as f64 > effective { 0.6 } else { 1.0 };
+                let penalty = if preset_br as f64 > effective {
+                    0.6
+                } else {
+                    1.0
+                };
                 100.0 * proximity * penalty
             }
         } else {
@@ -624,7 +636,9 @@ impl RecommendationEngine {
         };
         entry.components.insert("resolution", res_score);
         if res_score >= 90.0 {
-            entry.rationale.push("Resolution closely matches source".to_string());
+            entry
+                .rationale
+                .push("Resolution closely matches source".to_string());
         }
 
         // ── Frame-rate score ─────────────────────────────────────────────────
@@ -637,7 +651,11 @@ impl RecommendationEngine {
                 // Full score for exact match; decays linearly over ±15 fps
                 let score = 100.0 * (1.0 - (diff / 15.0).clamp(0.0, 1.0));
                 // Bonus for presets that equal the source fps exactly
-                if diff < 0.1 { score + 10.0 } else { score }
+                if diff < 0.1 {
+                    score + 10.0
+                } else {
+                    score
+                }
             }
         } else {
             50.0 // No explicit fps — neutral
@@ -645,7 +663,9 @@ impl RecommendationEngine {
         let fps_score = fps_score.clamp(0.0, 100.0);
         entry.components.insert("frame_rate", fps_score);
         if fps_score >= 95.0 {
-            entry.rationale.push("Frame rate matches source exactly".to_string());
+            entry
+                .rationale
+                .push("Frame rate matches source exactly".to_string());
         }
 
         // ── Codec affinity ───────────────────────────────────────────────────
@@ -657,9 +677,9 @@ impl RecommendationEngine {
                     score += 100.0;
                     // Extra bonus for noisy sources that benefit from FGS
                     if analysis.noise.benefits_from_film_grain() && snap.has_tag("film-grain") {
-                        entry.rationale.push(
-                            "AV1 film grain synthesis ideal for noisy source".to_string(),
-                        );
+                        entry
+                            .rationale
+                            .push("AV1 film grain synthesis ideal for noisy source".to_string());
                         score += 20.0; // boost (clamped below)
                     }
                 }
@@ -684,9 +704,13 @@ impl RecommendationEngine {
                 (AudioPreference::HighQuality, Some("opus")) => {
                     // Higher bitrate opus = higher score
                     let abr = snap.audio_bitrate.unwrap_or(0);
-                    if abr >= 192_000 { 100.0 }
-                    else if abr >= 128_000 { 85.0 }
-                    else { 60.0 }
+                    if abr >= 192_000 {
+                        100.0
+                    } else if abr >= 128_000 {
+                        85.0
+                    } else {
+                        60.0
+                    }
                 }
                 (AudioPreference::Standard, Some("opus")) => 90.0,
                 (AudioPreference::Standard, Some("vorbis")) => 80.0,
@@ -717,7 +741,9 @@ impl RecommendationEngine {
         entry.components.insert("platform", platform_score);
         if platform_score >= 100.0 {
             if let Some(hint) = &analysis.platform_hint {
-                entry.rationale.push(format!("Tagged for platform '{hint}'"));
+                entry
+                    .rationale
+                    .push(format!("Tagged for platform '{hint}'"));
             }
         }
 
@@ -753,7 +779,10 @@ pub fn recommend_best(
     analysis: &SourceMediaAnalysis,
 ) -> Option<String> {
     let engine = RecommendationEngine::from_library(library);
-    engine.recommend(analysis, 1).top().map(|e| e.preset_id.clone())
+    engine
+        .recommend(analysis, 1)
+        .top()
+        .map(|e| e.preset_id.clone())
 }
 
 #[cfg(test)]
@@ -842,21 +871,25 @@ mod tests {
     fn test_effective_bitrate_heuristic_without_target() {
         let analysis = SourceMediaAnalysis::new(1920, 1080, 30.0);
         let rate = analysis.effective_bitrate();
-        assert!(rate >= 200_000, "Heuristic bitrate should be at least 200 kbps");
-        assert!(rate <= 50_000_000, "Heuristic bitrate should be capped at 50 Mbps");
+        assert!(
+            rate >= 200_000,
+            "Heuristic bitrate should be at least 200 kbps"
+        );
+        assert!(
+            rate <= 50_000_000,
+            "Heuristic bitrate should be capped at 50 Mbps"
+        );
     }
 
     #[test]
     fn test_archival_candidate_detection() {
-        let noisy = SourceMediaAnalysis::new(1920, 1080, 24.0)
-            .with_noise(NoiseLevel::High);
+        let noisy = SourceMediaAnalysis::new(1920, 1080, 24.0).with_noise(NoiseLevel::High);
         assert!(noisy.is_archival_candidate());
 
         let clean = SourceMediaAnalysis::new(1920, 1080, 30.0);
         assert!(!clean.is_archival_candidate());
 
-        let hinted = SourceMediaAnalysis::new(1920, 1080, 24.0)
-            .with_platform_hint("archive");
+        let hinted = SourceMediaAnalysis::new(1920, 1080, 24.0).with_platform_hint("archive");
         assert!(hinted.is_archival_candidate());
     }
 
@@ -866,21 +899,16 @@ mod tests {
     fn test_engine_scores_all_presets() {
         let library = PresetLibrary::new();
         let engine = RecommendationEngine::from_library(&library);
-        let analysis = SourceMediaAnalysis::new(1920, 1080, 30.0)
-            .with_target_bitrate(4_000_000);
+        let analysis = SourceMediaAnalysis::new(1920, 1080, 30.0).with_target_bitrate(4_000_000);
 
         let list = engine.recommend(&analysis, 0);
-        assert!(
-            list.len() > 0,
-            "Engine should score at least one preset"
-        );
+        assert!(list.len() > 0, "Engine should score at least one preset");
     }
 
     #[test]
     fn test_recommend_returns_at_most_n() {
         let engine = make_engine();
-        let analysis = SourceMediaAnalysis::new(1280, 720, 30.0)
-            .with_target_bitrate(3_000_000);
+        let analysis = SourceMediaAnalysis::new(1280, 720, 30.0).with_target_bitrate(3_000_000);
 
         let list = engine.recommend(&analysis, 5);
         assert!(list.len() <= 5, "Should return at most 5 entries");
@@ -949,8 +977,7 @@ mod tests {
     #[test]
     fn test_recommend_best_returns_a_preset_id() {
         let library = PresetLibrary::new();
-        let analysis = SourceMediaAnalysis::new(1920, 1080, 30.0)
-            .with_target_bitrate(5_000_000);
+        let analysis = SourceMediaAnalysis::new(1920, 1080, 30.0).with_target_bitrate(5_000_000);
         let result = recommend_best(&library, &analysis);
         assert!(result.is_some(), "recommend_best should return a preset ID");
         let id = result.expect("already checked");
@@ -964,8 +991,7 @@ mod tests {
             .with_weights(RecommendationWeights::bandwidth_focused());
 
         let target = 2_000_000_u64;
-        let analysis = SourceMediaAnalysis::new(1280, 720, 30.0)
-            .with_target_bitrate(target);
+        let analysis = SourceMediaAnalysis::new(1280, 720, 30.0).with_target_bitrate(target);
 
         let list = engine.recommend(&analysis, 1);
         if let Some(entry) = list.top() {
@@ -983,8 +1009,8 @@ mod tests {
     #[test]
     fn test_audio_lossless_preference_boosts_flac_presets() {
         let library = PresetLibrary::new();
-        let engine = RecommendationEngine::from_library(&library)
-            .with_weights(RecommendationWeights {
+        let engine =
+            RecommendationEngine::from_library(&library).with_weights(RecommendationWeights {
                 audio: 5.0, // heavily weight audio
                 ..RecommendationWeights::balanced()
             });

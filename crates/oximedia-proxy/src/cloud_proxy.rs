@@ -307,16 +307,13 @@ impl CloudProxyManager {
         let mut remaining = VecDeque::new();
 
         for job_id in pending {
-            let preferred = self
-                .jobs
-                .get(&job_id)
-                .and_then(|j| {
-                    if j.state == CloudJobState::Pending {
-                        Some(j.preferred_region)
-                    } else {
-                        None
-                    }
-                });
+            let preferred = self.jobs.get(&job_id).and_then(|j| {
+                if j.state == CloudJobState::Pending {
+                    Some(j.preferred_region)
+                } else {
+                    None
+                }
+            });
 
             let preferred = match preferred {
                 Some(p) => p,
@@ -345,11 +342,8 @@ impl CloudProxyManager {
 
     /// Select a worker based on the current strategy.
     fn select_worker(&self, preferred_region: Option<CloudRegion>) -> Option<String> {
-        let available: Vec<&CloudWorker> = self
-            .workers
-            .values()
-            .filter(|w| w.has_capacity())
-            .collect();
+        let available: Vec<&CloudWorker> =
+            self.workers.values().filter(|w| w.has_capacity()).collect();
 
         if available.is_empty() {
             return None;
@@ -363,20 +357,19 @@ impl CloudProxyManager {
 
             DispatchStrategy::Fastest => available
                 .iter()
-                .max_by(|a, b| a.speed_factor.partial_cmp(&b.speed_factor).unwrap_or(std::cmp::Ordering::Equal))
+                .max_by(|a, b| {
+                    a.speed_factor
+                        .partial_cmp(&b.speed_factor)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
                 .map(|w| w.id.clone()),
 
             DispatchStrategy::RegionAffinity => {
                 // Prefer workers in the preferred region
                 if let Some(region) = preferred_region {
-                    let regional: Vec<&&CloudWorker> = available
-                        .iter()
-                        .filter(|w| w.region == region)
-                        .collect();
-                    if let Some(w) = regional
-                        .iter()
-                        .max_by_key(|w| w.remaining_capacity())
-                    {
+                    let regional: Vec<&&CloudWorker> =
+                        available.iter().filter(|w| w.region == region).collect();
+                    if let Some(w) = regional.iter().max_by_key(|w| w.remaining_capacity()) {
                         return Some(w.id.clone());
                     }
                 }

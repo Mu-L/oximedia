@@ -171,13 +171,7 @@ fn build_blur_map(w: u32, h: u32, cfg: &TiltShiftConfig) -> Vec<u32> {
 /// This is an approximation: each pixel averages a square neighbourhood of
 /// side `2 * radius + 1`.  For performance we keep it separable — horizontal
 /// then vertical — but use the per-pixel radius for sampling.
-fn variable_box_blur(
-    src: &[u8],
-    dst: &mut [u8],
-    w: usize,
-    h: usize,
-    blur_map: &[u32],
-) {
+fn variable_box_blur(src: &[u8], dst: &mut [u8], w: usize, h: usize, blur_map: &[u32]) {
     // We need a temp buffer for the intermediate horizontal pass.
     let pixel_count = w * h;
     let mut tmp = vec![0u8; pixel_count * 4];
@@ -436,9 +430,7 @@ mod tests {
         let mut fx = TiltShiftEffect::default();
         let input = Frame::new(32, 32).expect("frame");
         let mut output = Frame::new(16, 16).expect("frame");
-        assert!(fx
-            .apply(&input, &mut output, &EffectParams::new())
-            .is_err());
+        assert!(fx.apply(&input, &mut output, &EffectParams::new()).is_err());
     }
 
     #[test]

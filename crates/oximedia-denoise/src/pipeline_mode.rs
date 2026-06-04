@@ -232,7 +232,9 @@ mod tests {
         let mut denoiser = StreamingDenoiser::new(config);
         let frame = vec![42.0f32; 8];
         denoiser.push_frame(frame.clone()); // None
-        let output = denoiser.push_frame(frame.clone()).expect("should produce output");
+        let output = denoiser
+            .push_frame(frame.clone())
+            .expect("should produce output");
         for &v in &output {
             assert!((v - 42.0).abs() < 1e-4, "uniform average: {v}");
         }

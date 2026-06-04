@@ -1,6 +1,6 @@
 # oximedia-neural
 
-**Status: [Stable]** | Version: 0.1.7 | Tests: 700 | Updated: 2026-05-21
+**Status: [Stable]** | Version: 0.1.8 | Tests: 700 | Updated: 2026-05-21
 
 Lightweight neural network inference for media processing — pure Rust tensor ops, conv2d, and pre-defined media models
 

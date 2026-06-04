@@ -131,10 +131,8 @@ mod tests {
             .map(|i| (2.0 * std::f32::consts::PI * 10_000.0 * i as f32 / sr as f32).sin())
             .collect();
         let output = filter.apply(&input, sr);
-        let rms_in: f32 =
-            (input.iter().map(|v| v * v).sum::<f32>() / input.len() as f32).sqrt();
-        let rms_out: f32 =
-            (output.iter().map(|v| v * v).sum::<f32>() / output.len() as f32).sqrt();
+        let rms_in: f32 = (input.iter().map(|v| v * v).sum::<f32>() / input.len() as f32).sqrt();
+        let rms_out: f32 = (output.iter().map(|v| v * v).sum::<f32>() / output.len() as f32).sqrt();
         assert!(
             rms_out < rms_in * 0.5,
             "High-freq should be attenuated: in={rms_in:.4} out={rms_out:.4}"
@@ -147,7 +145,10 @@ mod tests {
         let input = vec![1.0_f32; 100];
         let _ = filter.apply(&input, 48000);
         filter.reset();
-        assert!((filter.state).abs() < 1e-10, "State should be zero after reset");
+        assert!(
+            (filter.state).abs() < 1e-10,
+            "State should be zero after reset"
+        );
     }
 
     #[test]

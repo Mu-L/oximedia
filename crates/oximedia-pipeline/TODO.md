@@ -28,12 +28,12 @@
 ## Performance
 - [x] Implement node fusion optimization in `PipelineOptimizer` (merge adjacent scale+crop) (verified 2026-05-16; src/optimizer.rs:415 fn apply_node_fusion, scale+crop/pad fusion at :174/:197)
 - [x] Add zero-copy frame passing between adjacent nodes in the same thread (verified 2026-05-16; src/zero_copy.rs:9 ZeroCopyFrame Arc<[u8]>, ZeroCopyChannel MPSC)
-- [ ] Implement memory pool allocation for `ResourceEstimate` to reduce allocation overhead (verified-open 2026-05-16: no memory pool/arena for ResourceEstimate)
+- [x] Implement memory pool allocation for `ResourceEstimate` to reduce allocation overhead (verified 2026-06-01; memory_pool.rs:75 PoolConfig::from_estimate, lib.rs:35 pub mod memory_pool)
 - [x] Add SIMD-aware node scheduling in `ExecutionPlanner` for data-parallel filters (verified 2026-05-16; src/simd_scheduler.rs:36 SimdScheduler, CpuCapabilities, SimdTier)
 
 ## Testing
-- [ ] Add property-based tests for topological sort correctness with random graph shapes
-- [ ] Test pipeline validation with malformed graphs (disconnected nodes, dangling pads)
+- [x] Add property-based tests for topological sort correctness with random graph shapes (verified 2026-06-01; tests/wave15_tests.rs test_pipeline_topo_sort_random_graph: 5 seeded xorshift32 DAGs 8-12 nodes, forward-edge invariant)
+- [x] Test pipeline validation with malformed graphs (disconnected nodes, dangling pads) (verified 2026-06-01; tests/wave15_tests.rs test_pipeline_validation_disconnected_nodes + validation.rs existing tests)
 - [ ] Add benchmark tests for `ExecutionPlanner` with large pipeline graphs (1000+ nodes)
 - [ ] Test `PipelineBuilder` chain correctness for all filter types (scale, flip, crop, etc.)
 

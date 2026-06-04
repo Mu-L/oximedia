@@ -98,21 +98,18 @@ pub enum KdfError {
 // ---------------------------------------------------------------------------
 
 const SHA256_H: [u32; 8] = [
-    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-    0x5be0cd19,
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
 const SHA256_K: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-    0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-    0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-    0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-    0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-    0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-    0xc67178f2,
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
 /// Compute SHA-256 of `msg` and return the 32-byte digest.
@@ -394,9 +391,7 @@ impl KeyDeriver {
                 }
                 pbkdf2_sha256(master_key, &config.salt, *iterations, length)?
             }
-            KeyDerivationMethod::Sp800108Ctr => {
-                sp800108_ctr(master_key, &config.info, length)?
-            }
+            KeyDerivationMethod::Sp800108Ctr => sp800108_ctr(master_key, &config.info, length)?,
         };
 
         Ok(DerivedKey {
@@ -454,9 +449,8 @@ mod tests {
     #[test]
     fn test_hkdf_key_length_respected() {
         for len in [16u8, 24, 32, 48, 64] {
-            let config =
-                KeyDerivationConfig::new(KeyDerivationMethod::HkdfSha256, len)
-                    .with_salt(b"s".to_vec());
+            let config = KeyDerivationConfig::new(KeyDerivationMethod::HkdfSha256, len)
+                .with_salt(b"s".to_vec());
             let dk = deriver()
                 .derive(b"master", &config)
                 .expect("derive should succeed");
@@ -477,15 +471,10 @@ mod tests {
 
     #[test]
     fn test_pbkdf2_deterministic() {
-        let config =
-            KeyDerivationConfig::new(KeyDerivationMethod::Pbkdf2Sha256(1000), 32)
-                .with_salt(b"pbkdf2-salt".to_vec());
-        let k1 = deriver()
-            .derive(b"password", &config)
-            .expect("derive k1");
-        let k2 = deriver()
-            .derive(b"password", &config)
-            .expect("derive k2");
+        let config = KeyDerivationConfig::new(KeyDerivationMethod::Pbkdf2Sha256(1000), 32)
+            .with_salt(b"pbkdf2-salt".to_vec());
+        let k1 = deriver().derive(b"password", &config).expect("derive k1");
+        let k2 = deriver().derive(b"password", &config).expect("derive k2");
         assert_eq!(k1.key_bytes, k2.key_bytes);
         assert_eq!(k1.key_bytes.len(), 32);
     }
@@ -493,12 +482,10 @@ mod tests {
     #[test]
     fn test_pbkdf2_different_iterations_produce_different_keys() {
         let salt = b"common-salt".to_vec();
-        let config_100 =
-            KeyDerivationConfig::new(KeyDerivationMethod::Pbkdf2Sha256(100), 32)
-                .with_salt(salt.clone());
+        let config_100 = KeyDerivationConfig::new(KeyDerivationMethod::Pbkdf2Sha256(100), 32)
+            .with_salt(salt.clone());
         let config_200 =
-            KeyDerivationConfig::new(KeyDerivationMethod::Pbkdf2Sha256(200), 32)
-                .with_salt(salt);
+            KeyDerivationConfig::new(KeyDerivationMethod::Pbkdf2Sha256(200), 32).with_salt(salt);
         let k100 = deriver().derive(b"pw", &config_100).expect("100 iters");
         let k200 = deriver().derive(b"pw", &config_200).expect("200 iters");
         assert_ne!(k100.key_bytes, k200.key_bytes);
@@ -518,9 +505,8 @@ mod tests {
 
     #[test]
     fn test_sp800108_deterministic() {
-        let config =
-            KeyDerivationConfig::new(KeyDerivationMethod::Sp800108Ctr, 32)
-                .with_info(b"content-key-label".to_vec());
+        let config = KeyDerivationConfig::new(KeyDerivationMethod::Sp800108Ctr, 32)
+            .with_info(b"content-key-label".to_vec());
         let k1 = deriver().derive(b"root-key", &config).expect("derive k1");
         let k2 = deriver().derive(b"root-key", &config).expect("derive k2");
         assert_eq!(k1.key_bytes, k2.key_bytes);
@@ -541,8 +527,7 @@ mod tests {
     #[test]
     fn test_sp800108_key_length_respected() {
         for len in [16u8, 32, 48] {
-            let config =
-                KeyDerivationConfig::new(KeyDerivationMethod::Sp800108Ctr, len);
+            let config = KeyDerivationConfig::new(KeyDerivationMethod::Sp800108Ctr, len);
             let dk = deriver().derive(b"root", &config).expect("derive");
             assert_eq!(dk.key_bytes.len(), len as usize);
         }
@@ -552,8 +537,8 @@ mod tests {
 
     #[test]
     fn test_derived_key_method_tag() {
-        let config = KeyDerivationConfig::new(KeyDerivationMethod::HkdfSha256, 16)
-            .with_salt(b"s".to_vec());
+        let config =
+            KeyDerivationConfig::new(KeyDerivationMethod::HkdfSha256, 16).with_salt(b"s".to_vec());
         let dk = deriver().derive(b"mk", &config).expect("derive");
         assert_eq!(dk.method, KeyDerivationMethod::HkdfSha256);
         assert_eq!(dk.key_id, "test-key-id");

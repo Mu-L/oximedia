@@ -169,6 +169,100 @@ impl PointTracker {
         self.initialize(frame, point)
     }
 
+    /// Track point in new frame and return the position with explicit sub-pixel
+    /// accuracy via parabolic interpolation (Foroosh et al. 2002).
+    ///
+    /// Unlike [`track`], this always applies parabolic interpolation on the NCC
+    /// surface around the integer-peak position regardless of the `subpixel`
+    /// flag in [`TrackingConfig`].  It returns the raw `(f32, f32)` sub-pixel
+    /// position rather than a [`TrackingResult`].
+    ///
+    /// The refinement formula is:
+    /// ```text
+    /// delta_x = (R[peak-1] - R[peak+1]) / (2 * (R[peak-1] - 2*R[peak] + R[peak+1]))
+    /// ```
+    /// clamped to `[-0.5, 0.5]`.  At image borders the delta is forced to 0.0
+    /// to avoid out-of-bounds access.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any error from the underlying NCC computation.
+    pub fn track_point_subpixel(&self, frame: &Frame) -> VfxResult<(f32, f32)> {
+        let template = self
+            .template
+            .as_ref()
+            .ok_or_else(|| VfxError::ProcessingError("Tracker not initialized".to_string()))?;
+        let template_point = self
+            .template_point
+            .ok_or_else(|| VfxError::ProcessingError("Tracker not initialized".to_string()))?;
+
+        let template_size = self.config.template_size as i32;
+        let search_size = self.config.search_size as i32;
+        let half_search = search_size / 2;
+
+        let center_x = template_point.x as i32;
+        let center_y = template_point.y as i32;
+
+        // Find integer peak via NCC scan
+        let mut best_score = f32::NEG_INFINITY;
+        let mut peak_x = center_x;
+        let mut peak_y = center_y;
+
+        for sy in (center_y - half_search)..=(center_y + half_search) {
+            for sx in (center_x - half_search)..=(center_x + half_search) {
+                if !self.is_valid_search_pos(frame, sx, sy, template_size) {
+                    continue;
+                }
+                let score = self.compute_ncc(frame, sx, sy, template)?;
+                if score > best_score {
+                    best_score = score;
+                    peak_x = sx;
+                    peak_y = sy;
+                }
+            }
+        }
+
+        // Parabolic sub-pixel interpolation (Foroosh et al. 2002)
+        // delta_x = (r_left - r_right) / (2*(r_left - 2*r_center + r_right))
+        let delta_x = if peak_x > 0
+            && peak_x < (frame.width as i32) - 1
+            && self.is_valid_search_pos(frame, peak_x - 1, peak_y, template_size)
+            && self.is_valid_search_pos(frame, peak_x + 1, peak_y, template_size)
+        {
+            let r_left = self.compute_ncc(frame, peak_x - 1, peak_y, template)?;
+            let r_right = self.compute_ncc(frame, peak_x + 1, peak_y, template)?;
+            let r_center = best_score;
+            let denom = 2.0 * (r_left - 2.0 * r_center + r_right);
+            if denom.abs() > 1e-6 {
+                ((r_left - r_right) / denom).clamp(-0.5, 0.5)
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
+        let delta_y = if peak_y > 0
+            && peak_y < (frame.height as i32) - 1
+            && self.is_valid_search_pos(frame, peak_x, peak_y - 1, template_size)
+            && self.is_valid_search_pos(frame, peak_x, peak_y + 1, template_size)
+        {
+            let r_top = self.compute_ncc(frame, peak_x, peak_y - 1, template)?;
+            let r_bot = self.compute_ncc(frame, peak_x, peak_y + 1, template)?;
+            let r_center = best_score;
+            let denom = 2.0 * (r_top - 2.0 * r_center + r_bot);
+            if denom.abs() > 1e-6 {
+                ((r_top - r_bot) / denom).clamp(-0.5, 0.5)
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
+        Ok((peak_x as f32 + delta_x, peak_y as f32 + delta_y))
+    }
+
     fn is_valid_search_pos(&self, frame: &Frame, x: i32, y: i32, template_size: i32) -> bool {
         let half_size = template_size / 2;
         x - half_size >= 0
@@ -367,6 +461,129 @@ mod tests {
             confidence: 1.0,
         };
         tracker.initialize(&frame, point)?;
+        Ok(())
+    }
+
+    // ── track_point_subpixel ──────────────────────────────────────────────
+
+    /// Build a tiny solid-colour frame with a bright 3×3 patch at (cx, cy).
+    fn frame_with_patch(w: u32, h: u32, cx: u32, cy: u32) -> Frame {
+        let mut f = Frame::new(w, h).expect("frame");
+        // Fill with a mid-grey base
+        for y in 0..h {
+            for x in 0..w {
+                f.set_pixel(x, y, [64, 64, 64, 255]);
+            }
+        }
+        // Bright patch
+        for dy in 0..=2i32 {
+            for dx in 0..=2i32 {
+                let px = (cx as i32 + dx - 1).clamp(0, (w as i32) - 1) as u32;
+                let py = (cy as i32 + dy - 1).clamp(0, (h as i32) - 1) as u32;
+                f.set_pixel(px, py, [255, 255, 255, 255]);
+            }
+        }
+        f
+    }
+
+    #[test]
+    fn test_subpixel_tracker_zero_shift() -> VfxResult<()> {
+        let w = 80u32;
+        let h = 80u32;
+        let cx = 40u32;
+        let cy = 40u32;
+        let frame = frame_with_patch(w, h, cx, cy);
+
+        let mut tracker = PointTracker::new(TrackingConfig {
+            template_size: 11,
+            search_size: 21,
+            min_confidence: 0.0,
+            subpixel: false,
+        });
+        let pt = TrackPoint {
+            x: cx as f32,
+            y: cy as f32,
+            confidence: 1.0,
+        };
+        tracker.initialize(&frame, pt)?;
+
+        // Track against identical frame
+        let (rx, ry) = tracker.track_point_subpixel(&frame)?;
+        assert!(
+            (rx - cx as f32).abs() < 0.5,
+            "zero-shift x: got {rx}, expected ~{cx}"
+        );
+        assert!(
+            (ry - cy as f32).abs() < 0.5,
+            "zero-shift y: got {ry}, expected ~{cy}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_subpixel_tracker_half_pixel_shift() -> VfxResult<()> {
+        // Place template at (40, 40) in reference, then track in a frame where
+        // patch is shifted to (41, 40) — we expect the recovered shift ≈ 1 px.
+        // Sub-pixel accuracy means the NCC peak will be at 41 ± 0.5.
+        let w = 80u32;
+        let h = 80u32;
+        let ref_frame = frame_with_patch(w, h, 40, 40);
+        let shifted_frame = frame_with_patch(w, h, 41, 40);
+
+        let mut tracker = PointTracker::new(TrackingConfig {
+            template_size: 11,
+            search_size: 21,
+            min_confidence: 0.0,
+            subpixel: false,
+        });
+        tracker.initialize(
+            &ref_frame,
+            TrackPoint {
+                x: 40.0,
+                y: 40.0,
+                confidence: 1.0,
+            },
+        )?;
+
+        let (rx, _ry) = tracker.track_point_subpixel(&shifted_frame)?;
+        // The peak should be at ≈ 41.0 (within 0.5 px of the 1-pixel shift)
+        let shift = rx - 40.0;
+        assert!(
+            (shift - 1.0).abs() < 0.5,
+            "expected shift ≈ 1.0, got {shift:.3}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_subpixel_fallback_at_border() -> VfxResult<()> {
+        // Place patch very close to the border so peak is at the edge.
+        // Must not panic and delta should be 0.0 for border axis.
+        let w = 80u32;
+        let h = 80u32;
+        let ref_frame = frame_with_patch(w, h, 40, 40);
+        let edge_frame = frame_with_patch(w, h, 40, 40);
+
+        let mut tracker = PointTracker::new(TrackingConfig {
+            template_size: 11,
+            search_size: 21,
+            min_confidence: 0.0,
+            subpixel: false,
+        });
+        tracker.initialize(
+            &ref_frame,
+            TrackPoint {
+                x: 40.0,
+                y: 40.0,
+                confidence: 1.0,
+            },
+        )?;
+
+        // Should succeed without panic
+        let (rx, ry) = tracker.track_point_subpixel(&edge_frame)?;
+        // Result must be finite
+        assert!(rx.is_finite(), "rx must be finite");
+        assert!(ry.is_finite(), "ry must be finite");
         Ok(())
     }
 

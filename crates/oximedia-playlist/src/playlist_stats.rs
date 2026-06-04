@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Play statistics tracking for playlists and individual tracks.
 //!
 //! In addition to per-track play event accounting ([`PlaylistStats`]),
@@ -7,6 +6,7 @@
 //! track count, BPM statistics, and genre distribution — without requiring
 //! any external crates.
 
+use serde::Serialize;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -75,7 +75,7 @@ impl TrackInfo {
 /// assert_eq!(stats.track_count, 2);
 /// assert!((stats.average_bpm.unwrap() - 130.0).abs() < 1.0);
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct PlaylistSummaryStats {
     /// Total number of tracks in the playlist.
     pub track_count: usize,
@@ -181,6 +181,12 @@ impl PlaylistSummaryStats {
         }
     }
 
+    /// Alias for `compute`; used by the cache layer in `PlaylistStats`.
+    #[must_use]
+    pub fn from_tracks(tracks: &[TrackInfo]) -> Self {
+        Self::compute(tracks)
+    }
+
     /// Returns the total duration as fractional seconds.
     #[must_use]
     pub fn total_duration_secs(&self) -> f64 {
@@ -210,7 +216,7 @@ impl PlaylistSummaryStats {
 }
 
 /// Statistics for a single track across all play events.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct PlayStats {
     /// Number of times the track was played to completion.
     pub complete_plays: u32,
@@ -288,6 +294,23 @@ impl PlayEvent {
     }
 }
 
+/// A serialisable row for JSON export.
+#[derive(Debug, Clone, Serialize)]
+struct TrackStatsRow {
+    track_id: String,
+    plays: u32,
+    completion_rate: f64,
+    skips: u32,
+}
+
+/// Top-level export payload for `PlaylistStats::to_json`.
+#[derive(Debug, Serialize)]
+struct PlaylistStatsExport {
+    tracks: Vec<TrackStatsRow>,
+    total_plays: usize,
+    unique_tracks: usize,
+}
+
 /// Aggregated play statistics for an entire playlist.
 #[derive(Debug, Default)]
 pub struct PlaylistStats {
@@ -295,6 +318,10 @@ pub struct PlaylistStats {
     track_stats: HashMap<String, PlayStats>,
     /// Chronological history of play events.
     events: Vec<PlayEvent>,
+    /// Cached summary statistics; `None` when `is_dirty` is true.
+    cached_summary: Option<PlaylistSummaryStats>,
+    /// Set to `true` whenever the track stats change.
+    is_dirty: bool,
 }
 
 impl PlaylistStats {
@@ -313,6 +340,8 @@ impl PlaylistStats {
         }
         stats.total_duration_secs += event.played_secs;
         self.events.push(event);
+        self.is_dirty = true;
+        self.cached_summary = None;
     }
 
     /// Returns the total number of play events recorded.
@@ -360,6 +389,83 @@ impl PlaylistStats {
     pub fn reset(&mut self) {
         self.track_stats.clear();
         self.events.clear();
+        self.is_dirty = true;
+        self.cached_summary = None;
+    }
+
+    // ── Cached summary ──────────────────────────────────────────────────────
+
+    /// Build `TrackInfo` records from the current play stats so that
+    /// `PlaylistSummaryStats::from_tracks` can be called.
+    fn build_track_infos(&self) -> Vec<TrackInfo> {
+        self.track_stats
+            .keys()
+            .map(|id| TrackInfo::new(id))
+            .collect()
+    }
+
+    /// Return aggregate summary statistics, recomputing only when the
+    /// underlying data has changed since the last call.
+    pub fn summary(&mut self) -> PlaylistSummaryStats {
+        if self.is_dirty || self.cached_summary.is_none() {
+            let infos = self.build_track_infos();
+            self.cached_summary = Some(PlaylistSummaryStats::from_tracks(&infos));
+            self.is_dirty = false;
+        }
+        self.cached_summary.clone().unwrap_or_default()
+    }
+
+    // ── Export methods ──────────────────────────────────────────────────────
+
+    /// Serialise play statistics to a pretty-printed JSON string.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`serde_json::Error`] if serialisation fails (in practice
+    /// this should never happen for this type).
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        let tracks: Vec<TrackStatsRow> = self
+            .track_stats
+            .iter()
+            .map(|(id, stats)| TrackStatsRow {
+                track_id: id.clone(),
+                plays: stats.total_plays(),
+                completion_rate: stats.completion_rate(),
+                skips: stats.skips,
+            })
+            .collect();
+
+        let export = PlaylistStatsExport {
+            total_plays: self.events.len(),
+            unique_tracks: self.track_stats.len(),
+            tracks,
+        };
+
+        serde_json::to_string_pretty(&export)
+    }
+
+    /// Serialise play statistics to CSV format.
+    ///
+    /// The returned string begins with a header row and contains one data row
+    /// per tracked track.
+    pub fn to_csv(&self) -> String {
+        let mut out = String::from("track_id,plays,completion_rate,skips\n");
+        for (id, stats) in &self.track_stats {
+            // Escape commas in the track ID by quoting.
+            let safe_id = if id.contains(',') {
+                format!("\"{id}\"")
+            } else {
+                id.clone()
+            };
+            out.push_str(&format!(
+                "{},{},{:.3},{}\n",
+                safe_id,
+                stats.total_plays(),
+                stats.completion_rate(),
+                stats.skips
+            ));
+        }
+        out
     }
 }
 
@@ -632,5 +738,85 @@ mod tests {
         let stats = PlaylistSummaryStats::compute(&tracks);
         assert_eq!(stats.tracks_with_duration, 1);
         assert_eq!(stats.total_duration, Duration::from_secs(100));
+    }
+
+    // ── PlaylistStats cache tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_stats_cache_same_as_fresh() {
+        let mut ps = PlaylistStats::new();
+        ps.record_play(PlayEvent::completed("t1", 180.0));
+        ps.record_play(PlayEvent::skipped("t1", 30.0));
+        ps.record_play(PlayEvent::completed("t2", 200.0));
+
+        let cached = ps.summary();
+        // The cached summary must report the same track count as a fresh compute.
+        assert_eq!(cached.track_count, 2);
+    }
+
+    #[test]
+    fn test_stats_cache_invalidates_on_record_play() {
+        let mut ps = PlaylistStats::new();
+        ps.record_play(PlayEvent::completed("t1", 60.0));
+
+        let first = ps.summary();
+        assert_eq!(first.track_count, 1);
+
+        // Add a second track and check that the summary reflects it.
+        ps.record_play(PlayEvent::completed("t2", 60.0));
+        let second = ps.summary();
+        assert_eq!(second.track_count, 2);
+    }
+
+    // ── Export method tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_to_json_roundtrip() {
+        let mut ps = PlaylistStats::new();
+        ps.record_play(PlayEvent::completed("track_a", 120.0));
+        ps.record_play(PlayEvent::skipped("track_b", 30.0));
+
+        let json = ps.to_json().expect("to_json should succeed");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("JSON should parse back");
+
+        let tracks = value.get("tracks").expect("tracks key missing");
+        assert!(tracks.is_array());
+        assert!(!tracks.as_array().expect("is array").is_empty());
+    }
+
+    #[test]
+    fn test_to_csv_format() {
+        let mut ps = PlaylistStats::new();
+        ps.record_play(PlayEvent::completed("alpha", 100.0));
+        ps.record_play(PlayEvent::skipped("beta", 20.0));
+
+        let csv = ps.to_csv();
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines[0], "track_id,plays,completion_rate,skips");
+        // One header + two data rows
+        assert_eq!(lines.len(), 3, "expected header + 2 data rows");
+        // Each data row must have 4 comma-separated fields.
+        for line in &lines[1..] {
+            let fields: Vec<&str> = line.splitn(4, ',').collect();
+            assert_eq!(fields.len(), 4, "row '{line}' does not have 4 fields");
+        }
+    }
+
+    #[test]
+    fn test_export_empty_stats() {
+        let ps = PlaylistStats::new();
+
+        let json = ps.to_json().expect("to_json on empty stats should succeed");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("JSON should parse back");
+        let tracks = value.get("tracks").expect("tracks key missing");
+        assert!(
+            tracks.as_array().map(Vec::is_empty).unwrap_or(false),
+            "tracks should be empty array"
+        );
+
+        let csv = ps.to_csv();
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines.len(), 1, "empty stats should have header only");
+        assert_eq!(lines[0], "track_id,plays,completion_rate,skips");
     }
 }

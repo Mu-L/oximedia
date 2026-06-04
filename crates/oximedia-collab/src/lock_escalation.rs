@@ -156,7 +156,9 @@ pub struct TrackLockState {
 impl TrackLockState {
     /// Return `true` if any holder is in exclusive mode.
     pub fn is_exclusively_held(&self) -> bool {
-        self.holders.iter().any(|h| h.mode == TrackLockMode::Exclusive)
+        self.holders
+            .iter()
+            .any(|h| h.mode == TrackLockMode::Exclusive)
     }
 
     /// Return `true` if `user_id` currently holds any lock on this track.
@@ -211,7 +213,10 @@ impl fmt::Display for EscalationError {
             Self::Deadlock(msg) => write!(f, "deadlock: {msg}"),
             Self::UnknownTrack(t) => write!(f, "unknown track: {t}"),
             Self::DuplicatePending { user_id, track_id } => {
-                write!(f, "{user_id} already has a pending escalation for {track_id}")
+                write!(
+                    f,
+                    "{user_id} already has a pending escalation for {track_id}"
+                )
             }
         }
     }
@@ -357,8 +362,11 @@ impl LockEscalationManager {
             }
 
             // Can we escalate immediately? (only this user holds a shared lock)
-            let other_holders: Vec<&TrackLockHolder> =
-                state.holders.iter().filter(|h| h.user_id != user_id).collect();
+            let other_holders: Vec<&TrackLockHolder> = state
+                .holders
+                .iter()
+                .filter(|h| h.user_id != user_id)
+                .collect();
 
             if other_holders.is_empty() {
                 // Promote to exclusive in-place.
@@ -459,9 +467,10 @@ impl LockEscalationManager {
         now_ms: u64,
     ) -> Result<Option<String>, EscalationError> {
         {
-            let state = self.tracks.get_mut(track_id).ok_or_else(|| {
-                EscalationError::UnknownTrack(track_id.to_string())
-            })?;
+            let state = self
+                .tracks
+                .get_mut(track_id)
+                .ok_or_else(|| EscalationError::UnknownTrack(track_id.to_string()))?;
             state.expire(now_ms);
             let before = state.holders.len();
             state.holders.retain(|h| h.user_id != user_id);
@@ -598,8 +607,12 @@ mod tests {
     #[test]
     fn test_acquire_shared_success() {
         let mut m = mgr();
-        m.acquire_shared("alice", "track-1", 0).expect("should succeed");
-        assert_eq!(m.current_mode("alice", "track-1"), Some(TrackLockMode::Shared));
+        m.acquire_shared("alice", "track-1", 0)
+            .expect("should succeed");
+        assert_eq!(
+            m.current_mode("alice", "track-1"),
+            Some(TrackLockMode::Shared)
+        );
     }
 
     #[test]
@@ -618,7 +631,9 @@ mod tests {
         m.request_escalation("alice", "t1", 0, EscalationPriority::NORMAL)
             .expect("escalation granted immediately");
         // bob cannot acquire shared while alice holds exclusive
-        let err = m.acquire_shared("bob", "t1", 0).expect_err("should be blocked");
+        let err = m
+            .acquire_shared("bob", "t1", 0)
+            .expect_err("should be blocked");
         assert!(matches!(err, EscalationError::BlockedBy(_)));
     }
 
@@ -628,10 +643,14 @@ mod tests {
     fn test_escalation_granted_immediately_when_sole_holder() {
         let mut m = mgr();
         m.acquire_shared("alice", "t1", 0).expect("ok");
-        let result = m.request_escalation("alice", "t1", 0, EscalationPriority::NORMAL)
+        let result = m
+            .request_escalation("alice", "t1", 0, EscalationPriority::NORMAL)
             .expect("should succeed");
         assert_eq!(result, EscalationResult::Granted);
-        assert_eq!(m.current_mode("alice", "t1"), Some(TrackLockMode::Exclusive));
+        assert_eq!(
+            m.current_mode("alice", "t1"),
+            Some(TrackLockMode::Exclusive)
+        );
     }
 
     #[test]
@@ -639,7 +658,8 @@ mod tests {
         let mut m = mgr();
         m.acquire_shared("alice", "t1", 0).expect("ok");
         m.acquire_shared("bob", "t1", 0).expect("ok");
-        let result = m.request_escalation("alice", "t1", 0, EscalationPriority::NORMAL)
+        let result = m
+            .request_escalation("alice", "t1", 0, EscalationPriority::NORMAL)
             .expect("should queue");
         assert_eq!(result, EscalationResult::Queued);
         assert_eq!(m.pending_count("t1"), 1);
@@ -648,7 +668,8 @@ mod tests {
     #[test]
     fn test_escalation_error_no_shared_lock() {
         let mut m = mgr();
-        let err = m.request_escalation("ghost", "t1", 0, EscalationPriority::NORMAL)
+        let err = m
+            .request_escalation("ghost", "t1", 0, EscalationPriority::NORMAL)
             .expect_err("no shared lock");
         assert!(matches!(err, EscalationError::NoSharedLock { .. }));
     }
@@ -659,7 +680,8 @@ mod tests {
         m.acquire_shared("alice", "t1", 0).expect("ok");
         m.request_escalation("alice", "t1", 0, EscalationPriority::NORMAL)
             .expect("granted");
-        let err = m.request_escalation("alice", "t1", 100, EscalationPriority::NORMAL)
+        let err = m
+            .request_escalation("alice", "t1", 100, EscalationPriority::NORMAL)
             .expect_err("already exclusive");
         assert!(matches!(err, EscalationError::AlreadyExclusive { .. }));
     }
@@ -671,7 +693,8 @@ mod tests {
         m.acquire_shared("bob", "t1", 0).expect("ok");
         m.request_escalation("alice", "t1", 0, EscalationPriority::NORMAL)
             .expect("queued");
-        let err = m.request_escalation("alice", "t1", 100, EscalationPriority::NORMAL)
+        let err = m
+            .request_escalation("alice", "t1", 100, EscalationPriority::NORMAL)
             .expect_err("duplicate");
         assert!(matches!(err, EscalationError::DuplicatePending { .. }));
     }
@@ -689,7 +712,10 @@ mod tests {
         // Bob releases → alice should be promoted.
         let promoted = m.release("bob", "t1", 100).expect("ok");
         assert_eq!(promoted, Some("alice".to_string()));
-        assert_eq!(m.current_mode("alice", "t1"), Some(TrackLockMode::Exclusive));
+        assert_eq!(
+            m.current_mode("alice", "t1"),
+            Some(TrackLockMode::Exclusive)
+        );
         assert_eq!(m.pending_count("t1"), 0);
     }
 
@@ -725,7 +751,10 @@ mod tests {
 
         let state = m.tracks.get("t1").expect("track");
         // Higher priority (carol HIGH=200) should be at front.
-        assert_eq!(state.pending.front().map(|p| p.user_id.as_str()), Some("carol"));
+        assert_eq!(
+            state.pending.front().map(|p| p.user_id.as_str()),
+            Some("carol")
+        );
     }
 
     // ── force_revoke_user ──
@@ -741,7 +770,10 @@ mod tests {
         let affected = m.force_revoke_user("bob", 100);
         assert!(affected.contains(&"t1".to_string()));
         // Alice should have been promoted.
-        assert_eq!(m.current_mode("alice", "t1"), Some(TrackLockMode::Exclusive));
+        assert_eq!(
+            m.current_mode("alice", "t1"),
+            Some(TrackLockMode::Exclusive)
+        );
     }
 
     // ── expiry ──
@@ -751,7 +783,8 @@ mod tests {
         let mut m = LockEscalationManager::new(500); // 500ms TTL
         m.acquire_shared("alice", "t1", 0).expect("ok");
         // At t=600 alice's lock has expired; bob should be able to acquire.
-        m.acquire_shared("bob", "t1", 600).expect("should succeed after expiry");
+        m.acquire_shared("bob", "t1", 600)
+            .expect("should succeed after expiry");
         let state = m.tracks.get("t1").expect("track");
         // Only bob remains.
         assert_eq!(state.holder_count(), 1);

@@ -137,7 +137,10 @@ impl SalvageMap {
 
     /// Return all extractable (valid or degraded) segments.
     pub fn extractable_segments(&self) -> Vec<&Segment> {
-        self.segments.iter().filter(|s| s.is_extractable()).collect()
+        self.segments
+            .iter()
+            .filter(|s| s.is_extractable())
+            .collect()
     }
 
     /// Total bytes of extractable content.
@@ -173,17 +176,15 @@ impl SalvageMap {
             return;
         }
 
+        let segments = std::mem::take(&mut self.segments);
         let mut merged: Vec<Segment> = Vec::new();
-        let mut iter = self.segments.drain(..);
+        let mut iter = segments.into_iter();
 
         if let Some(first) = iter.next() {
             let mut current = first;
             for next in iter {
                 let gap = next.start.saturating_sub(current.end);
-                if current.is_extractable()
-                    && next.is_extractable()
-                    && gap <= gap_tolerance
-                {
+                if current.is_extractable() && next.is_extractable() && gap <= gap_tolerance {
                     // Merge: extend current to cover next
                     current.end = next.end;
                     // Take the better validity
@@ -427,7 +428,14 @@ mod tests {
         assert_eq!(plan.segment_count(), 2);
         assert_eq!(plan.total_bytes, 2000);
         assert!(plan.needs_remux);
-        assert!((plan.estimated_duration_secs.expect("expected estimated_duration_secs to be Some/Ok") - 2.0).abs() < f64::EPSILON);
+        assert!(
+            (plan
+                .estimated_duration_secs
+                .expect("expected estimated_duration_secs to be Some/Ok")
+                - 2.0)
+                .abs()
+                < f64::EPSILON
+        );
     }
 
     #[test]

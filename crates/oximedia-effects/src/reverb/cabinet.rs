@@ -252,6 +252,8 @@ impl CabinetSimulator {
 }
 
 impl AudioEffect for CabinetSimulator {
+    const EFFECT_ID: &'static str = "cabinet_simulator";
+
     fn process_sample(&mut self, input: f32) -> f32 {
         let half = self.fft_size / 2;
 

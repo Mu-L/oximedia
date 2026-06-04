@@ -128,8 +128,7 @@ impl ScheduledEvent {
     /// Returns `true` if this event overlaps with another event.
     #[must_use]
     pub fn overlaps(&self, other: &Self) -> bool {
-        self.scheduled_start < other.scheduled_end
-            && other.scheduled_start < self.scheduled_end
+        self.scheduled_start < other.scheduled_end && other.scheduled_start < self.scheduled_end
     }
 }
 
@@ -528,15 +527,21 @@ mod tests {
     #[test]
     fn test_add_and_count() {
         let mut sched = BroadcastScheduler::new();
-        sched.add_event(make_event("e1", 1000, 2000)).expect("should succeed in test");
-        sched.add_event(make_event("e2", 2000, 3000)).expect("should succeed in test");
+        sched
+            .add_event(make_event("e1", 1000, 2000))
+            .expect("should succeed in test");
+        sched
+            .add_event(make_event("e2", 2000, 3000))
+            .expect("should succeed in test");
         assert_eq!(sched.event_count(), 2);
     }
 
     #[test]
     fn test_add_duplicate_id_fails() {
         let mut sched = BroadcastScheduler::new();
-        sched.add_event(make_event("e1", 1000, 2000)).expect("should succeed in test");
+        sched
+            .add_event(make_event("e1", 1000, 2000))
+            .expect("should succeed in test");
         let err = sched.add_event(make_event("e1", 3000, 4000));
         assert!(err.is_err());
     }
@@ -551,7 +556,9 @@ mod tests {
     #[test]
     fn test_remove_event() {
         let mut sched = BroadcastScheduler::new();
-        sched.add_event(make_event("e1", 1000, 2000)).expect("should succeed in test");
+        sched
+            .add_event(make_event("e1", 1000, 2000))
+            .expect("should succeed in test");
         assert!(sched.remove_event("e1"));
         assert_eq!(sched.event_count(), 0);
         assert!(!sched.remove_event("e1")); // already gone
@@ -560,8 +567,12 @@ mod tests {
     #[test]
     fn test_current_event() {
         let mut sched = BroadcastScheduler::new();
-        sched.add_event(make_event("e1", 1000, 2000)).expect("should succeed in test");
-        sched.add_event(make_event("e2", 2000, 3000)).expect("should succeed in test");
+        sched
+            .add_event(make_event("e1", 1000, 2000))
+            .expect("should succeed in test");
+        sched
+            .add_event(make_event("e2", 2000, 3000))
+            .expect("should succeed in test");
 
         assert!(sched.current_event(500).is_none());
         assert_eq!(sched.current_event(1000).map(|e| e.id.as_str()), Some("e1"));
@@ -573,9 +584,15 @@ mod tests {
     #[test]
     fn test_upcoming() {
         let mut sched = BroadcastScheduler::new();
-        sched.add_event(make_event("e1", 1000, 2000)).expect("should succeed in test");
-        sched.add_event(make_event("e2", 1500, 2500)).expect("should succeed in test");
-        sched.add_event(make_event("e3", 3000, 4000)).expect("should succeed in test");
+        sched
+            .add_event(make_event("e1", 1000, 2000))
+            .expect("should succeed in test");
+        sched
+            .add_event(make_event("e2", 1500, 2500))
+            .expect("should succeed in test");
+        sched
+            .add_event(make_event("e3", 3000, 4000))
+            .expect("should succeed in test");
 
         let up = sched.upcoming(900, 700); // window [900..1600)
         let ids: Vec<&str> = up.iter().map(|e| e.id.as_str()).collect();
@@ -587,16 +604,24 @@ mod tests {
     #[test]
     fn test_conflicts_none() {
         let mut sched = BroadcastScheduler::new();
-        sched.add_event(make_event("e1", 1000, 2000)).expect("should succeed in test");
-        sched.add_event(make_event("e2", 2000, 3000)).expect("should succeed in test");
+        sched
+            .add_event(make_event("e1", 1000, 2000))
+            .expect("should succeed in test");
+        sched
+            .add_event(make_event("e2", 2000, 3000))
+            .expect("should succeed in test");
         assert!(sched.conflicts().is_empty());
     }
 
     #[test]
     fn test_conflicts_detected() {
         let mut sched = BroadcastScheduler::new();
-        sched.add_event(make_event("e1", 1000, 3000)).expect("should succeed in test");
-        sched.add_event(make_event("e2", 2000, 4000)).expect("should succeed in test");
+        sched
+            .add_event(make_event("e1", 1000, 3000))
+            .expect("should succeed in test");
+        sched
+            .add_event(make_event("e2", 2000, 4000))
+            .expect("should succeed in test");
         let conflicts = sched.conflicts();
         assert_eq!(conflicts.len(), 1);
         let (a, b) = &conflicts[0];
@@ -606,8 +631,12 @@ mod tests {
     #[test]
     fn test_fill_gaps() {
         let mut sched = BroadcastScheduler::new();
-        sched.add_event(make_event("e1", 0, 1000)).expect("should succeed in test");
-        sched.add_event(make_event("e2", 2000, 3000)).expect("should succeed in test");
+        sched
+            .add_event(make_event("e1", 0, 1000))
+            .expect("should succeed in test");
+        sched
+            .add_event(make_event("e2", 2000, 3000))
+            .expect("should succeed in test");
         sched.fill_gaps("filler_asset", 100);
         // A filler event covering [1000, 2000) should have been inserted
         let filler_events = sched.events_with_tag("filler");
@@ -620,8 +649,12 @@ mod tests {
     #[test]
     fn test_fill_gaps_ignores_small_gaps() {
         let mut sched = BroadcastScheduler::new();
-        sched.add_event(make_event("e1", 0, 1000)).expect("should succeed in test");
-        sched.add_event(make_event("e2", 1050, 2000)).expect("should succeed in test");
+        sched
+            .add_event(make_event("e1", 0, 1000))
+            .expect("should succeed in test");
+        sched
+            .add_event(make_event("e2", 1050, 2000))
+            .expect("should succeed in test");
         // gap is 50s, minimum is 100s → should NOT fill
         sched.fill_gaps("filler_asset", 100);
         assert!(sched.events_with_tag("filler").is_empty());
@@ -630,7 +663,9 @@ mod tests {
     #[test]
     fn test_mark_started_and_completed() {
         let mut sched = BroadcastScheduler::new();
-        sched.add_event(make_event("e1", 1000, 2000)).expect("should succeed in test");
+        sched
+            .add_event(make_event("e1", 1000, 2000))
+            .expect("should succeed in test");
         assert!(sched.mark_started("e1", 1005));
         let event = sched.get_event("e1").expect("should succeed in test");
         assert_eq!(event.status, EventStatus::Playing);
@@ -651,8 +686,12 @@ mod tests {
     #[test]
     fn test_report() {
         let mut sched = BroadcastScheduler::new();
-        sched.add_event(make_event("e1", 0, 1000)).expect("should succeed in test");
-        sched.add_event(make_event("e2", 1500, 2000)).expect("should succeed in test");
+        sched
+            .add_event(make_event("e1", 0, 1000))
+            .expect("should succeed in test");
+        sched
+            .add_event(make_event("e2", 1500, 2000))
+            .expect("should succeed in test");
         let report = sched.report(0, 2000);
         assert_eq!(report.events.len(), 2);
         assert_eq!(report.total_scheduled_secs, 1500); // 1000 + 500
@@ -663,8 +702,12 @@ mod tests {
     #[test]
     fn test_events_with_status() {
         let mut sched = BroadcastScheduler::new();
-        sched.add_event(make_event("e1", 0, 1000)).expect("should succeed in test");
-        sched.add_event(make_event("e2", 1000, 2000)).expect("should succeed in test");
+        sched
+            .add_event(make_event("e1", 0, 1000))
+            .expect("should succeed in test");
+        sched
+            .add_event(make_event("e2", 1000, 2000))
+            .expect("should succeed in test");
         sched.mark_completed("e1");
         let completed = sched.events_with_status(&EventStatus::Completed);
         assert_eq!(completed.len(), 1);
@@ -685,7 +728,9 @@ mod tests {
     #[test]
     fn test_export_json() {
         let mut sched = BroadcastScheduler::new();
-        sched.add_event(make_event("e1", 0, 1000)).expect("should succeed in test");
+        sched
+            .add_event(make_event("e1", 0, 1000))
+            .expect("should succeed in test");
         let json = sched.export_json().expect("should succeed in test");
         assert!(json.contains("e1"));
     }
@@ -693,7 +738,9 @@ mod tests {
     #[test]
     fn test_clear() {
         let mut sched = BroadcastScheduler::new();
-        sched.add_event(make_event("e1", 0, 1000)).expect("should succeed in test");
+        sched
+            .add_event(make_event("e1", 0, 1000))
+            .expect("should succeed in test");
         sched.clear();
         assert_eq!(sched.event_count(), 0);
     }

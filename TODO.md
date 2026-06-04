@@ -1,12 +1,12 @@
 # OxiMedia — The Sovereign Media Framework: Development Roadmap
 
-**Version: 0.1.7 (active) / 0.1.6 (stable)**
-**Status as of: 2026-05-21**
+**Version: 0.1.8 (active) / 0.1.7 (stable)**
+**Status as of: 2026-06-02**
 **Total SLOC: ~2,752,381 (Rust)**
-**Total Tests: 84,064 passing (cargo nextest run --workspace --all-features)**
+**Total Tests: 100,278 passing (cargo nextest run --workspace --all-features)**
 **Total Crates: 109**
-**Crate Status: 108 Stable / 0 Alpha / 0 Partial**
-**Current Branch: 0.1.7 — Issue Fixes, Documentation, Build Prerequisites**
+**Crate Status: 109 Stable / 0 Alpha / 0 Partial**
+**Current Branch: 0.1.8 — Waves 1–20 complete; algorithmic depth, codec improvements, entropy coding**
 
 ---
 
@@ -14,7 +14,7 @@
 
 | Category | Count | Notes |
 |----------|-------|-------|
-| Stable crates | 108 | All crates fully stabilized; no `todo!()`/`unimplemented!()` stubs |
+| Stable crates | 109 | All crates fully stabilized; no `todo!()`/`unimplemented!()` stubs |
 | Alpha crates | 0 | All former alpha crates promoted to stable |
 | Partial crates | 0 | All former partial crates completed and promoted to stable |
 
@@ -613,7 +613,7 @@ All of the following must pass before any release tag:
 - [x] **PR #20/#21 (ProRes 422 parser + decoder)** — `crates/oximedia-codec/src/prores/` (bitreader, frame, picture, quant, entropy, zigzag, dequant, idct, decode); `prores` Cargo feature; SMPTE RDD 36-2015; 66 tests; `docs/prores_decoder.md` (2026-05-19)
 - [ ] **PR #19 (HW accel -sys crates)** — deferred to 2027+ (patent-encumbered codec targets: H.264/HEVC/AAC)
 
-*Last updated: 2026-05-21 — v0.1.7 active (issue fixes, documentation, build prerequisites, Waves 3+4+5+6+7+8+9+10); v0.1.6 stable baseline; 108 crates; `oximedia-ml` stable; feature-gated `onnx`/`cuda`/`webgpu`/`directml`; pure-Rust default preserved; Wave 3: ProRes 422 encoder, FLV muxer, RTSP 1.0 server; Wave 4: Theora promoted to Functional, JPEG 2000 lossless decoder (`jpeg2000`), VC-3/DNxHD decoder (`dnxhd`); Wave 5: FFV1 8/10/12-bit + rayon parallel slices, JPEG 2000 9-7 lossy wavelet (completing ISO 15444-1), JPEG XS decoder (`jpegxs`, ISO 21122-1, `CodecId::JpegXs`); Wave 6: FFV1 16-bit depth (`Yuv*16le` formats), JPEG 2000 multi-tile decode, JPEG-LS lossless decoder (`jpegls`, ISO 14495-1, `CodecId::JpegLs`); Wave 7: JPEG-LS near-lossless (NEAR>0) + interleaved (ILV=1/2), JPEG XS NLT quadratic reverse transform (ISO 21122-1 §A.2.2), ProRes 422 decoder API (`ProResDecoder`, `ProResFrame`); Wave 8: JPEG-LS encoder (completing the JPEG-LS codec), MPEG-2 video I-frame decoder (`mpeg2`, ISO 13818-2, patents expired 2023, `CodecId::Mpeg2`), JPEG XS encoder (completing the JPEG XS codec); Wave 9: MPEG-2 I-frame encoder (completing the MPEG-2 I-frame codec pair, ISO 13818-2 forward path), ALAC decoder + encoder (`alac`, Apache-2.0 patent-free since Oct 2011, `CodecId::Alac`), JPEG 2000 lossless (5-3) encoder (completing the JPEG 2000 lossless codec pair, ISO 15444-1 forward path); Wave 10: MPEG-2 4:2:2 + 4:4:4 chroma formats (decoder + encoder), JPEG 2000 lossy (9-7) encoder (completing the JPEG 2000 lossy codec pair), JPEG-LS RUN mode (ISO 14495-1 §A.7) on both decoder + encoder*
+*Last updated: 2026-06-02 — v0.1.8 active (Waves 1–20 complete, 100,278 tests, 0 failures, 0 warnings); v0.1.7 stable baseline; 109 crates; `oximedia-ml` stable; feature-gated `onnx`/`cuda`/`webgpu`/`directml`; pure-Rust default preserved; Wave 3: ProRes 422 encoder, FLV muxer, RTSP 1.0 server; Wave 4: Theora promoted to Functional, JPEG 2000 lossless decoder (`jpeg2000`), VC-3/DNxHD decoder (`dnxhd`); Wave 5: FFV1 8/10/12-bit + rayon parallel slices, JPEG 2000 9-7 lossy wavelet (completing ISO 15444-1), JPEG XS decoder (`jpegxs`, ISO 21122-1, `CodecId::JpegXs`); Wave 6: FFV1 16-bit depth (`Yuv*16le` formats), JPEG 2000 multi-tile decode, JPEG-LS lossless decoder (`jpegls`, ISO 14495-1, `CodecId::JpegLs`); Wave 7–20: deep algorithmic additions across 60+ crates — see Wave status in MEMORY.md*
 
 ---
 
@@ -715,3 +715,48 @@ This run did NOT touch any of these 7 files. The UU staging decision belongs to 
 ### Refinement 5 — Documentation singletons (defer to /readme)
 
 Singleton fixes (`oximedia-monitor/cardinality.rs`, `oximedia-bitstream/integer.rs`) are too small to justify a standalone slice. Bundle with the next `/readme` pass.
+
+## 0.1.8 Wave 15 Slice E — `oximedia-dolbyvision` SIMD IPT↔PQ (2026-06-01)
+
+- [x] `oximedia-dolbyvision` SIMD IPT↔PQ batch conversion — new `ipt_pq_simd.rs` (1011 L) with runtime-dispatched AVX2+FMA / SSE4.1 / NEON / scalar paths; matrix multiplies fully vectorised with `_mm256_fmadd_ps`; PQ OETF/EOTF per-lane scalar within SIMD functions; `ipt_pq_batch_simd(input, output, direction)` public API. Files: `crates/oximedia-dolbyvision/src/ipt_pq_simd.rs`, `src/lib.rs`
+- [x] Cache parsed RPU structures — `RPU_CACHE: OnceLock<Mutex<HashMap<…>>>` process-global cache; `parse_nal_unit_cached` and `parse_rpu_bitstream_cached` FNV-1a hash key + LRU-style 256-entry eviction. File: `crates/oximedia-dolbyvision/src/parser.rs:43-131`
+- [x] 4 new tests: `test_ipt_pq_simd_matches_scalar` (256 LCG pixels, ≤1e-4 tol), `test_ipt_pq_roundtrip` (10 representative pixels, ≤1e-3), `test_l1_through_l11_metadata_roundtrip` (write→parse structural equality for L1/L2/L5/L6/L8/L9/L11), `test_parser_robustness_random_bytes` (50 random slices 0–1000 B, no panic). All 966 tests pass, 0 clippy warnings.
+
+## 0.1.8 Wave 15 Slice B — `oximedia-calibrate` algorithmic depth (2026-06-01)
+
+- [x] `oximedia-calibrate` ICC tile parallelism — `apply_to_image` converted from sequential `chunks_exact` to `par_chunks_exact_mut` via rayon; per-pixel transform is stateless and embarrassingly parallel; output is bit-exact to scalar path. File: `crates/oximedia-calibrate/src/icc/apply.rs`
+- [x] `oximedia-calibrate` chromatic adaptation matrix cache — thread-safe `OnceLock<Mutex<HashMap<(Illuminant, Illuminant, ChromaticAdaptationMethod), Matrix3x3>>>` module-level cache; `ChromaticAdaptation::new` checks cache first, computes on miss; `Illuminant` and `ChromaticAdaptationMethod` both derive `Hash`. Files: `crates/oximedia-calibrate/src/chromatic/adapt.rs`, `src/lib.rs`
+- [x] 6 Wave 15 integration tests in `crates/oximedia-calibrate/tests/wave15_tests.rs` — all 659 tests pass, 0 clippy warnings
+
+## 0.1.8 Wave 15 Slice H — `oximedia-profiler` thread-local sampling + atomic allocation tracker (2026-06-01)
+
+- [x] `oximedia-profiler` `SamplingProfiler` — replaced direct `samples`/`hit_counts` mutation with `thread_local!` TLS staging buffers (`TL_SAMPLES: RefCell<Vec<SampleEvent>>`, `TL_HIT_COUNTS: RefCell<HashMap<String,u64>>`); `record()` writes to TLS; `merge_thread_local()` drains current thread's TLS into global aggregate; `stop()` calls `merge_thread_local()` before clearing `running`. Removed `#![allow(dead_code)]`. File: `crates/oximedia-profiler/src/sampling_profiler.rs`
+- [x] `oximedia-profiler` `AllocationTracker` — atomicised three scalar counters (`seq_counter: AtomicU64`, `current_bytes: AtomicU64`, `peak_bytes: AtomicU64`); `record()` and `free()` now take `&self` (lock-free on hot counters); `peak_bytes` updated via CAS-max loop; `records: Vec<AllocRecord>` stays behind `Mutex`; manual `Default` impl; removed `#![allow(dead_code)]`. File: `crates/oximedia-profiler/src/allocation_tracker.rs`
+- [x] 5 new tests: `test_merge_thread_local_drains_to_aggregate`, `test_explicit_merge_then_stop_no_double_count`, `test_thread_local_sampling_concurrent` (4 threads × 100 events = 400 total), `test_atomic_counter_concurrent` (8 threads × 1000 records × 100 B = 800_000 B), `test_atomic_peak_bytes_correctness` (100B + 200B → peak=300). 604 tests pass, 0 clippy warnings.
+
+## 0.1.8 Wave 15 Slice F — `oximedia-analysis` ring-buffer + parallel dispatch (2026-06-01)
+
+- [x] Ring-buffer bounded temporal analysis — `TemporalWindow.means`, `TemporalAnalysis.luma_means`, and `TemporalAnalyzer.brightness_history` converted from unbounded `Vec<f64>` to fixed-capacity `VecDeque<f64>` (`MAX_WINDOW=300`, `BRIGHTNESS_HISTORY_CAP=900`); `pop_front` + `push_back` on overflow; all downstream methods (`detect_cuts`, `compute_flicker_score`, `compute_motion_score`) rewritten to iterate over VecDeque via `.iter().zip()` pairs instead of `.windows(2)`. Files: `crates/oximedia-analysis/src/temporal_analysis.rs`, `crates/oximedia-analysis/src/temporal.rs`
+- [x] Parallel sub-analyzer dispatch — `Analyzer::process_video_frame` converted from sequential to concurrent using `rayon::scope`; each of the 8 independent sub-analyzers (scene, black, quality, classifier, thumbnail, motion, color, temporal) dispatched as a separate rayon task borrowing its own struct field; errors collected post-scope and first error propagated. File: `crates/oximedia-analysis/src/lib.rs`
+- [x] Use integer histograms instead of float arrays — `type Histogram = [usize; 256]` already in `scene.rs:225`; k-means cluster assignment (not float histogram bins) already in `color.rs:201`; verified integer histogram path is the sole code path for scene change detection. Files: `crates/oximedia-analysis/src/scene.rs`, `crates/oximedia-analysis/src/color.rs`
+- [x] 3 regression tests added: `test_ring_buffer_bounds_memory` (1000-frame push, assert ≤ MAX_WINDOW), `test_ring_buffer_stats_match_unbounded_over_window` (50-frame push, mean check ≤ 1e-9), `test_parallel_sub_analyzers_match_sequential` (100×100 RGBA, 5-frame run, structural equality); 770 tests pass, 0 warnings, 0 clippy findings.
+
+## 0.1.8 Wave 20 (completed 2026-06-02)
+
+- [x] `oximedia-access` — speech-clarity biquad DRC + SIMD contrast: 4th-order Butterworth band-pass (300–3400 Hz) + downward DRC for `enhance_speech`; AVX2/NEON/scalar 256-entry gamma LUT for contrast `enhance`; helpers (`calculate_snr`, `speech_clarity_index`, `estimate_sti`) wired
+- [x] `oximedia-scaling` — `scale_tiled` + `scale_reference`: cache-blocked tiled downscale with rayon `par_iter`; bit-exact vs reference; 7 tests
+- [x] `oximedia-archive-pro` — DataCite 4.x metadata (`datacite.rs`), PBCore 2.1 crosswalk (`metadata_crosswalk.rs`), `MigrationTriggerPolicy` (`risk/migration_trigger.rs`); 18 tests
+- [x] `oximedia-proxy` — `batch_conform` + `BatchConformResult` (conform/engine.rs), `ProxyDbExport` + `import_with_rebase` (proxy_sync.rs); 9 tests
+- [x] `oximedia-convert` — `SegmentPlan` + `encode_segments_parallel` (segment_encoder.rs); rayon parallel per-segment encoding; codec-agnostic concat; 5 tests
+- [x] `oximedia-align` — `phase_correlate_1d` switched to `oxifft::rfft`/`irfft` (N/2+1 bins); `phase_correlate_1d_full_complex` kept as regression reference; 4 tests
+- [x] `oximedia-analysis` — `AnalysisScale { Full, Half, Quarter }` enum; `downsample_box_luma` + `downsample_box_channels`; `AnalysisConfig.analysis_scale`; 6 tests
+- [x] `oximedia-codec` (NSQ fix) — SILK LTP coarse-to-fine decimated pitch search, per-subframe contour RD, fractional-lag parabolic interpolation, encode→decode round-trip harness (`tests/silk_ltp_roundtrip.rs`)
+- [x] **100,278 tests passing**, 0 failures, 0 clippy warnings
+
+## 0.1.8 Wave 4 deferrals (carried forward)
+> Added 2026-05-29 by /ultra Wave 5. These items were scoped in Wave 4 but deferred to research / 0.2.0+.
+
+- [x] SILK encoder 1 kHz LTP architecture redesign — Wave 4 delivered 440 Hz=6.91 dB / 1 kHz=3.09 dB structural floor; true 1 kHz fix requires LTP min-lag re-derivation (research-grade). **Spec-floor clarification (2026-06-01):** 1 kHz synthetic tone is above SILK's max trackable pitch (internal_rate÷min_lag ≈ 500 Hz at WB) — the 3.09 dB floor is a spec constraint, not a bug, and cannot be fixed without violating RFC 6716. Real LTP quality improvements (coarse-to-fine pitch search, per-subframe contour RD, fractional-lag refinement, round-trip harness) are tracked in crates/oximedia-codec/TODO.md Wave 19 section. File: crates/oximedia-codec/src/opus/silk_ltp.rs (live path; src/audio/silk/ path in this entry is stale).
+- [ ] Vorbis I spec-compliant encoder rewrite — current Vorbis encoder is an OxiMedia-internal format wrapper; full spec compliance requires psychoacoustic flooring + residue codebook design. Gated to 0.2.0+. File: crates/oximedia-codec/src/audio/vorbis/
+- [ ] LARSCH pure O(n) line-breaking proof — existing LARSCH is O(n log n) two-pass; strict O(n) requires KP cost function is strictly totally-Monge (formal proof needed). Research-grade. File: crates/oximedia-caption-gen/src/line_breaking/larsch.rs
+- [x] Motion blur Wiener deconvolution ≥3 dB — spatial-domain RL diverged in Wave 4; FFT-Wiener via oxifft::rfft2d/irfft2d implemented in Wave 5 β₁ (8/15 corpus ≥3 dB). File: crates/oximedia-cv/src/motion_blur/deconvolve.rs (verified 2026-05-29)

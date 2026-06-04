@@ -407,7 +407,7 @@ mod tests {
     #[test]
     fn test_decay_reduces_frequency() {
         let mut filter = default_filter(); // decay = 0.90
-        // 5 accesses → freq ≈ 5 (before decay stabilises)
+                                           // 5 accesses → freq ≈ 5 (before decay stabilises)
         for _ in 0..5 {
             filter.record_access("k");
         }
@@ -441,8 +441,8 @@ mod tests {
         for _ in 0..5 {
             filter.record_access("hot");
         }
-        let _ = filter.admit("hot");      // Admit
-        let _ = filter.admit("cold");     // Deny
+        let _ = filter.admit("hot"); // Admit
+        let _ = filter.admit("cold"); // Deny
         assert_eq!(filter.total_admits(), 1);
         assert_eq!(filter.total_denies(), 1);
     }

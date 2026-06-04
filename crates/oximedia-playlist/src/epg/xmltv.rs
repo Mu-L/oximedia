@@ -64,16 +64,24 @@ impl XmltvExporter {
             Self::escape_xml(&program.channel_id)
         )?;
 
-        // Title
-        writeln!(
-            writer,
-            "    <title>{}</title>",
-            Self::escape_xml(&program.title)
-        )?;
+        // Titles — one element per language, with lang attribute per XMLTV spec.
+        for (lang, text) in &program.title {
+            writeln!(
+                writer,
+                "    <title lang=\"{}\">{}</title>",
+                Self::escape_xml(lang),
+                Self::escape_xml(text)
+            )?;
+        }
 
-        // Description
-        if let Some(desc) = &program.description {
-            writeln!(writer, "    <desc>{}</desc>", Self::escape_xml(desc))?;
+        // Descriptions — one element per language.
+        for (lang, text) in &program.description {
+            writeln!(
+                writer,
+                "    <desc lang=\"{}\">{}</desc>",
+                Self::escape_xml(lang),
+                Self::escape_xml(text)
+            )?;
         }
 
         // Episode info
@@ -161,6 +169,29 @@ mod tests {
         assert!(xml.contains("Test Show"));
         assert!(xml.contains("Drama"));
         assert!(xml.contains("<premiere />"));
+        // Lang attribute must be present on the title element.
+        assert!(xml.contains("lang=\"en\""), "expected lang=en in: {xml}");
+    }
+
+    #[test]
+    fn test_epg_multilang_xmltv_output() {
+        let program =
+            ProgramEntry::new("Morning News", "ch1", Utc::now(), Duration::from_secs(1800))
+                .with_title("ja", "モーニングニュース")
+                .with_description_lang("ja", "朝のニュース番組");
+
+        let programs = vec![program];
+        let mut output = Vec::new();
+        XmltvExporter::export(&programs, &mut output).expect("export should succeed");
+
+        let xml = String::from_utf8(output).expect("should be valid utf-8");
+        assert!(xml.contains("lang=\"en\""), "missing en title: {xml}");
+        assert!(xml.contains("lang=\"ja\""), "missing ja title: {xml}");
+        assert!(xml.contains("Morning News"), "missing en title text: {xml}");
+        assert!(
+            xml.contains("モーニングニュース"),
+            "missing ja title text: {xml}"
+        );
     }
 
     #[test]

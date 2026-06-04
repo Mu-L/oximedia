@@ -418,7 +418,7 @@ mod tests {
     #[test]
     fn test_window_slides() {
         let mut meter = PhaseCorrelationMeter::new(48000, 0.01); // 480 samples window
-        // Push correlated data
+                                                                 // Push correlated data
         let sig = make_sine(440.0, 48000, 480);
         meter.push_channels(&sig, &sig);
         assert!(meter.correlation() > 0.9);

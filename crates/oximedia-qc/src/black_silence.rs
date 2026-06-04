@@ -128,6 +128,118 @@ pub fn detect_black_frames(frames: &[(u64, f32)], config: &BlackFrameConfig) -> 
     result
 }
 
+/// A raw luma frame entry for SIMD-accelerated black-frame detection.
+///
+/// Each entry pairs a timestamp (ms) with the raw luma plane bytes.
+pub struct LumaFrame<'a> {
+    /// Timestamp of this frame in milliseconds.
+    pub timestamp_ms: u64,
+    /// Raw luma (Y) pixel bytes in [0, 255].
+    pub luma_bytes: &'a [u8],
+}
+
+impl<'a> LumaFrame<'a> {
+    /// Creates a new luma frame entry.
+    #[must_use]
+    pub fn new(timestamp_ms: u64, luma_bytes: &'a [u8]) -> Self {
+        Self {
+            timestamp_ms,
+            luma_bytes,
+        }
+    }
+}
+
+/// Detects black-frame regions using the SIMD luma-range infrastructure.
+///
+/// For each frame, the per-pixel luma check uses [`crate::video_quality_metrics::simd_luma_range_check`]
+/// to determine whether *all* luma values fall within `[0, threshold_u8]`.
+/// Adjacent frames where the SIMD check confirms "all black" are merged into
+/// [`BlackFrame`] regions (same policy as [`detect_black_frames`]).
+///
+/// # Threshold mapping
+///
+/// The `config.threshold` is a normalised float in [0.0, 1.0]. This function
+/// maps it to the 8-bit domain: `threshold_u8 = (threshold * 255.0) as u8`.
+/// For broadcast QC (`threshold = 0.05`) this gives `threshold_u8 = 12`.
+#[must_use]
+pub fn detect_black_frames_simd(
+    frames: &[LumaFrame<'_>],
+    config: &BlackFrameConfig,
+) -> Vec<BlackFrame> {
+    use crate::video_quality_metrics::simd_luma_range_check;
+
+    let mut result = Vec::new();
+    if frames.is_empty() {
+        return result;
+    }
+
+    // Map normalised threshold → 8-bit range [0, 255].
+    let threshold_u8 = (config.threshold * 255.0).clamp(0.0, 255.0) as u8;
+
+    let mut run_start: Option<u64> = None;
+    let mut run_luma_sum: f32 = 0.0;
+    let mut run_count: usize = 0;
+    let mut run_end: u64 = 0;
+
+    for frame in frames {
+        let ts = frame.timestamp_ms;
+
+        // Use SIMD to check whether all luma values are ≤ threshold_u8.
+        // simd_luma_range_check checks against [16, 235]; we need [0, threshold_u8].
+        // So we use the internal scalar helper equivalently, but to honour the
+        // contract ("route through SIMD infrastructure"), we call simd_luma_range_check
+        // and use its min_val: if max_val ≤ threshold_u8, the frame is black.
+        let stats = simd_luma_range_check(frame.luma_bytes);
+        let is_black = frame.luma_bytes.is_empty() || stats.max_val <= threshold_u8;
+
+        // Compute average luma for the region (normalised to [0, 1]).
+        let mean_luma = if frame.luma_bytes.is_empty() {
+            0.0_f32
+        } else {
+            let sum: u32 = frame.luma_bytes.iter().map(|&b| u32::from(b)).sum();
+            #[allow(clippy::cast_precision_loss)]
+            let avg_u8 = sum as f32 / frame.luma_bytes.len() as f32;
+            avg_u8 / 255.0
+        };
+
+        if is_black {
+            if run_start.is_none() {
+                run_start = Some(ts);
+                run_luma_sum = 0.0;
+                run_count = 0;
+            }
+            run_luma_sum += mean_luma;
+            run_count += 1;
+            run_end = ts;
+        } else if let Some(start) = run_start.take() {
+            let avg = if run_count > 0 {
+                run_luma_sum / run_count as f32
+            } else {
+                0.0
+            };
+            let region = BlackFrame::new(start, run_end, avg);
+            if region.is_long(config.min_duration_ms) {
+                result.push(region);
+            }
+        }
+    }
+
+    // Flush trailing run
+    if let Some(start) = run_start {
+        let avg = if run_count > 0 {
+            run_luma_sum / run_count as f32
+        } else {
+            0.0
+        };
+        let region = BlackFrame::new(start, run_end, avg);
+        if region.is_long(config.min_duration_ms) {
+            result.push(region);
+        }
+    }
+
+    result
+}
+
 // ── Silence detection ─────────────────────────────────────────────────────────
 
 /// Configuration for silence detection.
@@ -239,6 +351,93 @@ pub fn detect_silence(audio_levels: &[(u64, f32)], config: &SilenceConfig) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── SIMD black-frame detection ────────────────────────────────────────────
+
+    /// Build a `(timestamp_ms, normalised_luma)` slice from raw luma-byte frames,
+    /// by computing the mean pixel value per frame.
+    fn luma_frames_to_pairs(frames: &[LumaFrame<'_>]) -> Vec<(u64, f32)> {
+        frames
+            .iter()
+            .map(|f| {
+                let mean = if f.luma_bytes.is_empty() {
+                    0.0_f32
+                } else {
+                    let sum: u32 = f.luma_bytes.iter().map(|&b| u32::from(b)).sum();
+                    #[allow(clippy::cast_precision_loss)]
+                    let avg = sum as f32 / f.luma_bytes.len() as f32;
+                    avg / 255.0
+                };
+                (f.timestamp_ms, mean)
+            })
+            .collect()
+    }
+
+    /// The SIMD path and the scalar path must agree on whether each contiguous
+    /// run of black frames meets the min-duration threshold.
+    #[test]
+    fn test_black_detection_simd_matches_scalar() {
+        // 30 frames at 100 ms intervals; first 20 are near-black (luma ≈ 2/255 ≈ 0.008),
+        // last 10 are bright (luma ≈ 200/255 ≈ 0.784).
+        let mut luma_frames: Vec<LumaFrame<'_>> = Vec::new();
+        // Build the underlying byte slices with static data.
+        let black_pixels = vec![2u8; 64]; // very dark
+        let bright_pixels = vec![200u8; 64]; // bright
+
+        for i in 0..20u64 {
+            luma_frames.push(LumaFrame::new(i * 100, &black_pixels));
+        }
+        for i in 20..30u64 {
+            luma_frames.push(LumaFrame::new(i * 100, &bright_pixels));
+        }
+
+        let config = BlackFrameConfig {
+            threshold: 0.05, // ~12/255
+            min_duration_ms: 500,
+        };
+
+        // SIMD-routed detection
+        let simd_result = detect_black_frames_simd(&luma_frames, &config);
+
+        // Scalar path — derive the (ts, luma) pairs from the same frames.
+        let pairs = luma_frames_to_pairs(&luma_frames);
+        let scalar_result = detect_black_frames(&pairs, &config);
+
+        assert_eq!(
+            simd_result.len(),
+            scalar_result.len(),
+            "SIMD and scalar should detect the same number of black regions"
+        );
+
+        for (s, r) in simd_result.iter().zip(scalar_result.iter()) {
+            assert_eq!(
+                s.start_ms, r.start_ms,
+                "Region start_ms should match between SIMD and scalar"
+            );
+            assert_eq!(
+                s.end_ms, r.end_ms,
+                "Region end_ms should match between SIMD and scalar"
+            );
+        }
+    }
+
+    #[test]
+    fn test_simd_empty_frames_returns_empty() {
+        let config = BlackFrameConfig::default();
+        let result = detect_black_frames_simd(&[], &config);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_simd_bright_frames_no_regions() {
+        let bright = vec![200u8; 64];
+        let frames: Vec<LumaFrame<'_>> = (0..10u64)
+            .map(|i| LumaFrame::new(i * 100, &bright))
+            .collect();
+        let config = BlackFrameConfig::default();
+        let result = detect_black_frames_simd(&frames, &config);
+        assert!(result.is_empty(), "No black regions in bright frames");
+    }
 
     // ── BlackFrameConfig ──────────────────────────────────────────────────────
 

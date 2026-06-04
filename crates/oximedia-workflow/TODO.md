@@ -28,16 +28,16 @@
 - [x] Add `workflow_health_check` module for periodic validation of workflow engine health (DB connectivity, queue depth, stuck tasks)
 
 ## Performance
-- [ ] Optimize `task_priority_queue` with binary heap instead of sorted Vec for O(log n) insert/extract
-- [ ] Add connection pooling in `persistence` for SQLite (using r2d2 pool with configurable size)
-- [ ] Implement batch task status updates in `executor` to reduce database write frequency
-- [ ] Cache workflow DAG topology in `dag` after first computation to avoid recomputation on each execution
-- [ ] Optimize `monitoring` metric collection with lock-free counters instead of mutex-guarded HashMap
-- [ ] Add lazy deserialization in `persistence::load_workflow` to skip parsing task configs until accessed
+- [x] Optimize `task_priority_queue` with binary heap instead of sorted Vec for O(log n) insert/extract (verified: task_priority_queue.rs:BinaryHeap<PriorityEntry>, :54:PriorityEntry)
+- [x] Add connection pooling in `persistence` for SQLite (using r2d2 pool with configurable size) (verified: persistence.rs:r2d2::Pool+SqliteConnectionManager)
+- [x] Implement batch task status updates in `executor` to reduce database write frequency (Wave 15: StatusUpdate buffer, buffer_flush_threshold=20, buffer_status_update/flush_status_buffer/flush methods, auto-flush on threshold reached)
+- [x] Cache workflow DAG topology in `dag` after first computation to avoid recomputation on each execution (Wave 15: RefCell<Option<Vec<NodeId>>> topo_cache, invalidated in add_node/add_edge, returned from topological_sort on cache hit)
+- [x] Optimize `monitoring` metric collection with lock-free counters instead of mutex-guarded HashMap (Wave 15: completed_tasks/failed_tasks/running_tasks converted to Arc<AtomicU64>, DashMap already in use for MonitoringService, concurrent test passes N=8 threads × M=100 tasks)
+- [x] Add lazy deserialization in `persistence::load_workflow` to skip parsing task configs until accessed (Wave 15: LazyWorkflowConfig with Mutex<Option<WorkflowConfig>> cache, get_cloned() API, raw() for zero-cost access)
 
 ## Testing
-- [ ] Add integration test for full workflow lifecycle: create -> submit -> execute -> complete with SQLite persistence
-- [ ] Test `dag` cycle detection with intentionally cyclic graphs and verify proper error reporting
+- [x] Add integration test for full workflow lifecycle: create -> submit -> execute -> complete with SQLite persistence (Wave 15: test_sqlite_lifecycle in tests/wave15_tests.rs, sqlite feature-gated)
+- [x] Test `dag` cycle detection with intentionally cyclic graphs and verify proper error reporting (Wave 15: test_dag_cycle_detection_negative verifies add_edge returns Err(DagError::CycleDetected))
 - [ ] Add stress test for `queue` with 1000+ concurrent task submissions and verify ordering correctness
 - [ ] Test `scheduler` cron trigger firing accuracy with mock clock
 - [ ] Add `approval_gate` test verifying workflow blocks until approval is granted and resumes correctly

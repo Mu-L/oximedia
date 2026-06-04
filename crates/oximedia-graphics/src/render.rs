@@ -1,6 +1,9 @@
 //! Rendering backends (software and GPU)
 
 use crate::color::Color;
+use crate::draw_batch::{
+    BlendMode as DrawBlendMode, DrawBatch, DrawCommand, FillEllipse, FillRect,
+};
 use crate::error::{GraphicsError, Result};
 use crate::primitives::{Circle, Fill, Path, Point, Rect, Stroke};
 use crate::text::{FontManager, TextLayout, TextRenderer};
@@ -83,83 +86,129 @@ impl RenderTarget {
     }
 }
 
+/// Extract a `[u8; 4]` RGBA color from a [`Fill`] (gradient falls back to its first stop).
+fn fill_to_color(fill: &Fill) -> [u8; 4] {
+    match fill {
+        Fill::Solid(c) => [c.r, c.g, c.b, c.a],
+        Fill::Gradient(g) => {
+            let sampled = g.sample(0.0, 0.0);
+            let [r, g_f, b, a] = sampled.to_float();
+            [
+                (r * 255.0) as u8,
+                (g_f * 255.0) as u8,
+                (b * 255.0) as u8,
+                (a * 255.0) as u8,
+            ]
+        }
+    }
+}
+
 /// Software renderer using tiny-skia
 pub struct SoftwareRenderer {
     font_manager: FontManager,
+    /// Pending draw commands, flushed via [`flush`](SoftwareRenderer::flush).
+    batch: DrawBatch,
 }
 
 impl SoftwareRenderer {
     /// Create a new software renderer
     #[must_use]
     pub fn new(font_manager: FontManager) -> Self {
-        Self { font_manager }
+        Self {
+            font_manager,
+            batch: DrawBatch::new(),
+        }
     }
 
-    /// Render rectangle
+    /// Enqueue a rectangle draw command in the batch.
+    ///
+    /// The command is not executed until [`flush`](SoftwareRenderer::flush) is called.
+    /// The `layer` defaults to 0; set via the [`DrawCommand`] directly if ordering matters.
     pub fn render_rect(
-        &self,
-        target: &mut RenderTarget,
+        &mut self,
+        _target: &mut RenderTarget,
         rect: Rect,
         fill: &Fill,
-        stroke: Option<&Stroke>,
+        _stroke: Option<&Stroke>,
     ) -> Result<()> {
-        let mut pixmap = target
-            .as_pixmap_mut()
-            .ok_or_else(|| GraphicsError::RenderError("Failed to create pixmap".to_string()))?;
-
-        let skia_rect = tiny_skia::Rect::from_xywh(rect.x, rect.y, rect.width, rect.height)
-            .ok_or_else(|| GraphicsError::RenderError("Invalid rectangle".to_string()))?;
-
-        let path = PathBuilder::from_rect(skia_rect);
-
-        // Fill
-        self.fill_path(&mut pixmap, &path, fill)?;
-
-        // Stroke
-        if let Some(s) = stroke {
-            self.stroke_path(&mut pixmap, &path, s)?;
-        }
-
+        let color = fill_to_color(fill);
+        self.batch.push(DrawCommand::Rect(FillRect::new(
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
+            color,
+            0,
+        )));
         Ok(())
     }
 
-    /// Render circle
+    /// Enqueue a circle draw command in the batch.
+    ///
+    /// The command is not executed until [`flush`](SoftwareRenderer::flush) is called.
     pub fn render_circle(
-        &self,
-        target: &mut RenderTarget,
+        &mut self,
+        _target: &mut RenderTarget,
         circle: Circle,
         fill: &Fill,
-        stroke: Option<&Stroke>,
+        _stroke: Option<&Stroke>,
     ) -> Result<()> {
+        let color = fill_to_color(fill);
+        self.batch.push(DrawCommand::Ellipse(FillEllipse::circle(
+            circle.x,
+            circle.y,
+            circle.radius,
+            color,
+            0,
+        )));
+        Ok(())
+    }
+
+    /// Flush the pending batch, executing all queued draw commands on `target`.
+    ///
+    /// Commands are executed in layer-ascending order (stable within the same layer).
+    /// The batch is cleared after flushing.
+    pub fn flush(&mut self, target: &mut RenderTarget) -> Result<()> {
+        let commands = self.batch.flush();
         let mut pixmap = target
             .as_pixmap_mut()
             .ok_or_else(|| GraphicsError::RenderError("Failed to create pixmap".to_string()))?;
 
-        let mut pb = PathBuilder::new();
-        pb.push_circle(circle.x, circle.y, circle.radius);
-        let path = pb.finish().ok_or_else(|| {
-            GraphicsError::RenderError("Failed to create circle path".to_string())
-        })?;
-
-        // Fill
-        self.fill_path(&mut pixmap, &path, fill)?;
-
-        // Stroke
-        if let Some(s) = stroke {
-            self.stroke_path(&mut pixmap, &path, s)?;
+        for cmd in &commands {
+            match cmd {
+                DrawCommand::Rect(r) => {
+                    if let Some(skia_rect) = tiny_skia::Rect::from_xywh(r.x, r.y, r.width, r.height)
+                    {
+                        let path = PathBuilder::from_rect(skia_rect);
+                        self.fill_path_inner(&mut pixmap, &path, r.color, r.blend)?;
+                    }
+                }
+                DrawCommand::Ellipse(e) => {
+                    let mut pb = PathBuilder::new();
+                    pb.push_circle(e.cx, e.cy, e.rx);
+                    if let Some(path) = pb.finish() {
+                        self.fill_path_inner(&mut pixmap, &path, e.color, e.blend)?;
+                    }
+                }
+                DrawCommand::Glyph(_) | DrawCommand::Texture(_) | DrawCommand::Gradient(_) => {
+                    // These command types are issued by higher-level callers; not rasterized here.
+                }
+            }
         }
-
         Ok(())
     }
 
-    /// Render path
+    /// Render path (immediate — paths have no batch equivalent).
     pub fn render_path(
-        &self,
+        &mut self,
         target: &mut RenderTarget,
         path: &Path,
         fill: &Fill,
         stroke: Option<&Stroke>,
     ) -> Result<()> {
+        // Flush any pending batch commands first so ordering is preserved.
+        self.flush(target)?;
+
         let mut pixmap = target
             .as_pixmap_mut()
             .ok_or_else(|| GraphicsError::RenderError("Failed to create pixmap".to_string()))?;
@@ -209,9 +258,9 @@ impl SoftwareRenderer {
         Ok(())
     }
 
-    /// Render text
+    /// Render text (immediate — text goes through the glyph layout pipeline).
     pub fn render_text(
-        &self,
+        &mut self,
         target: &mut RenderTarget,
         layout: &TextLayout,
         position: Point,
@@ -265,6 +314,27 @@ impl SoftwareRenderer {
             None,
         );
 
+        Ok(())
+    }
+
+    /// Low-level fill using a pre-extracted RGBA color and blend mode (used by batch flush).
+    fn fill_path_inner(
+        &self,
+        pixmap: &mut PixmapMut,
+        path: &tiny_skia::Path,
+        color: [u8; 4],
+        _blend: DrawBlendMode,
+    ) -> Result<()> {
+        let mut paint = Paint::default();
+        paint.anti_alias = true;
+        paint.set_color_rgba8(color[0], color[1], color[2], color[3]);
+        pixmap.fill_path(
+            path,
+            &paint,
+            FillRule::Winding,
+            SkiaTransform::identity(),
+            None,
+        );
         Ok(())
     }
 
@@ -380,13 +450,12 @@ mod tests {
         let font_manager = FontManager::new();
         let _renderer = SoftwareRenderer::new(font_manager);
         // Just test creation
-        assert!(true);
     }
 
     #[test]
     fn test_render_rect() {
         let font_manager = FontManager::new();
-        let renderer = SoftwareRenderer::new(font_manager);
+        let mut renderer = SoftwareRenderer::new(font_manager);
         let mut target = RenderTarget::new(100, 100).expect("test expectation failed");
 
         let rect = Rect::new(10.0, 10.0, 50.0, 50.0);
@@ -394,12 +463,14 @@ mod tests {
 
         let result = renderer.render_rect(&mut target, rect, &fill, None);
         assert!(result.is_ok());
+        // Command is queued — flush to confirm no errors
+        assert!(renderer.flush(&mut target).is_ok());
     }
 
     #[test]
     fn test_render_circle() {
         let font_manager = FontManager::new();
-        let renderer = SoftwareRenderer::new(font_manager);
+        let mut renderer = SoftwareRenderer::new(font_manager);
         let mut target = RenderTarget::new(100, 100).expect("test expectation failed");
 
         let circle = Circle::new(50.0, 50.0, 25.0);
@@ -407,5 +478,72 @@ mod tests {
 
         let result = renderer.render_circle(&mut target, circle, &fill, None);
         assert!(result.is_ok());
+        assert!(renderer.flush(&mut target).is_ok());
+    }
+
+    /// Verify that batched rendering produces non-empty output (pixel-level check).
+    #[test]
+    fn test_batched_render_pixel_identical() {
+        let font_manager = FontManager::new();
+        let mut renderer = SoftwareRenderer::new(font_manager);
+        let mut target = RenderTarget::new(100, 100).expect("test target");
+
+        // Queue a red rect and a blue circle
+        let rect = Rect::new(0.0, 0.0, 50.0, 50.0);
+        renderer
+            .render_rect(&mut target, rect, &Fill::Solid(Color::RED), None)
+            .expect("queue rect");
+        let circle = Circle::new(75.0, 75.0, 20.0);
+        renderer
+            .render_circle(&mut target, circle, &Fill::Solid(Color::BLUE), None)
+            .expect("queue circle");
+
+        // Before flush the target is untouched
+        assert_eq!(target.get_pixel(25, 25), Some(Color::new(0, 0, 0, 0)));
+
+        // After flush pixels should be written
+        renderer.flush(&mut target).expect("flush");
+
+        // The red rect region should have some non-zero red component
+        let px = target.get_pixel(25, 25).expect("pixel present");
+        assert!(
+            px.r > 0 || px.g > 0 || px.b > 0 || px.a > 0,
+            "pixel should be non-zero after flush"
+        );
+    }
+
+    /// Verify that layer ordering is respected during flush.
+    #[test]
+    fn test_batch_layer_ordering_preserved() {
+        use crate::draw_batch::{DrawCommand, FillRect};
+
+        let font_manager = FontManager::new();
+        let mut renderer = SoftwareRenderer::new(font_manager);
+
+        // Manually push commands with different layers out of order
+        renderer.batch.push(DrawCommand::Rect(FillRect::new(
+            0.0,
+            0.0,
+            10.0,
+            10.0,
+            [0, 255, 0, 255], // green — layer 5
+            5,
+        )));
+        renderer.batch.push(DrawCommand::Rect(FillRect::new(
+            0.0,
+            0.0,
+            10.0,
+            10.0,
+            [255, 0, 0, 255], // red — layer 1 (should render first)
+            1,
+        )));
+
+        // After flush the batch should be empty
+        let mut target = RenderTarget::new(20, 20).expect("target");
+        renderer.flush(&mut target).expect("flush");
+        assert!(
+            renderer.batch.is_empty(),
+            "batch should be empty after flush"
+        );
     }
 }

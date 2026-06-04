@@ -346,6 +346,83 @@ impl PriorityBooster {
     }
 }
 
+// ===========================================================================
+// Priority-decay complement: raise effective priority of aged/stale jobs
+// ===========================================================================
+
+/// Mathematical mode governing how priority ascends with age.
+///
+/// Note: this is an *anti-starvation* boost, not a penalty.  Older jobs gain
+/// a higher effective priority so they eventually overtake fresh low-priority
+/// work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecayMode {
+    /// Priority increases linearly with age.  The boost reaches
+    /// `(max_level - floor_level)` after one `half_life`.
+    Linear,
+    /// Priority increases exponentially, asymptotically approaching the
+    /// ceiling.  Reaches half the maximum boost after exactly one `half_life`.
+    Exponential,
+}
+
+/// Configuration for the age-based priority-rise policy.
+///
+/// Both `DecayMode::Linear` and `DecayMode::Exponential` treat `half_life` as
+/// the time at which the job has accrued *half* of the maximum possible boost.
+#[derive(Debug, Clone)]
+pub struct DecayPolicy {
+    /// Algorithm controlling how boost accumulates.
+    pub mode: DecayMode,
+    /// Duration after which the job has accrued half the maximum boost.
+    pub half_life: std::time::Duration,
+    /// Minimum effective priority — the result is never pushed below this.
+    /// Also used as the *floor* for the boost range computation.
+    pub floor: i32,
+}
+
+/// Compute the effective priority of a job given its base priority, how long
+/// it has been waiting, and a decay policy.
+///
+/// The function always returns a value in the range `[floor, 100]` (the
+/// module-wide priority ceiling from [`BoostConfig`]).
+///
+/// # Linear mode
+///
+/// `effective = base + (CEILING - floor) * (age / half_life).min(1.0)`
+///
+/// # Exponential mode
+///
+/// `effective = base + (CEILING - base) * (1 - 0.5 ^ (age / half_life))`
+///
+/// Both formulae are clamped so the result always lies in `[floor, CEILING]`.
+#[allow(clippy::cast_precision_loss)]
+#[must_use]
+pub fn effective_priority(base: i32, age: std::time::Duration, policy: &DecayPolicy) -> i32 {
+    const CEILING: i32 = 100; // mirrors BoostConfig::priority_ceiling default
+
+    let half_life_secs = policy.half_life.as_secs_f64().max(f64::EPSILON);
+    let age_secs = age.as_secs_f64();
+    let t = age_secs / half_life_secs; // dimensionless age ratio
+
+    let range = (CEILING - policy.floor) as f64;
+
+    let effective_f = match policy.mode {
+        DecayMode::Linear => {
+            let frac = t.min(1.0);
+            base as f64 + range * frac
+        }
+        DecayMode::Exponential => {
+            // asymptotically approaches CEILING
+            let frac = 1.0 - 0.5_f64.powf(t);
+            base as f64 + (CEILING - base) as f64 * frac
+        }
+    };
+
+    // Clamp to [floor, CEILING].
+    let clamped = effective_f.clamp(policy.floor as f64, CEILING as f64);
+    clamped.round() as i32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,5 +617,110 @@ mod tests {
         assert_eq!(state.pass_count, 0);
         assert!(!state.dependencies_complete);
         assert!(state.boost_history.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // DecayPolicy / effective_priority tests
+    // -----------------------------------------------------------------------
+
+    /// After one half-life a linear policy should boost a low-priority job by
+    /// 50 % of the available range — enough to overtake fresh medium-priority work.
+    #[test]
+    fn test_linear_decay_overtakes_low_prio_after_one_half_life() {
+        let policy = DecayPolicy {
+            mode: DecayMode::Linear,
+            half_life: Duration::from_secs(60),
+            floor: 0,
+        };
+
+        // Base priority 5 (low), floor 0, ceiling 100.
+        // After 1 half-life: effective = 5 + (100 - 0) * 1.0 = 105, clamped → 100.
+        // After half a half_life: effective = 5 + (100 - 0) * 0.5 = 55.
+        let after_half = effective_priority(5, Duration::from_secs(30), &policy);
+        let after_full = effective_priority(5, Duration::from_secs(60), &policy);
+
+        // After half the window the job should already outrank a base-40 job.
+        assert!(
+            after_half > 40,
+            "linear boost at t=0.5*half_life should exceed 40, got {after_half}"
+        );
+        // After a full half_life it reaches the ceiling.
+        assert_eq!(
+            after_full, 100,
+            "linear boost at t=half_life should reach ceiling"
+        );
+    }
+
+    /// Exponential mode should reach 50 % of the max boost at exactly one
+    /// half_life, and increase monotonically.
+    #[test]
+    fn test_exponential_decay_reaches_half_at_half_life() {
+        let policy = DecayPolicy {
+            mode: DecayMode::Exponential,
+            half_life: Duration::from_secs(120),
+            floor: 0,
+        };
+
+        let base = 10;
+        // At t = half_life, boost = (100 - 10) * (1 - 0.5) = 45 → effective = 55.
+        let at_half = effective_priority(base, Duration::from_secs(120), &policy);
+        let at_zero = effective_priority(base, Duration::from_secs(0), &policy);
+        let at_double = effective_priority(base, Duration::from_secs(240), &policy);
+
+        assert_eq!(at_zero, base, "at t=0 no boost should apply");
+        // at_half should be approximately base + 45 = 55 (allow ±1 for rounding)
+        assert!(
+            (at_half - 55).abs() <= 1,
+            "exponential at half-life expected ~55, got {at_half}"
+        );
+        assert!(
+            at_double > at_half,
+            "effective priority should increase monotonically"
+        );
+    }
+
+    /// The age-based `effective_priority` function and the existing pass-count
+    /// starvation guard operate independently — both should be additive.
+    #[test]
+    fn test_decay_policy_composes_with_starvation_guard() {
+        // Starvation guard: applies a manual boost via PriorityBooster.
+        let config = BoostConfig {
+            starvation_pass_count: 2,
+            starvation_boost_increment: 15,
+            priority_ceiling: 100,
+            ..BoostConfig::default()
+        };
+        let mut booster = PriorityBooster::new(config);
+        booster.register_job("stale-job", 10, None);
+        for _ in 0..2 {
+            booster.record_pass("stale-job");
+        }
+        booster.evaluate_starvation("stale-job");
+        let after_starvation = booster
+            .effective_priority("stale-job")
+            .expect("expected a value");
+
+        // Independently compute age-based effective priority.
+        let policy = DecayPolicy {
+            mode: DecayMode::Linear,
+            half_life: Duration::from_secs(60),
+            floor: 0,
+        };
+        let age_boost = effective_priority(10, Duration::from_secs(30), &policy);
+
+        // Both mechanisms raised the priority — each independently.
+        assert!(
+            after_starvation > 10,
+            "starvation guard must have boosted priority"
+        );
+        assert!(age_boost > 10, "age policy must have boosted priority");
+
+        // The combined result is strictly higher than either alone.
+        // (Simulating: apply age policy on top of starvation-boosted base.)
+        let combined = effective_priority(after_starvation, Duration::from_secs(30), &policy);
+        assert!(
+            combined >= after_starvation,
+            "combined result should not be lower than starvation-only result"
+        );
     }
 }

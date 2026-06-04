@@ -1,6 +1,6 @@
 //! Automatic camera angle selection.
 
-use super::{RuleEngine, SelectionCriteria, SwitchingRule};
+use super::{AngleScoreCache, RuleEngine, SelectionCriteria, SwitchingRule};
 use crate::auto::score::{AngleScore, AngleScorer};
 use crate::{AngleId, FrameNumber, Result};
 
@@ -11,6 +11,8 @@ pub struct AutoSwitcher {
     rule_engine: RuleEngine,
     /// Angle scorer
     scorer: AngleScorer,
+    /// Score cache — avoids re-computing scores for unchanged frames.
+    score_cache: AngleScoreCache,
     /// Currently selected angle
     current_angle: AngleId,
     /// Selection history
@@ -35,12 +37,16 @@ pub struct SelectionRecord {
 }
 
 impl AutoSwitcher {
+    /// Default capacity for the angle score cache.
+    const DEFAULT_CACHE_CAPACITY: usize = 1024;
+
     /// Create a new auto switcher
     #[must_use]
     pub fn new() -> Self {
         Self {
             rule_engine: RuleEngine::new(),
             scorer: AngleScorer::new(),
+            score_cache: AngleScoreCache::new(Self::DEFAULT_CACHE_CAPACITY),
             current_angle: 0,
             history: Vec::new(),
             min_hold_frames: 50, // 2 seconds at 25fps
@@ -74,11 +80,22 @@ impl AutoSwitcher {
             return Ok(self.current_angle);
         }
 
-        // Score all angles
+        // Score all angles, using the cache to skip recomputation when the
+        // frame content has not changed.
         let mut scores = Vec::new();
         for angle in 0..angle_count {
-            let score = self.scorer.score_angle(angle, criteria)?;
-            scores.push(score);
+            let total = if let Some(cached) = self.score_cache.get(angle, frame) {
+                // Cache hit: build a score struct from the stored total.
+                let mut s = AngleScore::new(angle);
+                s.total_score = cached;
+                s
+            } else {
+                // Cache miss: compute fresh and store the total for reuse.
+                let s = self.scorer.score_angle(angle, criteria)?;
+                self.score_cache.insert(angle, frame, s.total_score);
+                s
+            };
+            scores.push(total);
         }
 
         // Apply rules
@@ -185,6 +202,17 @@ impl AutoSwitcher {
         self.current_angle = initial_angle;
         self.last_selection_frame = 0;
         self.history.clear();
+    }
+
+    /// Borrow the angle score cache (read-only).
+    #[must_use]
+    pub fn score_cache(&self) -> &AngleScoreCache {
+        &self.score_cache
+    }
+
+    /// Borrow the angle score cache mutably.
+    pub fn score_cache_mut(&mut self) -> &mut AngleScoreCache {
+        &mut self.score_cache
     }
 }
 

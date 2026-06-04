@@ -76,7 +76,8 @@ impl VuMeter {
                         self.release_coeff
                     };
 
-                    self.channel_states[ch] = self.channel_states[ch] * (1.0 - coeff) + sample * coeff;
+                    self.channel_states[ch] =
+                        self.channel_states[ch] * (1.0 - coeff) + sample * coeff;
                 }
             }
         }

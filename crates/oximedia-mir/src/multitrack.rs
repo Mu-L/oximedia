@@ -137,10 +137,7 @@ impl MultiTrackAnalyzer {
     /// The order matches the order in which stems were added via [`add_stem`].
     #[must_use]
     pub fn analyze_all(&self) -> Vec<StemAnalysis> {
-        self.stems
-            .iter()
-            .map(|r| analyze_stem(r))
-            .collect()
+        self.stems.iter().map(|r| analyze_stem(r)).collect()
     }
 
     /// Weighted average of per-stem tempos.
@@ -307,8 +304,9 @@ fn estimate_tempo(samples: &[f32], sample_rate: u32) -> f32 {
 /// name with the highest accumulated energy.
 #[allow(clippy::cast_precision_loss)]
 fn estimate_key(samples: &[f32], sample_rate: u32) -> String {
-    const PITCH_CLASSES: [&str; 12] =
-        ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    const PITCH_CLASSES: [&str; 12] = [
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+    ];
 
     if samples.is_empty() || sample_rate == 0 {
         return "C".to_string();
@@ -360,9 +358,7 @@ fn estimate_key(samples: &[f32], sample_rate: u32) -> String {
                 let correlation: f32 = samples[start..end]
                     .iter()
                     .enumerate()
-                    .map(|(i, &s)| {
-                        s * (TAU * freq * i as f32 / sr).cos()
-                    })
+                    .map(|(i, &s)| s * (TAU * freq * i as f32 / sr).cos())
                     .sum::<f32>()
                     .abs();
                 acc += correlation;
@@ -407,7 +403,11 @@ fn count_onsets(samples: &[f32], sample_rate: u32) -> usize {
             let end = (start + hop).min(samples.len());
             let sq: f32 = samples[start..end].iter().map(|&s| s * s).sum();
             let len = (end - start) as f32;
-            if len > 0.0 { (sq / len).sqrt() } else { 0.0 }
+            if len > 0.0 {
+                (sq / len).sqrt()
+            } else {
+                0.0
+            }
         })
         .collect();
 
@@ -415,7 +415,11 @@ fn count_onsets(samples: &[f32], sample_rate: u32) -> usize {
     let flux: Vec<f32> = (1..energy.len())
         .map(|i| {
             let diff = energy[i] - energy[i - 1];
-            if diff > 0.0 { diff } else { 0.0 }
+            if diff > 0.0 {
+                diff
+            } else {
+                0.0
+            }
         })
         .collect();
 
@@ -609,7 +613,11 @@ mod tests {
         let clicks = make_click_train(0.25, 44100, 2.0);
         analyzer.add_stem(StemType::Drums, &clicks, 44100);
         let results = analyzer.analyze_all();
-        assert!(results[0].onset_count >= 0);
+        // A click train at 4 Hz for 2 s should produce several onsets.
+        assert!(
+            results[0].onset_count > 0,
+            "expected onsets from click train"
+        );
     }
 
     #[test]

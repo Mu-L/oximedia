@@ -50,10 +50,10 @@ impl PpmMeter {
     #[must_use]
     pub fn new(sample_rate: f64, channels: usize, standard: PpmStandard) -> Self {
         let (attack_time, release_time) = match standard {
-            PpmStandard::Ebu => (0.010, 2.8),      // 10ms attack, 2.8s decay
-            PpmStandard::Nordic => (0.005, 2.8),   // 5ms attack, 2.8s decay
-            PpmStandard::Din => (0.010, 1.5),      // 10ms attack, 1.5s decay
-            PpmStandard::Bbc => (0.010, 2.4),      // 10ms attack, 2.4s decay
+            PpmStandard::Ebu => (0.010, 2.8),    // 10ms attack, 2.8s decay
+            PpmStandard::Nordic => (0.005, 2.8), // 5ms attack, 2.8s decay
+            PpmStandard::Din => (0.010, 1.5),    // 10ms attack, 1.5s decay
+            PpmStandard::Bbc => (0.010, 2.4),    // 10ms attack, 2.4s decay
         };
 
         let attack_coeff = Self::calculate_coeff(attack_time, sample_rate);
@@ -96,7 +96,8 @@ impl PpmMeter {
                         self.release_coeff
                     };
 
-                    self.channel_states[ch] = self.channel_states[ch] * (1.0 - coeff) + sample * coeff;
+                    self.channel_states[ch] =
+                        self.channel_states[ch] * (1.0 - coeff) + sample * coeff;
 
                     // Update peak hold
                     if self.channel_states[ch] > self.peak_holds[ch] {
@@ -130,13 +131,16 @@ impl PpmMeter {
     /// Reset peak holds.
     pub fn reset_peaks(&mut self) {
         self.peak_holds.fill(0.0);
+        // Sync metrics cache so callers see updated peak_holds immediately.
+        self.metrics.peak_holds = self.peak_holds.clone();
     }
 
     fn update_metrics(&mut self) {
         self.metrics.channel_levels = self.channel_states.clone();
         self.metrics.peak_holds = self.peak_holds.clone();
 
-        self.metrics.peak_ppm = self.channel_states
+        self.metrics.peak_ppm = self
+            .channel_states
             .iter()
             .fold(0.0f32, |acc, &x| acc.max(x));
     }

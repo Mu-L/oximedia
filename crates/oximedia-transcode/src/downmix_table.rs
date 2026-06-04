@@ -82,7 +82,10 @@ impl DownmixLayout {
     /// Whether this layout carries a dedicated LFE sub-woofer channel.
     #[must_use]
     pub fn has_lfe(self) -> bool {
-        matches!(self, Self::TwoPointOne | Self::FivePointOne | Self::SevenPointOne)
+        matches!(
+            self,
+            Self::TwoPointOne | Self::FivePointOne | Self::SevenPointOne
+        )
     }
 }
 
@@ -112,7 +115,11 @@ impl DownmixCoefficient {
     /// Construct a new coefficient entry.
     #[must_use]
     pub fn new(input_channel: usize, output_channel: usize, gain: f32) -> Self {
-        Self { input_channel, output_channel, gain }
+        Self {
+            input_channel,
+            output_channel,
+            gain,
+        }
     }
 }
 
@@ -218,10 +225,9 @@ pub enum DownmixError {
 impl fmt::Display for DownmixError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoRuleAvailable { source, target } => write!(
-                f,
-                "no down-mix rule from {source} → {target}",
-            ),
+            Self::NoRuleAvailable { source, target } => {
+                write!(f, "no down-mix rule from {source} → {target}")
+            }
             Self::SourceSmallerThanTarget { source, target } => write!(
                 f,
                 "source layout {source} ({} ch) has fewer channels than target {target} ({} ch)",
@@ -295,7 +301,9 @@ impl DownmixTable {
     /// Returns `true` if a rule exists for `(source, target)`.
     #[must_use]
     pub fn has_rule(&self, source: DownmixLayout, target: DownmixLayout) -> bool {
-        self.rules.iter().any(|r| r.source == source && r.target == target)
+        self.rules
+            .iter()
+            .any(|r| r.source == source && r.target == target)
     }
 
     /// Returns the number of rules in the table.
@@ -337,14 +345,14 @@ impl DownmixTable {
             source: DownmixLayout::SevenPointOne,
             target: DownmixLayout::FivePointOne,
             coefficients: vec![
-                DownmixCoefficient::new(0, 0, FULL),    // L   → L
-                DownmixCoefficient::new(1, 1, FULL),    // R   → R
-                DownmixCoefficient::new(2, 2, FULL),    // C   → C
-                DownmixCoefficient::new(3, 3, FULL),    // LFE → LFE
-                DownmixCoefficient::new(4, 4, S_MIX),   // Lss → Ls (−3 dB)
-                DownmixCoefficient::new(6, 4, S_MIX),   // Lrs → Ls (−3 dB)
-                DownmixCoefficient::new(5, 5, S_MIX),   // Rss → Rs (−3 dB)
-                DownmixCoefficient::new(7, 5, S_MIX),   // Rrs → Rs (−3 dB)
+                DownmixCoefficient::new(0, 0, FULL),  // L   → L
+                DownmixCoefficient::new(1, 1, FULL),  // R   → R
+                DownmixCoefficient::new(2, 2, FULL),  // C   → C
+                DownmixCoefficient::new(3, 3, FULL),  // LFE → LFE
+                DownmixCoefficient::new(4, 4, S_MIX), // Lss → Ls (−3 dB)
+                DownmixCoefficient::new(6, 4, S_MIX), // Lrs → Ls (−3 dB)
+                DownmixCoefficient::new(5, 5, S_MIX), // Rss → Rs (−3 dB)
+                DownmixCoefficient::new(7, 5, S_MIX), // Rrs → Rs (−3 dB)
             ],
             output_trim_db: 0.0,
         });
@@ -356,15 +364,15 @@ impl DownmixTable {
             source: DownmixLayout::SevenPointOne,
             target: DownmixLayout::Stereo,
             coefficients: vec![
-                DownmixCoefficient::new(0, 0, FULL),    // L   → Lo
-                DownmixCoefficient::new(1, 1, FULL),    // R   → Ro
-                DownmixCoefficient::new(2, 0, C_MIX),   // C   → Lo
-                DownmixCoefficient::new(2, 1, C_MIX),   // C   → Ro
+                DownmixCoefficient::new(0, 0, FULL),  // L   → Lo
+                DownmixCoefficient::new(1, 1, FULL),  // R   → Ro
+                DownmixCoefficient::new(2, 0, C_MIX), // C   → Lo
+                DownmixCoefficient::new(2, 1, C_MIX), // C   → Ro
                 // LFE (ch 3) intentionally omitted
-                DownmixCoefficient::new(4, 0, S_MIX),   // Lss → Lo
-                DownmixCoefficient::new(5, 1, S_MIX),   // Rss → Ro
-                DownmixCoefficient::new(6, 0, S_MIX),   // Lrs → Lo
-                DownmixCoefficient::new(7, 1, S_MIX),   // Rrs → Ro
+                DownmixCoefficient::new(4, 0, S_MIX), // Lss → Lo
+                DownmixCoefficient::new(5, 1, S_MIX), // Rss → Ro
+                DownmixCoefficient::new(6, 0, S_MIX), // Lrs → Lo
+                DownmixCoefficient::new(7, 1, S_MIX), // Rrs → Ro
             ],
             output_trim_db: -3.0,
         });
@@ -374,9 +382,9 @@ impl DownmixTable {
             source: DownmixLayout::SevenPointOne,
             target: DownmixLayout::Mono,
             coefficients: vec![
-                DownmixCoefficient::new(0, 0, EQ_PWR),  // L
-                DownmixCoefficient::new(1, 0, EQ_PWR),  // R
-                DownmixCoefficient::new(2, 0, C_MIX),   // C
+                DownmixCoefficient::new(0, 0, EQ_PWR), // L
+                DownmixCoefficient::new(1, 0, EQ_PWR), // R
+                DownmixCoefficient::new(2, 0, C_MIX),  // C
                 // LFE omitted
                 DownmixCoefficient::new(4, 0, S_MIX * EQ_PWR), // Lss
                 DownmixCoefficient::new(5, 0, S_MIX * EQ_PWR), // Rss
@@ -394,13 +402,13 @@ impl DownmixTable {
             source: DownmixLayout::FivePointOne,
             target: DownmixLayout::Stereo,
             coefficients: vec![
-                DownmixCoefficient::new(0, 0, FULL),    // L   → Lo
-                DownmixCoefficient::new(1, 1, FULL),    // R   → Ro
-                DownmixCoefficient::new(2, 0, C_MIX),   // C   → Lo (−3 dB)
-                DownmixCoefficient::new(2, 1, C_MIX),   // C   → Ro (−3 dB)
+                DownmixCoefficient::new(0, 0, FULL),  // L   → Lo
+                DownmixCoefficient::new(1, 1, FULL),  // R   → Ro
+                DownmixCoefficient::new(2, 0, C_MIX), // C   → Lo (−3 dB)
+                DownmixCoefficient::new(2, 1, C_MIX), // C   → Ro (−3 dB)
                 // LFE (ch 3) intentionally omitted
-                DownmixCoefficient::new(4, 0, S_MIX),   // Ls  → Lo (−3 dB)
-                DownmixCoefficient::new(5, 1, S_MIX),   // Rs  → Ro (−3 dB)
+                DownmixCoefficient::new(4, 0, S_MIX), // Ls  → Lo (−3 dB)
+                DownmixCoefficient::new(5, 1, S_MIX), // Rs  → Ro (−3 dB)
             ],
             output_trim_db: -3.0,
         });
@@ -591,10 +599,7 @@ mod tests {
         let err = table
             .get(DownmixLayout::Mono, DownmixLayout::Stereo)
             .expect_err("mono → stereo is an up-mix");
-        assert!(matches!(
-            err,
-            DownmixError::SourceSmallerThanTarget { .. }
-        ));
+        assert!(matches!(err, DownmixError::SourceSmallerThanTarget { .. }));
     }
 
     #[test]

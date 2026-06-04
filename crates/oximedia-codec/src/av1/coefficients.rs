@@ -44,6 +44,7 @@
 #![allow(clippy::cast_lossless)]
 
 use super::transform::{TxClass, TxSize, TxType};
+use crate::error::{CodecError, CodecResult};
 
 // =============================================================================
 // Constants
@@ -599,7 +600,19 @@ pub enum EobPt {
 }
 
 impl EobPt {
-    /// Get the EOB point from an EOB value.
+    /// Get the EOB point from an EOB *position* (the actual index of the last
+    /// non-zero coefficient in scan order, i.e. the count of decoded
+    /// coefficients).
+    ///
+    /// Use this when you already have the final EOB position — for example in
+    /// the encoder, after locating the last non-zero entry in a transform
+    /// block.
+    ///
+    /// For the decoder path, where the bitstream carries the EOB-multi *symbol*
+    /// (the index into the EOB-multi CDF, range 0..11), use
+    /// [`EobPt::from_symbol`] instead. The two values are not interchangeable:
+    /// symbol `s` corresponds to base position
+    /// [`EOB_GROUP_START`]`[s]`, which is `(1 << (s - 1)) + 1` for `s ≥ 2`.
     #[must_use]
     pub fn from_eob(eob: u16) -> Self {
         match eob {
@@ -615,6 +628,43 @@ impl EobPt {
             129..=256 => Self::EobPt129To256,
             257..=512 => Self::EobPt257To512,
             _ => Self::EobPt513To1024,
+        }
+    }
+
+    /// Build an [`EobPt`] from the EOB-multi *symbol index* read from the
+    /// bitstream (range `0..=11`).
+    ///
+    /// The EOB-multi CDF in AV1 emits a symbol that directly identifies one of
+    /// the 12 EOB point classes. Each enum variant's discriminant equals the
+    /// symbol value it represents, so this is essentially the inverse of
+    /// [`EobPt::base_eob`] / [`EobPt::extra_bits`].
+    ///
+    /// Returns [`CodecError::InvalidBitstream`] if `symbol > 11`. The largest
+    /// EOB-multi CDF in the AV1 spec carries 16 symbols, so a malformed
+    /// bitstream can in principle place symbols 12..15 here — those values are
+    /// rejected rather than silently saturated, because they desynchronize the
+    /// EOB extra-bits read that follows.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CodecError::InvalidBitstream`] if `symbol >= 12`.
+    pub fn from_symbol(symbol: usize) -> CodecResult<Self> {
+        match symbol {
+            0 => Ok(Self::EobPt0),
+            1 => Ok(Self::EobPt1),
+            2 => Ok(Self::EobPt2),
+            3 => Ok(Self::EobPt3To4),
+            4 => Ok(Self::EobPt5To8),
+            5 => Ok(Self::EobPt9To16),
+            6 => Ok(Self::EobPt17To32),
+            7 => Ok(Self::EobPt33To64),
+            8 => Ok(Self::EobPt65To128),
+            9 => Ok(Self::EobPt129To256),
+            10 => Ok(Self::EobPt257To512),
+            11 => Ok(Self::EobPt513To1024),
+            other => Err(CodecError::InvalidBitstream(format!(
+                "EOB-multi symbol {other} out of range 0..=11"
+            ))),
         }
     }
 
@@ -790,6 +840,18 @@ impl CoeffBuffer {
     /// Clear all coefficients.
     pub fn clear(&mut self) {
         self.coeffs.fill(0);
+    }
+
+    /// Get the width (number of columns) of the buffer.
+    #[must_use]
+    pub const fn width(&self) -> usize {
+        self.width
+    }
+
+    /// Get the height (number of rows) of the buffer.
+    #[must_use]
+    pub const fn height(&self) -> usize {
+        self.height
     }
 
     /// Get mutable slice of coefficients.
@@ -1089,6 +1151,110 @@ mod tests {
 
         assert_eq!(EobPt::EobPt5To8.extra_bits(), 2);
         assert_eq!(EobPt::EobPt5To8.base_eob(), 5);
+    }
+
+    #[test]
+    fn test_eob_pt_from_symbol_basic() {
+        // Regression: the EOB-multi CDF emits a *symbol* (0..=11) that
+        // identifies the EobPt class directly. Each variant's discriminant
+        // equals its symbol value.
+        let expected = [
+            EobPt::EobPt0,
+            EobPt::EobPt1,
+            EobPt::EobPt2,
+            EobPt::EobPt3To4,
+            EobPt::EobPt5To8,
+            EobPt::EobPt9To16,
+            EobPt::EobPt17To32,
+            EobPt::EobPt33To64,
+            EobPt::EobPt65To128,
+            EobPt::EobPt129To256,
+            EobPt::EobPt257To512,
+            EobPt::EobPt513To1024,
+        ];
+        for (symbol, &want) in expected.iter().enumerate() {
+            let got = EobPt::from_symbol(symbol).expect("symbol in 0..=11 must succeed");
+            assert_eq!(got, want, "symbol {symbol} should map to {want:?}");
+            assert_eq!(
+                got as usize, symbol,
+                "discriminant of {got:?} should equal symbol {symbol}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_eob_pt_from_symbol_rejects_out_of_range() {
+        // The 16-symbol EOB-multi CDF can in principle yield symbols 12..15
+        // from a malformed bitstream. Those must produce a decoding error
+        // rather than silently saturate.
+        for bad in 12..=15 {
+            let err = EobPt::from_symbol(bad).expect_err("symbols 12..=15 must be rejected");
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("EOB-multi"),
+                "error message should mention EOB-multi: {msg}"
+            );
+        }
+        assert!(EobPt::from_symbol(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn test_eob_pt_from_symbol_differs_from_from_eob() {
+        // This is the heart of the bug: the old decoder confused these two.
+        // For symbols >= 4 the two functions return different EobPt classes,
+        // and crucially different `extra_bits` counts, so a decoder that
+        // misuses `from_eob` on a symbol desynchronizes the bitstream.
+        //
+        // Symbols 0..=3 happen to coincide (EobPt0, EobPt1, EobPt2,
+        // EobPt3To4) because for those values the position table and the
+        // symbol enumeration agree.
+        for symbol in 0..=3usize {
+            let from_sym = EobPt::from_symbol(symbol).expect("low symbol always succeeds");
+            let from_pos = EobPt::from_eob(symbol as u16);
+            assert_eq!(from_sym, from_pos, "symbols 0..=3 coincidentally match");
+        }
+        for symbol in 4..=11usize {
+            let from_sym = EobPt::from_symbol(symbol).expect("symbols 4..=11 must succeed");
+            let from_pos = EobPt::from_eob(symbol as u16);
+            assert_ne!(
+                from_sym, from_pos,
+                "symbol {symbol} must NOT coincide with from_eob (the bug)",
+            );
+            // And the extra_bits read from the bitstream would have been
+            // wrong, which is the actual harm.
+            assert_ne!(
+                from_sym.extra_bits(),
+                from_pos.extra_bits(),
+                "symbol {symbol} extra_bits mismatch is the desync source",
+            );
+        }
+    }
+
+    #[test]
+    fn test_eob_pt_symbol_chain_covers_group_start() {
+        // For every legal symbol, the decoder consumes `extra_bits` literal
+        // bits and combines them with EOB_GROUP_START[symbol] to obtain the
+        // final EOB position. Verify that this combination spans precisely
+        // the range advertised by the EobPt variant.
+        for symbol in 0..=11usize {
+            let pt = EobPt::from_symbol(symbol).expect("legal symbol");
+            assert_eq!(pt.base_eob(), EOB_GROUP_START[symbol]);
+
+            let extra = pt.extra_bits();
+            // Range size = 2^extra; symbol 0..=2 are degenerate (size 1).
+            let range_size: u16 = 1u16 << extra;
+            if symbol <= 2 {
+                assert_eq!(range_size, 1);
+            } else {
+                // Final position fits in [base, base + range_size - 1].
+                let max_offset = range_size - 1;
+                let max_pos = EobPt::from_eob(pt.base_eob() + max_offset);
+                assert_eq!(
+                    max_pos, pt,
+                    "EOB position at top of group must classify as same EobPt",
+                );
+            }
+        }
     }
 
     #[test]

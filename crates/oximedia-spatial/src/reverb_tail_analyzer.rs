@@ -79,13 +79,7 @@ pub fn compute_edc(ir: &[f32]) -> Result<Vec<f32>, SpatialError> {
 /// Samples with value ≤ 0 are clamped to `-200.0` dB.
 pub fn edc_to_db(edc: &[f32]) -> Vec<f32> {
     edc.iter()
-        .map(|&e| {
-            if e > 0.0 {
-                10.0 * e.log10()
-            } else {
-                -200.0
-            }
-        })
+        .map(|&e| if e > 0.0 { 10.0 * e.log10() } else { -200.0 })
         .collect()
 }
 
@@ -199,7 +193,10 @@ pub struct ReverbTimeEstimates {
 /// # Errors
 /// Returns [`SpatialError`] if the IR is empty, the sample rate is zero, or
 /// the EDC does not have a sufficient decay range.
-pub fn measure_reverb_times(ir: &[f32], sample_rate: u32) -> Result<ReverbTimeEstimates, SpatialError> {
+pub fn measure_reverb_times(
+    ir: &[f32],
+    sample_rate: u32,
+) -> Result<ReverbTimeEstimates, SpatialError> {
     if sample_rate == 0 {
         return Err(SpatialError::InvalidConfig(
             "Sample rate must be > 0".into(),
@@ -586,7 +583,10 @@ mod tests {
         let room = RoomParameters::from_volume_surface(200.0, 180.0, 0.1)
             .expect("room params should be valid");
         let rt60 = sabine_rt60(&room).expect("Sabine RT60 should compute");
-        assert!(rt60 > 1.0 && rt60 < 3.0, "Sabine RT60 should be ~1.79 s, got {rt60}");
+        assert!(
+            rt60 > 1.0 && rt60 < 3.0,
+            "Sabine RT60 should be ~1.79 s, got {rt60}"
+        );
     }
 
     #[test]
@@ -604,10 +604,10 @@ mod tests {
 
     #[test]
     fn test_sabine_rt60_increases_with_volume() {
-        let room_small = RoomParameters::rectangular(3.0, 3.0, 2.5, 0.2)
-            .expect("small room should be valid");
-        let room_large = RoomParameters::rectangular(10.0, 8.0, 4.0, 0.2)
-            .expect("large room should be valid");
+        let room_small =
+            RoomParameters::rectangular(3.0, 3.0, 2.5, 0.2).expect("small room should be valid");
+        let room_large =
+            RoomParameters::rectangular(10.0, 8.0, 4.0, 0.2).expect("large room should be valid");
         let rt_small = sabine_rt60(&room_small).expect("small room RT60 should compute");
         let rt_large = sabine_rt60(&room_large).expect("large room RT60 should compute");
         assert!(
@@ -646,8 +646,8 @@ mod tests {
         let target_rt60 = 1.0_f32;
         // Use a longer IR (5× RT60) to ensure the −35 dB level is reached.
         let ir = synthetic_ir(target_rt60, 5.0, 48_000);
-        let times =
-            measure_reverb_times(&ir, 48_000).expect("RT60 measurement should succeed for synthetic IR");
+        let times = measure_reverb_times(&ir, 48_000)
+            .expect("RT60 measurement should succeed for synthetic IR");
         // The T30-based RT60 extrapolation is accurate to within 30% for this
         // deterministic LCG noise sequence. The Schroeder method converges better
         // with true white noise, but 30% is sufficient to confirm the formula is correct.
@@ -661,7 +661,8 @@ mod tests {
         assert!(
             times.edt <= times.rt60_from_t30 * 2.0,
             "EDT should be plausible relative to T30: edt={}, t30_rt60={}",
-            times.edt, times.rt60_from_t30
+            times.edt,
+            times.rt60_from_t30
         );
     }
 
@@ -677,8 +678,8 @@ mod tests {
     #[test]
     fn test_separate_early_late_split_point() {
         let ir: Vec<f32> = (0..480).map(|i| i as f32).collect();
-        let result = separate_early_late(&ir, 48_000, 50.0)
-            .expect("early/late separation should succeed");
+        let result =
+            separate_early_late(&ir, 48_000, 50.0).expect("early/late separation should succeed");
         // 50 ms at 48 kHz = 2400 samples, but our IR is only 480 samples → clamped.
         assert_eq!(result.early.len() + result.late.len(), ir.len());
     }
@@ -721,8 +722,8 @@ mod tests {
     #[test]
     fn test_mean_free_path_cube() {
         // Cube 2×2×2 m: V=8, S=24, mfp = 4*8/24 = 1.333 m.
-        let room = RoomParameters::rectangular(2.0, 2.0, 2.0, 0.1)
-            .expect("cube room should be valid");
+        let room =
+            RoomParameters::rectangular(2.0, 2.0, 2.0, 0.1).expect("cube room should be valid");
         let mfp = mean_free_path(&room).expect("mean free path should compute");
         assert!(
             (mfp - 4.0 * 8.0 / 24.0).abs() < 0.001,
@@ -734,9 +735,11 @@ mod tests {
     fn test_mean_reflection_interval_positive() {
         let room = RoomParameters::rectangular(5.0, 4.0, 3.0, 0.15)
             .expect("room should be valid for reflection interval test");
-        let interval = mean_reflection_interval(&room)
-            .expect("reflection interval should compute");
-        assert!(interval > 0.0, "Reflection interval must be positive: {interval}");
+        let interval = mean_reflection_interval(&room).expect("reflection interval should compute");
+        assert!(
+            interval > 0.0,
+            "Reflection interval must be positive: {interval}"
+        );
     }
 
     #[test]
@@ -751,7 +754,10 @@ mod tests {
         let db = edc_to_db(&edc);
         assert_eq!(db.len(), 5);
         assert!((db[0]).abs() < 1e-4, "EDC[0]=1.0 should be 0 dB");
-        assert!((db[1] - (-3.010)).abs() < 0.01, "EDC[1]=0.5 should be ≈ -3.01 dB");
+        assert!(
+            (db[1] - (-3.010)).abs() < 0.01,
+            "EDC[1]=0.5 should be ≈ -3.01 dB"
+        );
         assert_eq!(db[4], -200.0, "Zero EDC should map to -200 dB");
     }
 }

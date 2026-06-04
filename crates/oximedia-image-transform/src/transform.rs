@@ -708,6 +708,66 @@ fn parse_hex_pair(pair: &str, original: &str) -> Result<u8, TransformParseError>
 pub use crate::transform_types::{Border, Compression, OutputOptions, Padding, Rotation, Trim};
 
 // ---------------------------------------------------------------------------
+// Aspect ratio utility
+// ---------------------------------------------------------------------------
+
+/// Compute target `(width, height)` that preserves the source aspect ratio
+/// given a requested `(req_w, req_h)` and a [`FitMode`].
+///
+/// | Mode                                    | Behaviour                                          |
+/// |-----------------------------------------|----------------------------------------------------|
+/// | [`FitMode::Contain`] / [`FitMode::ScaleDown`] | Fit *inside* the box — returned dims ≤ `req`. |
+/// | [`FitMode::Cover`] / [`FitMode::Crop`]  | Fill the box — returned dims ≥ `req`.              |
+/// | All other modes                         | Return `(req_w, req_h)` unchanged.                 |
+///
+/// If `src_w` or `src_h` is zero the function returns `(req_w, req_h)` unchanged.
+///
+/// # Example
+///
+/// ```
+/// use oximedia_image_transform::transform::{enforce_aspect_ratio, FitMode};
+///
+/// // 1600×900 source → fit inside 800×600 box
+/// let (w, h) = enforce_aspect_ratio(1600, 900, 800, 600, FitMode::Contain);
+/// assert_eq!(w, 800);
+/// assert_eq!(h, 450);
+///
+/// // 1600×900 source → cover 400×400 box
+/// let (w, h) = enforce_aspect_ratio(1600, 900, 400, 400, FitMode::Cover);
+/// assert_eq!(w, 711); // ≥ 400 on both axes
+/// assert_eq!(h, 400);
+/// ```
+pub fn enforce_aspect_ratio(
+    src_w: u32,
+    src_h: u32,
+    req_w: u32,
+    req_h: u32,
+    fit_mode: FitMode,
+) -> (u32, u32) {
+    if src_w == 0 || src_h == 0 {
+        return (req_w, req_h);
+    }
+    match fit_mode {
+        FitMode::Contain | FitMode::ScaleDown => {
+            // Shrink so that *both* dimensions fit inside the box.
+            let scale = f64::min(req_w as f64 / src_w as f64, req_h as f64 / src_h as f64);
+            let out_w = (src_w as f64 * scale).round() as u32;
+            let out_h = (src_h as f64 * scale).round() as u32;
+            (out_w.max(1), out_h.max(1))
+        }
+        FitMode::Cover | FitMode::Crop => {
+            // Scale so that *both* dimensions fill or exceed the box.
+            let scale = f64::max(req_w as f64 / src_w as f64, req_h as f64 / src_h as f64);
+            let out_w = (src_w as f64 * scale).round() as u32;
+            let out_h = (src_h as f64 * scale).round() as u32;
+            (out_w.max(1), out_h.max(1))
+        }
+        // Pad and Fill return the requested box dimensions unchanged.
+        FitMode::Pad | FitMode::Fill => (req_w, req_h),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TransformParams
 // ---------------------------------------------------------------------------
 
@@ -1738,5 +1798,75 @@ mod tests {
         p.onerror = Some("redirect".to_string());
         let key = p.cache_key();
         assert!(!key.contains("onerror"));
+    }
+
+    // ── enforce_aspect_ratio ──
+
+    #[test]
+    fn test_enforce_aspect_ratio_contain_landscape() {
+        // 1600×900 inside 800×600: width-limited → 800×450
+        let (w, h) = enforce_aspect_ratio(1600, 900, 800, 600, FitMode::Contain);
+        assert_eq!(w, 800);
+        assert_eq!(h, 450);
+    }
+
+    #[test]
+    fn test_enforce_aspect_ratio_contain_portrait() {
+        // 400×800 inside 800×600: height-limited → 300×600
+        let (w, h) = enforce_aspect_ratio(400, 800, 800, 600, FitMode::Contain);
+        assert_eq!(w, 300);
+        assert_eq!(h, 600);
+    }
+
+    #[test]
+    fn test_enforce_aspect_ratio_scale_down_behaves_like_contain() {
+        let (w1, h1) = enforce_aspect_ratio(1600, 900, 800, 600, FitMode::ScaleDown);
+        let (w2, h2) = enforce_aspect_ratio(1600, 900, 800, 600, FitMode::Contain);
+        assert_eq!((w1, h1), (w2, h2));
+    }
+
+    #[test]
+    fn test_enforce_aspect_ratio_cover() {
+        // 1600×900 covering 400×400: height-scale (400/900≈0.444) < width-scale (400/1600=0.25)
+        // so we use height scale → 1600*(400/900)≈711 × 400
+        let (w, h) = enforce_aspect_ratio(1600, 900, 400, 400, FitMode::Cover);
+        assert_eq!(h, 400);
+        assert!(w >= 400, "cover width {w} must be ≥ 400");
+    }
+
+    #[test]
+    fn test_enforce_aspect_ratio_crop_behaves_like_cover() {
+        let (w1, h1) = enforce_aspect_ratio(800, 600, 200, 200, FitMode::Crop);
+        let (w2, h2) = enforce_aspect_ratio(800, 600, 200, 200, FitMode::Cover);
+        assert_eq!((w1, h1), (w2, h2));
+    }
+
+    #[test]
+    fn test_enforce_aspect_ratio_fill_returns_request() {
+        let (w, h) = enforce_aspect_ratio(1600, 900, 400, 300, FitMode::Fill);
+        assert_eq!(w, 400);
+        assert_eq!(h, 300);
+    }
+
+    #[test]
+    fn test_enforce_aspect_ratio_pad_returns_request() {
+        let (w, h) = enforce_aspect_ratio(1600, 900, 400, 300, FitMode::Pad);
+        assert_eq!(w, 400);
+        assert_eq!(h, 300);
+    }
+
+    #[test]
+    fn test_enforce_aspect_ratio_zero_src_returns_request() {
+        let (w, h) = enforce_aspect_ratio(0, 900, 400, 300, FitMode::Contain);
+        assert_eq!(w, 400);
+        assert_eq!(h, 300);
+    }
+
+    #[test]
+    fn test_enforce_aspect_ratio_square_src_cover_square_box() {
+        // 200×200 covering 100×100 — already fits exactly at scale 0.5
+        let (w, h) = enforce_aspect_ratio(200, 200, 100, 100, FitMode::Cover);
+        assert_eq!(w, 100);
+        assert_eq!(h, 100);
     }
 }

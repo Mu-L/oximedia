@@ -23,20 +23,30 @@
 - [x] Add Zixi-compatible protocol support for broadcast contribution links
 - [x] Implement SMPTE ST 2022-7 seamless protection switching (dual-path redundancy) in smpte2110 (verified 2026-05-16; src/smpte2022_7.rs:1018 lines)
 - [x] Add media relay/restreaming server -- receive from one protocol, retransmit on another (verified 2026-05-16; src/relay.rs)
-- [ ] Implement bandwidth-aware transcoding trigger -- signal codec crate to reduce quality when bandwidth drops (verified-open 2026-05-16: bandwidth_trigger.rs exists but trigger→codec signaling not wired)
+- [x] Bandwidth-aware transcoding trigger — wire BandwidthTriggerEvaluator to codec signaling (verified 2026-06-01; src/bandwidth_adaptation.rs `BandwidthAdaptationController` wraps `BandwidthTrigger` + `Box<dyn Fn(TriggerAction)+Send>` callback; fires on Downgrade/Upgrade, silent on Hold; 5 tests)
+  - **Goal:** Connect the existing `TriggerEvaluator` (which emits `TriggerAction`) to a callback so callers can wire in codec bitrate changes.
+  - **Design:** `src/bandwidth_trigger.rs` has `TriggerEvaluator` that emits `TriggerAction::{Upgrade,Downgrade,Hold}` with hysteresis but nothing consumes them. Add `BandwidthAdaptationController` struct that owns `TriggerEvaluator` + a `Box<dyn Fn(TriggerAction) + Send>` callback; call callback on each `evaluate()` result. The consumer wires in a lambda that calls their codec's bitrate API. Pure Rust, no cross-crate dependency added.
+  - **Files:** `src/bandwidth_trigger.rs`, `src/bandwidth_adaptation.rs` (new), `TODO.md`.
+  - **Tests:** callback fires on `Downgrade` when bandwidth drops below threshold; callback NOT fired on `Hold`; Upgrade fires on recovery; callback receives the correct `TriggerAction` variant.
+  - **Risk:** callback must be `Send` for async contexts; document that the consumer is responsible for the actual codec API call.
 - [x] Add ICE (Interactive Connectivity Establishment) for WebRTC NAT traversal (verified 2026-05-16; src/webrtc/ice.rs:1082 lines, src/webrtc/ice_agent.rs)
 - [x] Implement multipath streaming -- send redundant streams over multiple network interfaces (verified 2026-05-16; src/multipath.rs:1241 lines)
 
 ## Performance
 - [x] Use connection pooling in CDN module for keep-alive HTTP connections to edge servers (verified 2026-05-16; src/cdn/keepalive_pool.rs:1 HTTP keep-alive connection pool per-host)
-- [ ] Implement zero-copy segment serving using sendfile/splice syscalls in HLS/DASH server (verified-open 2026-05-16: no sendfile/splice in HLS/DASH server paths)
+- [x] Implement zero-copy segment serving using sendfile/splice syscalls in HLS/DASH server (ZeroCopyFileServer done)
 - [ ] Add io_uring support for high-throughput RTP packet handling in smpte2110 (verified-open 2026-05-16: no io_uring in smpte2110)
-- [ ] Implement packet pacing in SRT to smooth out burst traffic and reduce jitter (verified-open 2026-05-16: not yet implemented)
-- [ ] Profile and optimize FEC encoding/decoding -- consider SIMD-accelerated XOR operations (verified-open 2026-05-16: not yet implemented)
-- [ ] Cache parsed manifest/playlist structures to avoid re-parsing on each client request (verified-open 2026-05-16: not yet implemented)
+- [x] Implement packet pacing in SRT to smooth out burst traffic and reduce jitter (SrtPacketPacer done)
+- [x] SIMD-accelerated XOR for FEC encode/decode (explicit intrinsics) (verified 2026-06-01; src/fec_interleave.rs `xor_blocks_avx2` AVX2 256-bit XOR + `xor_blocks_neon` NEON 128-bit + scalar fallback; `xor_blocks` runtime-dispatch; 4 new tests: SIMD==scalar 4KB, non-32-multiple 100B, double-XOR identity, multi-input)
+  - **Goal:** Replace compiler-autovectorized u64-word XOR with explicit AVX2/NEON SIMD paths.
+  - **Design:** `src/fec_interleave.rs:131-164` uses u64-word XOR relying on compiler autovectorization. Add explicit `#[target_feature(enable = "avx2")]` path: load 256-bit vectors, XOR, store; runtime-detect via `is_x86_feature_detected!("avx2")`. Add NEON path for aarch64 via `cfg(target_arch = "aarch64")`. Scalar fallback (current u64 path) always present. Use unaligned loads for safety.
+  - **Files:** `src/fec_interleave.rs`, `TODO.md`.
+  - **Tests:** SIMD XOR output == scalar XOR output on 4KB of random data; explicit-intrinsic path is hit on AVX2 hardware (assert via a test-only counter or runtime check); NEON path compiles on aarch64.
+  - **Risk:** 32-byte alignment requirements — use unaligned `_mm256_loadu_si256` / `_mm256_storeu_si256`; last-chunk handling for non-256-bit-multiple lengths.
+- [x] Cache parsed manifest/playlist structures to avoid re-parsing on each client request (verified: manifest_cache.rs:303:ManifestCache, TTL, ETag stale_while_revalidate)
 
 ## Testing
-- [ ] Add HLS playlist generation test verifying M3U8 format compliance (EXT-X-VERSION, segment tags)
+- [x] Add HLS playlist generation test verifying M3U8 format compliance (EXT-X-VERSION, segment tags) (verified: hls/playlist.rs:test_hls_m3u8_format_compliance)
 - [ ] Test DASH MPD generation against schema validation
 - [ ] Add SRT connection test with simulated packet loss verifying ARQ retransmission
 - [ ] Test CDN failover: simulate primary CDN timeout, verify automatic switch to secondary

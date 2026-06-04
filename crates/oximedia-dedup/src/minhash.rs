@@ -224,11 +224,7 @@ impl MinHashIndex {
             for j in (i + 1)..self.entries.len() {
                 let sim = self.entries[i].1.jaccard_similarity(&self.entries[j].1);
                 if sim >= self.threshold {
-                    pairs.push((
-                        self.entries[i].0.as_str(),
-                        self.entries[j].0.as_str(),
-                        sim,
-                    ));
+                    pairs.push((self.entries[i].0.as_str(), self.entries[j].0.as_str(), sim));
                 }
             }
         }
@@ -391,7 +387,7 @@ mod tests {
 
         let dupes = index.find_duplicates();
         // a.mp4 and b.mp4 should be duplicates
-        assert!(dupes.iter().any(|(a, b, _)| (*a == "a.mp4" && *b == "b.mp4")));
+        assert!(dupes.iter().any(|(a, b, _)| *a == "a.mp4" && *b == "b.mp4"));
     }
 
     #[test]

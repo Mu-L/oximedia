@@ -153,8 +153,7 @@ impl WatermarkDetector {
         // Hann window coefficients.
         let hann: Vec<f32> = (0..window_size)
             .map(|i| {
-                0.5 * (1.0
-                    - (std::f32::consts::TAU * i as f32 / (window_size - 1) as f32).cos())
+                0.5 * (1.0 - (std::f32::consts::TAU * i as f32 / (window_size - 1) as f32).cos())
             })
             .collect();
 
@@ -188,8 +187,7 @@ impl WatermarkDetector {
 
             // Target band energy.
             let target_slice = &mag[self.bin_lo..=self.bin_hi];
-            let mean_target: f32 =
-                target_slice.iter().sum::<f32>() / n_target as f32;
+            let mean_target: f32 = target_slice.iter().sum::<f32>() / n_target as f32;
 
             // Accumulate per-bin energy for payload estimation.
             for (k, &v) in target_slice.iter().enumerate() {
@@ -317,8 +315,7 @@ pub fn inject_stub_watermark(samples: &mut [f32], payload: u64, sample_rate: u32
         let freq = bin * sr / window;
 
         for (t, sample) in samples.iter_mut().enumerate() {
-            *sample +=
-                amplitude * (std::f32::consts::TAU * freq * t as f32 / sr).sin();
+            *sample += amplitude * (std::f32::consts::TAU * freq * t as f32 / sr).sin();
         }
     }
 }
@@ -435,7 +432,7 @@ mod tests {
         let sr = 44100u32;
         let detector = WatermarkDetector::new(sr);
         let mut sig = vec![0.1f32; 44100 * 2]; // Flat-ish signal
-        // Add DC bias so target bins have measurable energy after injection.
+                                               // Add DC bias so target bins have measurable energy after injection.
         inject_stub_watermark(&mut sig, 0b0111_1111_1111_u64, sr);
         if let Some(result) = detector.detect(&sig) {
             let (lo, hi) = result.frequency_band_hz;

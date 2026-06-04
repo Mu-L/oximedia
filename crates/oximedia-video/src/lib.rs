@@ -27,6 +27,7 @@ pub mod frame_rate_convert;
 pub mod grain;
 pub mod hdr_meta;
 pub mod hdr_tonemapping;
+pub mod integral_image;
 pub mod interlace_detector;
 pub mod invariant_fingerprint;
 pub mod lens_correction;

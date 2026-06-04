@@ -256,12 +256,9 @@ impl PixelModel {
     fn update(&mut self, value: f64, learning_rate: f64) {
         self.mean = self.mean * (1.0 - learning_rate) + value * learning_rate;
         let diff = value - self.mean;
-        self.variance =
-            self.variance * (1.0 - learning_rate) + diff * diff * learning_rate;
+        self.variance = self.variance * (1.0 - learning_rate) + diff * diff * learning_rate;
         self.variance = self.variance.max(1.0); // floor to avoid div-by-zero
-        if self.count < u32::MAX {
-            self.count += 1;
-        }
+        self.count = self.count.saturating_add(1);
     }
 
     /// Returns true if `value` is a foreground (outlier) observation.

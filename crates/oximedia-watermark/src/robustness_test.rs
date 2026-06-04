@@ -184,7 +184,10 @@ mod tests {
         // Pixels should be very close to 128.
         for (&orig, &deg) in img.iter().zip(degraded.iter()) {
             let diff = (i32::from(orig) - i32::from(deg)).unsigned_abs();
-            assert!(diff <= 5, "high-quality should produce small change: diff={diff}");
+            assert!(
+                diff <= 5,
+                "high-quality should produce small change: diff={diff}"
+            );
         }
     }
 

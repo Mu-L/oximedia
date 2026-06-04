@@ -7,9 +7,116 @@
 //! - Handles field synchronization
 //! - Supports all standard video formats
 
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
 use super::constants::*;
 use super::{VideoStandard, VitcWriterConfig};
 use crate::{FrameRate, Timecode, TimecodeError};
+
+// ── VITC pattern pre-computation cache ────────────────────────────────────────
+
+/// A pre-computed VITC line-insertion pattern for one frame rate.
+///
+/// The `scan_lines` field lists the standard VBI line numbers used by that
+/// frame rate; `bits_per_sample` is the pixel-clock ratio (how many pixels
+/// represent one VITC bit).
+#[derive(Debug, Clone)]
+pub struct VitcPattern {
+    /// Standard VBI scan lines for this frame rate.
+    pub scan_lines: Vec<u16>,
+    /// Nominal pixels per VITC bit at this standard.
+    pub bits_per_sample: u8,
+}
+
+/// Cache of pre-computed CRC table and per-frame-rate VITC insertion patterns.
+#[derive(Debug)]
+pub struct VitcPatternCache {
+    /// 256-entry CRC lookup table using polynomial `x^8 + x^2 + x + 1`.
+    pub crc_table: [u8; 256],
+    /// Pre-computed patterns for common broadcast frame rates.
+    pub patterns: HashMap<u8, VitcPattern>,
+}
+
+/// Build the 256-entry CRC lookup table for VITC (poly `0x07`).
+fn build_crc_table() -> [u8; 256] {
+    let mut table = [0u8; 256];
+    for (i, entry) in table.iter_mut().enumerate() {
+        let mut byte = i as u8;
+        for _ in 0..8 {
+            let feedback = (byte & 0x80) != 0;
+            byte <<= 1;
+            if feedback {
+                byte ^= 0x07;
+            }
+        }
+        *entry = byte;
+    }
+    table
+}
+
+/// Return a reference to the global (lazily initialised) `VitcPatternCache`.
+///
+/// The first call constructs the cache; subsequent calls return the already-
+/// computed reference.
+pub fn get_vitc_cache() -> &'static VitcPatternCache {
+    static CACHE: OnceLock<VitcPatternCache> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let crc_table = build_crc_table();
+
+        let mut patterns = HashMap::new();
+
+        // 23.976 / 24 fps — film / cinema, 525-line NTSC timing
+        patterns.insert(
+            24u8,
+            VitcPattern {
+                scan_lines: vec![14, 16],
+                bits_per_sample: 2,
+            },
+        );
+
+        // 25 fps — PAL/SECAM broadcast
+        patterns.insert(
+            25u8,
+            VitcPattern {
+                scan_lines: vec![19, 21],
+                bits_per_sample: 2,
+            },
+        );
+
+        // 29.97 / 30 fps — NTSC broadcast
+        patterns.insert(
+            30u8,
+            VitcPattern {
+                scan_lines: vec![14, 16],
+                bits_per_sample: 2,
+            },
+        );
+
+        // 50 fps — PAL progressive
+        patterns.insert(
+            50u8,
+            VitcPattern {
+                scan_lines: vec![7, 9, 320, 322],
+                bits_per_sample: 2,
+            },
+        );
+
+        // 59.94 / 60 fps — NTSC progressive
+        patterns.insert(
+            60u8,
+            VitcPattern {
+                scan_lines: vec![7, 9, 270, 272],
+                bits_per_sample: 2,
+            },
+        );
+
+        VitcPatternCache {
+            crc_table,
+            patterns,
+        }
+    })
+}
 
 /// VITC encoder
 pub struct VitcEncoder {
@@ -612,5 +719,84 @@ mod tests {
 
         let field1_lines = buffer.get_field_lines(1);
         assert_eq!(field1_lines.len(), 2);
+    }
+
+    // ── VitcPatternCache tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_vitc_cache_is_computed_on_first_call() {
+        let cache = get_vitc_cache();
+        // CRC table must be populated: table[0] = 0, table[1] = poly value 0x07.
+        assert_eq!(cache.crc_table[0], 0);
+        assert_eq!(cache.crc_table[1], 7);
+    }
+
+    #[test]
+    fn test_vitc_cache_second_call_returns_same_reference() {
+        let ptr1 = get_vitc_cache() as *const VitcPatternCache;
+        let ptr2 = get_vitc_cache() as *const VitcPatternCache;
+        assert_eq!(ptr1, ptr2, "OnceLock must return the same static reference");
+    }
+
+    #[test]
+    fn test_vitc_pattern_25fps_scan_lines() {
+        let cache = get_vitc_cache();
+        let pat = cache
+            .patterns
+            .get(&25)
+            .expect("25fps pattern must be present");
+        assert!(
+            pat.scan_lines.contains(&19),
+            "PAL VITC must include line 19"
+        );
+        assert!(
+            pat.scan_lines.contains(&21),
+            "PAL VITC must include line 21"
+        );
+    }
+
+    #[test]
+    fn test_vitc_pattern_2997fps_scan_lines() {
+        let cache = get_vitc_cache();
+        // 29.97 is stored under nominal fps=30.
+        let pat = cache
+            .patterns
+            .get(&30)
+            .expect("30fps pattern must be present");
+        assert!(
+            !pat.scan_lines.is_empty(),
+            "30fps VITC must have at least one scan line"
+        );
+    }
+
+    #[test]
+    fn test_vitc_crc_table_256_entries() {
+        let cache = get_vitc_cache();
+        assert_eq!(cache.crc_table.len(), 256);
+    }
+
+    #[test]
+    fn test_vitc_crc_table_correct_polynomial() {
+        // Verify a few known values for poly 0x07 CRC:
+        // table[0] = 0 (all-zero input → zero remainder)
+        // table[1] = 7 (0b0000_0001 → remainder 0x07)
+        // table[128] = 0x89 (computed via shift-register for 0b1000_0000)
+        let cache = get_vitc_cache();
+        assert_eq!(cache.crc_table[0], 0);
+        assert_eq!(cache.crc_table[1], 7);
+        assert_eq!(cache.crc_table[128], 0x89);
+    }
+
+    #[test]
+    fn test_vitc_pattern_common_rates_present() {
+        let cache = get_vitc_cache();
+        // All five standard entries must be present.
+        for fps in [24u8, 25, 30, 50, 60] {
+            assert!(
+                cache.patterns.contains_key(&fps),
+                "pattern for {}fps must be in cache",
+                fps
+            );
+        }
     }
 }

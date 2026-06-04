@@ -698,3 +698,86 @@ pub fn sync_to_bpm(cuts: &mut [CutPoint], bpm: f64, timebase: Rational) -> AutoR
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oximedia_core::Rational;
+
+    fn make_ts(pts: i64) -> Timestamp {
+        Timestamp::new(pts, Rational::new(1, 1000))
+    }
+
+    fn make_cut(pts: i64) -> CutPoint {
+        CutPoint::new(make_ts(pts), CutType::Hard, 0.9)
+    }
+
+    /// Cuts spaced closer than `preset.min_shot_duration_ms()` must be
+    /// pruned by `apply_rules` so all resulting gaps are >= the minimum.
+    #[test]
+    fn test_enforce_min_shot_duration() {
+        // VeryFast preset: min = 500 ms.
+        let rules = EditRules::new()
+            .with_pacing(PacingPreset::VeryFast)
+            .with_custom_rule("test", "true");
+        let engine = RulesEngine::new(rules);
+
+        let min_ms = PacingPreset::VeryFast.min_shot_duration_ms();
+
+        // Create cuts that are 100 ms apart (way below the 500 ms minimum).
+        let mut cuts: Vec<CutPoint> = (0..10).map(|i| make_cut(i * 100)).collect();
+
+        engine
+            .apply_rules(&mut cuts)
+            .expect("apply_rules should succeed");
+
+        // All consecutive pairs must be >= min_ms apart.
+        for window in cuts.windows(2) {
+            let gap = window[1].timestamp.pts - window[0].timestamp.pts;
+            assert!(
+                gap >= min_ms,
+                "gap {gap} ms is less than min_shot_duration {min_ms} ms"
+            );
+        }
+    }
+
+    /// Cuts that already satisfy all constraints should pass through unchanged.
+    #[test]
+    fn test_rules_engine_no_op_on_valid_cuts() {
+        // Medium preset: min = 1500 ms, max = 8000 ms.
+        let rules = EditRules::new().with_pacing(PacingPreset::Medium);
+        let engine = RulesEngine::new(rules);
+
+        // Cuts spaced 2000 ms apart — comfortably within [1500, 8000].
+        let original_pts: Vec<i64> = (0..5).map(|i| i * 2000).collect();
+        let mut cuts: Vec<CutPoint> = original_pts.iter().copied().map(make_cut).collect();
+
+        engine
+            .apply_rules(&mut cuts)
+            .expect("apply_rules should succeed");
+
+        // Cuts must be preserved (in timestamp order — apply_rules sorts).
+        assert_eq!(cuts.len(), original_pts.len(), "no cuts should be removed");
+        for (cut, &pts) in cuts.iter().zip(original_pts.iter()) {
+            assert_eq!(cut.timestamp.pts, pts, "timestamps must be unchanged");
+        }
+    }
+
+    /// `calculate_target_duration` clamps to the configured min/max bounds.
+    #[test]
+    fn test_calculate_target_duration_clamped() {
+        let rules = EditRules::new().with_pacing(PacingPreset::Fast);
+        let engine = RulesEngine::new(rules);
+
+        let min = PacingPreset::Fast.min_shot_duration_ms();
+        let max = PacingPreset::Fast.max_shot_duration_ms();
+
+        // Tiny total: result should be clamped to min.
+        let tiny = engine.calculate_target_duration(10, 100);
+        assert_eq!(tiny, min);
+
+        // Giant total with 1 clip: result should be clamped to max.
+        let huge = engine.calculate_target_duration(1_000_000, 1);
+        assert_eq!(huge, max);
+    }
+}

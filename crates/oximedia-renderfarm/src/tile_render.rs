@@ -355,6 +355,146 @@ impl TileJob {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// TileCompositor — parallel 8K tile merge
+// ─────────────────────────────────────────────────────────────────────────────
+
+use rayon::prelude::*;
+
+/// A rendered tile's pixel data ready for compositing into a frame buffer.
+pub struct TilePixels {
+    /// Tile geometry within the full frame (pixel coordinates).
+    pub rect: Rect,
+    /// Raw pixel bytes: `bytes_per_pixel` bytes per pixel, row-major order.
+    pub data: Vec<u8>,
+}
+
+/// Composites multiple rendered tiles into a single flat frame buffer.
+///
+/// The `merge` method uses rayon for parallelism. Tiles are required to be
+/// non-overlapping; each tile's rows are written to disjoint byte ranges.
+///
+/// # Parallelism strategy
+///
+/// Because `#![forbid(unsafe_code)]` is in effect for this crate, we cannot
+/// use raw pointer writes across threads. Instead, we group tiles by row band
+/// and process each band (set of tiles sharing the same vertical span) in
+/// parallel by giving each tile exclusive ownership of its pixel columns via
+/// `chunks_mut` / `split_at_mut` decomposition.
+///
+/// For tiles that share the same row range, we perform column-level splits
+/// using a per-row serial copy within each parallel rayon task. This remains
+/// safe and avoids aliasing.
+pub struct TileCompositor {
+    /// Full frame width in pixels.
+    pub frame_width: u32,
+    /// Full frame height in pixels.
+    pub frame_height: u32,
+    /// Bytes per pixel (e.g. 3 for RGB, 4 for RGBA).
+    pub bytes_per_pixel: u32,
+}
+
+impl TileCompositor {
+    /// Create a new compositor for the given frame dimensions.
+    pub fn new(frame_width: u32, frame_height: u32, bytes_per_pixel: u32) -> Self {
+        Self {
+            frame_width,
+            frame_height,
+            bytes_per_pixel,
+        }
+    }
+
+    /// Merge all tiles into `output`, resizing it to `frame_width × frame_height × bpp`.
+    ///
+    /// Returns `Err(String)` if any tile extends beyond the frame boundaries.
+    ///
+    /// # Parallelism
+    ///
+    /// Tiles are processed in parallel using rayon. Each tile owns disjoint
+    /// rows, so we partition the output buffer into per-row-band slices and
+    /// hand each tile its exclusive slice via `split_at_mut`.  Within a single
+    /// row band that holds multiple tiles at different column offsets we copy
+    /// sequentially (the common case is that tiles occupy non-overlapping
+    /// column ranges of the same row).
+    pub fn merge(&self, tiles: &[TilePixels], output: &mut Vec<u8>) -> Result<(), String> {
+        let stride = self.frame_width as usize * self.bytes_per_pixel as usize;
+        let total = stride * self.frame_height as usize;
+        output.resize(total, 0u8);
+
+        // Validate all tiles before touching output.
+        for tile in tiles {
+            let x_end = tile
+                .rect
+                .x
+                .checked_add(tile.rect.w)
+                .ok_or_else(|| format!("tile x overflow: {:?}", tile.rect))?;
+            let y_end = tile
+                .rect
+                .y
+                .checked_add(tile.rect.h)
+                .ok_or_else(|| format!("tile y overflow: {:?}", tile.rect))?;
+            if x_end > self.frame_width || y_end > self.frame_height {
+                return Err(format!(
+                    "tile ({},{} {}x{}) exceeds frame {}x{}",
+                    tile.rect.x,
+                    tile.rect.y,
+                    tile.rect.w,
+                    tile.rect.h,
+                    self.frame_width,
+                    self.frame_height
+                ));
+            }
+        }
+
+        // Build row-work items: (dst_row_byte_offset, x_byte_start, row_data)
+        // grouped by destination row. Rayon parallelises over individual
+        // tile-rows; since tiles are non-overlapping every item writes to a
+        // distinct byte range.
+        let bpp = self.bytes_per_pixel as usize;
+
+        // Collect all (dst_byte_start, src_row_slice) pairs.
+        let row_copies: Vec<(usize, &[u8])> = tiles
+            .iter()
+            .flat_map(|tile| {
+                let tile_stride = tile.rect.w as usize * bpp;
+                (0..tile.rect.h as usize).map(move |row| {
+                    let src_start = row * tile_stride;
+                    let src_end = src_start + tile_stride;
+                    let dst_row = (tile.rect.y as usize + row) * stride;
+                    let dst_start = dst_row + tile.rect.x as usize * bpp;
+                    (dst_start, &tile.data[src_start..src_end])
+                })
+            })
+            .collect();
+
+        // We need mutable access to disjoint regions of `output` across
+        // parallel threads.  Safe Rust requires us to express the
+        // non-aliasing.  We use chunks_mut over individual output rows, then
+        // for each row copy the tile data into the correct column offset.
+        //
+        // Index the row_copies by destination row for efficient lookup.
+        let frame_height = self.frame_height as usize;
+        let mut per_row: Vec<Vec<(usize, &[u8])>> = vec![Vec::new(); frame_height];
+        for (dst_byte_start, src) in &row_copies {
+            let row_idx = dst_byte_start / stride;
+            let col_byte = dst_byte_start % stride;
+            per_row[row_idx].push((col_byte, src));
+        }
+
+        // Parallel over rows: each row owns a disjoint `&mut [u8]` of `output`.
+        output
+            .par_chunks_mut(stride)
+            .zip(per_row.into_par_iter())
+            .for_each(|(row_buf, copies)| {
+                for (col_byte, src) in copies {
+                    row_buf[col_byte..col_byte + src.len()].copy_from_slice(src);
+                }
+            });
+
+        Ok(())
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Unit tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -501,5 +641,65 @@ mod tests {
                                                                // tile 2 is still pending
         let pending = job.pending_tiles();
         assert_eq!(pending, vec![2]);
+    }
+
+    // --- TileCompositor ---
+
+    #[test]
+    fn test_tile_compositor_basic_merge() {
+        let compositor = TileCompositor::new(4, 4, 1);
+        // Two 2x4 tiles side by side (left half / right half)
+        let left = TilePixels {
+            rect: Rect::new(0, 0, 2, 4),
+            data: vec![1u8; 8],
+        };
+        let right = TilePixels {
+            rect: Rect::new(2, 0, 2, 4),
+            data: vec![2u8; 8],
+        };
+        let mut output = Vec::new();
+        compositor
+            .merge(&[left, right], &mut output)
+            .expect("merge should succeed");
+        assert_eq!(output.len(), 16);
+        // Left half pixels = 1, right half pixels = 2 in each row
+        assert_eq!(output[0], 1);
+        assert_eq!(output[1], 1);
+        assert_eq!(output[2], 2);
+        assert_eq!(output[3], 2);
+    }
+
+    #[test]
+    fn test_tile_compositor_out_of_bounds_error() {
+        let compositor = TileCompositor::new(100, 100, 4);
+        let bad = TilePixels {
+            rect: Rect::new(90, 90, 20, 20), // x_end = 110 > 100
+            data: vec![0u8; 20 * 20 * 4],
+        };
+        let mut output = Vec::new();
+        assert!(compositor.merge(&[bad], &mut output).is_err());
+    }
+
+    #[test]
+    fn test_tile_compositor_single_tile() {
+        let compositor = TileCompositor::new(2, 2, 3);
+        let tile = TilePixels {
+            rect: Rect::new(0, 0, 2, 2),
+            data: vec![255u8; 12],
+        };
+        let mut output = Vec::new();
+        compositor
+            .merge(&[tile], &mut output)
+            .expect("merge should succeed");
+        assert_eq!(output, vec![255u8; 12]);
+    }
+
+    #[test]
+    fn test_tile_compositor_empty_tiles() {
+        let compositor = TileCompositor::new(4, 4, 1);
+        let mut output = Vec::new();
+        compositor.merge(&[], &mut output).expect("empty merge ok");
+        assert_eq!(output.len(), 16);
+        assert!(output.iter().all(|&b| b == 0));
     }
 }

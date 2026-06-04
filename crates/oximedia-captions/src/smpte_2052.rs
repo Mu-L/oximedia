@@ -28,9 +28,7 @@ impl SmpteProfile {
     pub fn uri(self) -> &'static str {
         match self {
             Self::Base => "http://www.smpte-ra.org/schemas/2052-1/2010/smpte-tt#STT-Base",
-            Self::Cea708Compat => {
-                "http://www.smpte-ra.org/schemas/2052-1/2010/smpte-tt#STT-CEA708"
-            }
+            Self::Cea708Compat => "http://www.smpte-ra.org/schemas/2052-1/2010/smpte-tt#STT-CEA708",
             Self::Hd => "http://www.smpte-ra.org/schemas/2052-1/2010/smpte-tt#STT-HD",
         }
     }
@@ -109,9 +107,7 @@ impl SmpteTtValidator {
         if !xml.contains(uri) && !xml.contains("ttp:profile") {
             issues.push(SmpteIssue::error(
                 "SMPTE-001",
-                format!(
-                    "ttp:profile is absent or does not reference the expected URI: {uri}",
-                ),
+                format!("ttp:profile is absent or does not reference the expected URI: {uri}"),
             ));
         }
 
@@ -267,9 +263,7 @@ mod tests {
         let v = SmpteTtValidator::new();
         let uri = SmpteProfile::Base.uri();
         // Provide all required attributes except frameRate (advisory only).
-        let xml = format!(
-            r#"<tt xml:lang="en" ttp:profile="{uri}" tts:extent="1920px 1080px"/>"#
-        );
+        let xml = format!(r#"<tt xml:lang="en" ttp:profile="{uri}" tts:extent="1920px 1080px"/>"#);
         let issues = v.validate(&xml, SmpteProfile::Base);
         // Only the advisory SMPTE-004 (frameRate absent) should remain.
         let errors: Vec<_> = issues.iter().filter(|i| i.is_error).collect();

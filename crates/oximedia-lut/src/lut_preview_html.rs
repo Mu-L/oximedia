@@ -380,21 +380,33 @@ mod tests {
     #[test]
     fn test_html_special_chars_escaped_in_title() {
         let lut = identity_lut();
-        let html =
-            generate_lut_preview_html(&lut, "<script>alert(1)</script>", &LutPreviewOptions::default());
+        let html = generate_lut_preview_html(
+            &lut,
+            "<script>alert(1)</script>",
+            &LutPreviewOptions::default(),
+        );
         assert!(
             !html.contains("<script>alert(1)</script>"),
             "Title must be HTML-escaped"
         );
-        assert!(html.contains("&lt;script&gt;"), "Title must be HTML-escaped");
+        assert!(
+            html.contains("&lt;script&gt;"),
+            "Title must be HTML-escaped"
+        );
     }
 
     #[test]
     fn test_html_contains_metadata_table_by_default() {
         let lut = identity_lut();
         let html = generate_lut_preview_html(&lut, "T", &LutPreviewOptions::default());
-        assert!(html.contains("LUT Metadata"), "Metadata table should be present");
-        assert!(html.contains("Grid size"), "Grid size row should be present");
+        assert!(
+            html.contains("LUT Metadata"),
+            "Metadata table should be present"
+        );
+        assert!(
+            html.contains("Grid size"),
+            "Grid size row should be present"
+        );
     }
 
     #[test]
@@ -456,8 +468,14 @@ mod tests {
     fn test_gradient_fragment_is_valid_html_fragment() {
         let lut = identity_lut();
         let frag = generate_gradient_fragment(&lut, &LutPreviewOptions::default());
-        assert!(frag.contains("gradient-row"), "Should contain gradient-row divs");
-        assert!(!frag.contains("<!DOCTYPE"), "Fragment should not be a full document");
+        assert!(
+            frag.contains("gradient-row"),
+            "Should contain gradient-row divs"
+        );
+        assert!(
+            !frag.contains("<!DOCTYPE"),
+            "Fragment should not be a full document"
+        );
     }
 
     #[test]
@@ -482,7 +500,10 @@ mod tests {
             ..Default::default()
         };
         let html = generate_lut_preview_html(&lut, "T", &opts);
-        assert!(html.contains("1200px"), "Custom page width should appear in CSS");
+        assert!(
+            html.contains("1200px"),
+            "Custom page width should appear in CSS"
+        );
     }
 
     #[test]
@@ -497,7 +518,10 @@ mod tests {
         };
         let html = generate_lut_preview_html(&lut, "T", &opts);
         // White swatch must appear in both rows.
-        assert!(html.contains("rgb(255,255,255)"), "White swatch expected for identity LUT");
+        assert!(
+            html.contains("rgb(255,255,255)"),
+            "White swatch expected for identity LUT"
+        );
     }
 
     #[test]
@@ -527,7 +551,9 @@ mod tests {
     #[test]
     fn test_lut_applied_in_gradient() {
         // Build a LUT that inverts luminance (x → 1-x on all channels).
-        let lut = Lut3d::from_fn(LutSize::Size17, |rgb: [f64; 3]| [1.0 - rgb[0], 1.0 - rgb[1], 1.0 - rgb[2]]);
+        let lut = Lut3d::from_fn(LutSize::Size17, |rgb: [f64; 3]| {
+            [1.0 - rgb[0], 1.0 - rgb[1], 1.0 - rgb[2]]
+        });
         let opts = LutPreviewOptions {
             gradient_steps: 2,
             include_neutral_chart: false,
@@ -539,7 +565,13 @@ mod tests {
         let html = generate_lut_preview_html(&lut, "Invert", &opts);
         // For input black (0,0,0) the inverted LUT should output white (255,255,255)
         // and vice-versa.  Both should appear as swatches.
-        assert!(html.contains("rgb(255,255,255)"), "Expected white swatch from inverted LUT");
-        assert!(html.contains("rgb(0,0,0)"), "Expected black swatch from inverted LUT");
+        assert!(
+            html.contains("rgb(255,255,255)"),
+            "Expected white swatch from inverted LUT"
+        );
+        assert!(
+            html.contains("rgb(0,0,0)"),
+            "Expected black swatch from inverted LUT"
+        );
     }
 }

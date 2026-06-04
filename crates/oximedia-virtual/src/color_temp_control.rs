@@ -93,37 +93,161 @@ struct RobRow {
 
 /// Robertson's isotemperature table (truncated to 31 standard entries).
 const ROB: &[RobRow] = &[
-    RobRow { r:   0.0, u: 0.18006, v: 0.26352 },
-    RobRow { r:  10.0, u: 0.18066, v: 0.26589 },
-    RobRow { r:  20.0, u: 0.18133, v: 0.26846 },
-    RobRow { r:  30.0, u: 0.18208, v: 0.27119 },
-    RobRow { r:  40.0, u: 0.18293, v: 0.27407 },
-    RobRow { r:  50.0, u: 0.18388, v: 0.27709 },
-    RobRow { r:  60.0, u: 0.18494, v: 0.28021 },
-    RobRow { r:  70.0, u: 0.18611, v: 0.28342 },
-    RobRow { r:  80.0, u: 0.18740, v: 0.28668 },
-    RobRow { r:  90.0, u: 0.18880, v: 0.28997 },
-    RobRow { r: 100.0, u: 0.19032, v: 0.29326 },
-    RobRow { r: 125.0, u: 0.19462, v: 0.30141 },
-    RobRow { r: 150.0, u: 0.19962, v: 0.30921 },
-    RobRow { r: 175.0, u: 0.20525, v: 0.31647 },
-    RobRow { r: 200.0, u: 0.21142, v: 0.32312 },
-    RobRow { r: 225.0, u: 0.21807, v: 0.32909 },
-    RobRow { r: 250.0, u: 0.22511, v: 0.33439 },
-    RobRow { r: 275.0, u: 0.23247, v: 0.33904 },
-    RobRow { r: 300.0, u: 0.24010, v: 0.34308 },
-    RobRow { r: 325.0, u: 0.24792, v: 0.34655 },
-    RobRow { r: 350.0, u: 0.25591, v: 0.34951 },
-    RobRow { r: 375.0, u: 0.26400, v: 0.35200 },
-    RobRow { r: 400.0, u: 0.27218, v: 0.35407 },
-    RobRow { r: 425.0, u: 0.28039, v: 0.35577 },
-    RobRow { r: 450.0, u: 0.28863, v: 0.35714 },
-    RobRow { r: 475.0, u: 0.29685, v: 0.35823 },
-    RobRow { r: 500.0, u: 0.30505, v: 0.35907 },
-    RobRow { r: 525.0, u: 0.31320, v: 0.35968 },
-    RobRow { r: 550.0, u: 0.32129, v: 0.36011 },
-    RobRow { r: 575.0, u: 0.32931, v: 0.36038 },
-    RobRow { r: 600.0, u: 0.33724, v: 0.36051 },
+    RobRow {
+        r: 0.0,
+        u: 0.18006,
+        v: 0.26352,
+    },
+    RobRow {
+        r: 10.0,
+        u: 0.18066,
+        v: 0.26589,
+    },
+    RobRow {
+        r: 20.0,
+        u: 0.18133,
+        v: 0.26846,
+    },
+    RobRow {
+        r: 30.0,
+        u: 0.18208,
+        v: 0.27119,
+    },
+    RobRow {
+        r: 40.0,
+        u: 0.18293,
+        v: 0.27407,
+    },
+    RobRow {
+        r: 50.0,
+        u: 0.18388,
+        v: 0.27709,
+    },
+    RobRow {
+        r: 60.0,
+        u: 0.18494,
+        v: 0.28021,
+    },
+    RobRow {
+        r: 70.0,
+        u: 0.18611,
+        v: 0.28342,
+    },
+    RobRow {
+        r: 80.0,
+        u: 0.18740,
+        v: 0.28668,
+    },
+    RobRow {
+        r: 90.0,
+        u: 0.18880,
+        v: 0.28997,
+    },
+    RobRow {
+        r: 100.0,
+        u: 0.19032,
+        v: 0.29326,
+    },
+    RobRow {
+        r: 125.0,
+        u: 0.19462,
+        v: 0.30141,
+    },
+    RobRow {
+        r: 150.0,
+        u: 0.19962,
+        v: 0.30921,
+    },
+    RobRow {
+        r: 175.0,
+        u: 0.20525,
+        v: 0.31647,
+    },
+    RobRow {
+        r: 200.0,
+        u: 0.21142,
+        v: 0.32312,
+    },
+    RobRow {
+        r: 225.0,
+        u: 0.21807,
+        v: 0.32909,
+    },
+    RobRow {
+        r: 250.0,
+        u: 0.22511,
+        v: 0.33439,
+    },
+    RobRow {
+        r: 275.0,
+        u: 0.23247,
+        v: 0.33904,
+    },
+    RobRow {
+        r: 300.0,
+        u: 0.24010,
+        v: 0.34308,
+    },
+    RobRow {
+        r: 325.0,
+        u: 0.24792,
+        v: 0.34655,
+    },
+    RobRow {
+        r: 350.0,
+        u: 0.25591,
+        v: 0.34951,
+    },
+    RobRow {
+        r: 375.0,
+        u: 0.26400,
+        v: 0.35200,
+    },
+    RobRow {
+        r: 400.0,
+        u: 0.27218,
+        v: 0.35407,
+    },
+    RobRow {
+        r: 425.0,
+        u: 0.28039,
+        v: 0.35577,
+    },
+    RobRow {
+        r: 450.0,
+        u: 0.28863,
+        v: 0.35714,
+    },
+    RobRow {
+        r: 475.0,
+        u: 0.29685,
+        v: 0.35823,
+    },
+    RobRow {
+        r: 500.0,
+        u: 0.30505,
+        v: 0.35907,
+    },
+    RobRow {
+        r: 525.0,
+        u: 0.31320,
+        v: 0.35968,
+    },
+    RobRow {
+        r: 550.0,
+        u: 0.32129,
+        v: 0.36011,
+    },
+    RobRow {
+        r: 575.0,
+        u: 0.32931,
+        v: 0.36038,
+    },
+    RobRow {
+        r: 600.0,
+        u: 0.33724,
+        v: 0.36051,
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -212,7 +336,7 @@ pub struct ColorTempConfig {
 impl Default for ColorTempConfig {
     fn default() -> Self {
         Self {
-            target_cct: 5600.0,   // film/video daylight standard
+            target_cct: 5600.0, // film/video daylight standard
             cct_tolerance_k: 150.0,
             target_duv: 0.0,
             duv_tolerance: 0.005, // broadcast standard
@@ -463,7 +587,8 @@ impl ColorTempController {
     /// Duv is measured in CIE 1960 (u, v) space.  Positive Duv = above the
     /// locus (greenish), negative Duv = below (magenta/pink).
     pub fn xy_to_duv(&self, x: f64, y: f64) -> Result<f64> {
-        let (u_test, v_test) = xy_to_uv(x, y).ok_or(ColorTempError::InvalidChromaticity { x, y })?;
+        let (u_test, v_test) =
+            xy_to_uv(x, y).ok_or(ColorTempError::InvalidChromaticity { x, y })?;
 
         // Estimate CCT for finding the nearest Planckian point.
         let cct = self.xy_to_cct(x, y).unwrap_or(6500.0);
@@ -547,9 +672,10 @@ impl ColorTempController {
     /// Return the thermally-compensated CCT for a panel at the given
     /// panel temperature.  Requires a thermal model to be configured.
     pub fn thermally_compensated_target(&self, panel_temp_c: f64) -> Result<f64> {
-        let model = self.thermal_model.as_ref().ok_or_else(|| {
-            ColorTempError::InvalidConfig("no thermal model configured".into())
-        })?;
+        let model = self
+            .thermal_model
+            .as_ref()
+            .ok_or_else(|| ColorTempError::InvalidConfig("no thermal model configured".into()))?;
         let drift = model.cct_per_degree_c * (panel_temp_c - model.reference_temp_c);
         // Counter-act the drift: if panels get warmer (lower CCT), push target up.
         let compensated = self.config.target_cct - drift;
@@ -576,10 +702,15 @@ impl ColorTempController {
         }
         let sum: f64 = self.panels.values().map(|p| p.measured_cct).sum();
         let mean = sum / n as f64;
-        let variance = self.panels.values().map(|p| {
-            let d = p.measured_cct - mean;
-            d * d
-        }).sum::<f64>() / n as f64;
+        let variance = self
+            .panels
+            .values()
+            .map(|p| {
+                let d = p.measured_cct - mean;
+                d * d
+            })
+            .sum::<f64>()
+            / n as f64;
         (mean, variance.sqrt())
     }
 
@@ -640,7 +771,10 @@ mod tests {
         // A point exactly on the Planckian locus should have |Duv| ≈ 0.
         let (x, y) = ctrl.cct_to_xy(6500.0).expect("valid");
         let duv = ctrl.xy_to_duv(x, y).expect("valid xy");
-        assert!(duv.abs() < 0.01, "|Duv| on Planckian locus should be near 0; got {duv}");
+        assert!(
+            duv.abs() < 0.01,
+            "|Duv| on Planckian locus should be near 0; got {duv}"
+        );
     }
 
     #[test]
@@ -671,13 +805,17 @@ mod tests {
             calibrated: false,
             position: [0.0, 0.0],
         });
-        let results = ctrl.compute_uniformity_corrections().expect("should succeed");
+        let results = ctrl
+            .compute_uniformity_corrections()
+            .expect("should succeed");
         assert_eq!(results.len(), 1);
         // Gains must be within configured bounds.
         let g = results[0].gain_rgb;
         for gain in g {
-            assert!(gain >= ctrl.config.min_gain && gain <= ctrl.config.max_gain,
-                "gain {gain} out of bounds");
+            assert!(
+                gain >= ctrl.config.min_gain && gain <= ctrl.config.max_gain,
+                "gain {gain} out of bounds"
+            );
         }
     }
 
@@ -709,7 +847,10 @@ mod tests {
             position: [1.0, 0.0],
         });
         let (mean, std) = ctrl.cct_statistics();
-        assert!((mean - 6500.0).abs() < 1e-6, "mean should be 6500; got {mean}");
+        assert!(
+            (mean - 6500.0).abs() < 1e-6,
+            "mean should be 6500; got {mean}"
+        );
         assert!(std > 0.0, "std dev should be positive");
     }
 
@@ -727,8 +868,10 @@ mod tests {
         ctrl.set_thermal_model(ThermalDriftModel::new(25.0, 5600.0, -10.0));
         // At 35°C the panel drifts -100 K; compensation should push target up.
         let compensated = ctrl.thermally_compensated_target(35.0).expect("valid");
-        assert!((compensated - 5700.0).abs() < 1e-9,
-            "expected 5700.0, got {compensated}");
+        assert!(
+            (compensated - 5700.0).abs() < 1e-9,
+            "expected 5700.0, got {compensated}"
+        );
     }
 
     #[test]

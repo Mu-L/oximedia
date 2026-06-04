@@ -153,10 +153,7 @@ impl KWeightFilter {
 
         // Stage 2: Highpass (RLB weighting, ~60 Hz)
         let (b2, a2) = if (fs - 48000.0).abs() < 1.0 {
-            (
-                [1.0, -2.0, 1.0],
-                [1.0, -1.990_042_1, 0.990_098_2],
-            )
+            ([1.0, -2.0, 1.0], [1.0, -1.990_042_1, 0.990_098_2])
         } else {
             Self::design_highpass(fs, 38.0)
         };
@@ -288,11 +285,7 @@ impl AribLoudnessAnalyzer {
     /// # Errors
     ///
     /// Returns an error if sample rate or channel count is invalid.
-    pub fn new(
-        sample_rate: u32,
-        num_channels: usize,
-        config: AribConfig,
-    ) -> AudioPostResult<Self> {
+    pub fn new(sample_rate: u32, num_channels: usize, config: AribConfig) -> AudioPostResult<Self> {
         if sample_rate == 0 {
             return Err(AudioPostError::InvalidSampleRate(sample_rate));
         }
@@ -593,11 +586,7 @@ impl AribLoudnessAnalyzer {
     /// Get maximum true peak across all channels in dBTP.
     #[must_use]
     pub fn max_true_peak_dbtp(&self) -> f32 {
-        let max_linear = self
-            .max_true_peak
-            .iter()
-            .copied()
-            .fold(0.0_f32, f32::max);
+        let max_linear = self.max_true_peak.iter().copied().fold(0.0_f32, f32::max);
         if max_linear <= 0.0 {
             -100.0
         } else {
@@ -627,8 +616,7 @@ impl AribLoudnessAnalyzer {
         let max_tp = self.max_true_peak_dbtp();
         let lra = self.loudness_range_lu();
 
-        let target_pass =
-            (integrated - self.config.target_lkfs).abs() <= self.config.tolerance_lu;
+        let target_pass = (integrated - self.config.target_lkfs).abs() <= self.config.tolerance_lu;
         let true_peak_pass = max_tp <= self.config.true_peak_limit_dbtp;
         let loudness_range_pass = lra <= self.config.max_loudness_range_lu;
 
@@ -794,7 +782,10 @@ mod tests {
         analyzer.process(&[&signal]).expect("process");
         let compliance = analyzer.check_compliance();
         // Full-scale sine is way louder than -24 LKFS target
-        assert!(!compliance.target_pass, "Full-scale should fail target check");
+        assert!(
+            !compliance.target_pass,
+            "Full-scale should fail target check"
+        );
     }
 
     #[test]

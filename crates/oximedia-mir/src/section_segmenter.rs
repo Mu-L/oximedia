@@ -150,22 +150,17 @@ impl SegmentationResult {
     /// Return sections with a specific label.
     #[must_use]
     pub fn sections_with_label(&self, label: SectionLabel) -> Vec<&Section> {
-        self.sections
-            .iter()
-            .filter(|s| s.label == label)
-            .collect()
+        self.sections.iter().filter(|s| s.label == label).collect()
     }
 
     /// Return the longest section.
     #[must_use]
     pub fn longest_section(&self) -> Option<&Section> {
-        self.sections
-            .iter()
-            .max_by(|a, b| {
-                a.duration_s()
-                    .partial_cmp(&b.duration_s())
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+        self.sections.iter().max_by(|a, b| {
+            a.duration_s()
+                .partial_cmp(&b.duration_s())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     }
 
     /// Return the number of detected boundaries.
@@ -272,12 +267,7 @@ impl SectionSegmenter {
         // Energy per frame for labelling
         let energies = frame_energies(samples, hop);
 
-        let sections = self.label_sections(
-            &boundaries_s,
-            &energies,
-            frame_dur,
-            total_duration_s,
-        );
+        let sections = self.label_sections(&boundaries_s, &energies, frame_dur, total_duration_s);
 
         Ok(SegmentationResult {
             sections,
@@ -335,9 +325,7 @@ impl SectionSegmenter {
         let mut peaks: Vec<usize> = Vec::new();
 
         for i in 1..novelty.len().saturating_sub(1) {
-            if novelty[i] > novelty[i - 1]
-                && novelty[i] > novelty[i + 1]
-                && novelty[i] >= threshold
+            if novelty[i] > novelty[i - 1] && novelty[i] > novelty[i + 1] && novelty[i] >= threshold
             {
                 if peaks.last().map(|&p| i - p >= min_dist).unwrap_or(true) {
                     peaks.push(i);
@@ -557,12 +545,8 @@ fn frame_energies(samples: &[f32], hop: usize) -> Vec<f32> {
     for f in 0..n_frames {
         let start = f * hop;
         let end = (start + hop).min(samples.len());
-        let rms = (samples[start..end]
-            .iter()
-            .map(|s| s * s)
-            .sum::<f32>()
-            / (end - start) as f32)
-            .sqrt();
+        let rms =
+            (samples[start..end].iter().map(|s| s * s).sum::<f32>() / (end - start) as f32).sqrt();
         energies.push(rms);
     }
     energies
@@ -609,12 +593,7 @@ fn assign_label(
 }
 
 /// Compute a simple confidence score for a label assignment.
-fn label_confidence(
-    seg_idx: usize,
-    n_segs: usize,
-    position_frac: f32,
-    mean_energy: f32,
-) -> f32 {
+fn label_confidence(seg_idx: usize, n_segs: usize, position_frac: f32, mean_energy: f32) -> f32 {
     // Intro / Outro are positionally certain
     if seg_idx == 0 || seg_idx + 1 == n_segs {
         return 0.85;
@@ -883,7 +862,10 @@ mod tests {
         let samples = sine(440.0, sr, 5.0, 0.5);
         let result = segmenter.segment(&samples).expect("segmentation failed");
         let first = result.sections.first().expect("at least one section");
-        assert!(first.start_s.abs() < 1e-4, "first section should start at 0");
+        assert!(
+            first.start_s.abs() < 1e-4,
+            "first section should start at 0"
+        );
     }
 
     #[test]
@@ -900,11 +882,7 @@ mod tests {
         let part_b = sine(880.0, sr, 3.0, 0.3);
         let samples = concat(&[part_a, part_b]);
         let result = segmenter.segment(&samples).expect("segmentation failed");
-        let last_end = result
-            .sections
-            .last()
-            .map(|s| s.end_s)
-            .unwrap_or(0.0);
+        let last_end = result.sections.last().map(|s| s.end_s).unwrap_or(0.0);
         assert!(
             last_end > 0.0,
             "last section end should be positive: {last_end}"

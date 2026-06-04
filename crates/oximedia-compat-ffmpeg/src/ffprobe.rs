@@ -690,6 +690,146 @@ fn format_long_name(fmt: &str) -> String {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// FfprobeQuery — parsed ffprobe argument set
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A parsed set of `ffprobe` query options derived from a command-line argument
+/// slice (e.g. `ffprobe -v quiet -print_format json -show_format -show_streams`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FfprobeQuery {
+    /// The input file path to probe.
+    pub input_path: Option<String>,
+    /// The requested output format (`json`, `csv`, `flat`, …).
+    pub print_format: PrintFormat,
+    /// Whether container-level format information was requested (`-show_format`).
+    pub show_format: bool,
+    /// Whether per-stream information was requested (`-show_streams`).
+    pub show_streams: bool,
+    /// Whether per-packet information was requested (`-show_packets`).
+    pub show_packets: bool,
+    /// Verbosity level override (`-v quiet|info|verbose|…`).
+    pub verbosity: Option<String>,
+    /// Selected stream specifier (`-select_streams v:0`, `a`, …).
+    pub select_streams: Option<String>,
+}
+
+impl Default for FfprobeQuery {
+    fn default() -> Self {
+        Self {
+            input_path: None,
+            print_format: PrintFormat::Json,
+            show_format: false,
+            show_streams: false,
+            show_packets: false,
+            verbosity: None,
+            select_streams: None,
+        }
+    }
+}
+
+/// Error returned when an `ffprobe` argument slice cannot be translated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FfprobeArgError {
+    /// A required value was missing after a flag.
+    MissingValue(String),
+    /// An unrecognised `-print_format` value was supplied.
+    UnknownPrintFormat(String),
+}
+
+impl std::fmt::Display for FfprobeArgError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingValue(flag) => write!(f, "missing value after '{}'", flag),
+            Self::UnknownPrintFormat(v) => {
+                write!(f, "unrecognised -print_format value '{}'", v)
+            }
+        }
+    }
+}
+
+impl std::error::Error for FfprobeArgError {}
+
+/// Translate a raw `ffprobe` argument slice into a [`FfprobeQuery`].
+///
+/// Recognised flags:
+/// - `-i <path>` / positional path — input file
+/// - `-print_format <json|csv|flat|default>` / `-of <format>` — output format
+/// - `-show_format` — include container metadata
+/// - `-show_streams` — include per-stream metadata
+/// - `-show_packets` — include per-packet metadata
+/// - `-v <level>` / `-loglevel <level>` — verbosity
+/// - `-select_streams <spec>` — filter streams
+///
+/// Returns an error only for strictly invalid argument combinations (e.g.
+/// missing value after a flag that requires one).
+///
+/// # Example
+///
+/// ```rust
+/// use oximedia_compat_ffmpeg::ffprobe::{translate_ffprobe_args, PrintFormat};
+///
+/// let args = &["-v", "quiet", "-print_format", "json", "-show_format",
+///              "-show_streams", "-i", "movie.mkv"];
+/// let q = translate_ffprobe_args(args).unwrap();
+/// assert_eq!(q.print_format, PrintFormat::Json);
+/// assert!(q.show_format);
+/// assert!(q.show_streams);
+/// assert_eq!(q.input_path.as_deref(), Some("movie.mkv"));
+/// ```
+pub fn translate_ffprobe_args(args: &[&str]) -> Result<FfprobeQuery, FfprobeArgError> {
+    let mut query = FfprobeQuery::default();
+    let mut it = args.iter().copied().peekable();
+
+    while let Some(arg) = it.next() {
+        match arg {
+            "-i" => {
+                let path = it
+                    .next()
+                    .ok_or_else(|| FfprobeArgError::MissingValue("-i".to_string()))?;
+                query.input_path = Some(path.to_string());
+            }
+            "-print_format" | "-of" => {
+                let val = it
+                    .next()
+                    .ok_or_else(|| FfprobeArgError::MissingValue(arg.to_string()))?;
+                query.print_format = PrintFormat::from_str(val)
+                    .ok_or_else(|| FfprobeArgError::UnknownPrintFormat(val.to_string()))?;
+            }
+            "-show_format" => query.show_format = true,
+            "-show_streams" => query.show_streams = true,
+            "-show_packets" => query.show_packets = true,
+            "-v" | "-loglevel" => {
+                let level = it
+                    .next()
+                    .ok_or_else(|| FfprobeArgError::MissingValue(arg.to_string()))?;
+                query.verbosity = Some(level.to_string());
+            }
+            "-select_streams" => {
+                let spec = it
+                    .next()
+                    .ok_or_else(|| FfprobeArgError::MissingValue(arg.to_string()))?;
+                query.select_streams = Some(spec.to_string());
+            }
+            // Unknown flags starting with '-' are silently ignored.
+            s if s.starts_with('-') => {
+                // Consume one value if the next token doesn't look like a flag.
+                if it.peek().map_or(false, |n| !n.starts_with('-')) {
+                    let _ = it.next();
+                }
+            }
+            // Bare positional argument → input file (if not already set).
+            path => {
+                if query.input_path.is_none() {
+                    query.input_path = Some(path.to_string());
+                }
+            }
+        }
+    }
+
+    Ok(query)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -922,5 +1062,92 @@ mod tests {
         assert_eq!(CodecType::Video.to_string(), "video");
         assert_eq!(CodecType::Audio.to_string(), "audio");
         assert_eq!(CodecType::Subtitle.to_string(), "subtitle");
+    }
+
+    // ── translate_ffprobe_args ───────────────────────────────────────────────
+
+    #[test]
+    fn test_translate_ffprobe_args_basic_json() {
+        let args = &[
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            "-i",
+            "movie.mkv",
+        ];
+        let q = translate_ffprobe_args(args).expect("should parse");
+        assert_eq!(q.print_format, PrintFormat::Json);
+        assert!(q.show_format);
+        assert!(q.show_streams);
+        assert!(!q.show_packets);
+        assert_eq!(q.input_path.as_deref(), Some("movie.mkv"));
+        assert_eq!(q.verbosity.as_deref(), Some("quiet"));
+    }
+
+    #[test]
+    fn test_translate_ffprobe_args_of_alias() {
+        let args = &["-of", "csv", "-show_streams", "input.mp4"];
+        let q = translate_ffprobe_args(args).expect("should parse");
+        assert_eq!(q.print_format, PrintFormat::Csv);
+        assert!(q.show_streams);
+        assert_eq!(q.input_path.as_deref(), Some("input.mp4"));
+    }
+
+    #[test]
+    fn test_translate_ffprobe_args_show_packets() {
+        let args = &["-show_packets", "-i", "stream.ts"];
+        let q = translate_ffprobe_args(args).expect("should parse");
+        assert!(q.show_packets);
+        assert_eq!(q.input_path.as_deref(), Some("stream.ts"));
+    }
+
+    #[test]
+    fn test_translate_ffprobe_args_select_streams() {
+        let args = &["-select_streams", "v:0", "-show_streams", "-i", "vid.mkv"];
+        let q = translate_ffprobe_args(args).expect("should parse");
+        assert_eq!(q.select_streams.as_deref(), Some("v:0"));
+        assert!(q.show_streams);
+    }
+
+    #[test]
+    fn test_translate_ffprobe_args_flat_format() {
+        let args = &["-print_format", "flat", "-show_format", "test.flac"];
+        let q = translate_ffprobe_args(args).expect("should parse");
+        assert_eq!(q.print_format, PrintFormat::Flat);
+        assert!(q.show_format);
+    }
+
+    #[test]
+    fn test_translate_ffprobe_args_positional_input() {
+        // Input file as positional arg (common usage: ffprobe movie.mkv)
+        let args = &["movie.mkv"];
+        let q = translate_ffprobe_args(args).expect("should parse");
+        assert_eq!(q.input_path.as_deref(), Some("movie.mkv"));
+    }
+
+    #[test]
+    fn test_translate_ffprobe_args_unknown_print_format() {
+        let args = &["-print_format", "xml_unsupported"];
+        let err = translate_ffprobe_args(args).expect_err("should fail");
+        assert!(matches!(err, FfprobeArgError::UnknownPrintFormat(_)));
+    }
+
+    #[test]
+    fn test_translate_ffprobe_args_missing_value() {
+        let args = &["-print_format"];
+        let err = translate_ffprobe_args(args).expect_err("should fail on missing value");
+        assert!(matches!(err, FfprobeArgError::MissingValue(_)));
+    }
+
+    #[test]
+    fn test_translate_ffprobe_args_defaults() {
+        let q = translate_ffprobe_args(&[]).expect("should parse empty");
+        assert_eq!(q.print_format, PrintFormat::Json);
+        assert!(!q.show_format);
+        assert!(!q.show_streams);
+        assert!(q.input_path.is_none());
     }
 }

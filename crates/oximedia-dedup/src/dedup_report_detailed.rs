@@ -65,9 +65,7 @@ impl RecommendedAction {
             Self::HardlinkDuplicates => {
                 "Replace duplicate files with hard links to the representative."
             }
-            Self::ArchiveDuplicates => {
-                "Move duplicates to an archive directory for manual review."
-            }
+            Self::ArchiveDuplicates => "Move duplicates to an archive directory for manual review.",
             Self::ManualReview => {
                 "Similarity confidence is insufficient for automated action; review manually."
             }
@@ -555,10 +553,7 @@ mod tests {
 
     #[test]
     fn test_space_savings_from_entries() {
-        let mut files = vec![
-            entry("a.mp4", 1000, 1.0),
-            entry("b.mp4", 800, 0.95),
-        ];
+        let mut files = vec![entry("a.mp4", 1000, 1.0), entry("b.mp4", 800, 0.95)];
         files[0].is_representative = true;
         let est = SpaceSavingsEstimate::from_entries(&files);
         assert_eq!(est.retained_bytes, 1000);
@@ -645,7 +640,10 @@ mod tests {
         let mut group = DetailedDuplicateGroup::new(0, "phash", 0.95);
         group.set_metadata("codec", "h264");
         group.set_metadata("resolution", "1920x1080");
-        assert_eq!(group.metadata.get("codec").map(String::as_str), Some("h264"));
+        assert_eq!(
+            group.metadata.get("codec").map(String::as_str),
+            Some("h264")
+        );
         assert_eq!(group.metadata.len(), 2);
     }
 
@@ -668,19 +666,13 @@ mod tests {
                 0,
                 "phash",
                 0.96,
-                vec![
-                    ("a.mp4".to_string(), 2000),
-                    ("b.mp4".to_string(), 1500),
-                ],
+                vec![("a.mp4".to_string(), 2000), ("b.mp4".to_string(), 1500)],
             )
             .add_simple_group(
                 1,
                 "ssim",
                 0.82,
-                vec![
-                    ("c.mp4".to_string(), 1000),
-                    ("d.mp4".to_string(), 900),
-                ],
+                vec![("c.mp4".to_string(), 1000), ("d.mp4".to_string(), 900)],
             )
             .build();
 
@@ -697,19 +689,13 @@ mod tests {
                 0,
                 "phash",
                 0.999,
-                vec![
-                    ("a.mp4".to_string(), 1000),
-                    ("b.mp4".to_string(), 800),
-                ],
+                vec![("a.mp4".to_string(), 1000), ("b.mp4".to_string(), 800)],
             )
             .add_simple_group(
                 1,
                 "ssim",
                 0.60,
-                vec![
-                    ("c.mp4".to_string(), 500),
-                    ("d.mp4".to_string(), 400),
-                ],
+                vec![("c.mp4".to_string(), 500), ("d.mp4".to_string(), 400)],
             )
             .build();
 
@@ -718,7 +704,11 @@ mod tests {
         assert_eq!(report.tier_counts.get("low").copied().unwrap_or(0), 1);
         assert_eq!(report.action_counts.get("delete").copied().unwrap_or(0), 1);
         assert_eq!(
-            report.action_counts.get("manual_review").copied().unwrap_or(0),
+            report
+                .action_counts
+                .get("manual_review")
+                .copied()
+                .unwrap_or(0),
             1
         );
     }

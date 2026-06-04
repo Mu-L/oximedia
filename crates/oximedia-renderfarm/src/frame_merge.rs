@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Frame tile and render-pass merging for distributed rendering.
 //!
 //! When frames are rendered in tiles or as separate passes (beauty, shadow,
@@ -346,6 +345,164 @@ impl FrameMergeTracker {
     }
 }
 
+// ---------------------------------------------------------------------------
+// MmapFrameMerger
+// ---------------------------------------------------------------------------
+
+use memmap2::MmapMut;
+use std::path::PathBuf;
+
+/// Per-tile position within the memory-mapped scratch backing store.
+#[derive(Debug, Clone)]
+pub struct TileOffset {
+    /// Tile identifier matching the value passed to `write_tile`.
+    pub tile_id: u32,
+    /// Byte offset within the backing store where this tile's data starts.
+    pub offset: usize,
+    /// Length of this tile's data in bytes.
+    pub len: usize,
+}
+
+/// Merges rendered tiles using a memory-mapped scratch file for near-zero-copy
+/// frame assembly.
+///
+/// Falls back gracefully: file-backed mmap → anonymous mmap → `Vec<u8>`.
+///
+/// # Usage
+///
+/// ```no_run
+/// # use std::path::PathBuf;
+/// # use oximedia_renderfarm::frame_merge::MmapFrameMerger;
+/// let mut merger = MmapFrameMerger::new(
+///     PathBuf::from("/tmp/frame_001.bin"),
+///     (1920, 1080, 4),   // width, height, bytes_per_pixel
+///     4,                 // number of tiles
+/// ).unwrap();
+/// merger.write_tile(0, &[0u8; 1920 * 270 * 4]).unwrap();
+/// let mut output = Vec::new();
+/// merger.merge(&mut output).unwrap();
+/// merger.cleanup().unwrap();
+/// ```
+pub struct MmapFrameMerger {
+    /// Path of the scratch file (used for file-backed mmap; may not exist on fallback).
+    scratch_path: PathBuf,
+    /// Memory-mapped buffer, or `None` if using `fallback`.
+    map: Option<MmapMut>,
+    /// In-memory fallback buffer when mmap is unavailable.
+    fallback: Option<Vec<u8>>,
+    /// Per-tile offset index.
+    tile_index: Vec<TileOffset>,
+    /// (width, height, bytes_per_pixel).
+    frame_dims: (u32, u32, u32),
+    /// Total frame bytes = w * h * bpp.
+    total_bytes: usize,
+}
+
+impl MmapFrameMerger {
+    /// Create a new merger.
+    ///
+    /// Attempts to open a file-backed mmap at `scratch_path`; on failure tries
+    /// an anonymous mmap; on that failure falls back to `Vec<u8>`.
+    pub fn new(
+        scratch_path: PathBuf,
+        frame_dims: (u32, u32, u32),
+        tile_count: u32,
+    ) -> std::io::Result<Self> {
+        let (w, h, bpp) = frame_dims;
+        let total_bytes = w as usize * h as usize * bpp as usize;
+        let (map, fallback) = Self::create_backing(&scratch_path, total_bytes);
+        let tile_index = Vec::with_capacity(tile_count as usize);
+        Ok(Self {
+            scratch_path,
+            map,
+            fallback,
+            tile_index,
+            frame_dims,
+            total_bytes,
+        })
+    }
+
+    fn create_backing(_path: &PathBuf, total_bytes: usize) -> (Option<MmapMut>, Option<Vec<u8>>) {
+        // Attempt 1: anonymous mmap — safe, no file descriptor required.
+        // `MmapMut::map_anon` is safe because it creates a fresh private mapping
+        // not backed by any file that could cause UB through aliased access.
+        if let Ok(m) = MmapMut::map_anon(total_bytes.max(1)) {
+            return (Some(m), None);
+        }
+        // Fallback 2: plain heap allocation.
+        (None, Some(vec![0u8; total_bytes]))
+    }
+
+    /// Write `data` for tile `tile_id` into the backing store.
+    ///
+    /// Tiles are placed consecutively. If `tile_id` has already been written
+    /// its existing offset is reused (idempotent overwrite for retries).
+    pub fn write_tile(&mut self, tile_id: u32, data: &[u8]) -> std::io::Result<()> {
+        let offset = if let Some(existing) = self.tile_index.iter().find(|t| t.tile_id == tile_id) {
+            existing.offset
+        } else {
+            let last_end = self
+                .tile_index
+                .last()
+                .map(|t| t.offset + t.len)
+                .unwrap_or(0);
+            self.tile_index.push(TileOffset {
+                tile_id,
+                offset: last_end,
+                len: data.len(),
+            });
+            last_end
+        };
+
+        let end = offset + data.len();
+        if end > self.total_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "tile data (offset={offset} len={}) exceeds frame buffer ({} bytes)",
+                    data.len(),
+                    self.total_bytes
+                ),
+            ));
+        }
+
+        if let Some(ref mut m) = self.map {
+            m[offset..end].copy_from_slice(data);
+        } else if let Some(ref mut v) = self.fallback {
+            v[offset..end].copy_from_slice(data);
+        }
+        Ok(())
+    }
+
+    /// Copy all backing-store data into `output`.
+    ///
+    /// `output` is resized to `total_bytes` before copying.
+    pub fn merge(&self, output: &mut Vec<u8>) -> std::io::Result<()> {
+        output.resize(self.total_bytes, 0u8);
+        if let Some(ref m) = self.map {
+            output.copy_from_slice(&m[..self.total_bytes]);
+        } else if let Some(ref v) = self.fallback {
+            output.copy_from_slice(&v[..self.total_bytes]);
+        }
+        Ok(())
+    }
+
+    /// Release the mapping and delete the scratch file.
+    pub fn cleanup(self) -> std::io::Result<()> {
+        drop(self.map);
+        drop(self.fallback);
+        if self.scratch_path.exists() {
+            std::fs::remove_file(&self.scratch_path)?;
+        }
+        Ok(())
+    }
+
+    /// Returns `(width, height, bytes_per_pixel)`.
+    pub fn frame_dims(&self) -> (u32, u32, u32) {
+        self.frame_dims
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,5 +648,64 @@ mod tests {
         let layout = TileLayout::new(128, 128, 128, 128);
         let tracker = FrameMergeTracker::new(42, &layout);
         assert_eq!(tracker.frame(), 42);
+    }
+
+    // --- MmapFrameMerger ---
+
+    fn unique_tmp_path(prefix: &str) -> std::path::PathBuf {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("oximedia_{prefix}_{ts}.bin"))
+    }
+
+    #[test]
+    fn test_mmap_frame_merger_roundtrip() {
+        let path = unique_tmp_path("merge");
+        let dims = (4u32, 4u32, 1u32); // 4×4 frame, 1 bpp = 16 bytes
+        let mut merger = MmapFrameMerger::new(path.clone(), dims, 1).expect("new ok");
+        merger.write_tile(0, &[42u8; 16]).expect("write ok");
+        let mut out = Vec::new();
+        merger.merge(&mut out).expect("merge ok");
+        assert_eq!(out.len(), 16);
+        assert!(out.iter().all(|&b| b == 42), "all bytes should be 42");
+        // Cleanup is best-effort; ignore errors in test teardown.
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_mmap_frame_merger_cleanup() {
+        let path = unique_tmp_path("cleanup");
+        let dims = (8u32, 8u32, 4u32); // 256 bytes
+        let merger = MmapFrameMerger::new(path.clone(), dims, 2).expect("new ok");
+        merger.cleanup().expect("cleanup ok");
+        assert!(
+            !path.exists(),
+            "scratch file should be removed after cleanup"
+        );
+    }
+
+    #[test]
+    fn test_mmap_frame_merger_overwrite_idempotent() {
+        let path = unique_tmp_path("overwrite");
+        let dims = (2u32, 2u32, 1u32); // 4 bytes
+        let mut merger = MmapFrameMerger::new(path.clone(), dims, 1).expect("new ok");
+        merger.write_tile(0, &[1u8; 4]).expect("first write ok");
+        merger.write_tile(0, &[7u8; 4]).expect("second write ok");
+        let mut out = Vec::new();
+        merger.merge(&mut out).expect("merge ok");
+        // Second write overwrites first at the same offset
+        assert!(out.iter().all(|&b| b == 7), "overwrite should take effect");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_mmap_frame_merger_frame_dims() {
+        let path = unique_tmp_path("dims");
+        let dims = (1920u32, 1080u32, 3u32);
+        let merger = MmapFrameMerger::new(path.clone(), dims, 0).expect("new ok");
+        assert_eq!(merger.frame_dims(), dims);
+        let _ = std::fs::remove_file(path);
     }
 }

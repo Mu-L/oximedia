@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! TTS pronunciation hints for accessible media.
 //!
 //! This module provides a rich, composable ruleset for transforming raw media
@@ -314,9 +313,7 @@ impl TtsHintEngine {
             }
 
             // ---- signed or bare number ----
-            let is_minus = chars[i] == '-'
-                && i + 1 < len
-                && chars[i + 1].is_ascii_digit();
+            let is_minus = chars[i] == '-' && i + 1 < len && chars[i + 1].is_ascii_digit();
             let digit_start = if is_minus { i + 1 } else { i };
 
             if chars[i].is_ascii_digit() || is_minus {
@@ -630,8 +627,25 @@ fn verbalize_integer_str(s: &str, opts: &NumberVerbalizationOptions) -> String {
 /// Convert a small non-negative integer to English words.
 fn number_to_words(n: u64) -> String {
     const ONES: &[&str] = &[
-        "", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-        "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen",
+        "",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
         "nineteen",
     ];
     const TENS: &[&str] = &[
@@ -751,8 +765,8 @@ mod tests {
 
     #[test]
     fn test_custom_phonetic_hint() {
-        let config = TtsHintConfig::empty()
-            .with_phonetic(PhoneticHint::spelling("colonel", "kernel"));
+        let config =
+            TtsHintConfig::empty().with_phonetic(PhoneticHint::spelling("colonel", "kernel"));
         let engine = TtsHintEngine::new(config);
         let out = engine.process("The colonel ordered a retreat");
         assert!(out.contains("kernel"), "got: {out}");

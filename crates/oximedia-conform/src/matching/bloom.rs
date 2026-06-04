@@ -248,6 +248,170 @@ impl CandidatePreFilter {
     }
 }
 
+// ─── CandidateBloom (Hash-generic pre-filter) ────────────────────────────────
+
+/// A Bloom filter whose items are inserted and queried by any type that
+/// implements `std::hash::Hash`.
+///
+/// Uses `k` independent hash functions derived from `DefaultHasher` seeded with
+/// successive Fibonacci-ratio constants so the seeds are well-spread in 64-bit
+/// space.  Each seed is `0x9e3779b97f4a7c15_u64.wrapping_add(i as u64)`.
+///
+/// Size formulas:
+/// * `m = ceil(-(n * ln(fpr)) / (ln 2)²)` bits
+/// * `k = ceil((m/n) * ln 2)` hash functions
+#[derive(Debug, Clone)]
+pub struct CandidateBloom {
+    bits: Vec<u64>,
+    k: usize,
+    bit_count: usize,
+}
+
+impl CandidateBloom {
+    /// Create a Bloom filter sized for `n_expected` items at `fpr`
+    /// false-positive rate (e.g. `0.01` for 1 %).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `n_expected == 0` or `fpr` is not in `(0, 1)`.
+    #[must_use]
+    #[allow(
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss
+    )]
+    pub fn new(n_expected: usize, fpr: f64) -> Self {
+        assert!(n_expected > 0, "n_expected must be > 0");
+        assert!(fpr > 0.0 && fpr < 1.0, "fpr must be in (0, 1)");
+
+        let n = n_expected as f64;
+        let ln2 = std::f64::consts::LN_2;
+        let ln2_sq = ln2 * ln2;
+
+        // m = ceil(-(n * ln(fpr)) / (ln 2)^2)
+        let m_bits = (-(n * fpr.ln()) / ln2_sq).ceil() as usize;
+        let m_bits = m_bits.max(64);
+
+        // k = ceil((m / n) * ln 2)
+        let k = ((m_bits as f64 / n) * ln2).ceil() as usize;
+        let k = k.max(1).min(32);
+
+        let word_count = m_bits.div_ceil(64);
+
+        Self {
+            bits: vec![0u64; word_count],
+            k,
+            bit_count: m_bits,
+        }
+    }
+
+    /// Insert `key` into the filter.
+    pub fn insert(&mut self, key: &impl std::hash::Hash) {
+        for bit_idx in self.bit_indices(key) {
+            self.bits[bit_idx / 64] |= 1u64 << (bit_idx % 64);
+        }
+    }
+
+    /// Returns `true` if `key` **might** be in the set (false positive possible).
+    /// Returns `false` if `key` is **definitely** not in the set (no false negatives).
+    #[must_use]
+    pub fn might_contain(&self, key: &impl std::hash::Hash) -> bool {
+        for bit_idx in self.bit_indices(key) {
+            if self.bits[bit_idx / 64] & (1u64 << (bit_idx % 64)) == 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    // ── Internal: derive k bit positions from the item hash ──────────────────
+
+    fn bit_indices(&self, key: &impl std::hash::Hash) -> impl Iterator<Item = usize> {
+        let m = self.bit_count;
+        let k = self.k;
+        // Hash the key with k different seeds.
+        let base_hashes: Vec<usize> = (0..k)
+            .map(|i| {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let seed: u64 = 0x9e3779b97f4a7c15_u64.wrapping_add(i as u64);
+                let mut h = DefaultHasher::default();
+                seed.hash(&mut h);
+                key.hash(&mut h);
+                (h.finish() % m as u64) as usize
+            })
+            .collect();
+        base_hashes.into_iter()
+    }
+}
+
+// ─── MatchingBloom: pre-filter layer wrapping a MatchStrategy ────────────────
+
+/// Pre-filter layer that wraps `MatchStrategy` and gates each candidate through
+/// a `CandidateBloom` before running the expensive matching strategies.
+///
+/// At catalog-load time call `build_from_catalog` to insert every media
+/// filename into the Bloom filter.  At match time `filter_candidates` drops
+/// candidates that are definitely not in the catalog before passing the
+/// survivors to the inner `MatchStrategy`.
+pub struct MatchingBloom {
+    inner: super::strategies::MatchStrategy,
+    bloom: CandidateBloom,
+}
+
+impl MatchingBloom {
+    /// Create a `MatchingBloom` that wraps `strategy`.  The filter is initially
+    /// empty; call `insert_key` for each media filename in the catalog.
+    #[must_use]
+    pub fn new(strategy: super::strategies::MatchStrategy, n_expected: usize, fpr: f64) -> Self {
+        Self {
+            inner: strategy,
+            bloom: CandidateBloom::new(n_expected.max(1), fpr),
+        }
+    }
+
+    /// Insert a media filename into the pre-filter.
+    pub fn insert_key(&mut self, key: &str) {
+        self.bloom.insert(&key.to_string());
+    }
+
+    /// Populate the pre-filter from a slice of `MediaFile` filenames.
+    pub fn build_from_catalog(&mut self, media: &[crate::types::MediaFile]) {
+        for m in media {
+            self.bloom.insert(&m.filename);
+        }
+    }
+
+    /// Match `clip` against `all_media`, using the Bloom filter to skip
+    /// candidates whose filename is definitely absent.
+    ///
+    /// Correctness guarantee: no candidate is dropped if its filename **was**
+    /// inserted into the filter (no false negatives).  False positives
+    /// (candidates that pass the filter but do not match) are handled by the
+    /// inner strategy.
+    #[must_use]
+    pub fn match_clip(
+        &self,
+        clip: &crate::types::ClipReference,
+        all_media: &[crate::types::MediaFile],
+    ) -> Vec<crate::types::ClipMatch> {
+        // Filter by Bloom pre-check on filename
+        let candidates: Vec<&crate::types::MediaFile> = all_media
+            .iter()
+            .filter(|m| self.bloom.might_contain(&m.filename))
+            .collect();
+
+        let owned: Vec<crate::types::MediaFile> = candidates.into_iter().cloned().collect();
+        self.inner.match_clip(clip, &owned)
+    }
+
+    /// Borrow the inner Bloom filter (for statistics / testing).
+    #[must_use]
+    pub fn bloom(&self) -> &CandidateBloom {
+        &self.bloom
+    }
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -361,5 +525,117 @@ mod tests {
         for i in 0..500 {
             assert!(bf.might_contain(&format!("file_{i:04}.mov")));
         }
+    }
+
+    // ── CandidateBloom tests ──────────────────────────────────────────────────
+
+    /// Guarantee 1: No false negatives — every inserted key must pass
+    /// `might_contain`.
+    #[test]
+    fn test_candidate_bloom_no_false_negatives() {
+        let keys: Vec<String> = (0..200).map(|i| format!("media_{i:04}.mov")).collect();
+        let mut bloom = CandidateBloom::new(256, 0.01);
+        for k in &keys {
+            bloom.insert(k);
+        }
+        for k in &keys {
+            assert!(
+                bloom.might_contain(k),
+                "CandidateBloom must not produce false negatives (key: {k})"
+            );
+        }
+    }
+
+    /// Guarantee 2: Pre-filter + full match must produce the same results as
+    /// full match alone (no candidates are lost through the Bloom gate).
+    #[test]
+    fn test_candidate_bloom_prefilter_equals_full_match() {
+        use crate::config::ConformConfig;
+        use crate::types::{FrameRate, MediaFile, Timecode, TrackType};
+        use std::path::PathBuf;
+
+        let config = ConformConfig::default();
+
+        // Build a small catalog of 10 media files
+        let media: Vec<MediaFile> = (0..10)
+            .map(|i| MediaFile::new(PathBuf::from(format!("/catalog/file_{i:02}.mov"))))
+            .collect();
+
+        // Build a MatchingBloom pre-filter with all filenames inserted
+        let mut mbloom = MatchingBloom::new(
+            crate::matching::strategies::MatchStrategy::new(config.clone()),
+            media.len(),
+            0.01,
+        );
+        mbloom.build_from_catalog(&media);
+
+        // Reference: plain MatchStrategy (no Bloom gate)
+        let plain_strategy = crate::matching::strategies::MatchStrategy::new(config);
+
+        // Query for a clip that should match file_05.mov exactly
+        let clip = crate::types::ClipReference {
+            id: "test_clip".to_string(),
+            source_file: Some("file_05.mov".to_string()),
+            source_in: Timecode::new(1, 0, 0, 0),
+            source_out: Timecode::new(1, 0, 5, 0),
+            record_in: Timecode::new(1, 0, 0, 0),
+            record_out: Timecode::new(1, 0, 5, 0),
+            track: TrackType::Video,
+            fps: FrameRate::Fps25,
+            metadata: std::collections::HashMap::new(),
+        };
+
+        let bloom_matches = mbloom.match_clip(&clip, &media);
+        let plain_matches = plain_strategy.match_clip(&clip, &media);
+
+        // Pre-filter result must be a superset of plain (no false negatives)
+        // i.e. every match found by plain must also appear in bloom_matches
+        for pm in &plain_matches {
+            let found = bloom_matches.iter().any(|bm| bm.media.id == pm.media.id);
+            assert!(
+                found,
+                "MatchingBloom dropped a correct match: {:?}",
+                pm.media.filename
+            );
+        }
+
+        // Also verify the exact same best match was found
+        assert_eq!(
+            bloom_matches.first().map(|m| &m.media.filename),
+            plain_matches.first().map(|m| &m.media.filename),
+            "MatchingBloom and plain strategy should return the same best match"
+        );
+    }
+
+    /// Guarantee 3: FPR must be within the expected bound when the filter is
+    /// loaded to its designed capacity.
+    #[test]
+    fn test_candidate_bloom_fpr_within_bound() {
+        // Design for 1 000 items at 2% FPR
+        let n = 1_000usize;
+        let target_fpr = 0.02_f64;
+        let mut bloom = CandidateBloom::new(n, target_fpr);
+
+        // Insert n distinct keys
+        for i in 0..n {
+            bloom.insert(&format!("inserted_{i:05}"));
+        }
+
+        // Count false positives from a disjoint set of 10 000 probes
+        let total_probes = 10_000usize;
+        let mut false_positives = 0usize;
+        for i in 0..total_probes {
+            if bloom.might_contain(&format!("absent_{i:06}")) {
+                false_positives += 1;
+            }
+        }
+
+        let observed_fpr = false_positives as f64 / total_probes as f64;
+        // Allow 3× the design FPR as the tolerance (statistical slack)
+        assert!(
+            observed_fpr <= target_fpr * 3.0,
+            "Observed FPR {observed_fpr:.4} exceeds 3× target ({:.4})",
+            target_fpr * 3.0
+        );
     }
 }

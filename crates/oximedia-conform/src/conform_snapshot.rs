@@ -255,8 +255,7 @@ pub fn diff_snapshots(from: &ConformSnapshot, to: &ConformSnapshot) -> SnapshotD
 
     let from_map: HashMap<&str, &ClipState> =
         from.clips.iter().map(|c| (c.name.as_str(), c)).collect();
-    let to_map: HashMap<&str, &ClipState> =
-        to.clips.iter().map(|c| (c.name.as_str(), c)).collect();
+    let to_map: HashMap<&str, &ClipState> = to.clips.iter().map(|c| (c.name.as_str(), c)).collect();
 
     // Find added and changed clips
     for (name, to_clip) in &to_map {
@@ -431,20 +430,26 @@ mod tests {
     #[test]
     fn test_snapshot_match_pct() {
         let clips = vec![sample_clip("A", true), sample_clip("B", false)];
-        let snap = ConformSnapshot::new(SnapshotId::new("s1".to_string()), "test".to_string(), clips);
+        let snap =
+            ConformSnapshot::new(SnapshotId::new("s1".to_string()), "test".to_string(), clips);
         assert!((snap.match_pct() - 50.0).abs() < f64::EPSILON);
     }
 
     #[test]
     fn test_snapshot_match_pct_empty() {
-        let snap = ConformSnapshot::new(SnapshotId::new("s1".to_string()), "test".to_string(), vec![]);
+        let snap = ConformSnapshot::new(
+            SnapshotId::new("s1".to_string()),
+            "test".to_string(),
+            vec![],
+        );
         assert!(snap.match_pct().abs() < f64::EPSILON);
     }
 
     #[test]
     fn test_snapshot_unmatched_clips() {
         let clips = vec![sample_clip("A", true), sample_clip("B", false)];
-        let snap = ConformSnapshot::new(SnapshotId::new("s1".to_string()), "test".to_string(), clips);
+        let snap =
+            ConformSnapshot::new(SnapshotId::new("s1".to_string()), "test".to_string(), clips);
         let unmatched = snap.unmatched_clips();
         assert_eq!(unmatched.len(), 1);
         assert_eq!(unmatched[0].name, "B");
@@ -453,8 +458,13 @@ mod tests {
     #[test]
     fn test_diff_no_changes() {
         let clips = vec![sample_clip("A", true)];
-        let snap1 = ConformSnapshot::new(SnapshotId::new("s1".to_string()), "v1".to_string(), clips.clone());
-        let snap2 = ConformSnapshot::new(SnapshotId::new("s2".to_string()), "v2".to_string(), clips);
+        let snap1 = ConformSnapshot::new(
+            SnapshotId::new("s1".to_string()),
+            "v1".to_string(),
+            clips.clone(),
+        );
+        let snap2 =
+            ConformSnapshot::new(SnapshotId::new("s2".to_string()), "v2".to_string(), clips);
         let diff = diff_snapshots(&snap1, &snap2);
         assert!(!diff.has_changes());
         assert_eq!(diff.matched_delta, 0);
@@ -464,8 +474,10 @@ mod tests {
     fn test_diff_clip_added() {
         let clips1 = vec![sample_clip("A", true)];
         let clips2 = vec![sample_clip("A", true), sample_clip("B", false)];
-        let snap1 = ConformSnapshot::new(SnapshotId::new("s1".to_string()), "v1".to_string(), clips1);
-        let snap2 = ConformSnapshot::new(SnapshotId::new("s2".to_string()), "v2".to_string(), clips2);
+        let snap1 =
+            ConformSnapshot::new(SnapshotId::new("s1".to_string()), "v1".to_string(), clips1);
+        let snap2 =
+            ConformSnapshot::new(SnapshotId::new("s2".to_string()), "v2".to_string(), clips2);
         let diff = diff_snapshots(&snap1, &snap2);
         assert!(diff.has_changes());
         assert_eq!(diff.change_count(), 1);
@@ -475,8 +487,10 @@ mod tests {
     fn test_diff_clip_removed() {
         let clips1 = vec![sample_clip("A", true), sample_clip("B", false)];
         let clips2 = vec![sample_clip("A", true)];
-        let snap1 = ConformSnapshot::new(SnapshotId::new("s1".to_string()), "v1".to_string(), clips1);
-        let snap2 = ConformSnapshot::new(SnapshotId::new("s2".to_string()), "v2".to_string(), clips2);
+        let snap1 =
+            ConformSnapshot::new(SnapshotId::new("s1".to_string()), "v1".to_string(), clips1);
+        let snap2 =
+            ConformSnapshot::new(SnapshotId::new("s2".to_string()), "v2".to_string(), clips2);
         let diff = diff_snapshots(&snap1, &snap2);
         assert!(diff.has_changes());
     }
@@ -485,8 +499,10 @@ mod tests {
     fn test_diff_match_changed() {
         let clips1 = vec![sample_clip("A", false)];
         let clips2 = vec![sample_clip("A", true)];
-        let snap1 = ConformSnapshot::new(SnapshotId::new("s1".to_string()), "v1".to_string(), clips1);
-        let snap2 = ConformSnapshot::new(SnapshotId::new("s2".to_string()), "v2".to_string(), clips2);
+        let snap1 =
+            ConformSnapshot::new(SnapshotId::new("s1".to_string()), "v1".to_string(), clips1);
+        let snap2 =
+            ConformSnapshot::new(SnapshotId::new("s2".to_string()), "v2".to_string(), clips2);
         let diff = diff_snapshots(&snap1, &snap2);
         assert_eq!(diff.matched_delta, 1);
     }

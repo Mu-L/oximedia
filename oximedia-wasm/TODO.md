@@ -108,12 +108,12 @@
 - [ ] `hdr_wasm` extensions — HDR scene analysis, CUVA/VIVID metadata
 - [ ] `lut_wasm` extensions — ACES pipeline, Hald CLUT round-trip
 - [ ] `spatial_wasm` extensions — HRTF binaural rendering, room simulation
-- [ ] `normalize_wasm` — loudness normalization with EBU R128 targets
-- [ ] `shots_wasm` — shot cut/dissolve/fade detection
-- [ ] `neural_wasm` — in-browser ML inference (pending WASM SIMD performance)
-- [ ] `stream_wasm` — ABR streaming manifest builder
-- [ ] `cache_wasm` — media cache management
-- [ ] `analytics_wasm` — session tracking, A/B testing
+- [x] `normalize_wasm` — loudness normalization with EBU R128 targets
+- [x] `shots_wasm` — shot cut/dissolve/fade detection
+- [x] `neural_wasm` — in-browser ML inference (pending WASM SIMD performance)
+- [x] `stream_wasm` — ABR streaming manifest builder
+- [x] `cache_wasm` — media cache management
+- [x] `analytics_wasm` — session tracking, A/B testing
 
 ## 0.1.2 Changes
 

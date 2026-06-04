@@ -30,6 +30,7 @@ hex = "0.4"
 rayon = { workspace = true }
 
 [dev-dependencies]
+tempfile.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio.workspace = true

@@ -302,7 +302,12 @@ impl ConnectionPool {
         let id = self
             .connections
             .values()
-            .filter(|c| matches!(c.health, ConnectionHealth::Healthy | ConnectionHealth::Degraded))
+            .filter(|c| {
+                matches!(
+                    c.health,
+                    ConnectionHealth::Healthy | ConnectionHealth::Degraded
+                )
+            })
             .min_by_key(|c| c.in_flight)?
             .id;
         if let Some(conn) = self.connections.get_mut(&id) {
@@ -316,7 +321,12 @@ impl ConnectionPool {
         let id = self
             .connections
             .values()
-            .filter(|c| matches!(c.health, ConnectionHealth::Healthy | ConnectionHealth::Degraded))
+            .filter(|c| {
+                matches!(
+                    c.health,
+                    ConnectionHealth::Healthy | ConnectionHealth::Degraded
+                )
+            })
             .min_by(|a, b| {
                 a.ewma_latency_ms
                     .partial_cmp(&b.ewma_latency_ms)
@@ -391,9 +401,7 @@ impl ConnectionPool {
             }
 
             // Assess health based on latency and success ratio.
-            if conn.ewma_latency_ms >= unhealthy_latency
-                || conn.success_ratio() < min_ratio
-            {
+            if conn.ewma_latency_ms >= unhealthy_latency || conn.success_ratio() < min_ratio {
                 conn.health = ConnectionHealth::Unhealthy;
             } else if conn.ewma_latency_ms >= degraded_latency {
                 conn.health = ConnectionHealth::Degraded;
@@ -405,10 +413,7 @@ impl ConnectionPool {
 
             // Mark idle connections for removal if above minimum.
             let idle_dur = Instant::now().duration_since(conn.connected_at);
-            if idle_dur > idle_timeout
-                && conn.requests_served == 0
-                && current_len > min_conn
-            {
+            if idle_dur > idle_timeout && conn.requests_served == 0 && current_len > min_conn {
                 to_remove.push(conn.id);
             }
         }
@@ -417,10 +422,7 @@ impl ConnectionPool {
         let unhealthy: Vec<u64> = self
             .connections
             .values()
-            .filter(|c| {
-                c.health == ConnectionHealth::Unhealthy
-                    && current_len > min_conn
-            })
+            .filter(|c| c.health == ConnectionHealth::Unhealthy && current_len > min_conn)
             .map(|c| c.id)
             .collect();
 

@@ -360,16 +360,15 @@ impl UniformityScore {
         let areas: Vec<f64> = ellipses.iter().map(|e| e.area()).collect();
 
         let mean_aspect = aspects.iter().sum::<f64>() / n;
-        let var_aspect =
-            aspects.iter().map(|&a| (a - mean_aspect).powi(2)).sum::<f64>() / n.max(1.0);
+        let var_aspect = aspects
+            .iter()
+            .map(|&a| (a - mean_aspect).powi(2))
+            .sum::<f64>()
+            / n.max(1.0);
         let std_aspect = var_aspect.sqrt();
 
         let mean_area = areas.iter().sum::<f64>() / n;
-        let var_area = areas
-            .iter()
-            .map(|&a| (a - mean_area).powi(2))
-            .sum::<f64>()
-            / n.max(1.0);
+        let var_area = areas.iter().map(|&a| (a - mean_area).powi(2)).sum::<f64>() / n.max(1.0);
         let std_area = var_area.sqrt();
         let area_cv = if mean_area > 1e-20 {
             std_area / mean_area
@@ -422,11 +421,8 @@ pub fn jzczhz_hue_circle_uniformity(jz: f64, cz: f64, n_samples: usize) -> f64 {
     if mean < 1e-20 {
         return 0.0;
     }
-    let variance = distances
-        .iter()
-        .map(|&d| (d - mean).powi(2))
-        .sum::<f64>()
-        / distances.len() as f64;
+    let variance =
+        distances.iter().map(|&d| (d - mean).powi(2)).sum::<f64>() / distances.len() as f64;
     variance.sqrt() / mean
 }
 
@@ -437,11 +433,7 @@ pub fn jzczhz_hue_circle_uniformity(jz: f64, cz: f64, n_samples: usize) -> f64 {
 ///
 /// Returns `None` if the ellipse set is empty.
 #[must_use]
-pub fn nearest_macadam_steps(
-    x: f64,
-    y: f64,
-    ellipses: &[MacAdamEllipse],
-) -> Option<(usize, f64)> {
+pub fn nearest_macadam_steps(x: f64, y: f64, ellipses: &[MacAdamEllipse]) -> Option<(usize, f64)> {
     if ellipses.is_empty() {
         return None;
     }
@@ -468,7 +460,11 @@ mod tests {
     #[test]
     fn test_macadam_standard_set_count() {
         let ellipses = MacAdamEllipse::standard_set();
-        assert_eq!(ellipses.len(), 25, "Should have 25 standard MacAdam ellipses");
+        assert_eq!(
+            ellipses.len(),
+            25,
+            "Should have 25 standard MacAdam ellipses"
+        );
     }
 
     #[test]
@@ -476,18 +472,18 @@ mod tests {
         let ellipses = MacAdamEllipse::standard_set();
         for e in &ellipses {
             let steps = e.steps_to_boundary(e.x, e.y);
+            assert!(steps < 1e-10, "Centre should have 0 JND steps, got {steps}");
             assert!(
-                steps < 1e-10,
-                "Centre should have 0 JND steps, got {steps}"
+                e.contains(e.x, e.y),
+                "Ellipse should contain its own centre"
             );
-            assert!(e.contains(e.x, e.y), "Ellipse should contain its own centre");
         }
     }
 
     #[test]
     fn test_macadam_outside_point() {
         let e = MacAdamEllipse::standard_set()[12]; // centre at ~(0.305, 0.323)
-        // Move 10× the semi-major axis away — definitely outside
+                                                    // Move 10× the semi-major axis away — definitely outside
         let far_x = e.x + e.semi_major * 10.0 * e.angle_rad.cos();
         let far_y = e.y + e.semi_major * 10.0 * e.angle_rad.sin();
         assert!(

@@ -87,11 +87,7 @@ impl DisplayP3 {
 /// the output in the nominal Display P3 gamut.
 #[must_use]
 pub fn srgb_to_display_p3(rgb: [f32; 3]) -> [f32; 3] {
-    let linear = [
-        srgb_eotf(rgb[0]),
-        srgb_eotf(rgb[1]),
-        srgb_eotf(rgb[2]),
-    ];
+    let linear = [srgb_eotf(rgb[0]), srgb_eotf(rgb[1]), srgb_eotf(rgb[2])];
     let p3_linear = DisplayP3::linear_srgb_to_linear_display_p3(linear);
     // Clamp to Display P3 nominal range before encoding
     let clamped = [

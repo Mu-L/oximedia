@@ -121,14 +121,7 @@ impl MultiLayerConfig {
                 };
                 // Derive per-layer key with FNV-64
                 let key = fnv64(master_key ^ (i as u64 + 1));
-                LayerConfig::new(
-                    format!("layer-{i}"),
-                    strength,
-                    key,
-                    start,
-                    end,
-                    chip_rate,
-                )
+                LayerConfig::new(format!("layer-{i}"), strength, key, start, end, chip_rate)
             })
             .collect();
 
@@ -173,8 +166,12 @@ impl MultiLayerEmbedder {
     pub fn embed(&self, samples: &[f32], payloads: &[&[u8]]) -> WatermarkResult<Vec<f32>> {
         let mut watermarked = samples.to_vec();
 
-        for (layer_idx, (layer, codec)) in
-            self.config.layers.iter().zip(self.codecs.iter()).enumerate()
+        for (layer_idx, (layer, codec)) in self
+            .config
+            .layers
+            .iter()
+            .zip(self.codecs.iter())
+            .enumerate()
         {
             let payload = payloads.get(layer_idx).copied().unwrap_or(&[]);
             let encoded = codec.encode(payload)?;
@@ -315,8 +312,12 @@ impl MultiLayerDetector {
     ) -> WatermarkResult<Vec<Vec<u8>>> {
         let mut results = Vec::with_capacity(self.config.layers.len());
 
-        for (layer_idx, (layer, codec)) in
-            self.config.layers.iter().zip(self.codecs.iter()).enumerate()
+        for (layer_idx, (layer, codec)) in self
+            .config
+            .layers
+            .iter()
+            .zip(self.codecs.iter())
+            .enumerate()
         {
             let n_bits = expected_bits.get(layer_idx).copied().unwrap_or(280);
             let frame_size = self.config.frame_size;

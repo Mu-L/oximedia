@@ -5,6 +5,7 @@
 //! feeding into neural-network audio models.
 
 use crate::AnalysisError;
+use rayon::prelude::*;
 
 /// Convert a frequency in Hz to the mel scale.
 ///
@@ -236,44 +237,52 @@ pub fn compute_mel_spectrogram(
 
     let n_bins = config.n_fft / 2 + 1;
     let num_frames = (samples.len() - config.n_fft) / config.hop_length + 1;
-    let mut spectrogram = Vec::with_capacity(num_frames);
 
-    for frame_idx in 0..num_frames {
-        let start = frame_idx * config.hop_length;
-        let end = start + config.n_fft;
-        if end > samples.len() {
-            break;
-        }
+    // Compute the set of valid frame start positions up-front so we can
+    // drive a parallel iterator without holding mutable state.
+    let frame_starts: Vec<usize> = (0..num_frames)
+        .map(|fi| fi * config.hop_length)
+        .take_while(|&start| start + config.n_fft <= samples.len())
+        .collect();
 
-        // Apply window
-        let windowed: Vec<oxifft::Complex<f64>> = samples[start..end]
-            .iter()
-            .zip(window.iter())
-            .map(|(&s, &w)| oxifft::Complex::new(f64::from(s * w), 0.0))
-            .collect();
+    // Each frame is independent: parallelize with rayon.
+    let log_scale = config.log_scale;
+    let log_eps = config.log_epsilon;
 
-        // FFT
-        let spectrum = oxifft::fft(&windowed);
+    let spectrogram: Vec<Vec<f32>> = frame_starts
+        .par_iter()
+        .map(|&start| {
+            let end = start + config.n_fft;
 
-        // Magnitude spectrum (positive frequencies only)
-        let magnitude: Vec<f32> = spectrum[..n_bins]
-            .iter()
-            .map(|c| (c.re * c.re + c.im * c.im).sqrt() as f32)
-            .collect();
+            // Apply Hann window and build complex input.
+            let windowed: Vec<oxifft::Complex<f64>> = samples[start..end]
+                .iter()
+                .zip(window.iter())
+                .map(|(&s, &w)| oxifft::Complex::new(f64::from(s * w), 0.0))
+                .collect();
 
-        // Apply mel filterbank
-        let mut mel_frame = apply_mel_filterbank(&magnitude, &filterbank);
+            // FFT.
+            let spectrum = oxifft::fft(&windowed);
 
-        // Optional log scaling
-        if config.log_scale {
-            let eps = config.log_epsilon;
-            for v in &mut mel_frame {
-                *v = (*v + eps).ln();
+            // Magnitude spectrum (positive frequencies only).
+            let magnitude: Vec<f32> = spectrum[..n_bins]
+                .iter()
+                .map(|c| (c.re * c.re + c.im * c.im).sqrt() as f32)
+                .collect();
+
+            // Apply mel filterbank.
+            let mut mel_frame = apply_mel_filterbank(&magnitude, &filterbank);
+
+            // Optional log scaling.
+            if log_scale {
+                for v in &mut mel_frame {
+                    *v = (*v + log_eps).ln();
+                }
             }
-        }
 
-        spectrogram.push(mel_frame);
-    }
+            mel_frame
+        })
+        .collect();
 
     Ok(spectrogram)
 }

@@ -336,9 +336,7 @@ fn parse_pad_labels(s: &str) -> (Vec<String>, &str) {
 /// `"scale=1280:720"` or `"scale=w=1280:h=720"`.
 ///
 /// Returns `(params, positional)`.
-fn parse_filter_params(
-    params_str: &str,
-) -> (HashMap<String, ParamValue>, Vec<ParamValue>) {
+fn parse_filter_params(params_str: &str) -> (HashMap<String, ParamValue>, Vec<ParamValue>) {
     let mut named: HashMap<String, ParamValue> = HashMap::new();
     let mut positional: Vec<ParamValue> = Vec::new();
 
@@ -569,7 +567,10 @@ mod tests {
 
     #[test]
     fn test_empty_graph_returns_error() {
-        assert_eq!(translate_lavfi_graph("").unwrap_err(), LavfiError::EmptyGraph);
+        assert_eq!(
+            translate_lavfi_graph("").unwrap_err(),
+            LavfiError::EmptyGraph
+        );
         assert_eq!(
             translate_lavfi_graph("   ").unwrap_err(),
             LavfiError::EmptyGraph
@@ -617,8 +618,8 @@ mod tests {
 
     #[test]
     fn test_multi_chain_graph() {
-        let g = translate_lavfi_graph("[0:v]scale=1280:720[v];[0:a]loudnorm[a]")
-            .expect("parse failed");
+        let g =
+            translate_lavfi_graph("[0:v]scale=1280:720[v];[0:a]loudnorm[a]").expect("parse failed");
         assert_eq!(g.chains.len(), 2);
         assert_eq!(g.nodes.len(), 2);
         assert!(g.is_complex);
@@ -664,7 +665,10 @@ mod tests {
 
     #[test]
     fn test_param_value_parse_rational() {
-        assert_eq!(ParamValue::parse("30000/1001"), ParamValue::Rational(30000, 1001));
+        assert_eq!(
+            ParamValue::parse("30000/1001"),
+            ParamValue::Rational(30000, 1001)
+        );
         let r = ParamValue::Rational(30000, 1001);
         let f = r.as_f64().expect("rational as f64");
         assert!((f - 29.97).abs() < 0.01);

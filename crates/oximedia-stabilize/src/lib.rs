@@ -84,25 +84,38 @@ pub mod horizon;
 pub mod jitter_detect;
 pub mod keyframe_filter;
 pub mod l1_optimal_path;
+pub mod lens_distortion;
 pub mod mesh_warp;
 pub mod motion;
+pub mod motion_mask;
 pub mod motion_model;
+pub mod motion_vector_export;
 pub mod multipass;
 pub mod optical_flow;
 pub mod parallax_compensate;
 pub mod path_planner;
 pub mod per_row_rolling_shutter;
+pub mod perspective_warp;
+pub mod realtime_stabilize;
+pub mod roi_stabilization;
 pub mod rolling;
 pub mod rolling_shutter;
 pub mod saliency_crop;
 pub mod smooth;
 pub mod smoothing;
 pub mod stabilize_config;
+pub mod stabilize_preview;
 pub mod stabilize_report;
+pub mod stitching_stabilize;
+pub mod streaming;
+mod synthetic_tests;
 pub mod three_d;
 pub mod trajectory;
 pub mod transform;
+pub mod tripod_mode;
 pub mod vibration_isolate;
+/// Frame warping with optional SIMD-accelerated bilinear interpolation.
+#[allow(unsafe_code)]
 pub mod warp;
 pub mod warp_field;
 pub mod zoom;
@@ -113,6 +126,7 @@ pub mod simd_warp;
 
 // Re-export commonly used items
 pub use error::{StabilizeError, StabilizeResult};
+pub use streaming::{StreamingStabConfig, StreamingStabilizer};
 
 use scirs2_core::ndarray::Array2;
 use serde::{Deserialize, Serialize};

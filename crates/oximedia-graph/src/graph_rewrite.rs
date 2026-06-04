@@ -49,7 +49,11 @@ impl fmt::Display for PatternKind {
         match self {
             Self::SingleNode { filter_type } => write!(f, "Single({filter_type})"),
             Self::Chain { first, second } => write!(f, "Chain({first} -> {second})"),
-            Self::WithProperty { filter_type, property_key, property_value } => {
+            Self::WithProperty {
+                filter_type,
+                property_key,
+                property_value,
+            } => {
                 write!(f, "{filter_type}[{property_key}={property_value}]")
             }
         }
@@ -136,9 +140,15 @@ impl RewriteRule {
         }
         match &self.pattern {
             PatternKind::SingleNode { filter_type: ft } => ft == filter_type,
-            PatternKind::WithProperty { filter_type: ft, property_key, property_value } => {
+            PatternKind::WithProperty {
+                filter_type: ft,
+                property_key,
+                property_value,
+            } => {
                 ft == filter_type
-                    && properties.get(property_key).map_or(false, |v| v == property_value)
+                    && properties
+                        .get(property_key)
+                        .map_or(false, |v| v == property_value)
             }
             PatternKind::Chain { first, .. } => first == filter_type,
         }
@@ -158,8 +168,11 @@ impl RewriteRule {
 
 impl fmt::Display for RewriteRule {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}[{}]: {} -> {}",
-            self.name, self.id, self.pattern, self.action)
+        write!(
+            f,
+            "{}[{}]: {} -> {}",
+            self.name, self.id, self.pattern, self.action
+        )
     }
 }
 
@@ -228,7 +241,11 @@ impl RewriteEngine {
     }
 
     /// Find matching rules for a single node.
-    pub fn find_matches(&self, filter_type: &str, properties: &HashMap<String, String>) -> Vec<&RewriteRule> {
+    pub fn find_matches(
+        &self,
+        filter_type: &str,
+        properties: &HashMap<String, String>,
+    ) -> Vec<&RewriteRule> {
         self.rules
             .iter()
             .filter(|r| r.matches_node(filter_type, properties))
@@ -304,7 +321,8 @@ pub fn standard_rules() -> Vec<RewriteRule> {
                 property_value: "1.0".to_string(),
             },
             RewriteAction::Remove,
-        ).with_priority(100),
+        )
+        .with_priority(100),
         // Consecutive scale fusion
         RewriteRule::new(
             RuleId(2),
@@ -313,8 +331,11 @@ pub fn standard_rules() -> Vec<RewriteRule> {
                 first: "scale".to_string(),
                 second: "scale".to_string(),
             },
-            RewriteAction::Fuse { fused_type: "scale".to_string() },
-        ).with_priority(90),
+            RewriteAction::Fuse {
+                fused_type: "scale".to_string(),
+            },
+        )
+        .with_priority(90),
         // Consecutive crop fusion
         RewriteRule::new(
             RuleId(3),
@@ -323,8 +344,11 @@ pub fn standard_rules() -> Vec<RewriteRule> {
                 first: "crop".to_string(),
                 second: "crop".to_string(),
             },
-            RewriteAction::Fuse { fused_type: "crop".to_string() },
-        ).with_priority(90),
+            RewriteAction::Fuse {
+                fused_type: "crop".to_string(),
+            },
+        )
+        .with_priority(90),
     ]
 }
 
@@ -339,13 +363,18 @@ mod tests {
 
     #[test]
     fn test_pattern_kind_display() {
-        let p = PatternKind::SingleNode { filter_type: "scale".to_string() };
+        let p = PatternKind::SingleNode {
+            filter_type: "scale".to_string(),
+        };
         assert_eq!(format!("{p}"), "Single(scale)");
     }
 
     #[test]
     fn test_chain_pattern_display() {
-        let p = PatternKind::Chain { first: "a".to_string(), second: "b".to_string() };
+        let p = PatternKind::Chain {
+            first: "a".to_string(),
+            second: "b".to_string(),
+        };
         assert_eq!(format!("{p}"), "Chain(a -> b)");
     }
 
@@ -354,7 +383,12 @@ mod tests {
         assert_eq!(format!("{}", RewriteAction::Remove), "Remove");
         assert_eq!(format!("{}", RewriteAction::Swap), "Swap");
         assert_eq!(
-            format!("{}", RewriteAction::Fuse { fused_type: "x".to_string() }),
+            format!(
+                "{}",
+                RewriteAction::Fuse {
+                    fused_type: "x".to_string()
+                }
+            ),
             "Fuse(x)"
         );
     }
@@ -364,7 +398,9 @@ mod tests {
         let rule = RewriteRule::new(
             RuleId(1),
             "test",
-            PatternKind::SingleNode { filter_type: "scale".to_string() },
+            PatternKind::SingleNode {
+                filter_type: "scale".to_string(),
+            },
             RewriteAction::Remove,
         );
         assert_eq!(rule.id, RuleId(1));
@@ -378,7 +414,9 @@ mod tests {
         let rule = RewriteRule::new(
             RuleId(1),
             "test",
-            PatternKind::SingleNode { filter_type: "scale".to_string() },
+            PatternKind::SingleNode {
+                filter_type: "scale".to_string(),
+            },
             RewriteAction::Remove,
         );
         let props = HashMap::new();
@@ -415,7 +453,9 @@ mod tests {
                 first: "scale".to_string(),
                 second: "scale".to_string(),
             },
-            RewriteAction::Fuse { fused_type: "scale".to_string() },
+            RewriteAction::Fuse {
+                fused_type: "scale".to_string(),
+            },
         );
         assert!(rule.matches_chain("scale", "scale"));
         assert!(!rule.matches_chain("scale", "crop"));
@@ -426,7 +466,9 @@ mod tests {
         let mut rule = RewriteRule::new(
             RuleId(1),
             "test",
-            PatternKind::SingleNode { filter_type: "scale".to_string() },
+            PatternKind::SingleNode {
+                filter_type: "scale".to_string(),
+            },
             RewriteAction::Remove,
         );
         rule.set_enabled(false);
@@ -438,8 +480,11 @@ mod tests {
     fn test_engine_add_and_count() {
         let mut engine = RewriteEngine::new();
         engine.add_rule(RewriteRule::new(
-            RuleId(1), "r1",
-            PatternKind::SingleNode { filter_type: "a".to_string() },
+            RuleId(1),
+            "r1",
+            PatternKind::SingleNode {
+                filter_type: "a".to_string(),
+            },
             RewriteAction::Remove,
         ));
         assert_eq!(engine.rule_count(), 1);
@@ -448,27 +493,49 @@ mod tests {
     #[test]
     fn test_engine_priority_ordering() {
         let mut engine = RewriteEngine::new();
-        engine.add_rule(RewriteRule::new(
-            RuleId(1), "low",
-            PatternKind::SingleNode { filter_type: "a".to_string() },
-            RewriteAction::Remove,
-        ).with_priority(10));
-        engine.add_rule(RewriteRule::new(
-            RuleId(2), "high",
-            PatternKind::SingleNode { filter_type: "b".to_string() },
-            RewriteAction::Remove,
-        ).with_priority(100));
-        let rules: Vec<_> = engine.find_matches("a", &HashMap::new());
+        engine.add_rule(
+            RewriteRule::new(
+                RuleId(1),
+                "low",
+                PatternKind::SingleNode {
+                    filter_type: "a".to_string(),
+                },
+                RewriteAction::Remove,
+            )
+            .with_priority(10),
+        );
+        engine.add_rule(
+            RewriteRule::new(
+                RuleId(2),
+                "high",
+                PatternKind::SingleNode {
+                    filter_type: "b".to_string(),
+                },
+                RewriteAction::Remove,
+            )
+            .with_priority(100),
+        );
         // Both might match different types, but internal ordering is by priority
-        assert_eq!(engine.get_rule(RuleId(2)).expect("value should be valid").name, "high");
+        assert_eq!(
+            engine
+                .get_rule(RuleId(2))
+                .expect("value should be valid")
+                .name,
+            "high"
+        );
+        // Verify find_matches doesn't panic (result not used in this test)
+        let _ = engine.find_matches("a", &HashMap::new());
     }
 
     #[test]
     fn test_engine_find_matches() {
         let mut engine = RewriteEngine::new();
         engine.add_rule(RewriteRule::new(
-            RuleId(1), "r1",
-            PatternKind::SingleNode { filter_type: "scale".to_string() },
+            RuleId(1),
+            "r1",
+            PatternKind::SingleNode {
+                filter_type: "scale".to_string(),
+            },
             RewriteAction::Remove,
         ));
         let matches = engine.find_matches("scale", &HashMap::new());
@@ -480,8 +547,11 @@ mod tests {
     fn test_engine_record_and_clear_history() {
         let mut engine = RewriteEngine::new();
         let rule = RewriteRule::new(
-            RuleId(1), "test_rule",
-            PatternKind::SingleNode { filter_type: "a".to_string() },
+            RuleId(1),
+            "test_rule",
+            PatternKind::SingleNode {
+                filter_type: "a".to_string(),
+            },
             RewriteAction::Remove,
         );
         engine.record_event(&rule, "node_42");
@@ -495,8 +565,11 @@ mod tests {
     fn test_engine_remove_rule() {
         let mut engine = RewriteEngine::new();
         engine.add_rule(RewriteRule::new(
-            RuleId(1), "r1",
-            PatternKind::SingleNode { filter_type: "a".to_string() },
+            RuleId(1),
+            "r1",
+            PatternKind::SingleNode {
+                filter_type: "a".to_string(),
+            },
             RewriteAction::Remove,
         ));
         assert!(engine.remove_rule(RuleId(1)));
@@ -516,8 +589,11 @@ mod tests {
         let mut engine = RewriteEngine::new();
         for i in 0..3 {
             engine.add_rule(RewriteRule::new(
-                RuleId(i), &format!("r{i}"),
-                PatternKind::SingleNode { filter_type: "a".to_string() },
+                RuleId(i),
+                &format!("r{i}"),
+                PatternKind::SingleNode {
+                    filter_type: "a".to_string(),
+                },
                 RewriteAction::Remove,
             ));
         }

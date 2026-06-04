@@ -199,7 +199,10 @@ impl std::fmt::Display for CompatError {
                 write!(f, "audio codec '{codec}' is not supported in '{container}'")
             }
             Self::LosslessMismatch => {
-                write!(f, "lossless video requires a lossless audio codec for archival")
+                write!(
+                    f,
+                    "lossless video requires a lossless audio codec for archival"
+                )
             }
             Self::UnknownCodec(n) => write!(f, "unknown codec '{n}'"),
             Self::UnknownContainer(n) => write!(f, "unknown container '{n}'"),
@@ -233,11 +236,11 @@ impl CompatMatrix {
         let mut audio: HashMap<Container, Vec<AudioCodec>> = HashMap::new();
 
         // WebM: VP8, VP9, AV1 + Opus, Vorbis
-        video.insert(Container::Webm, vec![VideoCodec::Vp8, VideoCodec::Vp9, VideoCodec::Av1]);
-        audio.insert(
+        video.insert(
             Container::Webm,
-            vec![AudioCodec::Opus, AudioCodec::Vorbis],
+            vec![VideoCodec::Vp8, VideoCodec::Vp9, VideoCodec::Av1],
         );
+        audio.insert(Container::Webm, vec![AudioCodec::Opus, AudioCodec::Vorbis]);
 
         // MKV: virtually all patent-free codecs
         video.insert(
@@ -454,7 +457,10 @@ mod tests {
     #[test]
     fn test_audio_codec_from_name_aliases() {
         assert_eq!(AudioCodec::from_name("libopus"), Some(AudioCodec::Opus));
-        assert_eq!(AudioCodec::from_name("pcm_s16le"), Some(AudioCodec::PcmS16Le));
+        assert_eq!(
+            AudioCodec::from_name("pcm_s16le"),
+            Some(AudioCodec::PcmS16Le)
+        );
         assert_eq!(AudioCodec::from_name("xyz"), None);
     }
 
@@ -502,7 +508,12 @@ mod tests {
     #[test]
     fn test_mkv_allows_all_patent_free_codecs() {
         let m = CompatMatrix::new();
-        for vc in [VideoCodec::Vp8, VideoCodec::Vp9, VideoCodec::Av1, VideoCodec::Ffv1] {
+        for vc in [
+            VideoCodec::Vp8,
+            VideoCodec::Vp9,
+            VideoCodec::Av1,
+            VideoCodec::Ffv1,
+        ] {
             assert!(m.video_allowed(vc, Container::Mkv), "{:?} in MKV", vc);
         }
         for ac in [
@@ -518,7 +529,9 @@ mod tests {
     #[test]
     fn test_validate_ok() {
         let m = CompatMatrix::new();
-        assert!(m.validate(VideoCodec::Vp9, AudioCodec::Opus, Container::Webm).is_ok());
+        assert!(m
+            .validate(VideoCodec::Vp9, AudioCodec::Opus, Container::Webm)
+            .is_ok());
     }
 
     #[test]
@@ -553,7 +566,9 @@ mod tests {
     #[test]
     fn test_string_config_unknown_video() {
         let errs = validate_string_config("h264", "opus", "webm").expect_err("should fail");
-        assert!(errs.iter().any(|e| matches!(e, CompatError::UnknownCodec(_))));
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, CompatError::UnknownCodec(_))));
     }
 
     #[test]

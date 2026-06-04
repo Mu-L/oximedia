@@ -69,6 +69,7 @@ pub fn wasm_ela_analysis(
         enable_geometric_analysis: false,
         enable_lighting_analysis: false,
         min_confidence_threshold: 0.0,
+        confidence_threshold: 1.0,
     };
     let analyzer = ForensicsAnalyzer::with_config(config);
     let report = analyzer
@@ -127,6 +128,7 @@ pub fn wasm_noise_analysis(
         enable_geometric_analysis: false,
         enable_lighting_analysis: false,
         min_confidence_threshold: 0.0,
+        confidence_threshold: 1.0,
     };
     let analyzer = ForensicsAnalyzer::with_config(config);
     let report = analyzer
@@ -174,6 +176,7 @@ pub fn wasm_compression_analysis(
         enable_geometric_analysis: false,
         enable_lighting_analysis: false,
         min_confidence_threshold: 0.0,
+        confidence_threshold: 1.0,
     };
     let analyzer = ForensicsAnalyzer::with_config(config);
     let report = analyzer

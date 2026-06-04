@@ -1,12 +1,12 @@
 //! Signal status and error monitoring.
 
-pub mod signal;
 pub mod errors;
+pub mod signal;
 
 use serde::{Deserialize, Serialize};
 
-pub use signal::SignalMonitor;
 pub use errors::ErrorLogger;
+pub use signal::SignalMonitor;
 
 /// Signal quality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

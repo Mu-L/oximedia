@@ -80,12 +80,7 @@ impl AafEssenceRelinker {
     /// # Errors
     ///
     /// Returns the first error encountered.
-    pub fn relink_all(
-        &self,
-        mobs: &mut [Mob],
-        old_path: &str,
-        new_path: &str,
-    ) -> Result<usize> {
+    pub fn relink_all(&self, mobs: &mut [Mob], old_path: &str, new_path: &str) -> Result<usize> {
         let mut total = 0usize;
         for mob in mobs.iter_mut() {
             total += self.relink(mob, old_path, new_path)?;

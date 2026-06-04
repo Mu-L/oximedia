@@ -116,6 +116,77 @@ impl PtzPresetStore {
 }
 
 // ---------------------------------------------------------------------------
+// PtzCommand serialization
+// ---------------------------------------------------------------------------
+
+/// Encode a [`PtzCommand`] to a compact tag-prefixed byte sequence.
+///
+/// The format is:
+/// - `0x00 axis speed_f32_le` for `Move`
+/// - `0x01` for `Stop`
+/// - `0x02 index` for `StorePreset`
+/// - `0x03 index` for `RecallPreset`
+/// - `0x04` for `AutoFocus`
+///
+/// This is intentionally minimal; for over-the-wire NDI use the full XML
+/// metadata encoding in [`crate::metadata_serializer`].
+pub fn encode_ptz_command(cmd: &PtzCommand) -> Vec<u8> {
+    match cmd {
+        PtzCommand::Move { axis, speed } => {
+            let axis_byte: u8 = match axis {
+                PtzAxis::Pan => 0,
+                PtzAxis::Tilt => 1,
+                PtzAxis::Zoom => 2,
+                PtzAxis::Focus => 3,
+            };
+            let mut out = vec![0x00u8, axis_byte];
+            out.extend_from_slice(&speed.to_le_bytes());
+            out
+        }
+        PtzCommand::Stop => vec![0x01],
+        PtzCommand::StorePreset(idx) => vec![0x02, *idx],
+        PtzCommand::RecallPreset(idx) => vec![0x03, *idx],
+        PtzCommand::AutoFocus => vec![0x04],
+    }
+}
+
+/// Decode a [`PtzCommand`] from bytes produced by [`encode_ptz_command`].
+///
+/// Returns `None` if the byte slice is malformed or empty.
+pub fn decode_ptz_command(bytes: &[u8]) -> Option<PtzCommand> {
+    let tag = bytes.first().copied()?;
+    match tag {
+        0x00 => {
+            // Move: tag(1) + axis(1) + speed_f32_le(4) = 6 bytes
+            if bytes.len() < 6 {
+                return None;
+            }
+            let axis = match bytes[1] {
+                0 => PtzAxis::Pan,
+                1 => PtzAxis::Tilt,
+                2 => PtzAxis::Zoom,
+                3 => PtzAxis::Focus,
+                _ => return None,
+            };
+            let speed_bytes: [u8; 4] = bytes[2..6].try_into().ok()?;
+            let speed = f32::from_le_bytes(speed_bytes);
+            Some(PtzCommand::Move { axis, speed })
+        }
+        0x01 => Some(PtzCommand::Stop),
+        0x02 => {
+            let idx = bytes.get(1).copied()?;
+            Some(PtzCommand::StorePreset(idx))
+        }
+        0x03 => {
+            let idx = bytes.get(1).copied()?;
+            Some(PtzCommand::RecallPreset(idx))
+        }
+        0x04 => Some(PtzCommand::AutoFocus),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PtzCommandQueue
 // ---------------------------------------------------------------------------
 
@@ -294,5 +365,81 @@ mod tests {
         q.push(PtzCommand::RecallPreset(0));
         assert_eq!(q.pop(), Some(PtzCommand::StorePreset(0)));
         assert_eq!(q.pop(), Some(PtzCommand::RecallPreset(0)));
+    }
+
+    // ── PTZ command round-trip serialization ──────────────────────────────────
+
+    /// Verify that every `PtzCommand` variant survives an encode→decode cycle.
+    #[test]
+    fn test_ptz_command_roundtrip_all_variants() {
+        let variants: Vec<PtzCommand> = vec![
+            PtzCommand::Move {
+                axis: PtzAxis::Pan,
+                speed: 0.5,
+            },
+            PtzCommand::Move {
+                axis: PtzAxis::Tilt,
+                speed: -0.25,
+            },
+            PtzCommand::Move {
+                axis: PtzAxis::Zoom,
+                speed: 1.0,
+            },
+            PtzCommand::Move {
+                axis: PtzAxis::Focus,
+                speed: -1.0,
+            },
+            PtzCommand::Stop,
+            PtzCommand::StorePreset(0),
+            PtzCommand::StorePreset(127),
+            PtzCommand::StorePreset(255),
+            PtzCommand::RecallPreset(0),
+            PtzCommand::RecallPreset(42),
+            PtzCommand::RecallPreset(255),
+            PtzCommand::AutoFocus,
+        ];
+
+        for cmd in &variants {
+            let encoded = encode_ptz_command(cmd);
+            let decoded =
+                decode_ptz_command(&encoded).unwrap_or_else(|| panic!("failed to decode {cmd:?}"));
+
+            // For `Move`, compare axis and use near-equality for float speed.
+            match (cmd, &decoded) {
+                (
+                    PtzCommand::Move {
+                        axis: a1,
+                        speed: s1,
+                    },
+                    PtzCommand::Move {
+                        axis: a2,
+                        speed: s2,
+                    },
+                ) => {
+                    assert_eq!(a1, a2, "axis mismatch for {cmd:?}");
+                    assert!(
+                        (s1 - s2).abs() < 1e-6,
+                        "speed mismatch for {cmd:?}: {s1} ≠ {s2}"
+                    );
+                }
+                _ => assert_eq!(cmd, &decoded, "round-trip failed for {cmd:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_ptz_decode_empty_returns_none() {
+        assert_eq!(decode_ptz_command(&[]), None);
+    }
+
+    #[test]
+    fn test_ptz_decode_unknown_tag_returns_none() {
+        assert_eq!(decode_ptz_command(&[0xFF]), None);
+    }
+
+    #[test]
+    fn test_ptz_decode_move_too_short_returns_none() {
+        // Move requires 6 bytes; provide only 3.
+        assert_eq!(decode_ptz_command(&[0x00, 0x00, 0xAB]), None);
     }
 }

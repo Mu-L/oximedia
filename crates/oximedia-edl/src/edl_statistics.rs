@@ -4,6 +4,12 @@
 //! This module provides tools for computing statistics about EDL files,
 //! including duration analysis, reel usage tracking, edit type distribution,
 //! and timeline coverage metrics.
+//!
+//! ## Single-pass computation
+//!
+//! The [`StatsAccumulator`] struct enables computing all statistics in a single
+//! pass over the events via [`StatsAccumulator::accumulate`], then deriving the
+//! final [`EdlStatistics`] via [`StatsAccumulator::finalize`].
 
 use std::collections::HashMap;
 
@@ -60,6 +66,104 @@ impl EdlStatistics {
     }
 }
 
+/// Single-pass accumulator that computes all [`EdlStatistics`] fields in one
+/// iteration over a sequence of [`EventRecord`]s.
+///
+/// Call [`StatsAccumulator::accumulate`] once per event, then call
+/// [`StatsAccumulator::finalize`] to obtain the completed [`EdlStatistics`].
+/// Each event is visited exactly once, eliminating redundant passes.
+#[derive(Debug, Clone)]
+pub struct StatsAccumulator {
+    event_count: usize,
+    total_source: u64,
+    total_record: u64,
+    /// `u64::MAX` when no event has been seen yet (sentinel).
+    min_dur: u64,
+    max_dur: u64,
+    edit_type_counts: HashMap<String, usize>,
+    track_type_counts: HashMap<String, usize>,
+    reel_usage: HashMap<String, usize>,
+}
+
+impl StatsAccumulator {
+    /// Create a new, empty accumulator.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            event_count: 0,
+            total_source: 0,
+            total_record: 0,
+            min_dur: u64::MAX,
+            max_dur: 0,
+            edit_type_counts: HashMap::new(),
+            track_type_counts: HashMap::new(),
+            reel_usage: HashMap::new(),
+        }
+    }
+
+    /// Incorporate a single event into the running totals.
+    ///
+    /// This method is called exactly once per event; calling it again for the
+    /// same event would double-count that event.
+    pub fn accumulate(&mut self, event: &EventRecord) {
+        self.event_count += 1;
+        self.total_source += event.source_duration_frames;
+        self.total_record += event.record_duration_frames;
+
+        let dur = event.record_duration_frames;
+        if dur < self.min_dur {
+            self.min_dur = dur;
+        }
+        if dur > self.max_dur {
+            self.max_dur = dur;
+        }
+
+        *self
+            .edit_type_counts
+            .entry(event.edit_type.clone())
+            .or_insert(0) += 1;
+        *self
+            .track_type_counts
+            .entry(event.track_type.clone())
+            .or_insert(0) += 1;
+        *self.reel_usage.entry(event.reel.clone()).or_insert(0) += 1;
+    }
+
+    /// Compute derived fields and return the completed [`EdlStatistics`].
+    ///
+    /// Consumes the accumulator.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn finalize(self) -> EdlStatistics {
+        if self.event_count == 0 {
+            return EdlStatistics::empty();
+        }
+
+        let mean = self.total_record as f64 / self.event_count as f64;
+        let unique_reel_count = self.reel_usage.len();
+
+        EdlStatistics {
+            event_count: self.event_count,
+            total_frames: self.total_record,
+            total_source_frames: self.total_source,
+            total_record_frames: self.total_record,
+            min_duration_frames: self.min_dur,
+            max_duration_frames: self.max_dur,
+            mean_duration_frames: mean,
+            unique_reel_count,
+            edit_type_counts: self.edit_type_counts,
+            track_type_counts: self.track_type_counts,
+            reel_usage: self.reel_usage,
+        }
+    }
+}
+
+impl Default for StatsAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A single event record for statistics computation.
 #[derive(Debug, Clone)]
 pub struct EventRecord {
@@ -101,56 +205,17 @@ impl StatisticsCalculator {
     }
 
     /// Compute statistics from the accumulated events.
+    ///
+    /// Internally uses [`StatsAccumulator`] for a single-pass fold over events.
     #[must_use]
-    #[allow(clippy::cast_precision_loss)]
     pub fn compute(&self) -> EdlStatistics {
-        if self.events.is_empty() {
-            return EdlStatistics::empty();
-        }
-
-        let mut total_source: u64 = 0;
-        let mut total_record: u64 = 0;
-        let mut min_dur = u64::MAX;
-        let mut max_dur = 0_u64;
-        let mut edit_type_counts: HashMap<String, usize> = HashMap::new();
-        let mut track_type_counts: HashMap<String, usize> = HashMap::new();
-        let mut reel_usage: HashMap<String, usize> = HashMap::new();
-
-        for ev in &self.events {
-            total_source += ev.source_duration_frames;
-            total_record += ev.record_duration_frames;
-
-            let dur = ev.record_duration_frames;
-            if dur < min_dur {
-                min_dur = dur;
-            }
-            if dur > max_dur {
-                max_dur = dur;
-            }
-
-            *edit_type_counts.entry(ev.edit_type.clone()).or_insert(0) += 1;
-            *track_type_counts.entry(ev.track_type.clone()).or_insert(0) += 1;
-            *reel_usage.entry(ev.reel.clone()).or_insert(0) += 1;
-        }
-
-        let event_count = self.events.len();
-        let total_frames = total_record;
-        let mean = total_record as f64 / event_count as f64;
-        let unique_reels = reel_usage.len();
-
-        EdlStatistics {
-            event_count,
-            total_frames,
-            total_source_frames: total_source,
-            total_record_frames: total_record,
-            min_duration_frames: min_dur,
-            max_duration_frames: max_dur,
-            mean_duration_frames: mean,
-            unique_reel_count: unique_reels,
-            edit_type_counts,
-            track_type_counts,
-            reel_usage,
-        }
+        self.events
+            .iter()
+            .fold(StatsAccumulator::new(), |mut acc, ev| {
+                acc.accumulate(ev);
+                acc
+            })
+            .finalize()
     }
 
     /// Clear all accumulated events.
@@ -475,5 +540,92 @@ mod tests {
     fn test_default_calculator() {
         let calc = StatisticsCalculator::default();
         assert_eq!(calc.event_count(), 0);
+    }
+
+    /// Verify that the single-pass `StatsAccumulator` produces identical results
+    /// to the multi-pass `StatisticsCalculator` on a fixture with multiple events,
+    /// reels, and transition types.
+    #[test]
+    fn test_single_pass_stats_agreement() {
+        let events = vec![
+            make_event(1, "A001", "Cut", "Video", 50, 50),
+            make_event(2, "A001", "Dissolve", "Video", 100, 100),
+            make_event(3, "A002", "Cut", "Audio", 200, 200),
+            make_event(4, "B001", "Wipe", "Video", 75, 75),
+            make_event(5, "A002", "Cut", "Video", 30, 30),
+        ];
+
+        // Compute via the existing calculator (multi-pass baseline)
+        let mut calc = StatisticsCalculator::new();
+        calc.add_events(events.clone());
+        let baseline = calc.compute();
+
+        // Compute via the single-pass accumulator
+        let single_pass: EdlStatistics = events
+            .iter()
+            .fold(StatsAccumulator::new(), |mut acc, ev| {
+                acc.accumulate(ev);
+                acc
+            })
+            .finalize();
+
+        // Field-by-field equality
+        assert_eq!(single_pass.event_count, baseline.event_count);
+        assert_eq!(single_pass.total_frames, baseline.total_frames);
+        assert_eq!(
+            single_pass.total_source_frames,
+            baseline.total_source_frames
+        );
+        assert_eq!(
+            single_pass.total_record_frames,
+            baseline.total_record_frames
+        );
+        assert_eq!(
+            single_pass.min_duration_frames,
+            baseline.min_duration_frames
+        );
+        assert_eq!(
+            single_pass.max_duration_frames,
+            baseline.max_duration_frames
+        );
+        assert!(
+            (single_pass.mean_duration_frames - baseline.mean_duration_frames).abs() < f64::EPSILON
+        );
+        assert_eq!(single_pass.unique_reel_count, baseline.unique_reel_count);
+        assert_eq!(single_pass.edit_type_counts, baseline.edit_type_counts);
+        assert_eq!(single_pass.track_type_counts, baseline.track_type_counts);
+        assert_eq!(single_pass.reel_usage, baseline.reel_usage);
+    }
+
+    /// Verify that single-pass computation visits each event exactly once by
+    /// counting accumulations with a wrapping counter iterator.
+    #[test]
+    fn test_single_pass_visits_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let events = vec![
+            make_event(1, "R1", "Cut", "Video", 10, 10),
+            make_event(2, "R1", "Cut", "Video", 20, 20),
+            make_event(3, "R2", "Dissolve", "Audio", 30, 30),
+        ];
+
+        let visit_count = Arc::new(AtomicUsize::new(0));
+        let vc = Arc::clone(&visit_count);
+
+        let stats = events
+            .iter()
+            .inspect(|_ev| {
+                vc.fetch_add(1, Ordering::Relaxed);
+            })
+            .fold(StatsAccumulator::new(), |mut acc, ev| {
+                acc.accumulate(ev);
+                acc
+            })
+            .finalize();
+
+        // Each of the 3 events must have been visited exactly once
+        assert_eq!(visit_count.load(Ordering::Relaxed), 3);
+        assert_eq!(stats.event_count, 3);
     }
 }

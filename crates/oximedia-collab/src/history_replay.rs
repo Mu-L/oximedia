@@ -235,7 +235,12 @@ mod tests {
     fn test_recorder_records_while_running() {
         let mut rec = HistoryRecorder::new();
         rec.start();
-        let ok = rec.record("alice".into(), "cut".into(), r#"{"clip":"c1"}"#.into(), 1_000);
+        let ok = rec.record(
+            "alice".into(),
+            "cut".into(),
+            r#"{"clip":"c1"}"#.into(),
+            1_000,
+        );
         assert!(ok);
         assert_eq!(rec.entry_count(), 1);
     }
@@ -573,10 +578,7 @@ mod replayer_tests {
 
     #[test]
     fn test_state_latest_timestamp() {
-        let events = vec![
-            make_event(100, "u1", "a"),
-            make_event(200, "u2", "b"),
-        ];
+        let events = vec![make_event(100, "u1", "a"), make_event(200, "u2", "b")];
         let r = HistoryReplayer::new(events);
         let state = r.replay_to(u64::MAX);
         assert_eq!(state.latest_timestamp_ms(), 200);

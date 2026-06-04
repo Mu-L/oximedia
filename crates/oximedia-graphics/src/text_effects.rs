@@ -206,13 +206,7 @@ fn stamp_glyph(
 ///
 /// Runs two passes (horizontal then vertical) repeated `iterations` times
 /// to approximate a Gaussian blur.
-fn box_blur_alpha(
-    buf: &mut Vec<u8>,
-    width: u32,
-    height: u32,
-    radius: u32,
-    iterations: u32,
-) {
+fn box_blur_alpha(buf: &mut Vec<u8>, width: u32, height: u32, radius: u32, iterations: u32) {
     if radius == 0 || width == 0 || height == 0 {
         return;
     }
@@ -382,7 +376,11 @@ pub fn render_shadow(
 
             let pixel_off = (ty as u32 * stride + tx as u32 * 4) as usize;
             if pixel_off + 4 <= target.len() {
-                blend_pixel(&mut target[pixel_off..pixel_off + 4], shadow_color, coverage);
+                blend_pixel(
+                    &mut target[pixel_off..pixel_off + 4],
+                    shadow_color,
+                    coverage,
+                );
             }
         }
     }
@@ -392,12 +390,7 @@ pub fn render_shadow(
 ///
 /// A glow is functionally a drop shadow with zero offset and `intensity` as
 /// opacity, spread over the glow `radius`.
-pub fn render_glow(
-    glyph: &GlyphBitmap,
-    config: &TextGlowConfig,
-    target: &mut [u8],
-    stride: u32,
-) {
+pub fn render_glow(glyph: &GlyphBitmap, config: &TextGlowConfig, target: &mut [u8], stride: u32) {
     if glyph.is_empty() || config.intensity <= 0.0 {
         return;
     }
@@ -857,7 +850,10 @@ mod tests {
         stamp_glyph(&glyph, 0, 0, [255, 255, 255, 255], &mut target, stride);
         // Pixels (0,0) and (1,1) should have content
         let idx = 0usize;
-        assert!(target[idx + 3] > 0, "partial clip should render visible portion");
+        assert!(
+            target[idx + 3] > 0,
+            "partial clip should render visible portion"
+        );
     }
 
     #[test]

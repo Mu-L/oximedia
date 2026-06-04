@@ -4,10 +4,28 @@ use crate::task::{TaskId, TaskState};
 use crate::workflow::{WorkflowId, WorkflowState};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+
+// ---------------------------------------------------------------------------
+// Serde helpers for Arc<AtomicU64>
+// ---------------------------------------------------------------------------
+
+fn serialize_atomic<S: Serializer>(val: &Arc<AtomicU64>, ser: S) -> Result<S::Ok, S::Error> {
+    ser.serialize_u64(val.load(Ordering::Relaxed))
+}
+
+fn deserialize_atomic<'de, D: Deserializer<'de>>(de: D) -> Result<Arc<AtomicU64>, D::Error> {
+    let n = u64::deserialize(de)?;
+    Ok(Arc::new(AtomicU64::new(n)))
+}
+
+fn default_atomic() -> Arc<AtomicU64> {
+    Arc::new(AtomicU64::new(0))
+}
 
 /// Task execution metrics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +100,11 @@ impl TaskMetrics {
 }
 
 /// Workflow execution metrics.
+///
+/// The `completed_tasks`, `failed_tasks`, and `running_tasks` counters are
+/// backed by `Arc<AtomicU64>` so they can be incremented/decremented from
+/// any thread without a mutable borrow. The `Arc` also allows sharing a
+/// counter across cheap clones (each clone shares the same atomic).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowMetrics {
     /// Workflow identifier.
@@ -100,12 +123,27 @@ pub struct WorkflowMetrics {
     pub tasks: HashMap<TaskId, TaskMetrics>,
     /// Total task count.
     pub total_tasks: usize,
-    /// Completed tasks count.
-    pub completed_tasks: usize,
-    /// Failed tasks count.
-    pub failed_tasks: usize,
-    /// Running tasks count.
-    pub running_tasks: usize,
+    /// Completed tasks count (atomic for lock-free concurrent updates).
+    #[serde(
+        serialize_with = "serialize_atomic",
+        deserialize_with = "deserialize_atomic",
+        default = "default_atomic"
+    )]
+    pub completed_tasks: Arc<AtomicU64>,
+    /// Failed tasks count (atomic for lock-free concurrent updates).
+    #[serde(
+        serialize_with = "serialize_atomic",
+        deserialize_with = "deserialize_atomic",
+        default = "default_atomic"
+    )]
+    pub failed_tasks: Arc<AtomicU64>,
+    /// Running tasks count (atomic for lock-free concurrent updates).
+    #[serde(
+        serialize_with = "serialize_atomic",
+        deserialize_with = "deserialize_atomic",
+        default = "default_atomic"
+    )]
+    pub running_tasks: Arc<AtomicU64>,
 }
 
 impl WorkflowMetrics {
@@ -121,10 +159,28 @@ impl WorkflowMetrics {
             duration: None,
             tasks: HashMap::new(),
             total_tasks,
-            completed_tasks: 0,
-            failed_tasks: 0,
-            running_tasks: 0,
+            completed_tasks: Arc::new(AtomicU64::new(0)),
+            failed_tasks: Arc::new(AtomicU64::new(0)),
+            running_tasks: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Read the completed tasks count.
+    #[must_use]
+    pub fn completed_tasks_count(&self) -> u64 {
+        self.completed_tasks.load(Ordering::Relaxed)
+    }
+
+    /// Read the failed tasks count.
+    #[must_use]
+    pub fn failed_tasks_count(&self) -> u64 {
+        self.failed_tasks.load(Ordering::Relaxed)
+    }
+
+    /// Read the running tasks count.
+    #[must_use]
+    pub fn running_tasks_count(&self) -> u64 {
+        self.running_tasks.load(Ordering::Relaxed)
     }
 
     /// Mark workflow as started.
@@ -166,18 +222,45 @@ impl WorkflowMetrics {
         self.tasks.insert(task_metrics.task_id, task_metrics);
     }
 
-    fn update_counters(&mut self, state: TaskState, increment: bool) {
-        let delta = if increment { 1_isize } else { -1_isize };
-
+    fn update_counters(&self, state: TaskState, increment: bool) {
         match state {
             TaskState::Completed => {
-                self.completed_tasks = (self.completed_tasks as isize + delta).max(0) as usize;
+                if increment {
+                    self.completed_tasks.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    // Saturating decrement — avoid underflow.
+                    let _ = self.completed_tasks.fetch_update(
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                        |v| if v > 0 { Some(v - 1) } else { Some(0) },
+                    );
+                }
             }
             TaskState::Failed => {
-                self.failed_tasks = (self.failed_tasks as isize + delta).max(0) as usize;
+                if increment {
+                    self.failed_tasks.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    let _ =
+                        self.failed_tasks
+                            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                                if v > 0 {
+                                    Some(v - 1)
+                                } else {
+                                    Some(0)
+                                }
+                            });
+                }
             }
             TaskState::Running | TaskState::Retrying => {
-                self.running_tasks = (self.running_tasks as isize + delta).max(0) as usize;
+                if increment {
+                    self.running_tasks.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    let _ = self.running_tasks.fetch_update(
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                        |v| if v > 0 { Some(v - 1) } else { Some(0) },
+                    );
+                }
             }
             _ => {}
         }
@@ -189,7 +272,7 @@ impl WorkflowMetrics {
         if self.total_tasks == 0 {
             return 100.0;
         }
-        (self.completed_tasks as f64 / self.total_tasks as f64) * 100.0
+        self.completed_tasks.load(Ordering::Relaxed) as f64 / self.total_tasks as f64 * 100.0
     }
 
     /// Get average task duration.
@@ -208,12 +291,13 @@ impl WorkflowMetrics {
     /// Get throughput (tasks per second).
     #[must_use]
     pub fn throughput(&self) -> f64 {
+        let completed = self.completed_tasks.load(Ordering::Relaxed) as f64;
         if let (Some(start), Some(end)) = (self.start_time, self.end_time) {
             let duration_secs = (end - start).num_seconds().max(1);
-            self.completed_tasks as f64 / duration_secs as f64
+            completed / duration_secs as f64
         } else if let Some(start) = self.start_time {
             let duration_secs = (Utc::now() - start).num_seconds().max(1);
-            self.completed_tasks as f64 / duration_secs as f64
+            completed / duration_secs as f64
         } else {
             0.0
         }
@@ -362,27 +446,27 @@ impl MonitoringService {
             .filter(|entry| matches!(entry.value().state, WorkflowState::Failed))
             .count();
 
-        let total_tasks_completed: usize = self
+        let total_tasks_completed: usize = (self
             .workflows
             .iter()
-            .map(|entry| entry.value().completed_tasks)
-            .sum::<usize>()
+            .map(|entry| entry.value().completed_tasks.load(Ordering::Relaxed))
+            .sum::<u64>()
             + self
                 .history
                 .iter()
-                .map(|entry| entry.value().completed_tasks)
-                .sum::<usize>();
+                .map(|entry| entry.value().completed_tasks.load(Ordering::Relaxed))
+                .sum::<u64>()) as usize;
 
-        let total_tasks_failed: usize = self
+        let total_tasks_failed: usize = (self
             .workflows
             .iter()
-            .map(|entry| entry.value().failed_tasks)
-            .sum::<usize>()
+            .map(|entry| entry.value().failed_tasks.load(Ordering::Relaxed))
+            .sum::<u64>()
             + self
                 .history
                 .iter()
-                .map(|entry| entry.value().failed_tasks)
-                .sum::<usize>();
+                .map(|entry| entry.value().failed_tasks.load(Ordering::Relaxed))
+                .sum::<u64>()) as usize;
 
         SystemStatistics {
             active_workflows,
@@ -465,20 +549,20 @@ mod tests {
 
         assert_eq!(metrics.workflow_id, workflow_id);
         assert_eq!(metrics.total_tasks, 5);
-        assert_eq!(metrics.completed_tasks, 0);
+        assert_eq!(metrics.completed_tasks_count(), 0);
     }
 
     #[test]
     fn test_workflow_metrics_progress() {
         let workflow_id = WorkflowId::new();
-        let mut metrics = WorkflowMetrics::new(workflow_id, "test-workflow".to_string(), 10);
+        let metrics = WorkflowMetrics::new(workflow_id, "test-workflow".to_string(), 10);
 
         assert_eq!(metrics.progress_percentage(), 0.0);
 
-        metrics.completed_tasks = 5;
+        metrics.completed_tasks.store(5, Ordering::Relaxed);
         assert_eq!(metrics.progress_percentage(), 50.0);
 
-        metrics.completed_tasks = 10;
+        metrics.completed_tasks.store(10, Ordering::Relaxed);
         assert_eq!(metrics.progress_percentage(), 100.0);
     }
 
@@ -522,7 +606,7 @@ mod tests {
         let metrics = service
             .get_workflow_metrics(&workflow_id)
             .expect("should succeed in test");
-        assert_eq!(metrics.running_tasks, 1);
+        assert_eq!(metrics.running_tasks_count(), 1);
 
         service.update_task(
             workflow_id,
@@ -535,8 +619,8 @@ mod tests {
         let metrics = service
             .get_workflow_metrics(&workflow_id)
             .expect("should succeed in test");
-        assert_eq!(metrics.completed_tasks, 1);
-        assert_eq!(metrics.running_tasks, 0);
+        assert_eq!(metrics.completed_tasks_count(), 1);
+        assert_eq!(metrics.running_tasks_count(), 0);
     }
 
     #[test]

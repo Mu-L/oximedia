@@ -1,13 +1,13 @@
 # oximedia-convert
 
 ![Status: Stable](https://img.shields.io/badge/status-stable-green)
-![Version: 0.1.7](https://img.shields.io/badge/version-0.1.7-blue)
+![Version: 0.1.8](https://img.shields.io/badge/version-0.1.8-blue)
 
 Universal media format converter for `OxiMedia`.
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.7 — 2026-05-16 — 826 tests
+Version: 0.1.8 — 2026-05-29 — 826 tests
 
 ## Features
 

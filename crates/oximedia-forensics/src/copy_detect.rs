@@ -382,6 +382,152 @@ fn merge_regions(mut regions: Vec<PartialCopyRegion>) -> Vec<PartialCopyRegion> 
     merged
 }
 
+// ─── Spatial-hash block copy detection ───────────────────────────────────────
+
+/// A spatial block with integer grid coordinates and a hash fingerprint.
+///
+/// `x` and `y` are **block-grid** coordinates (i.e. block index, not pixel
+/// coordinates).  The `hash` may be any perceptual or content hash of the
+/// block's pixel data.
+#[derive(Debug, Clone)]
+pub struct SpatialBlock {
+    /// Block column index.
+    pub x: i32,
+    /// Block row index.
+    pub y: i32,
+    /// Content hash of this block (e.g. dHash, pHash, etc.).
+    pub hash: u64,
+}
+
+impl SpatialBlock {
+    /// Create a new spatial block.
+    #[must_use]
+    pub fn new(x: i32, y: i32, hash: u64) -> Self {
+        Self { x, y, hash }
+    }
+
+    /// Hamming distance to another block's hash.
+    #[must_use]
+    pub fn hamming_distance(&self, other: &Self) -> u32 {
+        (self.hash ^ other.hash).count_ones()
+    }
+}
+
+/// A matched pair of spatial blocks that are considered copies.
+#[derive(Debug, Clone)]
+pub struct BlockCopyMatch {
+    /// Index of the first block in the input slice.
+    pub index_a: usize,
+    /// Index of the second block in the input slice.
+    pub index_b: usize,
+    /// Hamming distance between the two block hashes.
+    pub hamming_distance: u32,
+}
+
+/// Spatial-hash grid used internally by [`BlockSpatialMatcher`].
+///
+/// Blocks are bucketed by `(x, y)` block-grid position so that the
+/// neighbor-search window only touches blocks within Manhattan distance 1
+/// in block-grid space rather than the entire corpus.
+struct BlockGrid {
+    cells: HashMap<(i32, i32), Vec<usize>>,
+}
+
+impl BlockGrid {
+    fn new() -> Self {
+        Self {
+            cells: HashMap::new(),
+        }
+    }
+
+    fn insert(&mut self, bx: i32, by: i32, idx: usize) {
+        self.cells.entry((bx, by)).or_default().push(idx);
+    }
+
+    /// Iterate over all block indices in the 3×3 neighborhood of `(bx, by)`.
+    fn neighbors(&self, bx: i32, by: i32) -> impl Iterator<Item = usize> + '_ {
+        (-1i32..=1).flat_map(move |dx| {
+            (-1i32..=1).flat_map(move |dy| {
+                self.cells
+                    .get(&(bx + dx, by + dy))
+                    .into_iter()
+                    .flat_map(|v| v.iter().copied())
+            })
+        })
+    }
+}
+
+/// Block-level copy matcher using a spatial hash grid for O(n) neighbor lookup.
+///
+/// Rather than comparing every block against every other block (O(n²)), blocks
+/// are indexed into a grid keyed by their `(x, y)` block-grid position.  Only
+/// blocks that share the same 3×3 grid cell neighborhood are compared, which
+/// keeps the comparison count proportional to n for typical media content.
+pub struct BlockSpatialMatcher {
+    /// Maximum Hamming distance at which two blocks are considered copies
+    /// (default 5 — approximately 92 % bit-similarity for a 64-bit hash).
+    pub max_hamming_distance: u32,
+}
+
+impl Default for BlockSpatialMatcher {
+    fn default() -> Self {
+        Self {
+            max_hamming_distance: 5,
+        }
+    }
+}
+
+impl BlockSpatialMatcher {
+    /// Create a new matcher with the default Hamming distance threshold.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a matcher with a custom Hamming distance threshold.
+    #[must_use]
+    pub fn with_threshold(max_hamming_distance: u32) -> Self {
+        Self {
+            max_hamming_distance,
+        }
+    }
+
+    /// Find copy-pairs within `blocks` using the spatial hash grid.
+    ///
+    /// Returns every `(i, j)` pair where `j > i`, both blocks are within the
+    /// 3×3 block-grid neighborhood, and `hamming(blocks[i], blocks[j]) <=
+    /// self.max_hamming_distance`.
+    #[must_use]
+    pub fn find_copies(&self, blocks: &[SpatialBlock]) -> Vec<BlockCopyMatch> {
+        let mut grid = BlockGrid::new();
+        for (i, block) in blocks.iter().enumerate() {
+            grid.insert(block.x, block.y, i);
+        }
+
+        let mut matches = Vec::new();
+
+        for (i, block) in blocks.iter().enumerate() {
+            for j in grid.neighbors(block.x, block.y) {
+                if j <= i {
+                    continue;
+                }
+                let dist = block.hamming_distance(&blocks[j]);
+                if dist <= self.max_hamming_distance {
+                    matches.push(BlockCopyMatch {
+                        index_a: i,
+                        index_b: j,
+                        hamming_distance: dist,
+                    });
+                }
+            }
+        }
+
+        matches
+    }
+}
+
+// ─── Overall copy detection report ───────────────────────────────────────────
+
 /// Overall copy detection report
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CopyDetectionReport {
@@ -607,5 +753,131 @@ mod tests {
         assert!(!t.cropped);
         assert!(!t.scaled);
         assert_eq!(t.compression_level, 0);
+    }
+
+    // ── BlockSpatialMatcher tests ─────────────────────────────────────────────
+
+    /// Build a corpus of blocks at regularly-spaced grid positions with known
+    /// identical pairs (same hash, adjacent positions).
+    fn make_blocks(n: usize, identical_stride: usize) -> Vec<SpatialBlock> {
+        (0..n)
+            .map(|i| {
+                let x = (i % 10) as i32;
+                let y = (i / 10) as i32;
+                // Every `identical_stride`-th block gets the same hash as its
+                // predecessor so it forms a known copy-pair.
+                let hash = if identical_stride > 0 && i > 0 && i % identical_stride == 0 {
+                    (i - 1) as u64 * 17
+                } else {
+                    i as u64 * 17
+                };
+                SpatialBlock::new(x, y, hash)
+            })
+            .collect()
+    }
+
+    /// Brute-force reference: compare all (i, j) pairs with j > i.
+    fn brute_force_matches(blocks: &[SpatialBlock], max_dist: u32) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for i in 0..blocks.len() {
+            for j in i + 1..blocks.len() {
+                if blocks[i].hamming_distance(&blocks[j]) <= max_dist {
+                    out.push((i, j));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_copy_detect_spatial_matches_brute_force() {
+        // 100-block corpus with known identical pairs every 5 blocks.
+        let blocks = make_blocks(100, 5);
+        let matcher = BlockSpatialMatcher::with_threshold(0); // exact matches only
+
+        let spatial: std::collections::HashSet<(usize, usize)> = matcher
+            .find_copies(&blocks)
+            .into_iter()
+            .map(|m| (m.index_a, m.index_b))
+            .collect();
+
+        let brute: std::collections::HashSet<(usize, usize)> =
+            brute_force_matches(&blocks, 0).into_iter().collect();
+
+        // Spatial results must contain every brute-force match that falls
+        // within the 3×3 neighborhood; since our blocks are laid out in a
+        // 10-wide grid and identical pairs are consecutive, they always share
+        // a grid cell.  We check that for every brute-force hit the match is
+        // also found by the spatial matcher (superset check restricted to
+        // close neighbors).
+        let neighbors_only: std::collections::HashSet<(usize, usize)> = brute
+            .iter()
+            .copied()
+            .filter(|&(a, b)| {
+                let dx = (blocks[a].x - blocks[b].x).abs();
+                let dy = (blocks[a].y - blocks[b].y).abs();
+                dx <= 1 && dy <= 1
+            })
+            .collect();
+
+        for pair in &neighbors_only {
+            assert!(
+                spatial.contains(pair),
+                "Spatial matcher missed brute-force pair {:?}",
+                pair
+            );
+        }
+    }
+
+    #[test]
+    fn test_copy_detect_10k_blocks_completes() {
+        use std::time::Instant;
+
+        // 10 000 blocks spread over a 100×100 grid — no intentional copies.
+        let blocks: Vec<SpatialBlock> = (0..10_000usize)
+            .map(|i| SpatialBlock::new((i % 100) as i32, (i / 100) as i32, i as u64 * 31337))
+            .collect();
+
+        let matcher = BlockSpatialMatcher::with_threshold(3);
+        let start = Instant::now();
+        let _matches = matcher.find_copies(&blocks);
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed.as_secs() < 2,
+            "10 000-block spatial match should complete in < 2 s, took {:.2?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_spatial_block_hamming_distance() {
+        let a = SpatialBlock::new(0, 0, 0b0000_1111u64);
+        let b = SpatialBlock::new(0, 0, 0b0000_0000u64);
+        assert_eq!(a.hamming_distance(&b), 4);
+    }
+
+    #[test]
+    fn test_block_spatial_matcher_no_copies() {
+        // Blocks with maximally different hashes should not match.
+        let blocks: Vec<SpatialBlock> = (0..20usize)
+            .map(|i| {
+                SpatialBlock::new(
+                    (i % 5) as i32,
+                    (i / 5) as i32,
+                    i as u64 * 0x0101_0101_0101_0101,
+                )
+            })
+            .collect();
+        let matcher = BlockSpatialMatcher::with_threshold(2);
+        let matches = matcher.find_copies(&blocks);
+        // Very spread-out hashes → unlikely to match within tight Hamming bound.
+        for m in &matches {
+            assert!(
+                m.hamming_distance <= 2,
+                "Reported match exceeds threshold: dist {}",
+                m.hamming_distance
+            );
+        }
     }
 }

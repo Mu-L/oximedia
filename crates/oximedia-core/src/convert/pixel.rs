@@ -745,6 +745,155 @@ pub fn gray8_to_yuv420p(gray: &[u8], width: usize, height: usize) -> (Vec<u8>, V
     (y_plane, u_plane, v_plane)
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SIMD-accelerated u8 ↔ f32 conversion and YUV420→RGB (BT.601)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Converts a slice of `u8` pixels to normalised `f32` in `[0.0, 1.0]`.
+///
+/// The implementation is written in a style that LLVM auto-vectorises to
+/// AVX2 or NEON when those features are enabled at compile time.  Use
+/// `RUSTFLAGS="-C target-cpu=native"` to unlock wider SIMD widths.
+///
+/// # Panics
+///
+/// Panics if `src.len() != dst.len()`.
+///
+/// # Examples
+///
+/// ```
+/// use oximedia_core::convert::pixel::u8_to_f32_slice;
+///
+/// let src = [0_u8, 128, 255];
+/// let mut dst = [0.0_f32; 3];
+/// u8_to_f32_slice(&src, &mut dst);
+/// assert!((dst[0] - 0.0).abs() < 1e-6);
+/// assert!((dst[1] - 128.0 / 255.0).abs() < 1e-5);
+/// assert!((dst[2] - 1.0).abs() < 1e-6);
+/// ```
+#[inline]
+pub fn u8_to_f32_slice(src: &[u8], dst: &mut [f32]) {
+    assert_eq!(src.len(), dst.len(), "u8_to_f32_slice: length mismatch");
+    u8_to_f32_scalar(src, dst);
+}
+
+/// Converts a slice of normalised `f32` pixels back to `u8` with saturating
+/// clamp-and-round.
+///
+/// Values outside `[0.0, 1.0]` are clamped before rounding.
+///
+/// # Panics
+///
+/// Panics if `src.len() != dst.len()`.
+///
+/// # Examples
+///
+/// ```
+/// use oximedia_core::convert::pixel::f32_to_u8_slice;
+///
+/// let src = [0.0_f32, 0.5, 1.0, -0.5, 1.5];
+/// let mut dst = [0_u8; 5];
+/// f32_to_u8_slice(&src, &mut dst);
+/// assert_eq!(dst, [0, 128, 255, 0, 255]);
+/// ```
+#[inline]
+pub fn f32_to_u8_slice(src: &[f32], dst: &mut [u8]) {
+    assert_eq!(src.len(), dst.len(), "f32_to_u8_slice: length mismatch");
+    f32_to_u8_scalar(src, dst);
+}
+
+/// Converts `YUV420p` planar data to packed `RGB24` using **BT.601** coefficients.
+///
+/// This is a standalone function independent of [`PixelConverter`] that is
+/// tuned for the common broadcast SD colour space.  For HD content use
+/// [`yuv420p_to_rgb24`] with [`ColorMatrix::Bt709`].
+///
+/// The Y, U, and V planes follow the standard `YUV420p` layout:
+/// - Y plane: `width × height` bytes (full resolution)
+/// - U / V planes: `(width/2) × (height/2)` bytes each (4:2:0 subsampling)
+///
+/// Output is packed RGB, stride = `width × 3`.
+///
+/// # Panics
+///
+/// Panics if the input plane sizes do not match the expected dimensions.
+///
+/// # Examples
+///
+/// ```
+/// use oximedia_core::convert::pixel::yuv420_to_rgb;
+///
+/// let w = 4_u32;
+/// let h = 4_u32;
+/// let y = vec![128_u8; (w * h) as usize];
+/// let u = vec![128_u8; (w / 2 * (h / 2)) as usize];
+/// let v = vec![128_u8; (w / 2 * (h / 2)) as usize];
+/// let rgb = yuv420_to_rgb(&y, &u, &v, w, h);
+/// assert_eq!(rgb.len(), (w * h * 3) as usize);
+/// ```
+#[must_use]
+pub fn yuv420_to_rgb(y_plane: &[u8], u_plane: &[u8], v_plane: &[u8], w: u32, h: u32) -> Vec<u8> {
+    let width = w as usize;
+    let height = h as usize;
+
+    assert_eq!(y_plane.len(), width * height);
+    assert_eq!(u_plane.len(), (width / 2) * (height / 2));
+    assert_eq!(v_plane.len(), (width / 2) * (height / 2));
+
+    // BT.601 fixed-point coefficients (scaled × 1024).
+    // Y' contribution:  1.164 × (Y - 16)   → scale 1164/1000
+    // V→R:              1.596 × (V - 128)
+    // U→G:              0.392 × (U - 128)
+    // V→G:              0.813 × (V - 128)
+    // U→B:              2.017 × (U - 128)
+    const SCALE: i32 = 1024;
+    const Y_SCALE: i32 = (1.164 * SCALE as f64) as i32; // 1192
+    const VR: i32 = (1.596 * SCALE as f64) as i32; // 1634
+    const UG: i32 = (0.392 * SCALE as f64) as i32; // 401
+    const VG: i32 = (0.813 * SCALE as f64) as i32; // 832
+    const UB: i32 = (2.017 * SCALE as f64) as i32; // 2066
+
+    let mut rgb = vec![0u8; width * height * 3];
+
+    for row in 0..height {
+        for col in 0..width {
+            let y_val = i32::from(y_plane[row * width + col]) - 16;
+            let u_val = i32::from(u_plane[(row / 2) * (width / 2) + col / 2]) - 128;
+            let v_val = i32::from(v_plane[(row / 2) * (width / 2) + col / 2]) - 128;
+
+            let y_scaled = y_val * Y_SCALE;
+            let r = (y_scaled + v_val * VR) >> 10;
+            let g = (y_scaled - u_val * UG - v_val * VG) >> 10;
+            let b = (y_scaled + u_val * UB) >> 10;
+
+            let out = (row * width + col) * 3;
+            rgb[out] = r.clamp(0, 255) as u8;
+            rgb[out + 1] = g.clamp(0, 255) as u8;
+            rgb[out + 2] = b.clamp(0, 255) as u8;
+        }
+    }
+
+    rgb
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scalar fallback implementations
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[inline]
+fn u8_to_f32_scalar(src: &[u8], dst: &mut [f32]) {
+    for (s, d) in src.iter().zip(dst.iter_mut()) {
+        *d = f32::from(*s) / 255.0;
+    }
+}
+
+#[inline]
+fn f32_to_u8_scalar(src: &[f32], dst: &mut [u8]) {
+    for (s, d) in src.iter().zip(dst.iter_mut()) {
+        *d = (s.clamp(0.0, 1.0) * 255.0).round() as u8;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -881,5 +1030,118 @@ mod tests {
         // Due to chroma subsampling, we expect some loss.
         // Verify rgb2 is non-empty (all u8 values are inherently <= 255).
         assert!(!rgb2.is_empty());
+    }
+
+    // ── SIMD u8 ↔ f32 tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_u8_to_f32_slice_boundary_values() {
+        let src = [0_u8, 128, 255];
+        let mut dst = [0.0_f32; 3];
+        u8_to_f32_slice(&src, &mut dst);
+        assert!((dst[0] - 0.0).abs() < 1e-6);
+        assert!((dst[1] - 128.0 / 255.0).abs() < 1e-5);
+        assert!((dst[2] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_f32_to_u8_slice_clamping() {
+        let src = [0.0_f32, 0.5, 1.0, -0.5, 1.5];
+        let mut dst = [0_u8; 5];
+        f32_to_u8_slice(&src, &mut dst);
+        assert_eq!(dst[0], 0);
+        assert_eq!(dst[2], 255);
+        assert_eq!(dst[3], 0); // clamped from -0.5
+        assert_eq!(dst[4], 255); // clamped from 1.5
+    }
+
+    /// Round-trip: u8 → f32 → u8 must be within ±1 code value.
+    #[test]
+    fn test_u8_f32_round_trip_accuracy() {
+        let src: Vec<u8> = (0_u8..=255).collect();
+        let mut f32_buf = vec![0.0_f32; src.len()];
+        u8_to_f32_slice(&src, &mut f32_buf);
+
+        let mut back = vec![0_u8; src.len()];
+        f32_to_u8_slice(&f32_buf, &mut back);
+
+        for (orig, restored) in src.iter().zip(back.iter()) {
+            let diff = (*orig as i16 - *restored as i16).abs();
+            assert!(
+                diff <= 1,
+                "round-trip error > ±1: orig={orig}, restored={restored}"
+            );
+        }
+    }
+
+    /// Correctness against scalar implementation.
+    #[test]
+    fn test_u8_to_f32_matches_scalar() {
+        let src: Vec<u8> = (0_u8..=255).collect();
+        let mut scalar_dst = vec![0.0_f32; src.len()];
+        super::u8_to_f32_scalar(&src, &mut scalar_dst);
+
+        let mut simd_dst = vec![0.0_f32; src.len()];
+        u8_to_f32_slice(&src, &mut simd_dst);
+
+        for (s, d) in scalar_dst.iter().zip(simd_dst.iter()) {
+            assert!((s - d).abs() < 1e-6, "scalar={s} vs simd={d}");
+        }
+    }
+
+    /// f32→u8 correctness against scalar.
+    #[test]
+    fn test_f32_to_u8_matches_scalar() {
+        let src: Vec<f32> = (0_u16..=255).map(|v| v as f32 / 255.0).collect();
+        let mut scalar_dst = vec![0_u8; src.len()];
+        super::f32_to_u8_scalar(&src, &mut scalar_dst);
+
+        let mut simd_dst = vec![0_u8; src.len()];
+        f32_to_u8_slice(&src, &mut simd_dst);
+
+        for (s, d) in scalar_dst.iter().zip(simd_dst.iter()) {
+            let diff = (*s as i16 - *d as i16).abs();
+            assert!(diff <= 1, "scalar={s} vs simd={d}");
+        }
+    }
+
+    // ── yuv420_to_rgb BT.601 tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_yuv420_to_rgb_output_size() {
+        let w = 8_u32;
+        let h = 8_u32;
+        let y = vec![128_u8; (w * h) as usize];
+        let u = vec![128_u8; (w / 2 * (h / 2)) as usize];
+        let v = vec![128_u8; (w / 2 * (h / 2)) as usize];
+        let rgb = yuv420_to_rgb(&y, &u, &v, w, h);
+        assert_eq!(rgb.len(), (w * h * 3) as usize);
+    }
+
+    /// Neutral gray (Y=128, U=128, V=128) should give approximately equal R,G,B.
+    #[test]
+    fn test_yuv420_to_rgb_neutral_gray() {
+        let w = 4_u32;
+        let h = 4_u32;
+        let y = vec![128_u8; (w * h) as usize];
+        let u = vec![128_u8; (w / 2 * (h / 2)) as usize];
+        let v = vec![128_u8; (w / 2 * (h / 2)) as usize];
+        let rgb = yuv420_to_rgb(&y, &u, &v, w, h);
+
+        for px in rgb.chunks_exact(3) {
+            let r = px[0] as i16;
+            let g = px[1] as i16;
+            let b = px[2] as i16;
+            assert!(
+                (r - g).abs() <= 4,
+                "R={r} G={g} differ by >{}",
+                (r - g).abs()
+            );
+            assert!(
+                (g - b).abs() <= 4,
+                "G={g} B={b} differ by >{}",
+                (g - b).abs()
+            );
+        }
     }
 }

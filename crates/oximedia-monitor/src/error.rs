@@ -72,6 +72,22 @@ pub enum MonitorError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// Invalid configuration value (distinct from Config parse errors).
+    #[error("Invalid configuration: {0}")]
+    InvalidConfig(String),
+
+    /// Metering subsystem error (audio loudness / VU / PPM).
+    #[error("Metering error: {0}")]
+    MeteringError(String),
+
+    /// Signal/frame processing error.
+    #[error("Processing error: {0}")]
+    ProcessingError(String),
+
+    /// Video scope error.
+    #[error("Scope error: {0}")]
+    ScopeError(String),
+
     /// Invalid metric name.
     #[error("Invalid metric name: {0}")]
     InvalidMetricName(String),

@@ -22,7 +22,9 @@
 //! random-like shape up to N nodes and verify the invariant holds for all.
 
 use crate::graph::{Edge, PipelineGraph};
-use crate::node::{FilterConfig, FrameFormat, NodeId, NodeSpec, NodeType, SinkConfig, SourceConfig, StreamSpec};
+use crate::node::{
+    FilterConfig, FrameFormat, NodeId, NodeSpec, NodeType, SinkConfig, SourceConfig, StreamSpec,
+};
 use crate::validation::PipelineValidator;
 use crate::PipelineError;
 
@@ -37,20 +39,11 @@ fn vs() -> StreamSpec {
 /// in `order`.
 fn assert_topo_order_valid(graph: &PipelineGraph, order: &[NodeId]) {
     // Build position index.
-    let pos: std::collections::HashMap<NodeId, usize> = order
-        .iter()
-        .enumerate()
-        .map(|(i, &id)| (id, i))
-        .collect();
+    let pos: std::collections::HashMap<NodeId, usize> =
+        order.iter().enumerate().map(|(i, &id)| (id, i)).collect();
     for edge in &graph.edges {
-        let from_pos = pos
-            .get(&edge.from_node)
-            .copied()
-            .unwrap_or(usize::MAX);
-        let to_pos = pos
-            .get(&edge.to_node)
-            .copied()
-            .unwrap_or(usize::MAX);
+        let from_pos = pos.get(&edge.from_node).copied().unwrap_or(usize::MAX);
+        let to_pos = pos.get(&edge.to_node).copied().unwrap_or(usize::MAX);
         assert!(
             from_pos < to_pos,
             "edge {:?} → {:?}: from appears at pos {} but to appears at pos {}",
@@ -100,7 +93,11 @@ fn build_chain(len: usize) -> PipelineGraph {
 /// Build a diamond graph: `src → left, src → right, left → sink, right → sink`.
 fn build_diamond() -> PipelineGraph {
     let mut g = PipelineGraph::new();
-    let src = g.add_node(NodeSpec::source("src", SourceConfig::File("x".into()), vs()));
+    let src = g.add_node(NodeSpec::source(
+        "src",
+        SourceConfig::File("x".into()),
+        vs(),
+    ));
     let left = g.add_node(NodeSpec::filter("left", FilterConfig::Hflip, vs(), vs()));
     let right = g.add_node(NodeSpec::filter("right", FilterConfig::Vflip, vs(), vs()));
     let sink = g.add_node(NodeSpec::sink("sink", SinkConfig::Null, vs()));
@@ -118,13 +115,13 @@ fn build_diamond() -> PipelineGraph {
 /// Build a fan-out graph: `src → s1, src → s2, src → s3`.
 fn build_fan_out(branches: usize) -> PipelineGraph {
     let mut g = PipelineGraph::new();
-    let src = g.add_node(NodeSpec::source("src", SourceConfig::File("x".into()), vs()));
+    let src = g.add_node(NodeSpec::source(
+        "src",
+        SourceConfig::File("x".into()),
+        vs(),
+    ));
     for i in 0..branches {
-        let sink = g.add_node(NodeSpec::sink(
-            &format!("sink{i}"),
-            SinkConfig::Null,
-            vs(),
-        ));
+        let sink = g.add_node(NodeSpec::sink(&format!("sink{i}"), SinkConfig::Null, vs()));
         g.edges.push(Edge {
             from_node: src,
             from_pad: "default".into(),
@@ -139,9 +136,8 @@ fn build_fan_out(branches: usize) -> PipelineGraph {
 fn build_fan_in(inputs: usize) -> PipelineGraph {
     let mut g = PipelineGraph::new();
     // Build merge node with `inputs` input pads.
-    let input_pads: Vec<(String, StreamSpec)> = (0..inputs)
-        .map(|i| (format!("in{i}"), vs()))
-        .collect();
+    let input_pads: Vec<(String, StreamSpec)> =
+        (0..inputs).map(|i| (format!("in{i}"), vs())).collect();
     let merge = NodeSpec::new(
         "merge",
         NodeType::Merge,
@@ -179,7 +175,11 @@ fn build_tree(depth: usize) -> PipelineGraph {
     if depth == 0 {
         return g;
     }
-    let root = g.add_node(NodeSpec::source("root", SourceConfig::File("x".into()), vs()));
+    let root = g.add_node(NodeSpec::source(
+        "root",
+        SourceConfig::File("x".into()),
+        vs(),
+    ));
     let mut current_level = vec![root];
     for level in 1..depth {
         let mut next_level = Vec::new();
@@ -272,7 +272,11 @@ fn topo_binary_tree() {
 #[test]
 fn topo_single_node() {
     let mut g = PipelineGraph::new();
-    g.add_node(NodeSpec::source("only", SourceConfig::File("x".into()), vs()));
+    g.add_node(NodeSpec::source(
+        "only",
+        SourceConfig::File("x".into()),
+        vs(),
+    ));
     let order = g.topological_sort().expect("single node topo ok");
     assert_eq!(order.len(), 1);
 }
@@ -291,8 +295,18 @@ fn topo_two_node_cycle_detected() {
     let mut g = PipelineGraph::new();
     let a = g.add_node(NodeSpec::filter("a", FilterConfig::Hflip, vs(), vs()));
     let b = g.add_node(NodeSpec::filter("b", FilterConfig::Vflip, vs(), vs()));
-    g.edges.push(Edge { from_node: a, from_pad: "default".into(), to_node: b, to_pad: "default".into() });
-    g.edges.push(Edge { from_node: b, from_pad: "default".into(), to_node: a, to_pad: "default".into() });
+    g.edges.push(Edge {
+        from_node: a,
+        from_pad: "default".into(),
+        to_node: b,
+        to_pad: "default".into(),
+    });
+    g.edges.push(Edge {
+        from_node: b,
+        from_pad: "default".into(),
+        to_node: a,
+        to_pad: "default".into(),
+    });
     let result = g.topological_sort();
     assert!(result.is_err());
     assert!(matches!(result, Err(PipelineError::CycleDetected { .. })));
@@ -302,7 +316,12 @@ fn topo_two_node_cycle_detected() {
 #[test]
 fn topo_self_loop_detected() {
     let mut g = PipelineGraph::new();
-    let a = g.add_node(NodeSpec::filter("self_loop", FilterConfig::Hflip, vs(), vs()));
+    let a = g.add_node(NodeSpec::filter(
+        "self_loop",
+        FilterConfig::Hflip,
+        vs(),
+        vs(),
+    ));
     g.edges.push(Edge {
         from_node: a,
         from_pad: "default".into(),
@@ -321,7 +340,12 @@ fn topo_three_node_cycle_detected() {
     let b = g.add_node(NodeSpec::filter("b", FilterConfig::Vflip, vs(), vs()));
     let c = g.add_node(NodeSpec::filter("c", FilterConfig::Hflip, vs(), vs()));
     for (from, to) in [(a, b), (b, c), (c, a)] {
-        g.edges.push(Edge { from_node: from, from_pad: "default".into(), to_node: to, to_pad: "default".into() });
+        g.edges.push(Edge {
+            from_node: from,
+            from_pad: "default".into(),
+            to_node: to,
+            to_pad: "default".into(),
+        });
     }
     let result = g.topological_sort();
     assert!(matches!(result, Err(PipelineError::CycleDetected { .. })));
@@ -333,12 +357,29 @@ fn topo_cycle_path_nonempty() {
     let mut g = PipelineGraph::new();
     let a = g.add_node(NodeSpec::filter("alpha", FilterConfig::Hflip, vs(), vs()));
     let b = g.add_node(NodeSpec::filter("beta", FilterConfig::Vflip, vs(), vs()));
-    g.edges.push(Edge { from_node: a, from_pad: "default".into(), to_node: b, to_pad: "default".into() });
-    g.edges.push(Edge { from_node: b, from_pad: "default".into(), to_node: a, to_pad: "default".into() });
+    g.edges.push(Edge {
+        from_node: a,
+        from_pad: "default".into(),
+        to_node: b,
+        to_pad: "default".into(),
+    });
+    g.edges.push(Edge {
+        from_node: b,
+        from_pad: "default".into(),
+        to_node: a,
+        to_pad: "default".into(),
+    });
     if let Err(PipelineError::CycleDetected { path }) = g.topological_sort() {
-        assert!(path.len() >= 2, "cycle path must have at least 2 elements, got: {path:?}");
+        assert!(
+            path.len() >= 2,
+            "cycle path must have at least 2 elements, got: {path:?}"
+        );
         // The path should repeat the first element at the end to show the loop.
-        assert_eq!(path.first(), path.last(), "cycle path first and last should match");
+        assert_eq!(
+            path.first(),
+            path.last(),
+            "cycle path first and last should match"
+        );
     } else {
         panic!("expected CycleDetected");
     }
@@ -358,7 +399,10 @@ fn validate_completely_isolated_filter() {
         matches!(e, crate::validation::ValidationError::UnsatisfiedInput { node_name, .. }
             if node_name == "orphan")
     });
-    assert!(has_unsatisfied, "expected UnsatisfiedInput for isolated filter");
+    assert!(
+        has_unsatisfied,
+        "expected UnsatisfiedInput for isolated filter"
+    );
 }
 
 /// A sink node with no incoming edge triggers UnsatisfiedInput.
@@ -369,7 +413,10 @@ fn validate_sink_no_input() {
     let report = PipelineValidator::new().validate(&g);
     assert!(!report.is_valid);
     assert!(report.errors.iter().any(|e| {
-        matches!(e, crate::validation::ValidationError::UnsatisfiedInput { .. })
+        matches!(
+            e,
+            crate::validation::ValidationError::UnsatisfiedInput { .. }
+        )
     }));
 }
 
@@ -379,9 +426,18 @@ fn validate_sink_no_input() {
 #[test]
 fn validate_source_filter_no_sink() {
     let mut g = PipelineGraph::new();
-    let src = g.add_node(NodeSpec::source("src", SourceConfig::File("x".into()), vs()));
+    let src = g.add_node(NodeSpec::source(
+        "src",
+        SourceConfig::File("x".into()),
+        vs(),
+    ));
     let flt = g.add_node(NodeSpec::filter("flt", FilterConfig::Hflip, vs(), vs()));
-    g.edges.push(Edge { from_node: src, from_pad: "default".into(), to_node: flt, to_pad: "default".into() });
+    g.edges.push(Edge {
+        from_node: src,
+        from_pad: "default".into(),
+        to_node: flt,
+        to_pad: "default".into(),
+    });
     let report = PipelineValidator::new().validate(&g);
     // The filter has its input satisfied and is reachable from src, so no
     // structural error for it.  No sink, but that alone is not an error.
@@ -394,7 +450,11 @@ fn validate_source_filter_no_sink() {
 #[test]
 fn validate_mixed_valid_and_invalid_subgraphs() {
     let mut g = PipelineGraph::new();
-    let src = g.add_node(NodeSpec::source("src", SourceConfig::File("x".into()), vs()));
+    let src = g.add_node(NodeSpec::source(
+        "src",
+        SourceConfig::File("x".into()),
+        vs(),
+    ));
     let sink = g.add_node(NodeSpec::sink("sink", SinkConfig::Null, vs()));
     g.connect(src, "default", sink, "default").expect("connect");
     // Orphaned filter.
@@ -408,7 +468,11 @@ fn validate_mixed_valid_and_invalid_subgraphs() {
 #[test]
 fn graph_validate_dangling_edge() {
     let mut g = PipelineGraph::new();
-    let src = g.add_node(NodeSpec::source("src", SourceConfig::File("x".into()), vs()));
+    let src = g.add_node(NodeSpec::source(
+        "src",
+        SourceConfig::File("x".into()),
+        vs(),
+    ));
     let phantom_id = NodeId::new();
     // Push a dangling edge to a non-existent node.
     g.edges.push(Edge {
@@ -419,7 +483,9 @@ fn graph_validate_dangling_edge() {
     });
     let errors = g.validate();
     assert!(
-        errors.iter().any(|e| matches!(e, PipelineError::NodeNotFound(_))),
+        errors
+            .iter()
+            .any(|e| matches!(e, PipelineError::NodeNotFound(_))),
         "expected NodeNotFound for dangling edge, got: {errors:?}"
     );
 }
@@ -431,11 +497,23 @@ fn graph_validate_detects_cycle() {
     let mut g = PipelineGraph::new();
     let a = g.add_node(NodeSpec::filter("a", FilterConfig::Hflip, vs(), vs()));
     let b = g.add_node(NodeSpec::filter("b", FilterConfig::Vflip, vs(), vs()));
-    g.edges.push(Edge { from_node: a, from_pad: "default".into(), to_node: b, to_pad: "default".into() });
-    g.edges.push(Edge { from_node: b, from_pad: "default".into(), to_node: a, to_pad: "default".into() });
+    g.edges.push(Edge {
+        from_node: a,
+        from_pad: "default".into(),
+        to_node: b,
+        to_pad: "default".into(),
+    });
+    g.edges.push(Edge {
+        from_node: b,
+        from_pad: "default".into(),
+        to_node: a,
+        to_pad: "default".into(),
+    });
     let errors = g.validate();
     assert!(
-        errors.iter().any(|e| matches!(e, PipelineError::CycleDetected { .. })),
+        errors
+            .iter()
+            .any(|e| matches!(e, PipelineError::CycleDetected { .. })),
         "expected CycleDetected error"
     );
 }
@@ -444,9 +522,16 @@ fn graph_validate_detects_cycle() {
 #[test]
 fn graph_validate_source_only_no_errors() {
     let mut g = PipelineGraph::new();
-    g.add_node(NodeSpec::source("src", SourceConfig::File("x".into()), vs()));
+    g.add_node(NodeSpec::source(
+        "src",
+        SourceConfig::File("x".into()),
+        vs(),
+    ));
     let errors = g.validate();
-    assert!(errors.is_empty(), "source-only graph should have no errors, got: {errors:?}");
+    assert!(
+        errors.is_empty(),
+        "source-only graph should have no errors, got: {errors:?}"
+    );
 }
 
 /// `PipelineGraph::validate()` reports missing input pads on a filter with no
@@ -457,7 +542,9 @@ fn graph_validate_unconnected_input_pad() {
     g.add_node(NodeSpec::filter("flt", FilterConfig::Hflip, vs(), vs()));
     let errors = g.validate();
     assert!(
-        errors.iter().any(|e| matches!(e, PipelineError::PadNotFound { .. })),
+        errors
+            .iter()
+            .any(|e| matches!(e, PipelineError::PadNotFound { .. })),
         "expected PadNotFound for unconnected input pad"
     );
 }
@@ -468,15 +555,26 @@ fn graph_validate_unconnected_input_pad() {
 fn graph_validate_long_chain_valid() {
     let g = build_chain(5);
     let errors = g.validate();
-    assert!(errors.is_empty(), "chain of 5 should be valid, got: {errors:?}");
+    assert!(
+        errors.is_empty(),
+        "chain of 5 should be valid, got: {errors:?}"
+    );
 }
 
 /// Validator reports `DuplicateNodeName` warning for two sources with the same name.
 #[test]
 fn validate_duplicate_names_warning() {
     let mut g = PipelineGraph::new();
-    let s1 = g.add_node(NodeSpec::source("src", SourceConfig::File("a".into()), vs()));
-    let s2 = g.add_node(NodeSpec::source("src", SourceConfig::File("b".into()), vs()));
+    let s1 = g.add_node(NodeSpec::source(
+        "src",
+        SourceConfig::File("a".into()),
+        vs(),
+    ));
+    let s2 = g.add_node(NodeSpec::source(
+        "src",
+        SourceConfig::File("b".into()),
+        vs(),
+    ));
     let sk1 = g.add_node(NodeSpec::sink("sink1", SinkConfig::Null, vs()));
     let sk2 = g.add_node(NodeSpec::sink("sink2", SinkConfig::Null, vs()));
     g.connect(s1, "default", sk1, "default").expect("ok");

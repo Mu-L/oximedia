@@ -34,20 +34,20 @@
 ## Performance
 - [x] Replace `ndarray` with pure-Rust matrix operations per COOLJAPAN Pure Rust Policy
 - [x] Replace `rustfft` with OxiFFT per COOLJAPAN Policy
-- [ ] Pre-allocate FFT scratch buffers in `SpectralAnalyzer` to avoid per-frame allocation (verified-open 2026-05-16: not yet implemented)
-- [ ] Add overlap-save method for efficient long-duration spectral analysis (verified-open 2026-05-16: not yet implemented)
-- [ ] Implement parallel analysis of independent modules in `AudioAnalyzer::analyze` with rayon (verified-open 2026-05-16: no rayon par_iter in lib.rs analyze())
-- [ ] Cache window function coefficients across `SpectralAnalyzer` instances (static lazy) (verified-open 2026-05-16: not yet implemented)
+- [x] Pre-allocate FFT scratch buffers in `SpectralAnalyzer` to avoid per-frame allocation (implemented 2026-06-01: src/spectral/analyze.rs — `Mutex<Vec<Complex<f64>>>` fields `fft_in`/`fft_out`; uses `Plan::execute` for true in-place buffer reuse; `Mutex` ensures `Sync` for rayon sharing; tests: `test_fft_scratch_reuse_identical_to_allocating`, `test_fft_scratch_no_cross_contamination`)
+- [x] Add overlap-save method for efficient long-duration spectral analysis (verified 2026-06-01: src/spectral/overlap_save.rs 257-line OverlapSaveAnalyzer)
+- [x] Implement parallel analysis of independent modules in `AudioAnalyzer::analyze` with rayon (implemented 2026-06-01: src/lib.rs — nested `rayon::join` runs spectral/pitch/formants/dynamics/transients concurrently; voice analysis remains sequential after pitch; `SpectralAnalyzer` uses `Mutex` for `Sync`; tests: `test_parallel_analyze_matches_sequential`)
+- [x] Cache window function coefficients across `SpectralAnalyzer` instances (static lazy) (implemented 2026-06-01: src/lib.rs — `WINDOW_CACHE: OnceLock<Mutex<HashMap<(u8,usize), Arc<Vec<f32>>>>>` upgraded to `Arc`-backed cache; `get_or_compute_window()` returns `Arc<Vec<f32>>` — no Vec copy on cache hit; `SpectralAnalyzer` stores `Arc<Vec<f32>>`; tests: `test_window_cache_identical` (ptr_eq for cache hit), `test_window_cache_different_sizes`)
 - [ ] Optimize `formant/analyze` LPC computation with Levinson-Durbin recursion in-place (verified-open 2026-05-16: not yet implemented)
 
 ## Testing
 - [ ] Test `pitch/track` YIN accuracy against PTDB-TUG pitch reference dataset values
 - [ ] Add `voice/emotion` detection test with synthetic signals (known pitch/energy patterns)
 - [ ] Test `forensics/authenticity` with intentionally spliced audio files
-- [ ] Test `distortion/thd` computation against reference sinusoidal test signals
-- [ ] Add `echo/rt60` measurement test with synthetic exponentially decaying impulse response
+- [x] Test `distortion/thd` computation against reference sinusoidal test signals (implemented 2026-06-01: `test_thd_pure_sine_analytically_zero` + `test_thd_known_harmonics` in src/distortion/thd.rs)
+- [x] Add `echo/rt60` measurement test with synthetic exponentially decaying impulse response (implemented 2026-06-01: `test_rt60_exp_decay_known` in src/echo/rt60.rs)
 - [ ] Test `separate/vocal` separation quality using synthetic mixed vocal+instrumental signals
-- [ ] Test `noise/snr` computation accuracy with known white noise at specific SNR levels
+- [x] Test `noise/snr` computation accuracy with known white noise at specific SNR levels (implemented 2026-06-01: `test_snr_known_ratio` in src/noise/snr.rs)
 - [ ] Add `beat` detection accuracy test against annotated rhythm datasets
 
 ## Documentation

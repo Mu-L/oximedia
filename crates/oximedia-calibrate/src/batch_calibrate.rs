@@ -256,9 +256,14 @@ impl BatchCalibrator {
 
             // Least-squares 3×3 colour correction matrix from measurement to reference
             let matrix = compute_correction_matrix(&measurement.patch_rgb, &reference.patch_rgb);
-            let gain_offsets = compute_gain_offsets(&measurement.patch_rgb, &reference.patch_rgb, &matrix);
-            let corrected_de =
-                corrected_delta_e(measurement, &matrix, &gain_offsets, &reference.reference_lab);
+            let gain_offsets =
+                compute_gain_offsets(&measurement.patch_rgb, &reference.patch_rgb, &matrix);
+            let corrected_de = corrected_delta_e(
+                measurement,
+                &matrix,
+                &gain_offsets,
+                &reference.reference_lab,
+            );
 
             cameras.insert(
                 measurement.camera_id.clone(),
@@ -472,10 +477,7 @@ mod tests {
                 [v, v, v]
             })
             .collect();
-        let lab: Vec<Lab> = patches
-            .iter()
-            .map(|p| rgb_to_lab_approx(*p))
-            .collect();
+        let lab: Vec<Lab> = patches.iter().map(|p| rgb_to_lab_approx(*p)).collect();
         (patches, lab)
     }
 

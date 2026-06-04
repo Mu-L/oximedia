@@ -230,6 +230,115 @@ impl JobMetricsCollector {
     }
 }
 
+// ===========================================================================
+// EWMA-based ETA estimation
+// ===========================================================================
+
+/// EWMA smoothing factor for duration statistics.
+const EWMA_ALPHA: f64 = 0.1;
+
+/// Rolling EWMA statistics for a single job kind.
+///
+/// Both mean and variance are tracked in nanoseconds to avoid floating-point
+/// precision loss at sub-millisecond granularity.
+#[derive(Debug, Clone, Default)]
+pub struct DurationStats {
+    /// EWMA of the mean duration in nanoseconds.
+    pub ewma_mean_ns: f64,
+    /// EWMA of the variance (M2 approximation) in nanoseconds squared.
+    pub ewma_var_ns: f64,
+    /// Number of samples incorporated so far.
+    pub count: u64,
+}
+
+impl DurationStats {
+    /// Create zero-initialised statistics.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Incorporate a new duration sample using EWMA update rules.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn update(&mut self, duration: std::time::Duration) {
+        let sample_ns = duration.as_nanos() as f64;
+        if self.count == 0 {
+            self.ewma_mean_ns = sample_ns;
+            self.ewma_var_ns = 0.0;
+        } else {
+            let delta = sample_ns - self.ewma_mean_ns;
+            self.ewma_mean_ns += EWMA_ALPHA * delta;
+            self.ewma_var_ns = (1.0 - EWMA_ALPHA) * (self.ewma_var_ns + EWMA_ALPHA * delta * delta);
+        }
+        self.count += 1;
+    }
+}
+
+/// Per-kind duration statistics used for ETA estimation.
+///
+/// This is a thin wrapper that maps a job-kind string to its [`DurationStats`]
+/// and exposes a high-level [`estimate_remaining`] method.
+///
+/// [`estimate_remaining`]: JobEtaEstimator::estimate_remaining
+#[derive(Debug, Default, Clone)]
+pub struct JobEtaEstimator {
+    stats: std::collections::HashMap<String, DurationStats>,
+}
+
+impl JobEtaEstimator {
+    /// Create an empty estimator.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a completed duration for the given `kind`.
+    pub fn record_duration(&mut self, kind: &str, duration: std::time::Duration) {
+        self.stats
+            .entry(kind.to_string())
+            .or_default()
+            .update(duration);
+    }
+
+    /// Estimate how much time remains for a job of the given `kind`.
+    ///
+    /// Returns `None` when:
+    /// - No history exists for this `kind` (`count == 0`), or
+    /// - `progress_frac` is effectively zero (would cause division by zero).
+    ///
+    /// Otherwise:
+    /// ```text
+    /// remaining ≈ ewma_mean × (1 - progress_frac) / max(progress_frac, 0.001)
+    /// ```
+    /// The result is clamped to non-negative.
+    pub fn estimate_remaining(
+        &self,
+        kind: &str,
+        _elapsed: std::time::Duration,
+        progress_frac: f64,
+    ) -> Option<std::time::Duration> {
+        let stats = self.stats.get(kind)?;
+        if stats.count == 0 {
+            return None;
+        }
+        if progress_frac < f64::EPSILON {
+            return None;
+        }
+        let denom = progress_frac.max(0.001);
+        let remaining_ns = stats.ewma_mean_ns * (1.0 - progress_frac) / denom;
+        if remaining_ns <= 0.0 {
+            return Some(std::time::Duration::ZERO);
+        }
+        Some(std::time::Duration::from_nanos(remaining_ns as u64))
+    }
+
+    /// Return stats for a specific kind, if any.
+    #[must_use]
+    pub fn stats_for(&self, kind: &str) -> Option<&DurationStats> {
+        self.stats.get(kind)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,5 +472,76 @@ mod tests {
         c.clear();
         assert_eq!(c.total_recorded(), 0);
         assert_eq!(c.success_rate(), 0.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // ETA estimation tests
+    // -----------------------------------------------------------------------
+
+    /// After several warm-up samples the estimated remaining time should
+    /// converge close to `ewma_mean * (1 - progress) / progress` (within 20 %
+    /// tolerance).
+    ///
+    /// For jobs whose typical duration is 1 000 ms, at 25 % progress the
+    /// formula predicts: 1000 * (1 - 0.25) / 0.25 = 3000 ms.
+    #[test]
+    fn test_eta_converges_within_tolerance_after_warm_up() {
+        let mut est = JobEtaEstimator::new();
+        // Simulate 20 completed jobs of 1 s each to warm up the EWMA mean.
+        for _ in 0..20 {
+            est.record_duration("transcode", Duration::from_secs(1));
+        }
+
+        // At 25 % progress: remaining = 1000 * 0.75 / 0.25 = 3000 ms.
+        let remaining = est
+            .estimate_remaining("transcode", Duration::from_millis(250), 0.25)
+            .expect("estimate should exist after warm-up");
+
+        // After 20 EWMA samples the mean should be very close to 1000 ms, so
+        // the estimate should be close to 3000 ms.
+        let expected_ms = 3000_u128;
+        let actual_ms = remaining.as_millis();
+        let tolerance = expected_ms / 5; // 20 %
+        assert!(
+            actual_ms.abs_diff(expected_ms) <= tolerance,
+            "ETA expected ~{expected_ms} ms, got {actual_ms} ms"
+        );
+    }
+
+    /// `estimate_remaining` must return `None` when no history exists.
+    #[test]
+    fn test_eta_returns_none_with_zero_history() {
+        let est = JobEtaEstimator::new();
+        let result = est.estimate_remaining("unknown-kind", Duration::from_millis(100), 0.5);
+        assert!(
+            result.is_none(),
+            "expected None for unknown kind, got {result:?}"
+        );
+    }
+
+    /// The estimated remaining duration must decrease (or stay constant) as
+    /// `progress_frac` increases from a small value towards 1.0.
+    #[test]
+    fn test_eta_decreases_monotonically_as_progress_increases() {
+        let mut est = JobEtaEstimator::new();
+        for _ in 0..10 {
+            est.record_duration("encode", Duration::from_secs(2));
+        }
+
+        let frac_points: &[f64] = &[0.1, 0.25, 0.5, 0.75, 0.9];
+        let mut previous: Option<u128> = None;
+        for &frac in frac_points {
+            let rem = est
+                .estimate_remaining("encode", Duration::from_millis(100), frac)
+                .expect("estimate should exist")
+                .as_millis();
+            if let Some(prev) = previous {
+                assert!(
+                    rem <= prev,
+                    "at progress {frac} remaining={rem} ms should be <= previous {prev} ms"
+                );
+            }
+            previous = Some(rem);
+        }
     }
 }

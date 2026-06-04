@@ -202,8 +202,7 @@ impl MelodyExtractor {
         let window = hann_window(self.config.window_size);
         let hop = self.config.hop_size.max(1);
         let sr = self.sample_rate as f32;
-        let n_frames =
-            (samples.len().saturating_sub(self.config.window_size)) / hop + 1;
+        let n_frames = (samples.len().saturating_sub(self.config.window_size)) / hop + 1;
 
         let mut raw_midi: Vec<Option<u8>> = Vec::with_capacity(n_frames);
         let mut saliences: Vec<f32> = Vec::with_capacity(n_frames);
@@ -227,8 +226,7 @@ impl MelodyExtractor {
             let n_bins = spectrum.len() / 2;
             let mags: Vec<f32> = spectrum[..n_bins].iter().map(|c| c.norm()).collect();
 
-            let (best_midi, best_sal) =
-                self.compute_salience(&mags, n_bins, sr);
+            let (best_midi, best_sal) = self.compute_salience(&mags, n_bins, sr);
 
             raw_midi.push(best_midi);
             saliences.push(best_sal);
@@ -250,14 +248,10 @@ impl MelodyExtractor {
             .collect();
 
         // Phase 3: pitch smoothing (median over ±smooth_radius frames)
-        let smoothed_midi =
-            self.smooth_pitch(&voiced_midi, self.config.smooth_radius);
+        let smoothed_midi = self.smooth_pitch(&voiced_midi, self.config.smooth_radius);
 
         // Phase 4: convert MIDI → Hz
-        let pitch_hz: Vec<Option<f32>> = smoothed_midi
-            .iter()
-            .map(|m| m.map(midi_to_hz))
-            .collect();
+        let pitch_hz: Vec<Option<f32>> = smoothed_midi.iter().map(|m| m.map(midi_to_hz)).collect();
 
         // Phase 5: MIDI-pitch vec for output
         let midi_out: Vec<Option<u8>> = smoothed_midi;
@@ -358,10 +352,7 @@ impl MelodyExtractor {
         let n = pitch_hz.len();
 
         let flush_segment = |start: usize, end: usize| -> Option<VibratoSegment> {
-            let voiced: Vec<f32> = pitch_hz[start..end]
-                .iter()
-                .filter_map(|p| *p)
-                .collect();
+            let voiced: Vec<f32> = pitch_hz[start..end].iter().filter_map(|p| *p).collect();
 
             if voiced.len() < VIBRATO_MIN_FRAMES {
                 return None;
@@ -387,10 +378,7 @@ impl MelodyExtractor {
             }
 
             // Estimate vibrato rate via zero-crossing count of the deviation signal
-            let crossings = semitones
-                .windows(2)
-                .filter(|w| w[0] * w[1] < 0.0)
-                .count();
+            let crossings = semitones.windows(2).filter(|w| w[0] * w[1] < 0.0).count();
             // Each full cycle has 2 zero-crossings
             let duration_s = voiced.len() as f32 / frame_rate;
             let rate_hz = crossings as f32 / (2.0 * duration_s);
@@ -400,7 +388,10 @@ impl MelodyExtractor {
             }
 
             let start_s = timestamps.get(start).copied().unwrap_or(0.0);
-            let end_s = timestamps.get(end.saturating_sub(1)).copied().unwrap_or(duration_s);
+            let end_s = timestamps
+                .get(end.saturating_sub(1))
+                .copied()
+                .unwrap_or(duration_s);
 
             Some(VibratoSegment {
                 start_s,
@@ -557,7 +548,10 @@ mod tests {
         let extractor = MelodyExtractor::new(sr, config);
         let samples = sine(440.0, sr, 1.0);
         let result = extractor.extract(&samples).expect("extract failed");
-        assert!(result.n_voiced() > 0, "expected voiced frames for 440 Hz sine");
+        assert!(
+            result.n_voiced() > 0,
+            "expected voiced frames for 440 Hz sine"
+        );
     }
 
     #[test]
@@ -584,7 +578,12 @@ mod tests {
         assert_eq!(result.timestamps_s.len(), result.pitch_hz.len());
         // Timestamps should be monotonically non-decreasing
         for w in result.timestamps_s.windows(2) {
-            assert!(w[1] >= w[0], "timestamps not monotone: {} >= {}", w[0], w[1]);
+            assert!(
+                w[1] >= w[0],
+                "timestamps not monotone: {} >= {}",
+                w[0],
+                w[1]
+            );
         }
     }
 

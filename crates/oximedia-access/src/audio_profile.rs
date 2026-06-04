@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! User audio accessibility profiles and preferences.
 //!
 //! Manages per-user audio settings that adapt media playback to
@@ -253,18 +252,14 @@ impl AudioAccessProfile {
 
     /// Set a boost for a frequency band.
     pub fn set_band_boost(&mut self, band: FrequencyBand, boost_db: f64) {
-        self.band_adjustments.insert(
-            band,
-            BandBoost { band, boost_db },
-        );
+        self.band_adjustments
+            .insert(band, BandBoost { band, boost_db });
     }
 
     /// Get the boost for a specific band (0.0 if not set).
     #[must_use]
     pub fn get_band_boost(&self, band: FrequencyBand) -> f64 {
-        self.band_adjustments
-            .get(&band)
-            .map_or(0.0, |b| b.boost_db)
+        self.band_adjustments.get(&band).map_or(0.0, |b| b.boost_db)
     }
 
     /// Get the total number of band adjustments.
@@ -285,7 +280,11 @@ impl AudioAccessProfile {
     /// Compute the total boost across all bands.
     #[must_use]
     pub fn total_boost(&self) -> f64 {
-        self.band_adjustments.values().map(|b| b.boost_db).sum::<f64>() + self.volume_boost_db
+        self.band_adjustments
+            .values()
+            .map(|b| b.boost_db)
+            .sum::<f64>()
+            + self.volume_boost_db
     }
 }
 
@@ -442,7 +441,8 @@ mod tests {
         let comp = CompressionSettings::default();
         let output = comp.compute_output(-10.0);
         // Above threshold: compressed
-        let expected = comp.threshold_db + (-10.0 - comp.threshold_db) / comp.ratio + comp.makeup_gain_db;
+        let expected =
+            comp.threshold_db + (-10.0 - comp.threshold_db) / comp.ratio + comp.makeup_gain_db;
         assert!((output - expected).abs() < 1e-10);
     }
 
@@ -454,7 +454,12 @@ mod tests {
         assert!(mgr.active_profile().is_none());
         assert!(mgr.set_active(idx));
         assert!(mgr.active_profile().is_some());
-        assert_eq!(mgr.active_profile().expect("active_profile should succeed").name, "Test");
+        assert_eq!(
+            mgr.active_profile()
+                .expect("active_profile should succeed")
+                .name,
+            "Test"
+        );
     }
 
     #[test]
@@ -476,7 +481,12 @@ mod tests {
         assert!(mgr.remove_profile(0));
         assert_eq!(mgr.profile_count(), 1);
         // Active adjusted
-        assert_eq!(mgr.active_profile().expect("active_profile should succeed").name, "B");
+        assert_eq!(
+            mgr.active_profile()
+                .expect("active_profile should succeed")
+                .name,
+            "B"
+        );
     }
 
     #[test]

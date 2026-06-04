@@ -3,10 +3,22 @@
 //! Implements a fixed-capacity ring buffer that stores recent encoded frames
 //! up to the configured duration. When the buffer is full, the oldest frames
 //! are evicted to make room for new ones.
+//!
+//! Two storage back-ends are available:
+//!
+//! * **VecDeque** (default) — in-process heap storage; zero setup, always safe.
+//! * **MmapReplayRing** — memory-mapped file ring buffer; avoids copying frame
+//!   data into the heap and keeps the replay set page-cache-resident so it
+//!   survives GC pressure.  Enable via [`ReplayBufferConfig::use_mmap`].
 
 use crate::{GamingError, GamingResult};
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::time::Duration;
+
+// ---------------------------------------------------------------------------
+// ReplayFrame
+// ---------------------------------------------------------------------------
 
 /// A single frame stored in the replay buffer.
 #[derive(Debug, Clone)]
@@ -20,6 +32,332 @@ pub struct ReplayFrame {
     /// Frame sequence number.
     pub sequence: u64,
 }
+
+// ---------------------------------------------------------------------------
+// ReplayConfig (legacy) — kept for backward-compat
+// ---------------------------------------------------------------------------
+
+/// Replay buffer configuration.
+#[derive(Debug, Clone)]
+pub struct ReplayConfig {
+    /// Buffer duration in seconds
+    pub duration: u32,
+    /// Video bitrate in kbps
+    pub bitrate: u32,
+    /// Audio enabled
+    pub audio_enabled: bool,
+    /// Target framerate (used for capacity estimation)
+    pub framerate: u32,
+}
+
+impl Default for ReplayConfig {
+    fn default() -> Self {
+        Self {
+            duration: 30,
+            bitrate: 10000,
+            audio_enabled: true,
+            framerate: 60,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ReplayBufferConfig (extended, includes mmap option)
+// ---------------------------------------------------------------------------
+
+/// Extended replay buffer configuration including optional mmap back-end.
+#[derive(Debug, Clone)]
+pub struct ReplayBufferConfig {
+    /// Buffer duration in seconds (5–300).
+    pub duration: u32,
+    /// Video bitrate in kbps (used to compute byte budget).
+    pub bitrate: u32,
+    /// Audio enabled.
+    pub audio_enabled: bool,
+    /// Target framerate (used for frame-count capacity).
+    pub framerate: u32,
+    /// When `true`, use the memory-mapped ring buffer back-end.
+    /// When `false` (default), use the VecDeque back-end.
+    pub use_mmap: bool,
+    /// Directory for the mmap backing file (used only when `use_mmap = true`).
+    /// Defaults to `std::env::temp_dir()`.
+    pub mmap_dir: Option<PathBuf>,
+}
+
+impl Default for ReplayBufferConfig {
+    fn default() -> Self {
+        Self {
+            duration: 30,
+            bitrate: 10000,
+            audio_enabled: true,
+            framerate: 60,
+            use_mmap: false,
+            mmap_dir: None,
+        }
+    }
+}
+
+impl From<ReplayConfig> for ReplayBufferConfig {
+    fn from(rc: ReplayConfig) -> Self {
+        Self {
+            duration: rc.duration,
+            bitrate: rc.bitrate,
+            audio_enabled: rc.audio_enabled,
+            framerate: rc.framerate,
+            use_mmap: false,
+            mmap_dir: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MmapReplayRing — memory-mapped ring buffer
+// ---------------------------------------------------------------------------
+
+/// Record header size in the mmap ring: `[4-byte len][4-byte flags][8-byte ts_ns]`.
+const RECORD_HEADER_SIZE: usize = 16;
+
+/// Memory-mapped ring buffer storing replay frames as length-prefixed records.
+///
+/// The mmap provides durable, zero-copy backing storage.  An in-memory
+/// [`VecDeque`] index tracks the (offset, total_size) of every live record so
+/// there is no head==tail ambiguity and no sentinel records needed.
+///
+/// # File layout
+///
+/// ```text
+/// [8 bytes] magic "OxiRing1"
+/// [8 bytes] capacity_bytes (LE u64)
+/// [16 bytes] reserved
+/// --- data region (capacity_bytes bytes) ---
+/// ```
+/// Each record in the data region:
+/// ```text
+/// [4 bytes] payload_len  (LE u32)
+/// [4 bytes] flags        (bit 0 = keyframe, LE u32)
+/// [8 bytes] timestamp_ns (LE u64)
+/// [N bytes] payload
+/// ```
+pub struct MmapReplayRing {
+    path: PathBuf,
+    map: memmap2::MmapMut,
+    /// Usable data capacity (file size minus the 32-byte file header).
+    capacity_bytes: usize,
+    /// Write pointer: byte offset within the data region for the next record.
+    head: usize,
+    /// Per-record index: (offset_in_data_region, total_record_size).
+    index: VecDeque<(usize, usize)>,
+    /// Running total bytes used by live records (not including evicted ones).
+    used_bytes: usize,
+}
+
+const RING_GLOBAL_HEADER: usize = 32;
+const RING_MAGIC: &[u8; 8] = b"OxiRing1";
+
+impl MmapReplayRing {
+    /// Create (or re-create) a memory-mapped ring buffer at `path` with at least
+    /// `capacity_bytes` of usable data space.
+    ///
+    /// # Errors
+    ///
+    /// Returns `std::io::Error` if the backing file cannot be created or mapped.
+    #[allow(unsafe_code)]
+    pub fn new(path: PathBuf, capacity_bytes: usize) -> std::io::Result<Self> {
+        let file_size = capacity_bytes + RING_GLOBAL_HEADER;
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)?;
+
+        file.set_len(file_size as u64)?;
+
+        // SAFETY: The file is newly created/truncated to `file_size`, and we
+        // hold an exclusive write handle.  No other thread shares this map
+        // during construction.  The MmapMut is pinned to `Self` and not
+        // aliased externally.
+        let mut map = unsafe { memmap2::MmapMut::map_mut(&file)? };
+
+        map[0..8].copy_from_slice(RING_MAGIC);
+        map[8..16].copy_from_slice(&(capacity_bytes as u64).to_le_bytes());
+
+        Ok(Self {
+            path,
+            map,
+            capacity_bytes,
+            head: 0,
+            index: VecDeque::new(),
+            used_bytes: 0,
+        })
+    }
+
+    /// Push a frame record into the ring, evicting the oldest record(s) when
+    /// there is insufficient space.
+    ///
+    /// If a single frame's required space exceeds `capacity_bytes`, the push is
+    /// silently dropped to avoid an infinite eviction loop.
+    pub fn push_frame(&mut self, timestamp_ns: u64, flags: u32, data: &[u8]) {
+        let record_size = RECORD_HEADER_SIZE + data.len();
+
+        if record_size > self.capacity_bytes {
+            return; // single frame too large for the entire ring
+        }
+
+        // Evict oldest records until we have contiguous space at `head`.
+        // Two conditions must hold simultaneously:
+        //   (a) The record fits between head and end-of-ring  OR  after wrapping.
+        //   (b) After eviction, no live record overlaps the region we will write.
+        // The simplest correct approach: evict until `used_bytes + record_size <=
+        // capacity_bytes` (enough total space), then wrap head if needed.
+        while !self.index.is_empty() && self.used_bytes + record_size > self.capacity_bytes {
+            self.evict_oldest();
+        }
+
+        // If the record doesn't fit between head and end-of-ring, wrap head.
+        if self.head + record_size > self.capacity_bytes {
+            // Evict any records that are in the [head..capacity] zone or at
+            // the start of the ring where we'd overwrite them after wrapping.
+            let wrap_zone_end = self.capacity_bytes; // just mark; after wrap head=0
+            while let Some(&(off, _)) = self.index.front() {
+                // Evict if in the tail-of-ring dead zone OR if at head=0 region
+                // and we'd collide.
+                if off >= self.head && off < wrap_zone_end {
+                    self.evict_oldest();
+                } else {
+                    break;
+                }
+            }
+            // Evict records at the beginning of the ring that the wrapped write
+            // would overwrite.
+            let needed_at_start = record_size;
+            while let Some(&(off, _)) = self.index.front() {
+                if off < needed_at_start {
+                    self.evict_oldest();
+                } else {
+                    break;
+                }
+            }
+            self.head = 0;
+        }
+
+        // Write the record at `head`.
+        let start = RING_GLOBAL_HEADER + self.head;
+        self.map[start..start + 4].copy_from_slice(&(data.len() as u32).to_le_bytes());
+        self.map[start + 4..start + 8].copy_from_slice(&flags.to_le_bytes());
+        self.map[start + 8..start + 16].copy_from_slice(&timestamp_ns.to_le_bytes());
+        self.map[start + 16..start + 16 + data.len()].copy_from_slice(data);
+
+        self.index.push_back((self.head, record_size));
+        self.used_bytes += record_size;
+        self.head += record_size;
+        // Wrap head if it lands exactly at capacity
+        if self.head == self.capacity_bytes {
+            self.head = 0;
+        }
+    }
+
+    /// Return all frames whose timestamp is within `duration_ns` of the newest frame.
+    #[must_use]
+    pub fn snapshot_last_ns(&self, duration_ns: u64) -> Vec<ReplayFrame> {
+        let records = self.read_all_records();
+        if records.is_empty() {
+            return Vec::new();
+        }
+        let newest_ns = records.iter().map(|(ts, _, _)| *ts).max().unwrap_or(0);
+        let cutoff_ns = newest_ns.saturating_sub(duration_ns);
+
+        records
+            .into_iter()
+            .enumerate()
+            .filter(|(_, (ts, _, _))| *ts >= cutoff_ns)
+            .map(|(seq, (ts_ns, flags, data))| ReplayFrame {
+                data,
+                timestamp: Duration::from_nanos(ts_ns),
+                is_keyframe: (flags & 1) != 0,
+                sequence: seq as u64,
+            })
+            .collect()
+    }
+
+    /// Number of records currently in the ring.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.index.len()
+    }
+
+    /// Path of the backing file.
+    #[must_use]
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    // -------------------------------------------------------------------------
+    // Internal helpers
+    // -------------------------------------------------------------------------
+
+    /// Evict the oldest record from the ring.
+    fn evict_oldest(&mut self) {
+        if let Some((_, sz)) = self.index.pop_front() {
+            self.used_bytes = self.used_bytes.saturating_sub(sz);
+        }
+    }
+
+    /// Read all live records in insertion order using the in-memory index.
+    fn read_all_records(&self) -> Vec<(u64, u32, Vec<u8>)> {
+        let mut records = Vec::with_capacity(self.index.len());
+
+        for &(off, sz) in &self.index {
+            let start = RING_GLOBAL_HEADER + off;
+            if start + sz > self.map.len() {
+                break;
+            }
+
+            let payload_len = u32::from_le_bytes([
+                self.map[start],
+                self.map[start + 1],
+                self.map[start + 2],
+                self.map[start + 3],
+            ]) as usize;
+
+            if start + RECORD_HEADER_SIZE + payload_len > self.map.len() {
+                break;
+            }
+
+            let flags = u32::from_le_bytes([
+                self.map[start + 4],
+                self.map[start + 5],
+                self.map[start + 6],
+                self.map[start + 7],
+            ]);
+            let ts_ns = u64::from_le_bytes([
+                self.map[start + 8],
+                self.map[start + 9],
+                self.map[start + 10],
+                self.map[start + 11],
+                self.map[start + 12],
+                self.map[start + 13],
+                self.map[start + 14],
+                self.map[start + 15],
+            ]);
+            let data = self.map[start + 16..start + 16 + payload_len].to_vec();
+            records.push((ts_ns, flags, data));
+        }
+
+        records
+    }
+}
+
+impl Drop for MmapReplayRing {
+    fn drop(&mut self) {
+        let _ = self.map.flush();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ReplayBuffer — unified front-end (VecDeque or mmap)
+// ---------------------------------------------------------------------------
 
 /// Replay buffer for storing recent frames in a ring-buffer arrangement.
 pub struct ReplayBuffer {
@@ -35,19 +373,6 @@ pub struct ReplayBuffer {
     max_bytes: usize,
     /// Next sequence number.
     next_sequence: u64,
-}
-
-/// Replay buffer configuration.
-#[derive(Debug, Clone)]
-pub struct ReplayConfig {
-    /// Buffer duration in seconds
-    pub duration: u32,
-    /// Video bitrate in kbps
-    pub bitrate: u32,
-    /// Audio enabled
-    pub audio_enabled: bool,
-    /// Target framerate (used for capacity estimation)
-    pub framerate: u32,
 }
 
 impl ReplayBuffer {
@@ -244,16 +569,9 @@ impl ReplayBuffer {
     }
 }
 
-impl Default for ReplayConfig {
-    fn default() -> Self {
-        Self {
-            duration: 30,
-            bitrate: 10000,
-            audio_enabled: true,
-            framerate: 60,
-        }
-    }
-}
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -430,5 +748,137 @@ mod tests {
         buffer.clear();
         assert_eq!(buffer.frame_count(), 0);
         assert_eq!(buffer.total_bytes(), 0);
+    }
+
+    // --- MmapReplayRing tests ---
+
+    #[test]
+    fn test_mmap_ring_new() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("oximedia_test_mmap_ring_new.bin");
+        let ring = MmapReplayRing::new(path.clone(), 4096).expect("create ring");
+        assert_eq!(ring.count(), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_mmap_ring_push_and_snapshot() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("oximedia_test_mmap_ring_push.bin");
+        let mut ring = MmapReplayRing::new(path.clone(), 65536).expect("create ring");
+
+        let frame_data = vec![0xABu8; 64];
+        ring.push_frame(1_000_000_000, 1, &frame_data); // ts=1s, keyframe
+        ring.push_frame(2_000_000_000, 0, &frame_data); // ts=2s
+        ring.push_frame(3_000_000_000, 0, &frame_data); // ts=3s
+
+        assert_eq!(ring.count(), 3);
+
+        // All frames within last 3s
+        let snap = ring.snapshot_last_ns(3_000_000_000);
+        assert_eq!(snap.len(), 3);
+        assert!(snap[0].is_keyframe);
+
+        // Only last 1.5s → frames at 2s and 3s
+        let snap2 = ring.snapshot_last_ns(1_500_000_000);
+        assert_eq!(snap2.len(), 2);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_mmap_ring_overflow_eviction() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("oximedia_test_mmap_ring_overflow.bin");
+        // Small capacity: enough for ~3 records of 64 bytes each
+        // Each record = 16 header + 64 data = 80 bytes; capacity 256 bytes.
+        let mut ring = MmapReplayRing::new(path.clone(), 256).expect("create ring");
+
+        for i in 0u64..10 {
+            ring.push_frame(i * 1_000_000, 0, &[i as u8; 64]);
+        }
+
+        // We pushed 10 frames but capacity fits only ~3; count should be ≤ 3.
+        assert!(ring.count() <= 3, "count={}", ring.count());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // --- Overflow tests for VecDeque path (multiple durations) ---
+
+    #[test]
+    fn test_replay_overflow_5s() {
+        let config = ReplayConfig {
+            duration: 5,
+            bitrate: 100_000,
+            framerate: 30,
+            audio_enabled: false,
+        };
+        let max_frames = 30 * 5; // 150
+        let mut buf = ReplayBuffer::new(config).expect("valid");
+        buf.enable().expect("enable");
+
+        // Push 3× max
+        for i in 0u64..(max_frames as u64 * 3) {
+            buf.push_frame(vec![0u8; 100], Duration::from_millis(i * 33), i % 30 == 0)
+                .expect("push");
+        }
+
+        assert_eq!(buf.frame_count(), max_frames, "capped at max_frames");
+        // Oldest frames should have been evicted (FIFO).
+        let oldest_seq = buf.frames[0].sequence;
+        assert!(
+            oldest_seq >= max_frames as u64 * 2,
+            "oldest seq={oldest_seq}"
+        );
+    }
+
+    #[test]
+    fn test_replay_overflow_30s() {
+        let config = ReplayConfig {
+            duration: 30,
+            bitrate: 10_000,
+            framerate: 10,
+            audio_enabled: false,
+        };
+        let max_frames = 10 * 30; // 300
+        let mut buf = ReplayBuffer::new(config).expect("valid");
+        buf.enable().expect("enable");
+
+        for i in 0u64..(max_frames as u64 * 2) {
+            buf.push_frame(vec![0u8; 100], Duration::from_millis(i * 100), i % 10 == 0)
+                .expect("push");
+        }
+
+        assert!(buf.frame_count() <= max_frames);
+        // Ensure FIFO eviction: newest frames remain.
+        let last_seq = buf.frames.back().map(|f| f.sequence).unwrap_or(0);
+        assert_eq!(last_seq, max_frames as u64 * 2 - 1);
+    }
+
+    #[test]
+    fn test_replay_overflow_300s() {
+        let config = ReplayConfig {
+            duration: 300,
+            bitrate: 1_000,
+            framerate: 5,
+            audio_enabled: false,
+        };
+        let max_frames = 5 * 300; // 1500
+        let mut buf = ReplayBuffer::new(config).expect("valid");
+        buf.enable().expect("enable");
+
+        // Push 2× max
+        for i in 0u64..(max_frames as u64 * 2) {
+            buf.push_frame(vec![0u8; 10], Duration::from_millis(i * 200), i % 5 == 0)
+                .expect("push");
+        }
+
+        assert!(
+            buf.frame_count() <= max_frames,
+            "count={} exceeds max={}",
+            buf.frame_count(),
+            max_frames
+        );
     }
 }

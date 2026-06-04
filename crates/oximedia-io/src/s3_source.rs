@@ -293,10 +293,7 @@ impl S3Source {
     /// Recognises `Content-Length`, `ETag`, `Last-Modified`, `Content-Type`
     /// and any `x-amz-meta-*` headers.
     #[must_use]
-    pub fn parse_object_meta(
-        key: &str,
-        headers: &HashMap<String, String>,
-    ) -> Option<S3ObjectMeta> {
+    pub fn parse_object_meta(key: &str, headers: &HashMap<String, String>) -> Option<S3ObjectMeta> {
         let size_str = headers
             .get("Content-Length")
             .or_else(|| headers.get("content-length"))?;
@@ -518,7 +515,10 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("Content-Length".to_string(), "1048576".to_string());
         headers.insert("ETag".to_string(), "\"abc123\"".to_string());
-        headers.insert("Last-Modified".to_string(), "Thu, 01 Jan 2026 00:00:00 GMT".to_string());
+        headers.insert(
+            "Last-Modified".to_string(),
+            "Thu, 01 Jan 2026 00:00:00 GMT".to_string(),
+        );
         headers.insert("Content-Type".to_string(), "video/mp4".to_string());
         headers.insert("x-amz-meta-title".to_string(), "My Video".to_string());
 
@@ -527,7 +527,10 @@ mod tests {
         let meta = meta.unwrap();
         assert_eq!(meta.size, 1048576);
         assert_eq!(meta.etag, "abc123");
-        assert_eq!(meta.user_metadata.get("title"), Some(&"My Video".to_string()));
+        assert_eq!(
+            meta.user_metadata.get("title"),
+            Some(&"My Video".to_string())
+        );
     }
 
     #[test]

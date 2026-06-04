@@ -32,7 +32,10 @@ impl std::fmt::Display for ChangeKind {
         match self {
             Self::Added => write!(f, "ADDED"),
             Self::Removed => write!(f, "REMOVED"),
-            Self::Modified { left_size, right_size } => {
+            Self::Modified {
+                left_size,
+                right_size,
+            } => {
                 write!(f, "MODIFIED ({left_size}B → {right_size}B)")
             }
             Self::Unchanged => write!(f, "UNCHANGED"),
@@ -64,22 +67,35 @@ pub struct DiffReport {
 impl DiffReport {
     #[must_use]
     pub fn new(left: impl Into<String>, right: impl Into<String>) -> Self {
-        Self { left_path: left.into(), right_path: right.into(), entries: Vec::new() }
+        Self {
+            left_path: left.into(),
+            right_path: right.into(),
+            entries: Vec::new(),
+        }
     }
 
     #[must_use]
     pub fn added(&self) -> Vec<&DiffEntry> {
-        self.entries.iter().filter(|e| e.kind == ChangeKind::Added).collect()
+        self.entries
+            .iter()
+            .filter(|e| e.kind == ChangeKind::Added)
+            .collect()
     }
 
     #[must_use]
     pub fn removed(&self) -> Vec<&DiffEntry> {
-        self.entries.iter().filter(|e| e.kind == ChangeKind::Removed).collect()
+        self.entries
+            .iter()
+            .filter(|e| e.kind == ChangeKind::Removed)
+            .collect()
     }
 
     #[must_use]
     pub fn modified(&self) -> Vec<&DiffEntry> {
-        self.entries.iter().filter(|e| matches!(e.kind, ChangeKind::Modified { .. })).collect()
+        self.entries
+            .iter()
+            .filter(|e| matches!(e.kind, ChangeKind::Modified { .. }))
+            .collect()
     }
 
     #[must_use]
@@ -94,13 +110,19 @@ impl DiffReport {
             self.added().len(),
             self.removed().len(),
             self.modified().len(),
-            self.entries.iter().filter(|e| e.kind == ChangeKind::Unchanged).count()
+            self.entries
+                .iter()
+                .filter(|e| e.kind == ChangeKind::Unchanged)
+                .count()
         )
     }
 
     #[must_use]
     pub fn render(&self) -> String {
-        let mut out = format!("=== IMF Diff: {} vs {} ===\n", self.left_path, self.right_path);
+        let mut out = format!(
+            "=== IMF Diff: {} vs {} ===\n",
+            self.left_path, self.right_path
+        );
         for e in &self.entries {
             if e.kind != ChangeKind::Unchanged {
                 out.push_str(&format!("  {e}\n"));
@@ -123,10 +145,16 @@ impl ImfDiff {
         let left = left.as_ref();
         let right = right.as_ref();
         if !left.is_dir() {
-            return Err(ImfError::InvalidPackage(format!("Not a directory: {}", left.display())));
+            return Err(ImfError::InvalidPackage(format!(
+                "Not a directory: {}",
+                left.display()
+            )));
         }
         if !right.is_dir() {
-            return Err(ImfError::InvalidPackage(format!("Not a directory: {}", right.display())));
+            return Err(ImfError::InvalidPackage(format!(
+                "Not a directory: {}",
+                right.display()
+            )));
         }
 
         let left_files = scan_dir(left)?;
@@ -136,21 +164,33 @@ impl ImfDiff {
 
         for (name, &left_size) in &left_files {
             match right_files.get(name) {
-                None => report.entries.push(DiffEntry { filename: name.clone(), kind: ChangeKind::Removed }),
+                None => report.entries.push(DiffEntry {
+                    filename: name.clone(),
+                    kind: ChangeKind::Removed,
+                }),
                 Some(&right_size) => {
                     let kind = if left_size == right_size {
                         ChangeKind::Unchanged
                     } else {
-                        ChangeKind::Modified { left_size, right_size }
+                        ChangeKind::Modified {
+                            left_size,
+                            right_size,
+                        }
                     };
-                    report.entries.push(DiffEntry { filename: name.clone(), kind });
+                    report.entries.push(DiffEntry {
+                        filename: name.clone(),
+                        kind,
+                    });
                 }
             }
         }
 
         for (name, _) in &right_files {
             if !left_files.contains_key(name) {
-                report.entries.push(DiffEntry { filename: name.clone(), kind: ChangeKind::Added });
+                report.entries.push(DiffEntry {
+                    filename: name.clone(),
+                    kind: ChangeKind::Added,
+                });
             }
         }
 
@@ -164,7 +204,10 @@ impl ImfDiff {
     ///
     /// # Errors
     /// Propagates errors from `compare` and file I/O.
-    pub fn compare_with_hash(left: impl AsRef<Path>, right: impl AsRef<Path>) -> ImfResult<DiffReport> {
+    pub fn compare_with_hash(
+        left: impl AsRef<Path>,
+        right: impl AsRef<Path>,
+    ) -> ImfResult<DiffReport> {
         let left = left.as_ref();
         let right = right.as_ref();
         let mut report = Self::compare(left, right)?;
@@ -185,7 +228,10 @@ impl ImfDiff {
 
 fn scan_dir(dir: &Path) -> ImfResult<HashMap<String, u64>> {
     let mut map = HashMap::new();
-    for entry in std::fs::read_dir(dir).map_err(|e| ImfError::Other(e.to_string()))?.flatten() {
+    for entry in std::fs::read_dir(dir)
+        .map_err(|e| ImfError::Other(e.to_string()))?
+        .flatten()
+    {
         if entry.path().is_file() {
             let name = entry.file_name().to_string_lossy().to_string();
             let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
@@ -245,8 +291,16 @@ pub struct CplChange {
 }
 
 impl CplChange {
-    fn new(change_type: ChangeType, description: impl Into<String>, segment_index: Option<usize>) -> Self {
-        Self { change_type, description: description.into(), segment_index }
+    fn new(
+        change_type: ChangeType,
+        description: impl Into<String>,
+        segment_index: Option<usize>,
+    ) -> Self {
+        Self {
+            change_type,
+            description: description.into(),
+            segment_index,
+        }
     }
 }
 
@@ -265,7 +319,12 @@ pub struct CplDiff {
 
 impl CplDiff {
     fn empty() -> Self {
-        Self { changes: Vec::new(), additions: 0, removals: 0, modifications: 0 }
+        Self {
+            changes: Vec::new(),
+            additions: 0,
+            removals: 0,
+            modifications: 0,
+        }
     }
 
     /// Returns `true` if there are any detected changes.
@@ -381,7 +440,12 @@ impl ImfDiffer {
             }
         }
 
-        CplDiff { changes, additions, removals, modifications }
+        CplDiff {
+            changes,
+            additions,
+            removals,
+            modifications,
+        }
     }
 
     /// Compare the edit rates of two CPL revisions.
@@ -407,7 +471,8 @@ mod tests {
     use super::*;
 
     fn make_pkg(suffix: &str, files: &[(&str, &[u8])]) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("oximedia_idf_{suffix}"));
+        let dir =
+            std::env::temp_dir().join(format!("oximedia_idf_{}_{}", std::process::id(), suffix));
         std::fs::create_dir_all(&dir).ok();
         for (name, content) in files {
             std::fs::write(dir.join(name), content).ok();
@@ -464,7 +529,10 @@ mod tests {
     #[test]
     fn test_summary() {
         let mut r = DiffReport::new("l", "r");
-        r.entries.push(DiffEntry { filename: "new.mxf".into(), kind: ChangeKind::Added });
+        r.entries.push(DiffEntry {
+            filename: "new.mxf".into(),
+            kind: ChangeKind::Added,
+        });
         assert!(r.summary().contains("1 added"));
     }
 
@@ -491,7 +559,10 @@ mod tests {
     fn test_diff_identical_no_changes() {
         let base = segs(&["urn:uuid:aaa", "urn:uuid:bbb", "urn:uuid:ccc"]);
         let diff = ImfDiffer::diff_segments(&base, &base);
-        assert!(!diff.has_changes(), "identical lists should produce no changes");
+        assert!(
+            !diff.has_changes(),
+            "identical lists should produce no changes"
+        );
         assert_eq!(diff.additions, 0);
         assert_eq!(diff.removals, 0);
         assert_eq!(diff.modifications, 0);
@@ -504,7 +575,10 @@ mod tests {
         let diff = ImfDiffer::diff_segments(&base, &updated);
         assert_eq!(diff.additions, 1);
         assert_eq!(diff.removals, 0);
-        assert!(diff.changes.iter().any(|c| c.change_type == ChangeType::Added));
+        assert!(diff
+            .changes
+            .iter()
+            .any(|c| c.change_type == ChangeType::Added));
     }
 
     #[test]
@@ -514,7 +588,10 @@ mod tests {
         let diff = ImfDiffer::diff_segments(&base, &updated);
         assert_eq!(diff.removals, 1);
         assert_eq!(diff.additions, 0);
-        assert!(diff.changes.iter().any(|c| c.change_type == ChangeType::Removed));
+        assert!(diff
+            .changes
+            .iter()
+            .any(|c| c.change_type == ChangeType::Removed));
     }
 
     #[test]
@@ -523,7 +600,10 @@ mod tests {
         let updated = segs(&["urn:uuid:aaa", "urn:uuid:ccc", "urn:uuid:bbb"]);
         let diff = ImfDiffer::diff_segments(&base, &updated);
         assert!(diff.has_changes());
-        assert!(diff.changes.iter().any(|c| c.change_type == ChangeType::Reordered));
+        assert!(diff
+            .changes
+            .iter()
+            .any(|c| c.change_type == ChangeType::Reordered));
     }
 
     #[test]
@@ -531,7 +611,10 @@ mod tests {
         let base = segs(&["urn:uuid:seg1", "urn:uuid:seg2"]);
         let updated = segs(&["urn:uuid:seg1", "urn:uuid:seg2", "urn:uuid:seg3"]);
         let diff = ImfDiffer::diff_segments(&base, &updated);
-        assert!(diff.is_compatible_extension(), "only additions = compatible extension");
+        assert!(
+            diff.is_compatible_extension(),
+            "only additions = compatible extension"
+        );
     }
 
     #[test]

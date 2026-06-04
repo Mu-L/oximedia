@@ -99,10 +99,7 @@ impl ThreadLocalCounters {
     /// Records `duration` against the named timer accumulator.
     #[inline]
     pub fn add_duration(&mut self, name: &str, duration: Duration) {
-        *self
-            .durations_ns
-            .entry(name.to_string())
-            .or_insert(0) += duration.as_nanos() as u64;
+        *self.durations_ns.entry(name.to_string()).or_insert(0) += duration.as_nanos() as u64;
     }
 
     /// Returns the current count for `name`.

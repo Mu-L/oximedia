@@ -2,6 +2,13 @@
 //!
 //! A lightweight, in-process inverted index for searching asset metadata
 //! without requiring an external search engine.
+//!
+//! This module contains two implementations:
+//!
+//! * [`SearchIndex`] — a simple, pure-Rust in-memory index suitable for small
+//!   collections and unit tests.
+//! * [`TantivySearchIndex`] — a Tantivy-backed index with incremental
+//!   add/update/delete and index warming, designed for production use.
 
 /// A single searchable field attached to an asset document.
 #[derive(Debug, Clone)]
@@ -361,5 +368,395 @@ mod tests {
         let q = SearchQuery::parse("cooking");
         let doc = make_doc("y", "Sports Reel", "sport events");
         assert!(!q.matches_document(&doc));
+    }
+}
+
+// =============================================================================
+// TantivySearchIndex — incremental Tantivy-backed index (Wave 15)
+// =============================================================================
+
+use std::sync::{Arc, RwLock};
+use tantivy::{
+    collector::{Count, TopDocs},
+    query::{QueryParser, TermQuery},
+    schema::{Schema, SchemaBuilder, Term, Value, STORED, STRING, TEXT},
+    Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument,
+};
+
+/// Structured search fields for a single MAM asset.
+///
+/// Used as the canonical input type for [`TantivySearchIndex`] operations.
+#[derive(Debug, Clone, Default)]
+pub struct AssetSearchFields {
+    /// Human-readable asset title.
+    pub title: String,
+    /// Free-text description.
+    pub description: String,
+    /// Space-separated tags / keywords.
+    pub tags: String,
+    /// MIME type string (e.g. `"video/mp4"`).
+    pub mime_type: String,
+}
+
+/// Error type for [`TantivySearchIndex`] operations.
+#[derive(Debug, thiserror::Error)]
+pub enum SearchIndexError {
+    /// An underlying Tantivy error.
+    #[error("Tantivy error: {0}")]
+    Tantivy(#[from] tantivy::TantivyError),
+    /// A Tantivy directory open error.
+    #[error("Directory open error: {0}")]
+    Directory(#[from] tantivy::directory::error::OpenDirectoryError),
+    /// An I/O error (e.g. creating the index directory).
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    /// A query parse error.
+    #[error("Query parse error: {0}")]
+    QueryParse(#[from] tantivy::query::QueryParserError),
+    /// The internal RwLock was poisoned by a previous panic.
+    #[error("Index writer lock poisoned")]
+    LockPoisoned,
+    /// The requested schema field is missing — indicates a programming error.
+    #[error("Schema field not found: {0}")]
+    FieldNotFound(String),
+}
+
+/// Result alias for [`SearchIndexError`].
+pub type SearchIndexResult<T> = std::result::Result<T, SearchIndexError>;
+
+/// Tantivy-backed in-process search index with incremental update support.
+///
+/// All mutations (add / update / delete) are committed immediately and the
+/// reader is reloaded so that subsequent calls to [`Self::search`] observe the
+/// change.
+///
+/// # Thread safety
+///
+/// The [`IndexWriter`] is wrapped in an `Arc<RwLock<...>>` so that multiple
+/// threads may issue concurrent reads while a single thread holds a write lock
+/// for mutations.
+pub struct TantivySearchIndex {
+    /// The underlying Tantivy index (kept alive for the lifetime of this
+    /// struct; fields and schema are resolved from here).
+    index: Index,
+    /// Live reader — reloaded after each commit so searches are current.
+    reader: IndexReader,
+    /// Writer wrapped in a lock to serialise concurrent mutation requests.
+    writer: Arc<RwLock<IndexWriter>>,
+    /// Schema built at construction time; used by all field lookups.
+    schema: Schema,
+    /// Query parser pre-configured for text fields.
+    query_parser: QueryParser,
+}
+
+impl TantivySearchIndex {
+    /// Build the Tantivy schema used by this index.
+    fn build_schema() -> Schema {
+        let mut builder: SchemaBuilder = Schema::builder();
+        // doc_id is the primary key — exact-match only (STRING) and stored so
+        // we can retrieve it from search results.
+        builder.add_text_field("doc_id", STRING | STORED);
+        // Text fields participate in full-text search.
+        builder.add_text_field("title", TEXT | STORED);
+        builder.add_text_field("description", TEXT);
+        builder.add_text_field("tags", TEXT);
+        builder.add_text_field("mime_type", STRING);
+        builder.build()
+    }
+
+    /// Create a new `TantivySearchIndex` backed by `index`.
+    ///
+    /// The schema **must** have been built with [`TantivySearchIndex::build_schema`]
+    /// (or an equivalent layout).  Use [`TantivySearchIndex::new_ram`] for the
+    /// typical in-process / test use-case.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the writer or reader cannot be initialised, or if
+    /// the initial warming fails.
+    fn new_from_index(index: Index) -> SearchIndexResult<Self> {
+        let schema = index.schema();
+
+        let writer: IndexWriter = index.writer(15_000_000)?; // 15 MB heap
+
+        let reader: IndexReader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .try_into()?;
+
+        let doc_id_field = schema
+            .get_field("doc_id")
+            .map_err(|_| SearchIndexError::FieldNotFound("doc_id".to_string()))?;
+        let title_field = schema
+            .get_field("title")
+            .map_err(|_| SearchIndexError::FieldNotFound("title".to_string()))?;
+        let description_field = schema
+            .get_field("description")
+            .map_err(|_| SearchIndexError::FieldNotFound("description".to_string()))?;
+        let tags_field = schema
+            .get_field("tags")
+            .map_err(|_| SearchIndexError::FieldNotFound("tags".to_string()))?;
+
+        let query_parser = QueryParser::for_index(
+            &index,
+            vec![doc_id_field, title_field, description_field, tags_field],
+        );
+
+        let idx = Self {
+            index,
+            reader,
+            writer: Arc::new(RwLock::new(writer)),
+            schema,
+            query_parser,
+        };
+
+        // Warm immediately so the reader is current.
+        idx.warm()?;
+
+        Ok(idx)
+    }
+
+    /// Create a new `TantivySearchIndex` that stores data in RAM only.
+    ///
+    /// This is the recommended constructor for tests and in-process use where
+    /// durability is not required.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if Tantivy cannot initialise the RAM-backed index.
+    pub fn new_ram() -> SearchIndexResult<Self> {
+        let schema = Self::build_schema();
+        let index = Index::create_in_ram(schema);
+        Self::new_from_index(index)
+    }
+
+    /// Create a new `TantivySearchIndex` persisted in the directory at `path`.
+    ///
+    /// If the directory already contains an index it is opened; otherwise a new
+    /// index is created.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be opened or the index cannot
+    /// be initialised.
+    pub fn new_in_dir(path: &std::path::Path) -> SearchIndexResult<Self> {
+        let schema = Self::build_schema();
+        let index = if path.exists() {
+            let dir = tantivy::directory::MmapDirectory::open(path)?;
+            Index::open(dir)?
+        } else {
+            std::fs::create_dir_all(path)?;
+            Index::create_in_dir(path, schema)?
+        };
+        Self::new_from_index(index)
+    }
+
+    /// Build a Tantivy document from `doc_id` and `fields`.
+    fn build_tantivy_doc(
+        &self,
+        doc_id: &str,
+        fields: &AssetSearchFields,
+    ) -> SearchIndexResult<TantivyDocument> {
+        let mut doc = TantivyDocument::new();
+        doc.add_text(
+            self.schema
+                .get_field("doc_id")
+                .map_err(|_| SearchIndexError::FieldNotFound("doc_id".to_string()))?,
+            doc_id,
+        );
+        doc.add_text(
+            self.schema
+                .get_field("title")
+                .map_err(|_| SearchIndexError::FieldNotFound("title".to_string()))?,
+            &fields.title,
+        );
+        doc.add_text(
+            self.schema
+                .get_field("description")
+                .map_err(|_| SearchIndexError::FieldNotFound("description".to_string()))?,
+            &fields.description,
+        );
+        doc.add_text(
+            self.schema
+                .get_field("tags")
+                .map_err(|_| SearchIndexError::FieldNotFound("tags".to_string()))?,
+            &fields.tags,
+        );
+        doc.add_text(
+            self.schema
+                .get_field("mime_type")
+                .map_err(|_| SearchIndexError::FieldNotFound("mime_type".to_string()))?,
+            &fields.mime_type,
+        );
+        Ok(doc)
+    }
+
+    /// Add a document to the index and commit immediately.
+    ///
+    /// After a successful call the document is visible to calls to [`Self::search`]
+    /// (the reader is reloaded as part of the commit).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the document cannot be built, the writer lock is
+    /// poisoned, or the commit fails.
+    pub fn add_document(&self, doc_id: &str, fields: &AssetSearchFields) -> SearchIndexResult<()> {
+        let tantivy_doc = self.build_tantivy_doc(doc_id, fields)?;
+        let mut writer = self
+            .writer
+            .write()
+            .map_err(|_| SearchIndexError::LockPoisoned)?;
+        writer.add_document(tantivy_doc)?;
+        writer.commit()?;
+        drop(writer); // release write lock before reloading reader
+        self.reader.reload()?;
+        Ok(())
+    }
+
+    /// Replace an existing document with updated content.
+    ///
+    /// The old entry is deleted by `doc_id` term before the new one is
+    /// inserted, so there is at most one document per `doc_id` after the call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the delete, insert, or commit fails.
+    pub fn update_document(
+        &self,
+        doc_id: &str,
+        fields: &AssetSearchFields,
+    ) -> SearchIndexResult<()> {
+        let id_field = self
+            .schema
+            .get_field("doc_id")
+            .map_err(|_| SearchIndexError::FieldNotFound("doc_id".to_string()))?;
+        let delete_term = Term::from_field_text(id_field, doc_id);
+        let tantivy_doc = self.build_tantivy_doc(doc_id, fields)?;
+
+        let mut writer = self
+            .writer
+            .write()
+            .map_err(|_| SearchIndexError::LockPoisoned)?;
+        writer.delete_term(delete_term);
+        writer.add_document(tantivy_doc)?;
+        writer.commit()?;
+        drop(writer);
+        self.reader.reload()?;
+        Ok(())
+    }
+
+    /// Remove a document by `doc_id` and commit immediately.
+    ///
+    /// After a successful call the document no longer appears in [`Self::search`]
+    /// results.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the delete or commit fails.
+    pub fn delete_document(&self, doc_id: &str) -> SearchIndexResult<()> {
+        let id_field = self
+            .schema
+            .get_field("doc_id")
+            .map_err(|_| SearchIndexError::FieldNotFound("doc_id".to_string()))?;
+        let term = Term::from_field_text(id_field, doc_id);
+        let mut writer = self
+            .writer
+            .write()
+            .map_err(|_| SearchIndexError::LockPoisoned)?;
+        writer.delete_term(term);
+        writer.commit()?;
+        drop(writer);
+        self.reader.reload()?;
+        Ok(())
+    }
+
+    /// Warm the index by reloading the reader and running a lightweight probe
+    /// query to prime OS page caches and segment metadata.
+    ///
+    /// This is called automatically by the constructors; you may also call it
+    /// explicitly after a bulk load to ensure the reader is current.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the reader cannot be reloaded.
+    pub fn warm(&self) -> SearchIndexResult<()> {
+        self.reader.reload()?;
+
+        // Fire a low-overhead probe search to prime segment-level caches.
+        // The `Count` collector avoids allocating a result vector.
+        let searcher = self.reader.searcher();
+        let probe_query = self.query_parser.parse_query("*").unwrap_or_else(|_| {
+            // If `*` is unparseable fall back to a guaranteed-valid empty query.
+            Box::new(tantivy::query::AllQuery)
+        });
+        let _ = searcher.search(&*probe_query, &Count);
+
+        Ok(())
+    }
+
+    /// Search for documents matching `query_str` using full-text search across
+    /// title, description, tags, and doc_id fields.
+    ///
+    /// Returns the `doc_id` strings of matching documents ordered by Tantivy
+    /// relevance score (highest first), limited to `limit` results.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query cannot be parsed or the search fails.
+    pub fn search(&self, query_str: &str, limit: usize) -> SearchIndexResult<Vec<String>> {
+        let searcher = self.reader.searcher();
+        let query = self.query_parser.parse_query(query_str)?;
+        let top_docs = searcher.search(&query, &TopDocs::with_limit(limit).order_by_score())?;
+
+        let doc_id_field = self
+            .schema
+            .get_field("doc_id")
+            .map_err(|_| SearchIndexError::FieldNotFound("doc_id".to_string()))?;
+
+        let mut results = Vec::with_capacity(top_docs.len());
+        for (_score, doc_address) in top_docs {
+            let retrieved: TantivyDocument = searcher.doc(doc_address)?;
+            if let Some(id_str) = retrieved.get_first(doc_id_field).and_then(|v| v.as_str()) {
+                results.push(id_str.to_string());
+            }
+        }
+        Ok(results)
+    }
+
+    /// Perform an exact-term lookup on the `doc_id` field.
+    ///
+    /// Returns `true` if at least one document with `doc_id == id` exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the search fails.
+    pub fn contains(&self, id: &str) -> SearchIndexResult<bool> {
+        let id_field = self
+            .schema
+            .get_field("doc_id")
+            .map_err(|_| SearchIndexError::FieldNotFound("doc_id".to_string()))?;
+        let term = Term::from_field_text(id_field, id);
+        let term_query = TermQuery::new(term, tantivy::schema::IndexRecordOption::Basic);
+        let searcher = self.reader.searcher();
+        let count = searcher.search(&term_query, &Count)?;
+        Ok(count > 0)
+    }
+
+    /// Return the number of documents currently in the index.
+    #[must_use]
+    pub fn num_docs(&self) -> u64 {
+        self.reader.searcher().num_docs()
+    }
+
+    /// Return the number of indexed segments.
+    ///
+    /// Useful for diagnostics; each commit may produce one additional segment
+    /// until Tantivy's background merger collapses them.
+    #[must_use]
+    pub fn num_segments(&self) -> usize {
+        self.index
+            .searchable_segments()
+            .map(|s| s.len())
+            .unwrap_or(0)
     }
 }

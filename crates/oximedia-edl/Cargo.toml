@@ -20,6 +20,7 @@ nom = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 bitflags = { workspace = true }
 rayon = { workspace = true }
+smallvec = { workspace = true }
 
 [lints]
 workspace = true

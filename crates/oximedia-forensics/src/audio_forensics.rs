@@ -387,9 +387,14 @@ mod tests {
     #[test]
     fn test_compute_zcr_alternating() {
         // [-1, 1, -1, 1, ...] → every pair crosses
-        let frame: Vec<f32> = (0..100).map(|i| if i % 2 == 0 { -1.0 } else { 1.0 }).collect();
+        let frame: Vec<f32> = (0..100)
+            .map(|i| if i % 2 == 0 { -1.0 } else { 1.0 })
+            .collect();
         let zcr = compute_zcr(&frame);
-        assert!(zcr > 0.9, "Near-maximum ZCR expected for alternating signal");
+        assert!(
+            zcr > 0.9,
+            "Near-maximum ZCR expected for alternating signal"
+        );
     }
 
     #[test]
@@ -402,7 +407,10 @@ mod tests {
         // A rising ramp concentrates energy at high indices
         let frame: Vec<f32> = (0..256).map(|i| i as f32 / 256.0).collect();
         let c = compute_spectral_centroid(&frame);
-        assert!(c > 50.0, "High-energy tail should push centroid up: got {c}");
+        assert!(
+            c > 50.0,
+            "High-energy tail should push centroid up: got {c}"
+        );
     }
 
     #[test]
@@ -514,9 +522,7 @@ mod tests {
 
     #[test]
     fn test_audio_eno_test_score_in_range() {
-        let samples: Vec<f32> = (0..8192)
-            .map(|i| (i as f32 * 0.1).sin() * 0.5)
-            .collect();
+        let samples: Vec<f32> = (0..8192).map(|i| (i as f32 * 0.1).sin() * 0.5).collect();
         let score = audio_eno_test(&samples);
         assert!(
             score >= 0.0 && score <= 1.0,

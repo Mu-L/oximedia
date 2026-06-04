@@ -58,6 +58,7 @@ fn build_internal_config(py_cfg: &PyForensicConfig) -> ForensicsConfig {
         enable_geometric_analysis: py_cfg.enable_geometric,
         enable_lighting_analysis: py_cfg.enable_lighting,
         min_confidence_threshold: py_cfg.min_confidence,
+        confidence_threshold: 1.0,
     }
 }
 
@@ -350,6 +351,7 @@ impl PyForensicAnalyzer {
             enable_geometric_analysis: false,
             enable_lighting_analysis: false,
             min_confidence_threshold: 0.0,
+            confidence_threshold: 1.0,
         };
         let analyzer = ForensicsAnalyzer::with_config(config);
         let report = analyzer
@@ -385,6 +387,7 @@ impl PyForensicAnalyzer {
             enable_geometric_analysis: false,
             enable_lighting_analysis: false,
             min_confidence_threshold: 0.0,
+            confidence_threshold: 1.0,
         };
         let analyzer = ForensicsAnalyzer::with_config(config);
         let report = analyzer
@@ -420,6 +423,7 @@ impl PyForensicAnalyzer {
             enable_geometric_analysis: false,
             enable_lighting_analysis: false,
             min_confidence_threshold: 0.0,
+            confidence_threshold: 1.0,
         };
         let analyzer = ForensicsAnalyzer::with_config(config);
         let report = analyzer
@@ -455,6 +459,7 @@ impl PyForensicAnalyzer {
             enable_geometric_analysis: true,
             enable_lighting_analysis: false,
             min_confidence_threshold: 0.0,
+            confidence_threshold: 1.0,
         };
         let analyzer = ForensicsAnalyzer::with_config(config);
         let report = analyzer
@@ -601,6 +606,7 @@ pub fn ela_analysis(
         enable_geometric_analysis: false,
         enable_lighting_analysis: false,
         min_confidence_threshold: 0.0,
+        confidence_threshold: 1.0,
     };
     let analyzer = ForensicsAnalyzer::with_config(config);
     let report = analyzer

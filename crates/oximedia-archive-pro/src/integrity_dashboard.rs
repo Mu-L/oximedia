@@ -241,11 +241,7 @@ pub struct DashboardRecommendation {
 impl DashboardRecommendation {
     /// Creates a new recommendation.
     #[must_use]
-    pub fn new(
-        code: impl Into<String>,
-        description: impl Into<String>,
-        priority: u8,
-    ) -> Self {
+    pub fn new(code: impl Into<String>, description: impl Into<String>, priority: u8) -> Self {
         Self {
             code: code.into(),
             description: description.into(),
@@ -343,7 +339,8 @@ impl IntegrityDashboard {
 
     /// Sets the replication status for an object.
     pub fn set_replication(&mut self, status: ReplicationStatus) {
-        self.replication_map.insert(status.object_id.clone(), status);
+        self.replication_map
+            .insert(status.object_id.clone(), status);
     }
 
     /// Sets the format obsolescence risk for an object.
@@ -412,10 +409,8 @@ impl IntegrityDashboard {
             .filter(|e| !e.recovered)
             .map(|e| e.object_id.as_str())
             .collect();
-        let bit_rot_affected: Vec<String> = unique_affected
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
+        let bit_rot_affected: Vec<String> =
+            unique_affected.iter().map(|s| (*s).to_string()).collect();
         let total_monitored = total_fixity.max(total_rep).max(total_fmt).max(1);
         let bit_rot_score = if bit_rot_affected.is_empty() {
             1.0
@@ -675,10 +670,7 @@ mod tests {
 
         let report = dashboard.generate_report();
         assert_eq!(report.under_replicated.len(), 1);
-        assert!(report
-            .recommendations
-            .iter()
-            .any(|r| r.code == "UNDER_REP"));
+        assert!(report.recommendations.iter().any(|r| r.code == "UNDER_REP"));
     }
 
     #[test]
@@ -709,10 +701,7 @@ mod tests {
 
         let report = dashboard.generate_report();
         assert_eq!(report.bit_rot_affected.len(), 1);
-        assert!(report
-            .recommendations
-            .iter()
-            .any(|r| r.code == "BIT_ROT"));
+        assert!(report.recommendations.iter().any(|r| r.code == "BIT_ROT"));
     }
 
     #[test]

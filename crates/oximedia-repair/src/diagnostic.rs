@@ -110,7 +110,7 @@ pub struct HealthStats {
 impl HealthStats {
     /// Create health stats from a set of findings.
     #[allow(clippy::cast_precision_loss)]
-    pub fn from_findings(findings: &[DiagnosticFinding], total_file_bytes: u64) -> Self {
+    pub fn from_findings(findings: &[DiagnosticFinding], _total_file_bytes: u64) -> Self {
         let mut info_count = 0usize;
         let mut warning_count = 0usize;
         let mut error_count = 0usize;
@@ -130,9 +130,8 @@ impl HealthStats {
         }
 
         // Compute a health score: fatals tank it, errors reduce it, warnings are minor
-        let penalty = fatal_count as f64 * 0.40
-            + error_count as f64 * 0.15
-            + warning_count as f64 * 0.03;
+        let penalty =
+            fatal_count as f64 * 0.40 + error_count as f64 * 0.15 + warning_count as f64 * 0.03;
         let health_score = (1.0 - penalty).clamp(0.0, 1.0);
 
         Self {
@@ -227,7 +226,8 @@ impl DiagnosticReport {
                     DiagnosticSeverity::Info => {}
                 }
             }
-            self.stream_scores.insert(*idx, (1.0 - penalty).clamp(0.0, 1.0));
+            self.stream_scores
+                .insert(*idx, (1.0 - penalty).clamp(0.0, 1.0));
         }
     }
 }
@@ -418,8 +418,18 @@ mod tests {
     #[test]
     fn test_report_findings_at_severity() {
         let mut report = DiagnosticReport::new("/test/a.mkv", 1_000);
-        report.add_finding(DiagnosticFinding::new("I1", DiagnosticSeverity::Info, "ok", "none"));
-        report.add_finding(DiagnosticFinding::new("E1", DiagnosticSeverity::Error, "bad", "fix"));
+        report.add_finding(DiagnosticFinding::new(
+            "I1",
+            DiagnosticSeverity::Info,
+            "ok",
+            "none",
+        ));
+        report.add_finding(DiagnosticFinding::new(
+            "E1",
+            DiagnosticSeverity::Error,
+            "bad",
+            "fix",
+        ));
         let errors = report.findings_at_severity(DiagnosticSeverity::Error);
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].code, "E1");

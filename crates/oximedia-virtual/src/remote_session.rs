@@ -14,8 +14,6 @@
 use crate::{Result, VirtualProductionError};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::io::{Read, Write};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ---------------------------------------------------------------------------
@@ -39,10 +37,7 @@ impl OperatorRole {
     /// Whether this role can send control commands.
     #[must_use]
     pub fn can_control(self) -> bool {
-        matches!(
-            self,
-            Self::Director | Self::CameraOp | Self::LedTech
-        )
+        matches!(self, Self::Director | Self::CameraOp | Self::LedTech)
     }
 
     /// Whether this role can receive telemetry.
@@ -247,7 +242,10 @@ impl SessionRecorder {
             self.events.remove(0);
         }
         let offset_ns = self.start_time.elapsed().as_nanos() as u64;
-        self.events.push(SessionEvent { offset_ns, snapshot });
+        self.events.push(SessionEvent {
+            offset_ns,
+            snapshot,
+        });
     }
 
     /// Get all recorded events.
@@ -276,9 +274,8 @@ impl SessionRecorder {
 
     /// Export to JSON string.
     pub fn export_json(&self) -> Result<String> {
-        serde_json::to_string(&self.events).map_err(|e| {
-            VirtualProductionError::InvalidConfig(format!("JSON export failed: {e}"))
-        })
+        serde_json::to_string(&self.events)
+            .map_err(|e| VirtualProductionError::InvalidConfig(format!("JSON export failed: {e}")))
     }
 
     /// Import from JSON string (replaces current events).
@@ -491,9 +488,7 @@ impl RemoteSessionServer {
     pub fn submit_command(&mut self, operator: &str, cmd: RemoteCommand) -> Result<()> {
         // Role check
         let role = self.operator_role(operator).ok_or_else(|| {
-            VirtualProductionError::InvalidConfig(format!(
-                "Unknown operator '{operator}'"
-            ))
+            VirtualProductionError::InvalidConfig(format!("Unknown operator '{operator}'"))
         })?;
 
         if !role.can_control() {
@@ -532,17 +527,14 @@ impl RemoteSessionServer {
     /// Execute a single command and return the response.
     fn execute_command(&mut self, operator: &str, cmd: &RemoteCommand) -> CommandResponse {
         match cmd {
-            RemoteCommand::Ping { sequence } => CommandResponse::success(
-                "Ping",
-                &format!("Pong from server, sequence={sequence}"),
-            ),
-
-            RemoteCommand::Recalibrate { camera_id } => {
-                CommandResponse::success(
-                    "Recalibrate",
-                    &format!("Recalibration triggered for camera {camera_id}"),
-                )
+            RemoteCommand::Ping { sequence } => {
+                CommandResponse::success("Ping", &format!("Pong from server, sequence={sequence}"))
             }
+
+            RemoteCommand::Recalibrate { camera_id } => CommandResponse::success(
+                "Recalibrate",
+                &format!("Recalibration triggered for camera {camera_id}"),
+            ),
 
             RemoteCommand::SetLedBrightness { brightness } => {
                 let b = brightness.clamp(0.0, 1.0);
@@ -596,12 +588,10 @@ impl RemoteSessionServer {
                 Err(e) => CommandResponse::failure("StopRecording", &e.to_string()),
             },
 
-            RemoteCommand::SetColorTemperature { delta_k } => {
-                CommandResponse::success(
-                    "SetColorTemperature",
-                    &format!("Color temperature delta {delta_k:+}K applied by {operator}"),
-                )
-            }
+            RemoteCommand::SetColorTemperature { delta_k } => CommandResponse::success(
+                "SetColorTemperature",
+                &format!("Color temperature delta {delta_k:+}K applied by {operator}"),
+            ),
 
             RemoteCommand::EmergencyStop => {
                 self.emergency_stop = true;
@@ -700,9 +690,8 @@ impl RemoteSessionServer {
 
 /// Encode a serializable value to a 4-byte-length-prefixed JSON frame.
 pub fn encode_message<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-    let json = serde_json::to_vec(value).map_err(|e| {
-        VirtualProductionError::InvalidConfig(format!("JSON encode error: {e}"))
-    })?;
+    let json = serde_json::to_vec(value)
+        .map_err(|e| VirtualProductionError::InvalidConfig(format!("JSON encode error: {e}")))?;
     let len = json.len() as u32;
     let mut buf = Vec::with_capacity(4 + json.len());
     buf.extend_from_slice(&len.to_le_bytes());
@@ -724,9 +713,8 @@ pub fn decode_message<T: for<'de> Deserialize<'de>>(buf: &[u8]) -> Result<T> {
             buf.len() - 4
         ))
     })?;
-    serde_json::from_slice(payload).map_err(|e| {
-        VirtualProductionError::InvalidConfig(format!("JSON decode error: {e}"))
-    })
+    serde_json::from_slice(payload)
+        .map_err(|e| VirtualProductionError::InvalidConfig(format!("JSON decode error: {e}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -752,7 +740,9 @@ mod tests {
     #[test]
     fn test_register_operator() {
         let mut server = make_server();
-        server.register_operator("alice", OperatorRole::Director).expect("ok");
+        server
+            .register_operator("alice", OperatorRole::Director)
+            .expect("ok");
         assert_eq!(server.operator_count(), 1);
         assert_eq!(server.operator_role("alice"), Some(OperatorRole::Director));
     }
@@ -760,7 +750,9 @@ mod tests {
     #[test]
     fn test_register_duplicate_operator_fails() {
         let mut server = make_server();
-        server.register_operator("alice", OperatorRole::Director).expect("ok");
+        server
+            .register_operator("alice", OperatorRole::Director)
+            .expect("ok");
         let result = server.register_operator("alice", OperatorRole::Observer);
         assert!(result.is_err(), "duplicate registration should fail");
     }
@@ -768,7 +760,9 @@ mod tests {
     #[test]
     fn test_deregister_operator() {
         let mut server = make_server();
-        server.register_operator("alice", OperatorRole::Director).expect("ok");
+        server
+            .register_operator("alice", OperatorRole::Director)
+            .expect("ok");
         server.deregister_operator("alice");
         assert_eq!(server.operator_count(), 0);
         assert!(server.operator_role("alice").is_none());
@@ -781,8 +775,12 @@ mod tests {
             ..RemoteSessionConfig::default()
         };
         let mut server = RemoteSessionServer::new(config);
-        server.register_operator("a", OperatorRole::Director).expect("ok");
-        server.register_operator("b", OperatorRole::Observer).expect("ok");
+        server
+            .register_operator("a", OperatorRole::Director)
+            .expect("ok");
+        server
+            .register_operator("b", OperatorRole::Observer)
+            .expect("ok");
         let result = server.register_operator("c", OperatorRole::Observer);
         assert!(result.is_err(), "should reject when at capacity");
     }
@@ -790,17 +788,26 @@ mod tests {
     #[test]
     fn test_submit_command_as_director() {
         let mut server = make_server();
-        server.register_operator("director", OperatorRole::Director).expect("ok");
-        server.submit_command("director", RemoteCommand::Ping { sequence: 1 }).expect("ok");
+        server
+            .register_operator("director", OperatorRole::Director)
+            .expect("ok");
+        server
+            .submit_command("director", RemoteCommand::Ping { sequence: 1 })
+            .expect("ok");
         assert_eq!(server.pending_command_count(), 1);
     }
 
     #[test]
     fn test_submit_command_as_observer_fails() {
         let mut server = make_server();
-        server.register_operator("viewer", OperatorRole::Observer).expect("ok");
+        server
+            .register_operator("viewer", OperatorRole::Observer)
+            .expect("ok");
         let result = server.submit_command("viewer", RemoteCommand::Ping { sequence: 1 });
-        assert!(result.is_err(), "observer should not be able to submit commands");
+        assert!(
+            result.is_err(),
+            "observer should not be able to submit commands"
+        );
     }
 
     #[test]
@@ -813,8 +820,12 @@ mod tests {
     #[test]
     fn test_process_ping_command() {
         let mut server = make_server();
-        server.register_operator("dir", OperatorRole::Director).expect("ok");
-        server.submit_command("dir", RemoteCommand::Ping { sequence: 42 }).expect("ok");
+        server
+            .register_operator("dir", OperatorRole::Director)
+            .expect("ok");
+        server
+            .submit_command("dir", RemoteCommand::Ping { sequence: 42 })
+            .expect("ok");
         let n = server.process_commands();
         assert_eq!(n, 1);
         let resp = server.response_log().back().expect("should have response");
@@ -825,8 +836,12 @@ mod tests {
     #[test]
     fn test_set_led_brightness() {
         let mut server = make_server();
-        server.register_operator("tech", OperatorRole::LedTech).expect("ok");
-        server.submit_command("tech", RemoteCommand::SetLedBrightness { brightness: 0.75 }).expect("ok");
+        server
+            .register_operator("tech", OperatorRole::LedTech)
+            .expect("ok");
+        server
+            .submit_command("tech", RemoteCommand::SetLedBrightness { brightness: 0.75 })
+            .expect("ok");
         server.process_commands();
         assert!((server.latest_snapshot().led_brightness - 0.75).abs() < 1e-5);
     }
@@ -834,13 +849,19 @@ mod tests {
     #[test]
     fn test_emergency_stop_and_resume() {
         let mut server = make_server();
-        server.register_operator("dir", OperatorRole::Director).expect("ok");
+        server
+            .register_operator("dir", OperatorRole::Director)
+            .expect("ok");
 
-        server.submit_command("dir", RemoteCommand::EmergencyStop).expect("ok");
+        server
+            .submit_command("dir", RemoteCommand::EmergencyStop)
+            .expect("ok");
         server.process_commands();
         assert!(server.is_emergency_stop());
 
-        server.submit_command("dir", RemoteCommand::ResumeFromStop).expect("ok");
+        server
+            .submit_command("dir", RemoteCommand::ResumeFromStop)
+            .expect("ok");
         server.process_commands();
         assert!(!server.is_emergency_stop());
     }
@@ -848,11 +869,18 @@ mod tests {
     #[test]
     fn test_start_and_stop_recording() {
         let mut server = make_server();
-        server.register_operator("dir", OperatorRole::Director).expect("ok");
+        server
+            .register_operator("dir", OperatorRole::Director)
+            .expect("ok");
 
-        server.submit_command("dir", RemoteCommand::StartRecording {
-            session_name: "take_01".to_string(),
-        }).expect("ok");
+        server
+            .submit_command(
+                "dir",
+                RemoteCommand::StartRecording {
+                    session_name: "take_01".to_string(),
+                },
+            )
+            .expect("ok");
         server.process_commands();
         assert!(server.recorder().is_recording());
 
@@ -861,7 +889,9 @@ mod tests {
         server.push_telemetry([1.1, 0.5, -2.1], [0.0, 46.0, 0.0], "Locked", 4800);
         assert_eq!(server.recorder().event_count(), 2);
 
-        server.submit_command("dir", RemoteCommand::StopRecording).expect("ok");
+        server
+            .submit_command("dir", RemoteCommand::StopRecording)
+            .expect("ok");
         server.process_commands();
         assert!(!server.recorder().is_recording());
     }
@@ -869,17 +899,29 @@ mod tests {
     #[test]
     fn test_double_start_recording_fails() {
         let mut server = make_server();
-        server.register_operator("dir", OperatorRole::Director).expect("ok");
+        server
+            .register_operator("dir", OperatorRole::Director)
+            .expect("ok");
 
-        server.submit_command("dir", RemoteCommand::StartRecording {
-            session_name: "take_01".to_string(),
-        }).expect("ok");
+        server
+            .submit_command(
+                "dir",
+                RemoteCommand::StartRecording {
+                    session_name: "take_01".to_string(),
+                },
+            )
+            .expect("ok");
         server.process_commands();
 
         // Second start should fail
-        server.submit_command("dir", RemoteCommand::StartRecording {
-            session_name: "take_02".to_string(),
-        }).expect("ok");
+        server
+            .submit_command(
+                "dir",
+                RemoteCommand::StartRecording {
+                    session_name: "take_02".to_string(),
+                },
+            )
+            .expect("ok");
         server.process_commands();
 
         let resp = server.response_log().back().expect("response");
@@ -901,10 +943,17 @@ mod tests {
     #[test]
     fn test_set_workflow() {
         let mut server = make_server();
-        server.register_operator("dir", OperatorRole::Director).expect("ok");
-        server.submit_command("dir", RemoteCommand::SetWorkflow {
-            workflow: "Hybrid".to_string(),
-        }).expect("ok");
+        server
+            .register_operator("dir", OperatorRole::Director)
+            .expect("ok");
+        server
+            .submit_command(
+                "dir",
+                RemoteCommand::SetWorkflow {
+                    workflow: "Hybrid".to_string(),
+                },
+            )
+            .expect("ok");
         server.process_commands();
         assert_eq!(server.latest_snapshot().workflow, "Hybrid");
     }
@@ -926,10 +975,16 @@ mod tests {
             ..RemoteSessionConfig::default()
         };
         let mut server = RemoteSessionServer::new(config);
-        server.register_operator("dir", OperatorRole::Director).expect("ok");
+        server
+            .register_operator("dir", OperatorRole::Director)
+            .expect("ok");
 
-        server.submit_command("dir", RemoteCommand::Ping { sequence: 1 }).expect("ok");
-        server.submit_command("dir", RemoteCommand::Ping { sequence: 2 }).expect("ok");
+        server
+            .submit_command("dir", RemoteCommand::Ping { sequence: 1 })
+            .expect("ok");
+        server
+            .submit_command("dir", RemoteCommand::Ping { sequence: 2 })
+            .expect("ok");
         let result = server.submit_command("dir", RemoteCommand::Ping { sequence: 3 });
         assert!(result.is_err(), "queue depth exceeded should fail");
     }
@@ -994,7 +1049,10 @@ mod tests {
 
         // First event (offset=0) should be immediately available
         let first = playback.poll();
-        assert!(first.is_some(), "first event should be immediately available");
+        assert!(
+            first.is_some(),
+            "first event should be immediately available"
+        );
         assert_eq!(first.expect("ok").frame_number, 1);
     }
 
@@ -1006,7 +1064,7 @@ mod tests {
         }];
         let mut playback = SessionPlayback::new(events, 1.0, false);
         playback.poll(); // consume the only event
-        // poll again
+                         // poll again
         playback.poll();
         assert!(playback.is_finished());
     }
@@ -1038,18 +1096,30 @@ mod tests {
     #[test]
     fn test_multiple_operators_different_roles() {
         let mut server = make_server();
-        server.register_operator("alice", OperatorRole::Director).expect("ok");
-        server.register_operator("bob", OperatorRole::Observer).expect("ok");
-        server.register_operator("carol", OperatorRole::LedTech).expect("ok");
+        server
+            .register_operator("alice", OperatorRole::Director)
+            .expect("ok");
+        server
+            .register_operator("bob", OperatorRole::Observer)
+            .expect("ok");
+        server
+            .register_operator("carol", OperatorRole::LedTech)
+            .expect("ok");
 
         assert_eq!(server.operator_count(), 3);
 
         // Director can command
-        server.submit_command("alice", RemoteCommand::Ping { sequence: 1 }).expect("ok");
+        server
+            .submit_command("alice", RemoteCommand::Ping { sequence: 1 })
+            .expect("ok");
         // Observer cannot
-        assert!(server.submit_command("bob", RemoteCommand::Ping { sequence: 1 }).is_err());
+        assert!(server
+            .submit_command("bob", RemoteCommand::Ping { sequence: 1 })
+            .is_err());
         // LedTech can command
-        server.submit_command("carol", RemoteCommand::SetLedBrightness { brightness: 0.5 }).expect("ok");
+        server
+            .submit_command("carol", RemoteCommand::SetLedBrightness { brightness: 0.5 })
+            .expect("ok");
 
         server.process_commands();
         assert_eq!(server.response_log().len(), 2);

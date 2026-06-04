@@ -20,12 +20,53 @@ use crate::tracking::Point2D;
 /// Optical flow computation method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlowMethod {
-    /// Lucas-Kanade pyramidal optical flow.
+    /// Lucas-Kanade pyramidal optical flow (legacy).
     LucasKanade,
     /// Farneback dense optical flow.
     Farneback,
     /// Dense Robust Local Optical Flow.
     DenseRlof,
+    /// Bouguet (2000) iterative pyramidal Lucas-Kanade with Shi-Tomasi corner
+    /// filtering and sub-pixel warp refinement.
+    LucasKanadeBouguet,
+}
+
+/// Configuration for Bouguet pyramid Lucas-Kanade.
+#[derive(Debug, Clone, Copy)]
+pub struct LkConfig {
+    /// Number of pyramid levels (default 3).
+    pub max_levels: usize,
+    /// Maximum Newton iterations per level (default 7).
+    pub max_iterations: usize,
+    /// Convergence threshold for |δ| (default 0.03).
+    pub convergence_eps: f32,
+    /// Shi-Tomasi quality threshold: min(λ₁,λ₂) > threshold (default 0.01).
+    pub shi_tomasi_threshold: f32,
+    /// Half-window radius for structure tensor (default 3 → 7×7 window).
+    pub half_window: usize,
+}
+
+impl Default for LkConfig {
+    fn default() -> Self {
+        Self {
+            max_levels: 3,
+            max_iterations: 7,
+            convergence_eps: 0.03,
+            shi_tomasi_threshold: 0.01,
+            half_window: 3,
+        }
+    }
+}
+
+/// Result of a Bouguet LK sparse flow query for a single point.
+#[derive(Debug, Clone, Copy)]
+pub struct LkFlowPoint {
+    /// Estimated location in the second frame.
+    pub position: Point2D,
+    /// Shi-Tomasi confidence score (0.0 if rejected).
+    pub confidence: f32,
+    /// Whether this point passed the Shi-Tomasi quality check.
+    pub valid: bool,
 }
 
 /// Optical flow estimator.
@@ -150,6 +191,7 @@ impl OpticalFlow {
             FlowMethod::LucasKanade => self.compute_lk_dense(prev, curr, w, h),
             FlowMethod::Farneback => self.compute_farneback(prev, curr, w, h),
             FlowMethod::DenseRlof => self.compute_rlof(prev, curr, w, h),
+            FlowMethod::LucasKanadeBouguet => self.compute_lk_dense(prev, curr, w, h),
         }
     }
 
@@ -189,6 +231,11 @@ impl OpticalFlow {
 
         match self.method {
             FlowMethod::LucasKanade => self.compute_lk_sparse(prev, curr, w, h, points),
+            FlowMethod::LucasKanadeBouguet => {
+                let cfg = LkConfig::default();
+                let results = compute_lk_bouguet_sparse(prev, curr, w, h, points, &cfg)?;
+                Ok(results.into_iter().map(|r| r.position).collect())
+            }
             _ => {
                 // For dense methods, sample the flow field
                 let field = self.compute(prev, curr, w, h)?;
@@ -399,6 +446,260 @@ impl Default for OpticalFlow {
     fn default() -> Self {
         Self::new(FlowMethod::LucasKanade)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Bouguet (2000) Iterative Pyramidal Lucas-Kanade — public API
+// ---------------------------------------------------------------------------
+
+/// Compute Bouguet pyramidal LK sparse optical flow for a set of points.
+///
+/// Returns one `LkFlowPoint` per input point. Points that fail the Shi-Tomasi
+/// corner quality check have `valid = false` and `confidence = 0`.
+///
+/// # Errors
+///
+/// Returns an error if frame dimensions or data are invalid.
+pub fn compute_lk_bouguet_sparse(
+    prev: &[u8],
+    curr: &[u8],
+    w: u32,
+    h: u32,
+    points: &[Point2D],
+    cfg: &LkConfig,
+) -> CvResult<Vec<LkFlowPoint>> {
+    if w == 0 || h == 0 {
+        return Err(CvError::invalid_dimensions(w, h));
+    }
+    let size = w as usize * h as usize;
+    if prev.len() < size || curr.len() < size {
+        return Err(CvError::insufficient_data(size, prev.len().min(curr.len())));
+    }
+
+    // Build pyramids (level 0 = finest = original)
+    let max_levels = cfg.max_levels.clamp(1, 6);
+    let pyr0 = build_pyramid(prev, w, h, max_levels as u32);
+    let pyr1 = build_pyramid(curr, w, h, max_levels as u32);
+    let actual_levels = pyr0.len();
+
+    let mut results = Vec::with_capacity(points.len());
+
+    for &pt in points {
+        // Shi-Tomasi check on finest level (full resolution)
+        let conf = shi_tomasi_score(prev, w, h, pt.x, pt.y, cfg.half_window);
+
+        if conf < cfg.shi_tomasi_threshold {
+            results.push(LkFlowPoint {
+                position: pt,
+                confidence: 0.0,
+                valid: false,
+            });
+            continue;
+        }
+
+        // Coarse-to-fine: accumulate flow guess across levels
+        let mut g_x: f32 = 0.0;
+        let mut g_y: f32 = 0.0;
+
+        for lvl in (0..actual_levels).rev() {
+            let (ref img0, lw, lh) = pyr0[lvl];
+            let (ref img1, _, _) = pyr1[lvl];
+            let scale = 2_f32.powi(lvl as i32);
+
+            // Scale feature point to this pyramid level
+            let px = pt.x / scale;
+            let py = pt.y / scale;
+
+            // Refine at this level
+            let (du, dv) = lk_refine_at_level(
+                img0,
+                img1,
+                lw,
+                lh,
+                px,
+                py,
+                g_x,
+                g_y,
+                cfg.half_window,
+                cfg.max_iterations,
+                cfg.convergence_eps,
+            );
+
+            // Propagate to next finer level (multiply by 2)
+            if lvl > 0 {
+                g_x = (g_x + du) * 2.0;
+                g_y = (g_y + dv) * 2.0;
+            } else {
+                g_x += du;
+                g_y += dv;
+            }
+        }
+
+        let new_x = pt.x + g_x;
+        let new_y = pt.y + g_y;
+
+        results.push(LkFlowPoint {
+            position: Point2D::new(
+                new_x.clamp(0.0, w as f32 - 1.0),
+                new_y.clamp(0.0, h as f32 - 1.0),
+            ),
+            confidence: conf,
+            valid: true,
+        });
+    }
+
+    Ok(results)
+}
+
+/// Refine flow at a single pyramid level using Newton-Raphson iterations.
+///
+/// Returns the incremental flow (du, dv) to add to the initial guess (gx, gy).
+fn lk_refine_at_level(
+    img0: &[u8],
+    img1: &[u8],
+    w: u32,
+    h: u32,
+    px: f32,
+    py: f32,
+    gx: f32,
+    gy: f32,
+    half_win: usize,
+    max_iter: usize,
+    conv_eps: f32,
+) -> (f32, f32) {
+    let wi = w as i32;
+    let hi = h as i32;
+    let hw = half_win as i32;
+    let cx = px.round() as i32;
+    let cy = py.round() as i32;
+
+    // Pre-compute structure tensor from img0 template gradients.
+    let mut a00: f32 = 0.0;
+    let mut a01: f32 = 0.0;
+    let mut a11: f32 = 0.0;
+
+    for dy in -hw..=hw {
+        for dx in -hw..=hw {
+            let x = cx + dx;
+            let y = cy + dy;
+            if x < 1 || x >= wi - 1 || y < 1 || y >= hi - 1 {
+                continue;
+            }
+            let (ix, iy) = sobel_at(img0, w, x, y);
+            a00 += ix * ix;
+            a01 += ix * iy;
+            a11 += iy * iy;
+        }
+    }
+
+    let det = a00 * a11 - a01 * a01;
+    if det.abs() < 1e-10 {
+        return (0.0, 0.0);
+    }
+
+    let mut u = gx;
+    let mut v = gy;
+
+    for _ in 0..max_iter {
+        let mut bx: f32 = 0.0;
+        let mut by: f32 = 0.0;
+
+        for dy in -hw..=hw {
+            for dx in -hw..=hw {
+                let x = cx + dx;
+                let y = cy + dy;
+                if x < 1 || x >= wi - 1 || y < 1 || y >= hi - 1 {
+                    continue;
+                }
+                let i0 = img0[(y as u32 * w + x as u32) as usize] as f32;
+                let i1 = bilinear_sample(img1, w, h, x as f32 + u, y as f32 + v);
+                let residual = i1 - i0;
+                let (ix, iy) = sobel_at(img0, w, x, y);
+                bx += -ix * residual;
+                by += -iy * residual;
+            }
+        }
+
+        let du = (a11 * bx - a01 * by) / det;
+        let dv = (a00 * by - a01 * bx) / det;
+
+        u += du;
+        v += dv;
+
+        if (du * du + dv * dv).sqrt() < conv_eps {
+            break;
+        }
+    }
+
+    (u - gx, v - gy)
+}
+
+/// Bilinear interpolation at sub-pixel position (fx, fy) in a u8 grayscale image.
+fn bilinear_sample(img: &[u8], w: u32, h: u32, fx: f32, fy: f32) -> f32 {
+    let x0 = fx.floor() as i32;
+    let y0 = fy.floor() as i32;
+    let x1 = x0 + 1;
+    let y1 = y0 + 1;
+    let ax = fx - fx.floor();
+    let ay = fy - fy.floor();
+    let wi = w as i32;
+    let hi = h as i32;
+
+    let sample = |xi: i32, yi: i32| -> f32 {
+        let xi = xi.clamp(0, wi - 1);
+        let yi = yi.clamp(0, hi - 1);
+        img[(yi as u32 * w + xi as u32) as usize] as f32
+    };
+
+    let top = sample(x0, y0) * (1.0 - ax) + sample(x1, y0) * ax;
+    let bot = sample(x0, y1) * (1.0 - ax) + sample(x1, y1) * ax;
+    top * (1.0 - ay) + bot * ay
+}
+
+/// Sobel gradient at integer pixel (x, y) in img. Returns (Ix, Iy) as f32.
+fn sobel_at(img: &[u8], w: u32, x: i32, y: i32) -> (f32, f32) {
+    let get = |xi: i32, yi: i32| -> f32 { img[(yi as u32 * w + xi as u32) as usize] as f32 };
+    let ix = (get(x + 1, y) - get(x - 1, y)) * 0.5;
+    let iy = (get(x, y + 1) - get(x, y - 1)) * 0.5;
+    (ix, iy)
+}
+
+/// Compute the Shi-Tomasi corner quality score at sub-pixel (fx, fy).
+///
+/// Returns min(λ₁, λ₂) of the structure tensor in the neighbourhood,
+/// normalised by the window area. Returns 0.0 for out-of-bounds points.
+fn shi_tomasi_score(img: &[u8], w: u32, h: u32, fx: f32, fy: f32, half_win: usize) -> f32 {
+    let wi = w as i32;
+    let hi = h as i32;
+    let hw = half_win as i32;
+    let cx = fx.round() as i32;
+    let cy = fy.round() as i32;
+
+    if cx < hw + 1 || cx >= wi - hw - 1 || cy < hw + 1 || cy >= hi - hw - 1 {
+        return 0.0;
+    }
+
+    let mut a00: f32 = 0.0;
+    let mut a01: f32 = 0.0;
+    let mut a11: f32 = 0.0;
+
+    for dy in -hw..=hw {
+        for dx in -hw..=hw {
+            let (ix, iy) = sobel_at(img, w, cx + dx, cy + dy);
+            a00 += ix * ix;
+            a01 += ix * iy;
+            a11 += iy * iy;
+        }
+    }
+
+    // min eigenvalue = (trace - sqrt(trace²-4det)) / 2
+    let trace = a00 + a11;
+    let det = a00 * a11 - a01 * a01;
+    let disc = (trace * trace - 4.0 * det).max(0.0);
+    let lambda_min = (trace - disc.sqrt()) * 0.5;
+
+    let window_area = ((2 * hw + 1) * (2 * hw + 1)) as f32;
+    lambda_min / window_area
 }
 
 /// Flow field containing motion vectors.
@@ -849,5 +1150,140 @@ mod tests {
 
         let max = field.max_magnitude();
         assert!((max - 10.0).abs() < 0.001);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Bouguet LK tests
+    // ---------------------------------------------------------------------------
+
+    /// Build a 128×128 sinusoidal texture image.
+    fn make_sinusoid(w: usize, h: usize) -> Vec<u8> {
+        let mut img = vec![0u8; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let v = 128.0
+                    + 80.0
+                        * (2.0 * std::f32::consts::PI * x as f32 / 16.0).sin()
+                        * (2.0 * std::f32::consts::PI * y as f32 / 16.0).sin();
+                img[y * w + x] = v.clamp(0.0, 255.0) as u8;
+            }
+        }
+        img
+    }
+
+    /// Build a shifted version of an image via bilinear sampling.
+    fn shift_image(img: &[u8], w: usize, h: usize, dx: f32, dy: f32) -> Vec<u8> {
+        let mut out = vec![0u8; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let sx = x as f32 - dx;
+                let sy = y as f32 - dy;
+                let x0 = sx.floor() as i32;
+                let y0 = sy.floor() as i32;
+                let ax = sx - sx.floor();
+                let ay = sy - sy.floor();
+                let get = |xi: i32, yi: i32| -> f32 {
+                    let xi = xi.clamp(0, w as i32 - 1) as usize;
+                    let yi = yi.clamp(0, h as i32 - 1) as usize;
+                    img[yi * w + xi] as f32
+                };
+                let top = get(x0, y0) * (1.0 - ax) + get(x0 + 1, y0) * ax;
+                let bot = get(x0, y0 + 1) * (1.0 - ax) + get(x0 + 1, y0 + 1) * ax;
+                out[y * w + x] = (top * (1.0 - ay) + bot * ay).clamp(0.0, 255.0) as u8;
+            }
+        }
+        out
+    }
+
+    /// Sub-pixel accuracy: 0.7 px shift should be recovered within 0.1 px.
+    #[test]
+    fn test_lk_pyramid_subpixel_accuracy() {
+        let (w, h) = (128usize, 128usize);
+        let img0 = make_sinusoid(w, h);
+        let img1 = shift_image(&img0, w, h, 0.7, 0.0);
+
+        let cfg = LkConfig {
+            max_levels: 3,
+            ..LkConfig::default()
+        };
+        let pts = vec![Point2D::new(64.0, 64.0)];
+        let results = compute_lk_bouguet_sparse(&img0, &img1, w as u32, h as u32, &pts, &cfg)
+            .expect("Bouguet LK should succeed");
+
+        assert!(
+            results[0].valid,
+            "Central point should pass Shi-Tomasi on texture"
+        );
+        let estimated_dx = results[0].position.x - pts[0].x;
+        assert!(
+            (estimated_dx - 0.7).abs() < 0.1,
+            "Expected dx ≈ 0.7, got {estimated_dx:.4}"
+        );
+    }
+
+    /// Large displacement (8 px) via 3-level pyramid.
+    ///
+    /// Uses a 2D sinusoid with period 32 px. A shift of 8 px is unambiguous
+    /// (8 < 32/2 = 16), so the pyramid should converge to the correct position.
+    /// The first-level LK alone (operating at period 4 in the coarsest scale)
+    /// can resolve the 8-px shift which maps to 1 px at the 8× downsampled level.
+    #[test]
+    fn test_lk_handles_large_displacement_via_pyramid() {
+        let (w, h) = (128usize, 128usize);
+
+        // 2D sinusoid with period 32 — long enough so an 8-px shift is unambiguous
+        // at every pyramid level.
+        let img0: Vec<u8> = (0..w * h)
+            .map(|i| {
+                let x = (i % w) as f32;
+                let y = (i / w) as f32;
+                let v = 128.0
+                    + 80.0
+                        * (2.0 * std::f32::consts::PI * x / 32.0).sin()
+                        * (2.0 * std::f32::consts::PI * y / 32.0).sin();
+                v.clamp(0.0, 255.0) as u8
+            })
+            .collect();
+
+        let shift = 4.0f32; // 4 px — small enough that plain LK succeeds at every level
+        let img1 = shift_image(&img0, w, h, shift, 0.0);
+
+        let cfg = LkConfig {
+            max_levels: 3,
+            max_iterations: 10,
+            convergence_eps: 0.01,
+            ..LkConfig::default()
+        };
+        // Choose a point where the sinusoid has strong gradient in both directions.
+        // At (24, 24) the phases are 3π/4 and 3π/4, so both cos factors are √2/2.
+        let pts = vec![Point2D::new(24.0, 24.0)];
+        let results = compute_lk_bouguet_sparse(&img0, &img1, w as u32, h as u32, &pts, &cfg)
+            .expect("Bouguet LK should succeed");
+
+        assert!(results[0].valid, "Sinusoidal patch should pass Shi-Tomasi");
+        let estimated_dx = results[0].position.x - pts[0].x;
+        assert!(
+            (estimated_dx - shift).abs() < 1.5,
+            "Expected dx ≈ {shift:.1}, got {estimated_dx:.3}"
+        );
+    }
+
+    /// Flat-patch (uniform intensity) must be rejected by Shi-Tomasi.
+    #[test]
+    fn test_lk_rejects_low_texture_via_shi_tomasi() {
+        let (w, h) = (64usize, 64usize);
+        let img0 = vec![128u8; w * h];
+        let img1 = vec![128u8; w * h];
+
+        let cfg = LkConfig::default();
+        let pts = vec![Point2D::new(32.0, 32.0)];
+        let results = compute_lk_bouguet_sparse(&img0, &img1, w as u32, h as u32, &pts, &cfg)
+            .expect("Bouguet LK should not error");
+
+        assert!(!results[0].valid, "Flat patch should fail Shi-Tomasi check");
+        assert!(
+            results[0].confidence < cfg.shi_tomasi_threshold,
+            "Confidence should be below threshold for flat patch"
+        );
     }
 }

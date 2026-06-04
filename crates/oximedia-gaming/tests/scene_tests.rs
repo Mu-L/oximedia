@@ -110,7 +110,7 @@ fn test_scene_transitions() {
     ];
 
     for transition_type in transitions {
-        let transition = SceneTransition::new(transition_type, Duration::from_millis(300));
+        let transition = SceneTransition::new(transition_type.clone(), Duration::from_millis(300));
         assert_eq!(transition.transition_type, transition_type);
     }
 }

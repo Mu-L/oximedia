@@ -15,7 +15,7 @@
 - [x] Implement plugin health checks in `hot_reload::HotReloadManager` (periodic liveness probe) (verified 2026-05-16; src/health_monitor.rs PluginHealthMonitor, src/health_check.rs periodic liveness probes)
 - [x] Extend `sandbox::PermissionSet` with fine-grained filesystem path restrictions (not just PERM_FILESYSTEM) (verified 2026-05-16; src/sandbox.rs:57 path allow-list, add_path:119, is_path_permitted:148)
 - [x] Add plugin resource usage tracking (memory, CPU time) in `SandboxContext` (verified 2026-05-16; src/resources.rs:31 ResourceUsage cpu_time_ms:35, ResourceTracker, ResourceLimit)
-- [ ] Implement plugin dependency conflict detection in `version_resolver` (diamond dependency problem) (verified-open 2026-05-16: version_resolver.rs handles circular deps but not diamond/multi-provider conflicts)
+- [x] Implement plugin dependency conflict detection in `version_resolver` (diamond dependency problem) (verified 2026-06-01: register_with_deps+provider_deps+BFS transitive propagation in version_resolver.rs)
 - [x] Add graceful degradation in `GracefulReload` — serve from old plugin during new plugin initialization (verified 2026-05-16; src/graceful_reload.rs:80 serves old plugin during init, InProgress state:35)
 - [x] Extend `PluginManifest` with minimum OxiMedia version requirement field (verified 2026-05-16; src/manifest.rs:399 min_host_version: Option<String>)
 
@@ -29,17 +29,17 @@
 - [x] Add filter/transform plugin type alongside codec plugins (video/audio filter plugins) (verified 2026-05-16; src/filter_plugin.rs:442 FilterPlugin trait, FilterRegistry)
 
 ## Performance
-- [ ] Cache plugin capability lookups in `PluginRegistry` with invalidation on register/unregister (verified-open 2026-05-16: no capability cache in registry.rs or capability.rs)
+- [x] Cache plugin capability lookups in `PluginRegistry` with invalidation on register/unregister (verified 2026-06-01: registry.rs:44 CapabilityCache struct with invalidate():59, rebuild():65, wired at line 584)
 - [x] Implement lazy plugin initialization — defer codec creation until first use (verified 2026-05-16; src/lazy_init.rs:320 lazy plugin init, src/lazy.rs lazy loading)
 - [x] Add plugin instance pooling for codecs that are expensive to initialize (verified 2026-05-16; src/pool.rs:378 plugin instance pool)
 - [x] Optimize `compute_hash` in hot_reload to use memory-mapped I/O for large plugin files — `compute_hash_mmap` with `MMAP_THRESHOLD_BYTES` (4 MiB) page-streaming strategy; 9 new tests
 
 ## Testing
 - [x] Add integration test for full plugin lifecycle (register -> lookup -> use -> unregister) — 10 new tests in `tests/integration.rs` covering priority ordering, failover, clear, re-registration
-- [ ] Test `hot_reload` with simulated file modification events and verify seamless reload
-- [ ] Add fuzz testing for `PluginManifest` parsing with malformed JSON/TOML
+- [x] Test `hot_reload` with simulated file modification events and verify seamless reload (verified 2026-06-01: tests/hot_reload_test.rs:29 test_hot_reload_seamless_lifecycle)
+- [x] Add fuzz testing for `PluginManifest` parsing with malformed JSON/TOML (verified 2026-06-01: tests/fuzz_manifest.rs 33 tests; tests/manifest_fuzz.rs 5 additional injection/large-input tests)
 - [x] Test `sandbox` permission enforcement — verify blocked operations raise `SandboxError` — 13 new tests in `tests/sandbox_test.rs` covering path allow-list, CPU quota, combined enforcement
-- [ ] Add tests for `version_resolver` with complex dependency graphs (10+ interdependent plugins)
+- [x] Add tests for `version_resolver` with complex dependency graphs (10+ interdependent plugins) (verified 2026-06-01: version_resolver.rs test_large_dep_graph_chain+test_diamond_conflict_transitive+test_diamond_compatible_transitive; tests/version_graph_test.rs 13 tests)
 
 ## Documentation
 - [ ] Add plugin development guide with step-by-step shared library plugin creation

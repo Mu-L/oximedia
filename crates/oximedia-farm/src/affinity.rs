@@ -155,7 +155,10 @@ mod tests {
 
     #[test]
     fn test_all_match_false_missing_one() {
-        let rules = vec![JobAffinityRule::new("av1"), JobAffinityRule::new("hevc-10bit")];
+        let rules = vec![
+            JobAffinityRule::new("av1"),
+            JobAffinityRule::new("hevc-10bit"),
+        ];
         let w = make_worker(1, "av1");
         assert!(!JobAffinityRule::all_match(&rules, &w));
     }

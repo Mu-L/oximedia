@@ -131,13 +131,7 @@ pub fn checkerboard(width: usize, height: usize, cell_size: usize) -> Array2<u8>
 
 /// Shift a frame by `(dx, dy)` pixels using nearest-neighbour sampling.
 #[must_use]
-pub fn shift_frame(
-    src: &Array2<u8>,
-    dx: f64,
-    dy: f64,
-    width: usize,
-    height: usize,
-) -> Array2<u8> {
+pub fn shift_frame(src: &Array2<u8>, dx: f64, dy: f64, width: usize, height: usize) -> Array2<u8> {
     let mut dst = Array2::zeros((height, width));
     let idx = dx.round() as i64;
     let idy = dy.round() as i64;
@@ -236,11 +230,7 @@ pub fn apply_row_skew(
 /// `frame_count` – number of samples.
 /// `fps`         – frames per second (determines sampling period).
 #[must_use]
-pub fn sinusoidal_trajectory(
-    frequencies: &[(f64, f64)],
-    frame_count: usize,
-    fps: f64,
-) -> Vec<f64> {
+pub fn sinusoidal_trajectory(frequencies: &[(f64, f64)], frame_count: usize, fps: f64) -> Vec<f64> {
     use std::f64::consts::PI;
     (0..frame_count)
         .map(|i| {
@@ -376,8 +366,8 @@ mod tests {
     #[test]
     fn test_known_translation_within_half_pixel() {
         use crate::motion::estimate::MotionEstimator;
-        use crate::motion::trajectory::Trajectory;
         use crate::motion::tracker::MotionTracker;
+        use crate::motion::trajectory::Trajectory;
         use crate::StabilizationMode;
 
         let dx = 3.0f64;
@@ -438,9 +428,7 @@ mod tests {
         // Row 32, comparing frame 1 vs frame 0: frame 1 has skew.
         // The bottom rows should differ more than the top rows between frames.
         let top_diff: u32 = (0..4)
-            .map(|c| {
-                (frames[1].data[[1, c]] as i32 - frames[0].data[[1, c]] as i32).unsigned_abs()
-            })
+            .map(|c| (frames[1].data[[1, c]] as i32 - frames[0].data[[1, c]] as i32).unsigned_abs())
             .sum();
         let bot_diff: u32 = (0..4)
             .map(|c| {
@@ -490,8 +478,8 @@ mod tests {
             .map(|i| {
                 let t = i as f64;
                 StabilizationTransform::new(
-                    (t - 15.0) * 5.0, // dx spans ±75 px
-                    (t - 10.0) * 3.0, // dy spans ±60 px
+                    (t - 15.0) * 5.0,  // dx spans ±75 px
+                    (t - 10.0) * 3.0,  // dy spans ±60 px
                     (t - 15.0) * 0.01, // small rotation
                     1.0,
                     i,
@@ -502,7 +490,11 @@ mod tests {
         let optimizer = ZoomOptimizer::new(0.95);
         let result = optimizer.optimize(&transforms, width, height);
 
-        assert!(result.is_ok(), "zoom optimizer should not fail: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "zoom optimizer should not fail: {:?}",
+            result.err()
+        );
 
         let optimized = result.expect("should succeed");
         for t in &optimized {
@@ -543,8 +535,8 @@ mod tests {
 
     #[test]
     fn test_zoom_calculate_empty_returns_error() {
-        use crate::zoom::calculate::ZoomOptimizer;
         use crate::error::StabilizeError;
+        use crate::zoom::calculate::ZoomOptimizer;
 
         let optimizer = ZoomOptimizer::new(0.95);
         let result = optimizer.optimize(&[], 1920, 1080);
@@ -582,11 +574,7 @@ mod tests {
         let vib_amp = 5.0;
 
         // Build a trajectory with a 8 Hz vibration + slow drift.
-        let signal = sinusoidal_trajectory(
-            &[(vib_freq, vib_amp), (0.5, 2.0)],
-            256,
-            fps,
-        );
+        let signal = sinusoidal_trajectory(&[(vib_freq, vib_amp), (0.5, 2.0)], 256, fps);
 
         let config = VibrationConfig::new()
             .with_sample_rate(fps)

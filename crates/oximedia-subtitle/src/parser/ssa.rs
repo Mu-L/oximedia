@@ -16,6 +16,7 @@
 //! Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,Hello world!
 //! ```
 
+use crate::ssa_style_cache::AssStyleCache;
 use crate::style::{Alignment, Color, FontWeight, OutlineStyle, Position, ShadowStyle};
 use crate::{Subtitle, SubtitleError, SubtitleResult, SubtitleStyle};
 use std::collections::HashMap;
@@ -29,6 +30,10 @@ pub struct AssFile {
     pub styles: HashMap<String, SubtitleStyle>,
     /// Subtitle events.
     pub events: Vec<Subtitle>,
+    /// Pre-built style cache for O(1) dialogue-line lookup.
+    ///
+    /// Populated automatically from `styles` during parsing.
+    pub style_cache: AssStyleCache,
 }
 
 /// Parse SSA/ASS subtitle file.
@@ -100,10 +105,15 @@ pub fn parse_ass(input: &str) -> SubtitleResult<AssFile> {
         }
     }
 
+    // Build the style cache from the fully-parsed styles map so that callers
+    // can do O(1) style lookups without re-scanning the HashMap.
+    let style_cache = AssStyleCache::from_map(styles.clone());
+
     Ok(AssFile {
         script_info,
         styles,
         events,
+        style_cache,
     })
 }
 
@@ -763,4 +773,122 @@ pub fn write(subtitles: &[Subtitle]) -> SubtitleResult<String> {
     }
 
     Ok(output)
+}
+
+// ============================================================================
+// AssStyleCache wiring tests
+// ============================================================================
+
+#[cfg(test)]
+mod style_cache_tests {
+    use super::*;
+
+    /// Minimal ASS document with two named styles and three dialogue lines.
+    const SAMPLE_ASS: &str = r#"[Script Info]
+Title: Test
+ScriptType: v4.00+
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,48,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,40,40,40,1
+Style: Title,Arial,64,&H0000FFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,8,40,40,40,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,Hello world!
+Dialogue: 0,0:00:05.00,0:00:08.00,Title,,0,0,0,,Title line
+Dialogue: 0,0:00:09.00,0:00:12.00,Default,,0,0,0,,Another line
+"#;
+
+    #[test]
+    fn test_ass_style_cache_wiring() {
+        let file = parse_ass(SAMPLE_ASS).expect("parse should succeed");
+
+        // The cache must have been built from the parsed styles.
+        assert_eq!(
+            file.style_cache.len(),
+            2,
+            "cache should contain both styles"
+        );
+        assert!(
+            file.style_cache.contains("Default"),
+            "Default must be in cache"
+        );
+        assert!(file.style_cache.contains("Title"), "Title must be in cache");
+
+        // Verify that cache font sizes match the parsed styles map.
+        let default_style = file.styles.get("Default").expect("Default in map");
+        let title_style = file.styles.get("Title").expect("Title in map");
+        let cached_default = file.style_cache.get("Default").expect("Default in cache");
+        let cached_title = file.style_cache.get("Title").expect("Title in cache");
+
+        assert!(
+            (cached_default.font_size - default_style.font_size).abs() < 0.5,
+            "cache Default font_size must match parsed value"
+        );
+        assert!(
+            (cached_title.font_size - title_style.font_size).abs() < 0.5,
+            "cache Title font_size must match parsed value"
+        );
+
+        // Verify the three dialogue lines received correct styles.
+        assert_eq!(file.events.len(), 3);
+        // Line 0 -> Default (font_size 48)
+        let ev0_style = file.events[0].style.as_ref().expect("event 0 has style");
+        assert!(
+            (ev0_style.font_size - 48.0).abs() < 0.5,
+            "event 0 should use Default (48px)"
+        );
+        // Line 1 -> Title (font_size 64)
+        let ev1_style = file.events[1].style.as_ref().expect("event 1 has style");
+        assert!(
+            (ev1_style.font_size - 64.0).abs() < 0.5,
+            "event 1 should use Title (64px)"
+        );
+        // Line 2 -> Default (font_size 48)
+        let ev2_style = file.events[2].style.as_ref().expect("event 2 has style");
+        assert!(
+            (ev2_style.font_size - 48.0).abs() < 0.5,
+            "event 2 should use Default (48px)"
+        );
+    }
+
+    #[test]
+    fn test_ass_cache_fallback_for_unknown_style() {
+        // A dialogue line referencing a nonexistent style should not crash and
+        // should produce a subtitle (style will be None because HashMap lookup
+        // returns None for unknown names, which is the existing behavior).
+        let ass = r#"[Script Info]
+ScriptType: v4.00+
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,48,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,40,40,40,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Ghost,,0,0,0,,Phantom line
+"#;
+        let file = parse_ass(ass).expect("parse should succeed");
+        assert_eq!(file.events.len(), 1);
+        // cache was built from styles (only "Default" registered)
+        assert!(file.style_cache.contains("Default"));
+        assert!(!file.style_cache.contains("Ghost"));
+    }
+
+    #[test]
+    fn test_ass_cache_and_direct_lookup_agree() {
+        // Verify that cache.get(name) == styles.get(name) for each registered name.
+        let file = parse_ass(SAMPLE_ASS).expect("parse should succeed");
+        for (name, style_from_map) in &file.styles {
+            let from_cache = file
+                .style_cache
+                .get(name)
+                .expect("every style in map must be in cache");
+            assert!(
+                (from_cache.font_size - style_from_map.font_size).abs() < 0.5,
+                "cache and map must agree on font_size for style {name}"
+            );
+        }
+    }
 }

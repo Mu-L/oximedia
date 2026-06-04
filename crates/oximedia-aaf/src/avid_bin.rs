@@ -456,9 +456,7 @@ impl AafFile {
     /// `None` if there are no composition mobs.
     #[must_use]
     pub fn name(&self) -> Option<&str> {
-        self.composition_mobs()
-            .first()
-            .map(|m| m.name())
+        self.composition_mobs().first().map(|m| m.name())
     }
 }
 
@@ -467,13 +465,19 @@ impl AafFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::composition::CompositionMob;
-    use crate::object_model::{Mob, MobType};
 
     fn make_bin() -> AvidBin {
         let mut bin = AvidBin::new("TestBin");
-        bin.add_item(BinItem::new(Uuid::new_v4(), "Clip A", BinItemType::MasterClip));
-        bin.add_item(BinItem::new(Uuid::new_v4(), "Sequence B", BinItemType::Sequence));
+        bin.add_item(BinItem::new(
+            Uuid::new_v4(),
+            "Clip A",
+            BinItemType::MasterClip,
+        ));
+        bin.add_item(BinItem::new(
+            Uuid::new_v4(),
+            "Sequence B",
+            BinItemType::Sequence,
+        ));
         bin
     }
 
@@ -516,8 +520,16 @@ mod tests {
     #[test]
     fn test_bin_sort_by_name() {
         let mut bin = AvidBin::new("Bin");
-        bin.add_item(BinItem::new(Uuid::new_v4(), "Zebra", BinItemType::MasterClip));
-        bin.add_item(BinItem::new(Uuid::new_v4(), "Apple", BinItemType::MasterClip));
+        bin.add_item(BinItem::new(
+            Uuid::new_v4(),
+            "Zebra",
+            BinItemType::MasterClip,
+        ));
+        bin.add_item(BinItem::new(
+            Uuid::new_v4(),
+            "Apple",
+            BinItemType::MasterClip,
+        ));
         bin.sort_by_name();
         assert_eq!(bin.items()[0].name, "Apple");
         assert_eq!(bin.items()[1].name, "Zebra");
@@ -527,8 +539,16 @@ mod tests {
     #[test]
     fn test_bin_sort_by_name_desc() {
         let mut bin = AvidBin::new("Bin");
-        bin.add_item(BinItem::new(Uuid::new_v4(), "Apple", BinItemType::MasterClip));
-        bin.add_item(BinItem::new(Uuid::new_v4(), "Zebra", BinItemType::MasterClip));
+        bin.add_item(BinItem::new(
+            Uuid::new_v4(),
+            "Apple",
+            BinItemType::MasterClip,
+        ));
+        bin.add_item(BinItem::new(
+            Uuid::new_v4(),
+            "Zebra",
+            BinItemType::MasterClip,
+        ));
         bin.sort_by_name_desc();
         assert_eq!(bin.items()[0].name, "Zebra");
         assert_eq!(bin.sort_order, BinSortOrder::NameDescending);
@@ -590,7 +610,11 @@ mod tests {
     #[test]
     fn test_writer_xml_escapes_special_chars() {
         let mut bin = AvidBin::new("Test & Bin");
-        bin.add_item(BinItem::new(Uuid::new_v4(), "Clip <1>", BinItemType::MasterClip));
+        bin.add_item(BinItem::new(
+            Uuid::new_v4(),
+            "Clip <1>",
+            BinItemType::MasterClip,
+        ));
         let writer = AvidBinWriter::new();
         let xml = writer.write_xml(&bin).expect("write_xml should succeed");
         assert!(xml.contains("Test &amp; Bin"));
@@ -599,8 +623,8 @@ mod tests {
 
     #[test]
     fn test_reader_from_file() {
-        use crate::ContentStorage;
         use crate::composition::CompositionMob;
+        use crate::ContentStorage;
         let mut storage = ContentStorage::new();
         storage.add_composition_mob(CompositionMob::new(Uuid::new_v4(), "TestComp"));
         let reader = AvidBinReader::new();
@@ -615,8 +639,8 @@ mod tests {
 
     #[test]
     fn test_reader_includes_source_mobs() {
-        use crate::ContentStorage;
         use crate::object_model::{Mob, MobType};
+        use crate::ContentStorage;
         let mut storage = ContentStorage::new();
         let mob = Mob::new(Uuid::new_v4(), "source.mxf".to_string(), MobType::Source);
         storage.add_mob(mob);

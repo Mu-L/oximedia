@@ -305,15 +305,12 @@ impl PipelineDebugger {
             };
 
             // Find the stream spec on the specified output pad.
-            let stream_spec = result
-                .nodes
-                .get(&upstream_id)
-                .and_then(|s| {
-                    s.output_pads
-                        .iter()
-                        .find(|(n, _)| n == &config.edge_from_pad)
-                        .map(|(_, sp)| sp.clone())
-                });
+            let stream_spec = result.nodes.get(&upstream_id).and_then(|s| {
+                s.output_pads
+                    .iter()
+                    .find(|(n, _)| n == &config.edge_from_pad)
+                    .map(|(_, sp)| sp.clone())
+            });
 
             let stream_spec = match stream_spec {
                 Some(sp) => sp,
@@ -415,12 +412,8 @@ impl PipelineDebugger {
     ///
     /// Returns the cleaned graph.
     pub fn remove_taps(&self, graph: PipelineGraph) -> PipelineGraph {
-        let tap_ids: std::collections::HashSet<NodeId> = self
-            .graph_info
-            .taps
-            .values()
-            .map(|t| t.node_id)
-            .collect();
+        let tap_ids: std::collections::HashSet<NodeId> =
+            self.graph_info.taps.values().map(|t| t.node_id).collect();
 
         if tap_ids.is_empty() {
             return graph;
@@ -573,7 +566,10 @@ mod tests {
         let src = NodeSpec::source("src", SourceConfig::File("in.mkv".into()), vs());
         let filt = NodeSpec::filter(
             "scale",
-            crate::node::FilterConfig::Scale { width: 640, height: 360 },
+            crate::node::FilterConfig::Scale {
+                width: 640,
+                height: 360,
+            },
             vs(),
             StreamSpec::video(FrameFormat::Yuv420p, 640, 360, 25),
         );

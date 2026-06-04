@@ -111,7 +111,10 @@ fn ssim_components(ref_frame: &[u8], cmp_frame: &[u8], n: usize) -> (f64, f64) {
     // Contrast–structure comparison: cs(x,y) = (2·σxy + C2) / (σx² + σy² + C2)
     let contrast_structure = (2.0 * cov_xy + C2) / (var_x + var_y + C2);
 
-    (luminance.clamp(0.0, 1.0), contrast_structure.clamp(0.0, 1.0))
+    (
+        luminance.clamp(0.0, 1.0),
+        contrast_structure.clamp(0.0, 1.0),
+    )
 }
 
 /// Compute the Multi-Scale SSIM (MS-SSIM) between two 8-bit luma frames.
@@ -284,7 +287,10 @@ mod tests {
             .collect();
         let score = ms_ssim(&ref_pixels, &cmp_pixels, w, h);
         // Slightly degraded should score close to but below 1.0.
-        assert!(score > 0.5, "Slightly degraded should score > 0.5, got {score}");
+        assert!(
+            score > 0.5,
+            "Slightly degraded should score > 0.5, got {score}"
+        );
         assert!(score < 1.0, "Degraded should score < 1.0, got {score}");
     }
 
@@ -310,10 +316,7 @@ mod tests {
         let h = 32u32;
         let ref_pixels: Vec<u8> = (0..(w * h) as usize).map(|i| (i % 256) as u8).collect();
         let perfect_score = ms_ssim(&ref_pixels, &ref_pixels, w, h);
-        let degraded: Vec<u8> = ref_pixels
-            .iter()
-            .map(|&v| v.saturating_add(50))
-            .collect();
+        let degraded: Vec<u8> = ref_pixels.iter().map(|&v| v.saturating_add(50)).collect();
         let degraded_score = ms_ssim(&ref_pixels, &degraded, w, h);
         assert!(
             degraded_score <= perfect_score,

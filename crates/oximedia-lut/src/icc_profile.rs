@@ -151,11 +151,7 @@ impl IccTrc {
                 f,
             } => {
                 // Determine linear threshold in linear-light space
-                let y_thresh = if *d > 0.0 {
-                    c * d + f
-                } else {
-                    0.0
-                };
+                let y_thresh = if *d > 0.0 { c * d + f } else { 0.0 };
                 if y_c < y_thresh {
                     if *c <= 0.0 {
                         0.0
@@ -513,7 +509,13 @@ pub fn parse_icc_header(data: &[u8]) -> LutResult<IccHeader> {
 fn bytes4_to_str(b: &[u8]) -> String {
     let s: String = b
         .iter()
-        .map(|&c| if c.is_ascii_graphic() || c == b' ' { c as char } else { '?' })
+        .map(|&c| {
+            if c.is_ascii_graphic() || c == b' ' {
+                c as char
+            } else {
+                '?'
+            }
+        })
         .collect();
     s.trim_end().to_string()
 }
@@ -600,7 +602,10 @@ mod tests {
         for v in [0.0, 0.1, 0.5, 0.9, 1.0] {
             let encoded = trc.apply(v);
             let decoded = trc.apply_inverse(encoded);
-            assert!((decoded - v).abs() < 1e-10, "gamma roundtrip failed at {v}: got {decoded}");
+            assert!(
+                (decoded - v).abs() < 1e-10,
+                "gamma roundtrip failed at {v}: got {decoded}"
+            );
         }
     }
 
@@ -708,8 +713,8 @@ mod tests {
 
     #[test]
     fn test_lut3d_output_linear_srgb() {
-        let conv = IccToLutConverter::new(srgb_profile())
-            .with_output_space(IccOutputSpace::LinearSrgb);
+        let conv =
+            IccToLutConverter::new(srgb_profile()).with_output_space(IccOutputSpace::LinearSrgb);
         let lut = conv.to_lut3d(3);
         assert_eq!(lut.len(), 27);
         // Black → black
@@ -718,8 +723,7 @@ mod tests {
 
     #[test]
     fn test_lut3d_output_rec709() {
-        let conv = IccToLutConverter::new(srgb_profile())
-            .with_output_space(IccOutputSpace::Rec709);
+        let conv = IccToLutConverter::new(srgb_profile()).with_output_space(IccOutputSpace::Rec709);
         let lut = conv.to_lut3d(3);
         assert_eq!(lut.len(), 27);
     }

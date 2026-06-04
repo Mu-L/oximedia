@@ -571,7 +571,7 @@ impl<'a> OcioParser<'a> {
         }
 
         if config.version == 0 {
-            return Err(ColorError::InvalidProfile(
+            return Err(ColorError::Parse(
                 "OCIO config missing ocio_profile_version".to_owned(),
             ));
         }
@@ -654,7 +654,7 @@ fn apply_cs_field(cs: &mut OcioColorSpace, key: &str, val: &str) {
         "description" => cs.description = val.to_owned(),
         "bitdepth" => cs.bitdepth = Some(val.to_owned()),
         "isdata" | "is_data" => {
-            cs.is_data = matches!(val.to_lowercase().as_str(), "true" | "yes" | "1")
+            cs.is_data = matches!(val.to_lowercase().as_str(), "true" | "yes" | "1");
         }
         "allocation" => cs.allocation = Some(val.to_owned()),
         "allocation_vars" => {

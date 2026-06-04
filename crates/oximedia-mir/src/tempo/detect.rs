@@ -1,5 +1,6 @@
 //! Tempo detection using autocorrelation and comb filtering.
 
+use crate::tempo::utils::bounded_acf_with_early_exit;
 use crate::types::TempoResult;
 use crate::utils::{autocorrelation, find_peaks, mean};
 use crate::{MirError, MirResult};
@@ -25,6 +26,9 @@ impl TempoDetector {
     /// Detect tempo from audio signal.
     ///
     /// Uses autocorrelation-based method with comb filtering for robustness.
+    /// An incremental ACF scan with early-exit is performed first; if a
+    /// high-confidence lag is found before exhausting the search range the
+    /// more expensive full-scan and peak-finding steps are skipped.
     ///
     /// # Errors
     ///
@@ -42,12 +46,38 @@ impl TempoDetector {
         // Compute onset strength envelope
         let onset_env = self.compute_onset_envelope(signal)?;
 
-        // Compute autocorrelation of onset envelope
-        let acf = autocorrelation(&onset_env)?;
-
-        // Convert BPM range to lag range
+        // Convert BPM range to lag range (in onset-envelope frames)
         let min_lag = self.bpm_to_lag(self.max_bpm);
-        let max_lag = self.bpm_to_lag(self.min_bpm).min(acf.len() - 1);
+        let max_lag_raw = self.bpm_to_lag(self.min_bpm);
+
+        if min_lag == 0 || min_lag >= max_lag_raw {
+            return Err(MirError::InvalidConfig(
+                "Invalid BPM range for tempo detection".to_string(),
+            ));
+        }
+
+        // --- Fast path: incremental ACF with early-exit -------------------------
+        // Threshold 0.8 means we exit as soon as normalised ACF prominence ≥ 0.8.
+        // We require at least 8 lags to have been scanned before triggering exit.
+        let (early_best_lag, early_conf, _lags_scanned) =
+            bounded_acf_with_early_exit(&onset_env, min_lag, max_lag_raw, 0.8, 8);
+
+        if early_conf >= 0.8 {
+            // High confidence: skip full ACF + peak-picking, go straight to refine.
+            let primary_bpm = self.lag_to_bpm(early_best_lag);
+            let refined_bpm = self.refine_with_comb_filter(&onset_env, primary_bpm)?;
+            let stability = self.compute_stability(&onset_env, refined_bpm);
+            return Ok(TempoResult {
+                bpm: refined_bpm,
+                confidence: early_conf.clamp(0.0, 1.0),
+                stability,
+                alternatives: vec![],
+            });
+        }
+
+        // --- Slow path: full FFT-based autocorrelation + peak picking ------------
+        let acf = autocorrelation(&onset_env)?;
+        let max_lag = max_lag_raw.min(acf.len() - 1);
 
         if min_lag >= max_lag {
             return Err(MirError::InvalidConfig(
@@ -98,7 +128,14 @@ impl TempoDetector {
             .iter()
             .skip(1)
             .take(3)
-            .map(|&(bpm, strength)| (bpm, strength / max_acf))
+            .map(|&(bpm, strength)| {
+                let alt_conf = if max_acf > 0.0 {
+                    strength / max_acf
+                } else {
+                    0.0
+                };
+                (bpm, alt_conf)
+            })
             .collect();
 
         Ok(TempoResult {
@@ -244,6 +281,10 @@ impl TempoDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::structure_analysis::{novelty_curve, pick_boundaries, self_similarity_matrix};
+    use crate::tempo::utils::bounded_acf_with_early_exit;
+
+    // ─── existing tests ──────────────────────────────────────────────────────
 
     #[test]
     fn test_tempo_detector_creation() {
@@ -266,5 +307,233 @@ mod tests {
         let signal = vec![0.0; 1000]; // Too short
         let result = detector.detect(&signal);
         assert!(result.is_err());
+    }
+
+    // ─── Wave 18 Slice B tests ───────────────────────────────────────────────
+
+    /// Build an onset-envelope that fires every `period` frames (in the
+    /// hop-rate domain).  This simulates the normalised onset env that
+    /// `compute_onset_envelope` would produce for a perfect click track.
+    fn synthetic_onset_env(period: usize, n_frames: usize) -> Vec<f32> {
+        (0..n_frames)
+            .map(|i| if i % period == 0 { 1.0_f32 } else { 0.0 })
+            .collect()
+    }
+
+    /// 120 BPM click track in onset-envelope space.
+    ///
+    /// At 44 100 Hz with hop=512:  frames_per_beat = 44100 / (120/60) / 512 ≈ 43.
+    /// We use the bounded ACF helper directly on the onset envelope so the test
+    /// does not depend on STFT processing.
+    #[test]
+    fn test_early_exit_clean_tempo() {
+        // hop=512, sr=44100 → period for 120 BPM ≈ round(44100/2/512) = 43 frames
+        let period = 43_usize;
+        let n_frames = 512;
+        let onset_env = synthetic_onset_env(period, n_frames);
+
+        // min_lag = lag for 200 BPM ≈ round(44100/200*60/512) = round(25.9) = 26
+        // max_lag = lag for 60 BPM  ≈ round(44100/60*60/512)  = round(86.1) = 86
+        let min_lag = 26_usize;
+        let max_lag = 86_usize;
+
+        let total_range = max_lag - min_lag + 1; // 61 lags
+
+        let (best_lag, conf, lags_scanned) =
+            bounded_acf_with_early_exit(&onset_env, min_lag, max_lag, 0.8, 8);
+
+        // The detected lag should correspond to ±1 frame of the true period (43)
+        assert!(
+            best_lag.abs_diff(period) <= 1,
+            "best_lag={best_lag} should be close to {period}"
+        );
+
+        // Confidence must be high for a perfect signal
+        assert!(conf >= 0.8, "confidence={conf} should be ≥ 0.8");
+
+        // Early-exit: we should have scanned fewer lags than the full range
+        assert!(
+            lags_scanned < total_range,
+            "lags_scanned={lags_scanned} should be < {total_range} (early exit expected)"
+        );
+    }
+
+    /// For a nearly-white-noise signal the confidence never exceeds 0.99, so
+    /// the full lag range is scanned.
+    #[test]
+    fn test_noisy_still_full_scan() {
+        // Deterministic pseudo-noise: vary the signal such that no lag dominates.
+        let n: usize = 256;
+        let signal: Vec<f32> = (0..n)
+            .map(|i| {
+                // Combine three incommensurate frequencies so ACF stays low.
+                ((i as f32 * 0.37).sin() + (i as f32 * 0.73).sin() + (i as f32 * 1.13).sin()) / 3.0
+            })
+            .collect();
+
+        let min_lag = 5_usize;
+        let max_lag = 50_usize;
+        let total_range = max_lag - min_lag + 1;
+
+        let (_lag, _conf, lags_scanned) =
+            bounded_acf_with_early_exit(&signal, min_lag, max_lag, 0.99, 1);
+
+        // Should scan the entire range (no early exit at 0.99 threshold)
+        assert_eq!(
+            lags_scanned, total_range,
+            "expected full scan, got lags_scanned={lags_scanned}"
+        );
+    }
+
+    /// A direct 120 BPM ACF test: synthetic onset env at period=43 frames,
+    /// then check the best lag converts to a BPM within ±2 of 120.
+    #[test]
+    fn test_acf_120bpm_click_track() {
+        let period = 43_usize; // ≈ 120 BPM at 44100 Hz, hop=512
+        let onset_env = synthetic_onset_env(period, 512);
+
+        let min_lag = 26_usize;
+        let max_lag = 86_usize;
+
+        let (best_lag, _conf, _scanned) =
+            bounded_acf_with_early_exit(&onset_env, min_lag, max_lag, 0.8, 8);
+
+        // Convert lag back to BPM: bpm = 44100 * 60 / (lag * 512)
+        #[allow(clippy::cast_precision_loss)]
+        let detected_bpm = 44100.0_f32 * 60.0 / (best_lag as f32 * 512.0);
+
+        assert!(
+            (detected_bpm - 120.0).abs() <= 2.0,
+            "detected_bpm={detected_bpm:.1} should be within ±2 BPM of 120"
+        );
+    }
+
+    // ─── Key detection smoke test ─────────────────────────────────────────────
+
+    /// Instantiate KeyDetector and detect key on a simple signal.
+    /// We don't assert a specific key, just that the detector returns `Ok`.
+    #[test]
+    fn test_key_detection() {
+        use crate::key::detect::KeyDetector;
+
+        let sample_rate = 22050.0_f32;
+        let detector = KeyDetector::new(sample_rate, 4096);
+
+        // C major chord tone frequencies (C4=261.6, E4=329.6, G4=392 Hz)
+        let n_samples = 22050_usize; // 1 s
+        let signal: Vec<f32> = (0..n_samples)
+            .map(|i| {
+                let t = i as f32 / sample_rate;
+                (2.0 * std::f32::consts::PI * 261.63 * t).sin()
+                    + 0.8 * (2.0 * std::f32::consts::PI * 329.63 * t).sin()
+                    + 0.8 * (2.0 * std::f32::consts::PI * 392.00 * t).sin()
+            })
+            .collect();
+
+        let result = detector.detect(&signal);
+        assert!(
+            result.is_ok(),
+            "KeyDetector should succeed, got: {:?}",
+            result.err()
+        );
+        let key = result.expect("checked above");
+        assert!(!key.key.is_empty(), "key name must be non-empty");
+        assert!(
+            key.confidence >= 0.0 && key.confidence <= 1.0,
+            "confidence={} out of range",
+            key.confidence
+        );
+    }
+
+    // ─── Chord recognition smoke test ────────────────────────────────────────
+
+    /// ChordRecognizer on a synthetic C major chord signal → recognize returns
+    /// Ok and detects at least one chord.
+    #[test]
+    fn test_chord_recognition() {
+        use crate::chord::recognize::ChordRecognizer;
+
+        let sample_rate = 22050.0_f32;
+        let recognizer = ChordRecognizer::new(sample_rate, 2048, 512);
+
+        // Build a C major chord: C4 (261.63 Hz) + E4 (329.63 Hz) + G4 (392.00 Hz)
+        let n_samples = 22050_usize; // 1 s
+        let signal: Vec<f32> = (0..n_samples)
+            .map(|i| {
+                let t = i as f32 / sample_rate;
+                (2.0 * std::f32::consts::PI * 261.63 * t).sin()
+                    + 0.8 * (2.0 * std::f32::consts::PI * 329.63 * t).sin()
+                    + 0.8 * (2.0 * std::f32::consts::PI * 392.00 * t).sin()
+            })
+            .collect();
+
+        let result = recognizer.recognize(&signal);
+        assert!(
+            result.is_ok(),
+            "ChordRecognizer should succeed, got: {:?}",
+            result.err()
+        );
+        let chord_result = result.expect("checked above");
+        // At least one chord should be detected in 1 second of audio
+        assert!(
+            !chord_result.chords.is_empty(),
+            "should detect at least one chord"
+        );
+        // The root chord should include "C" (or at minimum be non-empty)
+        let root_label = &chord_result.chords[0].label;
+        assert!(
+            !root_label.is_empty(),
+            "chord label must be non-empty, got '{root_label}'"
+        );
+    }
+
+    // ─── Structure boundary test ──────────────────────────────────────────────
+
+    /// self_similarity_matrix + novelty_curve + pick_boundaries on a 2-section
+    /// synthetic feature sequence should detect at least 1 boundary near the
+    /// midpoint where the two sections transition.
+    ///
+    /// Section A: first 10 frames — orthogonal to section B.
+    /// Section B: last 10 frames — different direction in feature space.
+    ///
+    /// Note: the checkerboard kernel may also produce a peak at or near frame 0
+    /// (the beginning) due to boundary effects; we only assert that exactly one
+    /// boundary falls in the neighbourhood of the midpoint (the real transition).
+    #[test]
+    fn test_structure_boundaries() {
+        // Section A: feature vector [1, 0, 0]
+        // Section B: feature vector [0, 1, 0]
+        let n = 20_usize;
+        let half = n / 2; // 10
+        let features: Vec<Vec<f64>> = (0..n)
+            .map(|i| {
+                if i < half {
+                    vec![1.0, 0.0, 0.0]
+                } else {
+                    vec![0.0, 1.0, 0.0]
+                }
+            })
+            .collect();
+
+        let ssm = self_similarity_matrix(&features);
+        assert_eq!(ssm.len(), n, "SSM must be {n}×{n}");
+
+        // kernel_size=4 gives a wider checkerboard that clearly separates the two
+        // uniform sections and concentrates novelty at the midpoint.
+        let novelty = novelty_curve(&ssm, 4);
+        assert_eq!(novelty.len(), n, "novelty curve length must equal n");
+
+        // Require min_gap=3 so the frame-0 boundary-effect peak (if present) is
+        // counted separately from the midpoint peak.
+        let boundaries = pick_boundaries(&novelty, 0.01, 3);
+
+        // At least one detected boundary must be near the midpoint.
+        let near_mid = boundaries
+            .iter()
+            .any(|&b| b >= half.saturating_sub(3) && b <= half + 3);
+        assert!(
+            near_mid,
+            "expected a boundary near midpoint {half}, detected boundaries: {boundaries:?}"
+        );
     }
 }

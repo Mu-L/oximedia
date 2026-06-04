@@ -624,6 +624,90 @@ pub fn analyze_regions(
     Ok(region_scores)
 }
 
+/// A single ELA region with its grid position and mean error score.
+///
+/// `x` and `y` are the top-left pixel coordinates of the tile; `score` is the
+/// mean absolute error level across the tile after JPEG recompression at
+/// [`ELA_QUALITY`].
+#[derive(Debug, Clone)]
+pub struct ElaRegion {
+    /// Left pixel column of the tile.
+    pub x: u32,
+    /// Top pixel row of the tile.
+    pub y: u32,
+    /// Mean ELA error score for the tile.
+    pub score: f64,
+}
+
+/// Tiled ELA for memory-efficient large-image analysis.
+///
+/// Unlike `analyze_regions`, which materialises a full-frame error map first,
+/// this function iterates over `tile_size × tile_size` pixel tiles and
+/// performs the ELA recompression comparison *only* over each tile's rows and
+/// columns.  This keeps peak memory proportional to `tile_size²` rather than
+/// to the full image area.
+///
+/// The recompression is performed on the full image once (necessary for JPEG
+/// codec correctness — individual tile crops would encode different DCT block
+/// grids and produce meaningless error values).  The per-tile computation then
+/// reads only the tile's pixels from the shared full-frame recompressed image.
+///
+/// # Arguments
+///
+/// * `image` – Source RGB image.
+/// * `tile_size` – Width and height (in pixels) of each analysis tile.
+///
+/// # Returns
+///
+/// A `Vec<ElaRegion>` with one entry per tile in raster order (row-major).
+pub fn analyze_regions_tiled(image: &RgbImage, tile_size: u32) -> ForensicsResult<Vec<ElaRegion>> {
+    let (width, height) = image.dimensions();
+    if tile_size == 0 {
+        return Err(ForensicsError::AnalysisFailed(
+            "tile_size must be > 0".to_string(),
+        ));
+    }
+
+    // Recompress once — sharing the result across all tiles avoids allocating
+    // a full-frame difference buffer while keeping DCT block boundaries intact.
+    let recompressed = recompress_image(image, ELA_QUALITY)?;
+
+    let mut regions = Vec::new();
+
+    for y in (0..height).step_by(tile_size as usize) {
+        for x in (0..width).step_by(tile_size as usize) {
+            let mut sum = 0.0_f64;
+            let mut count = 0u64;
+
+            let y_end = (y + tile_size).min(height);
+            let x_end = (x + tile_size).min(width);
+
+            for py in y..y_end {
+                for px in x..x_end {
+                    let orig = image.get_pixel(px, py);
+                    let recomp = recompressed.get_pixel(px, py);
+                    sum += calculate_pixel_error(orig, recomp);
+                    count += 1;
+                }
+            }
+
+            let score = if count > 0 { sum / count as f64 } else { 0.0 };
+
+            regions.push(ElaRegion { x, y, score });
+        }
+    }
+
+    Ok(regions)
+}
+
+/// Convenience wrapper for `analyze_regions_tiled` with a default tile size of 128 pixels.
+///
+/// 128 × 128 tiles represent a good trade-off between memory usage and analysis
+/// granularity for typical 4K and 8K source images.
+pub fn analyze_regions_tiled_default(image: &RgbImage) -> ForensicsResult<Vec<ElaRegion>> {
+    analyze_regions_tiled(image, 128)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

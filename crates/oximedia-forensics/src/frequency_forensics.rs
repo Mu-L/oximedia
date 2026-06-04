@@ -12,6 +12,7 @@
 //! - **Block artifact grid analysis** for detecting misaligned JPEG grids
 //! - **Power spectrum analysis** for source identification
 
+use rayon::prelude::*;
 use std::f64::consts::PI;
 
 /// A block of DCT coefficients (8x8).
@@ -409,6 +410,11 @@ impl FrequencyForensicAnalyzer {
     }
 
     /// Detect double JPEG compression from DCT coefficient histograms.
+    ///
+    /// Each frequency index is independent so we analyse them in parallel using
+    /// rayon.  The periodicity scores are then averaged to produce the final
+    /// confidence value.  The result is identical to the serial version because
+    /// histogram construction and gap detection have no shared mutable state.
     #[allow(clippy::cast_precision_loss)]
     fn detect_double_compression(&self, blocks: &[DctBlock]) -> f64 {
         if blocks.is_empty() {
@@ -416,26 +422,25 @@ impl FrequencyForensicAnalyzer {
         }
 
         // Analyze a few AC frequencies (indices 1, 2, 3) for periodicity
-        let freq_indices = [1, 2, 3, 8, 9, 16];
-        let mut total_periodicity = 0.0;
-        let mut count = 0;
+        let freq_indices = [1usize, 2, 3, 8, 9, 16];
+        let num_histogram_bins = self.config.num_histogram_bins;
 
-        for &fi in &freq_indices {
-            if fi >= 64 {
-                continue;
-            }
-            let values: Vec<f64> = blocks.iter().map(|b| b.coefficients[fi]).collect();
-            let hist = DctHistogram::from_values(fi, &values, self.config.num_histogram_bins);
-            let p = hist.detect_periodic_gaps();
-            total_periodicity += p;
-            count += 1;
-        }
+        // Compute periodicity for each frequency index in parallel.
+        let periodicities: Vec<f64> = freq_indices
+            .par_iter()
+            .filter(|&&fi| fi < 64)
+            .map(|&fi| {
+                let values: Vec<f64> = blocks.iter().map(|b| b.coefficients[fi]).collect();
+                let hist = DctHistogram::from_values(fi, &values, num_histogram_bins);
+                hist.detect_periodic_gaps()
+            })
+            .collect();
 
-        if count == 0 {
+        if periodicities.is_empty() {
             return 0.0;
         }
 
-        total_periodicity / count as f64
+        periodicities.iter().sum::<f64>() / periodicities.len() as f64
     }
 
     /// Detect JPEG block grid misalignment.

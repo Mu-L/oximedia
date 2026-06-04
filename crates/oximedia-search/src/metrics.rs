@@ -62,14 +62,9 @@ impl SearchMetrics {
     /// * `relevant` — set of truly relevant document IDs (ground truth).
     /// * `k` — evaluation depth.
     #[must_use]
-    pub fn compute(
-        retrieved: &[usize],
-        relevant: &HashSet<usize>,
-        k: usize,
-    ) -> Self {
+    pub fn compute(retrieved: &[usize], relevant: &HashSet<usize>, k: usize) -> Self {
         // Build binary relevance map (score = 1.0 for each relevant doc).
-        let binary_scores: HashMap<usize, f32> =
-            relevant.iter().map(|&id| (id, 1.0)).collect();
+        let binary_scores: HashMap<usize, f32> = relevant.iter().map(|&id| (id, 1.0)).collect();
 
         let p_at_k: Vec<f32> = (1..=k.min(retrieved.len().max(1)))
             .map(|i| compute_precision_at_k(retrieved, relevant, i))
@@ -111,11 +106,7 @@ impl SearchMetrics {
 /// assert!((compute_precision_at_k(&retrieved, &relevant, 5) - 3.0 / 5.0).abs() < 1e-5);
 /// ```
 #[must_use]
-pub fn compute_precision_at_k(
-    retrieved: &[usize],
-    relevant: &HashSet<usize>,
-    k: usize,
-) -> f32 {
+pub fn compute_precision_at_k(retrieved: &[usize], relevant: &HashSet<usize>, k: usize) -> f32 {
     if k == 0 {
         return 0.0;
     }
@@ -143,11 +134,7 @@ pub fn compute_precision_at_k(
 /// assert!((r - 2.0 / 3.0).abs() < 1e-5, "got {}", r);
 /// ```
 #[must_use]
-pub fn compute_recall_at_k(
-    retrieved: &[usize],
-    relevant: &HashSet<usize>,
-    k: usize,
-) -> f32 {
+pub fn compute_recall_at_k(retrieved: &[usize], relevant: &HashSet<usize>, k: usize) -> f32 {
     if k == 0 || relevant.is_empty() {
         return 0.0;
     }
@@ -170,11 +157,7 @@ pub fn compute_recall_at_k(
 ///
 /// Returns `0.0` when `relevant` is empty.
 #[must_use]
-pub fn compute_average_precision(
-    retrieved: &[usize],
-    relevant: &HashSet<usize>,
-    k: usize,
-) -> f32 {
+pub fn compute_average_precision(retrieved: &[usize], relevant: &HashSet<usize>, k: usize) -> f32 {
     if relevant.is_empty() {
         return 0.0;
     }
@@ -199,11 +182,7 @@ pub fn compute_average_precision(
 /// a named alias for clarity; multi-query MAP should be computed by averaging
 /// `compute_average_precision` over all queries.
 #[must_use]
-pub fn compute_map(
-    retrieved: &[usize],
-    relevant: &HashSet<usize>,
-    k: usize,
-) -> f32 {
+pub fn compute_map(retrieved: &[usize], relevant: &HashSet<usize>, k: usize) -> f32 {
     compute_average_precision(retrieved, relevant, k)
 }
 
@@ -241,11 +220,7 @@ pub fn compute_map(
 /// assert!((ndcg - 1.0).abs() < 1e-5, "perfect ranking should yield nDCG=1.0, got {}", ndcg);
 /// ```
 #[must_use]
-pub fn compute_ndcg(
-    retrieved: &[usize],
-    relevance_scores: &HashMap<usize, f32>,
-    k: usize,
-) -> f32 {
+pub fn compute_ndcg(retrieved: &[usize], relevance_scores: &HashMap<usize, f32>, k: usize) -> f32 {
     if k == 0 || relevance_scores.is_empty() {
         return 0.0;
     }

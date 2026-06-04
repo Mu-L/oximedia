@@ -10,7 +10,7 @@
 //! The [`TimecodeDistributor`] maintains a table of registered subscribers
 //! and emits timecode updates whenever the master advances a frame.  In a
 //! real facility this would be driven by a genlock reference signal; here the
-//! master is advanced manually via [`advance_frame`] for testability.
+//! master is advanced manually via `advance_frame` for testability.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -195,7 +195,7 @@ impl TimecodeSubscriber {
 /// House timecode distributor.
 ///
 /// Maintains a master timecode value and distributes it to all registered
-/// subscribers on every call to [`advance_frame`].
+/// subscribers on every call to [`Self::advance_frame`].
 pub struct TimecodeDistributor {
     standard: TimecodeStandard,
     master: SmpteTimecode,
@@ -315,7 +315,11 @@ mod tests {
     #[test]
     fn test_timecode_advance_wraps_seconds() {
         let mut tc = SmpteTimecode {
-            hours: 0, minutes: 0, seconds: 0, frames: 24, drop_frame: false,
+            hours: 0,
+            minutes: 0,
+            seconds: 0,
+            frames: 24,
+            drop_frame: false,
         };
         tc.advance(25);
         assert_eq!(tc.frames, 0);
@@ -324,20 +328,38 @@ mod tests {
 
     #[test]
     fn test_timecode_display_non_dropframe() {
-        let tc = SmpteTimecode { hours: 1, minutes: 2, seconds: 3, frames: 4, drop_frame: false };
+        let tc = SmpteTimecode {
+            hours: 1,
+            minutes: 2,
+            seconds: 3,
+            frames: 4,
+            drop_frame: false,
+        };
         assert_eq!(tc.to_string(), "01:02:03:04");
     }
 
     #[test]
     fn test_timecode_display_dropframe() {
-        let tc = SmpteTimecode { hours: 0, minutes: 0, seconds: 10, frames: 5, drop_frame: true };
+        let tc = SmpteTimecode {
+            hours: 0,
+            minutes: 0,
+            seconds: 10,
+            frames: 5,
+            drop_frame: true,
+        };
         assert_eq!(tc.to_string(), "00:00:10;05");
     }
 
     #[test]
     fn test_timecode_to_frame_count() {
         // 1 minute at 25 fps = 1500 frames
-        let tc = SmpteTimecode { hours: 0, minutes: 1, seconds: 0, frames: 0, drop_frame: false };
+        let tc = SmpteTimecode {
+            hours: 0,
+            minutes: 1,
+            seconds: 0,
+            frames: 0,
+            drop_frame: false,
+        };
         assert_eq!(tc.to_frame_count(25), 1500);
     }
 
@@ -374,7 +396,13 @@ mod tests {
     #[test]
     fn test_jam_sync() {
         let mut d = TimecodeDistributor::new(TimecodeStandard::Ltc25);
-        let target = SmpteTimecode { hours: 10, minutes: 0, seconds: 0, frames: 0, drop_frame: false };
+        let target = SmpteTimecode {
+            hours: 10,
+            minutes: 0,
+            seconds: 0,
+            frames: 0,
+            drop_frame: false,
+        };
         d.jam_sync(target);
         assert_eq!(d.master().hours, 10);
     }

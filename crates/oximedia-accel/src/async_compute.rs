@@ -7,6 +7,7 @@
 #![allow(dead_code)]
 
 use crate::error::{AccelError, AccelResult};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -22,6 +23,8 @@ struct AsyncInner<T> {
     result: Mutex<Option<AccelResult<T>>>,
     cvar: Condvar,
     submitted_at: Instant,
+    /// Set to `true` atomically when the worker stores the result.
+    done: AtomicBool,
 }
 
 impl<T: Send + 'static> AsyncHandle<T> {
@@ -42,19 +45,19 @@ impl<T: Send + 'static> AsyncHandle<T> {
             .cvar
             .wait_while(guard, |r| r.is_none())
             .map_err(|e| AccelError::Synchronization(format!("condvar wait failed: {e}")))?;
+        let mut guard = guard;
         guard
-            .clone()
+            .take()
             .ok_or_else(|| AccelError::Synchronization("async result missing".to_string()))?
     }
 
     /// Poll whether the result is already available (non-blocking).
+    ///
+    /// Uses an atomic flag so the check remains valid even after [`wait`](Self::wait)
+    /// has consumed the stored value.
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        self.inner
-            .result
-            .lock()
-            .map(|g| g.is_some())
-            .unwrap_or(false)
+        self.inner.done.load(Ordering::Acquire)
     }
 
     /// Wall-clock age of this handle since submission.
@@ -118,6 +121,7 @@ impl AsyncComputeQueue {
             result: Mutex::new(None),
             cvar: Condvar::new(),
             submitted_at: Instant::now(),
+            done: AtomicBool::new(false),
         });
 
         let handle = AsyncHandle {
@@ -133,12 +137,9 @@ impl AsyncComputeQueue {
             let result = work();
             let is_err = result.is_err();
 
-            // Store result and notify waiters.
-            if let Ok(mut guard) = inner.result.lock() {
-                *guard = Some(result);
-            }
-            inner.cvar.notify_all();
-
+            // Update stats BEFORE signalling completion so that any caller
+            // which returns from `wait()` is guaranteed to see the updated
+            // counters when it subsequently calls `stats()`.
             if let Ok(mut s) = stats.lock() {
                 if is_err {
                     s.failed += 1;
@@ -146,6 +147,13 @@ impl AsyncComputeQueue {
                     s.completed += 1;
                 }
             }
+
+            // Store result, signal done flag, and notify waiters.
+            if let Ok(mut guard) = inner.result.lock() {
+                *guard = Some(result);
+            }
+            inner.done.store(true, Ordering::Release);
+            inner.cvar.notify_all();
         });
 
         handle
@@ -256,11 +264,8 @@ mod tests {
     #[test]
     fn test_submit_batch_all_succeed() {
         let q = AsyncComputeQueue::new();
-        let items: Vec<Box<dyn FnOnce() -> AccelResult<u32> + Send>> = vec![
-            Box::new(|| Ok(1)),
-            Box::new(|| Ok(2)),
-            Box::new(|| Ok(3)),
-        ];
+        let items: Vec<Box<dyn FnOnce() -> AccelResult<u32> + Send>> =
+            vec![Box::new(|| Ok(1)), Box::new(|| Ok(2)), Box::new(|| Ok(3))];
         let results = submit_batch(&q, items).expect("batch should succeed");
         assert_eq!(results, vec![1, 2, 3]);
     }

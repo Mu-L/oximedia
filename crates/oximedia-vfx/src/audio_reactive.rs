@@ -172,10 +172,7 @@ impl AudioAmplitudeData {
         }
         let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
         let rms_raw = (sum_sq / samples.len() as f32).sqrt();
-        let peak_raw: f32 = samples
-            .iter()
-            .map(|s| s.abs())
-            .fold(0.0f32, f32::max);
+        let peak_raw: f32 = samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
         self.rms = (rms_raw / max_amplitude).clamp(0.0, 1.0);
         self.peak = (peak_raw / max_amplitude).clamp(0.0, 1.0);
     }
@@ -248,7 +245,12 @@ pub struct ParameterMapping {
 impl ParameterMapping {
     /// Create a linear mapping with no smoothing.
     #[must_use]
-    pub fn linear(source: MappingSource, param_name: impl Into<String>, min: f32, max: f32) -> Self {
+    pub fn linear(
+        source: MappingSource,
+        param_name: impl Into<String>,
+        min: f32,
+        max: f32,
+    ) -> Self {
         Self {
             source,
             param_name: param_name.into(),
@@ -389,12 +391,7 @@ impl AudioReactiveBuilder {
 
     /// Map RMS amplitude linearly to `param_name`.
     #[must_use]
-    pub fn map_rms_to_param(
-        mut self,
-        param_name: impl Into<String>,
-        min: f32,
-        max: f32,
-    ) -> Self {
+    pub fn map_rms_to_param(mut self, param_name: impl Into<String>, min: f32, max: f32) -> Self {
         self.mappings.push(ParameterMapping::linear(
             MappingSource::Rms,
             param_name,
@@ -437,7 +434,10 @@ mod tests {
         for &b in bands {
             let (lo, hi) = b.frequency_range();
             assert!(lo < hi, "band {b:?} low >= high");
-            assert!(lo >= prev_hi || prev_hi == 0.0, "bands not ordered at {b:?}");
+            assert!(
+                lo >= prev_hi || prev_hi == 0.0,
+                "bands not ordered at {b:?}"
+            );
             prev_hi = lo; // allow overlap at boundaries
         }
     }
@@ -518,7 +518,10 @@ mod tests {
         let intensity = params.get("intensity").copied().unwrap_or(0.0);
         let blur = params.get("blur_radius").copied().unwrap_or(0.0);
 
-        assert!(intensity >= 0.0 && intensity <= 1.0, "intensity={intensity}");
+        assert!(
+            intensity >= 0.0 && intensity <= 1.0,
+            "intensity={intensity}"
+        );
         assert!(blur >= 0.0 && blur <= 20.0, "blur={blur}");
     }
 

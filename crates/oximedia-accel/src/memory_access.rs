@@ -111,12 +111,30 @@ impl MemoryAccessProfile {
                 AccessPattern::Gather => gather += r.bytes_accessed,
             }
         }
+        // Find the weighted-average stride across all strided regions.
+        let total_strided_bytes: u64 = self
+            .regions
+            .iter()
+            .filter_map(|r| {
+                if let AccessPattern::Strided { stride } = r.pattern {
+                    Some(stride as u64 * r.bytes_accessed)
+                } else {
+                    None
+                }
+            })
+            .sum();
+        let dominant_stride = total_strided_bytes
+            .checked_div(strided)
+            .map(|v| v as usize)
+            .unwrap_or(1);
+
         let max = seq.max(strided).max(random).max(gather);
         if max == seq {
             AccessPattern::Sequential
         } else if max == strided {
-            // Use a representative stride of 1 as placeholder.
-            AccessPattern::Strided { stride: 1 }
+            AccessPattern::Strided {
+                stride: dominant_stride,
+            }
         } else if max == random {
             AccessPattern::Random
         } else {
@@ -305,15 +323,26 @@ mod tests {
     fn test_optimizer_small_stride_suggests_interleave() {
         let optimizer = MemoryOptimizer::new();
         let mut profile = MemoryAccessProfile::new();
-        profile.record(RegionStat::new("ch", AccessPattern::Strided { stride: 2 }, 1024));
-        assert_eq!(optimizer.suggest_layout(&profile), LayoutSuggestion::Interleave);
+        profile.record(RegionStat::new(
+            "ch",
+            AccessPattern::Strided { stride: 2 },
+            1024,
+        ));
+        assert_eq!(
+            optimizer.suggest_layout(&profile),
+            LayoutSuggestion::Interleave
+        );
     }
 
     #[test]
     fn test_optimizer_large_stride_suggests_tiled() {
         let optimizer = MemoryOptimizer::new();
         let mut profile = MemoryAccessProfile::new();
-        profile.record(RegionStat::new("row", AccessPattern::Strided { stride: 1920 }, 1024));
+        profile.record(RegionStat::new(
+            "row",
+            AccessPattern::Strided { stride: 1920 },
+            1024,
+        ));
         assert!(matches!(
             optimizer.suggest_layout(&profile),
             LayoutSuggestion::TiledLayout { .. }

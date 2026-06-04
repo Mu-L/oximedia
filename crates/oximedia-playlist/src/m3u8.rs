@@ -386,14 +386,10 @@ impl HlsPlaylist {
                         .get("BANDWIDTH")
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(0),
-                    average_bandwidth: attrs
-                        .get("AVERAGE-BANDWIDTH")
-                        .and_then(|v| v.parse().ok()),
+                    average_bandwidth: attrs.get("AVERAGE-BANDWIDTH").and_then(|v| v.parse().ok()),
                     codecs: attrs.get("CODECS").cloned(),
                     resolution: attrs.get("RESOLUTION").cloned(),
-                    frame_rate: attrs
-                        .get("FRAME-RATE")
-                        .and_then(|v| v.parse().ok()),
+                    frame_rate: attrs.get("FRAME-RATE").and_then(|v| v.parse().ok()),
                     hdcp_level: attrs.get("HDCP-LEVEL").cloned(),
                     audio: attrs.get("AUDIO").cloned(),
                     video: attrs.get("VIDEO").cloned(),
@@ -425,18 +421,12 @@ impl HlsPlaylist {
                 playlist.kind = HlsPlaylistKind::Master;
                 let attrs = parse_attr_list(rest);
                 let rendition = HlsRendition {
-                    rendition_type: attrs
-                        .get("TYPE")
-                        .cloned()
-                        .unwrap_or_else(|| "AUDIO".into()),
+                    rendition_type: attrs.get("TYPE").cloned().unwrap_or_else(|| "AUDIO".into()),
                     group_id: attrs.get("GROUP-ID").cloned().unwrap_or_default(),
                     name: attrs.get("NAME").cloned().unwrap_or_default(),
                     language: attrs.get("LANGUAGE").cloned(),
                     is_default: attrs.get("DEFAULT").map(|v| v == "YES").unwrap_or(false),
-                    auto_select: attrs
-                        .get("AUTOSELECT")
-                        .map(|v| v == "YES")
-                        .unwrap_or(false),
+                    auto_select: attrs.get("AUTOSELECT").map(|v| v == "YES").unwrap_or(false),
                     uri: attrs.get("URI").cloned(),
                     characteristics: attrs.get("CHARACTERISTICS").cloned(),
                 };
@@ -605,17 +595,24 @@ impl HlsPlaylist {
 
     fn write_master(&self, out: &mut String) -> Result<()> {
         for r in &self.renditions {
-            write!(out, "#EXT-X-MEDIA:TYPE={},GROUP-ID=\"{}\",NAME=\"{}\"",
-                r.rendition_type, r.group_id, r.name)
-                .map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
+            write!(
+                out,
+                "#EXT-X-MEDIA:TYPE={},GROUP-ID=\"{}\",NAME=\"{}\"",
+                r.rendition_type, r.group_id, r.name
+            )
+            .map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
             if let Some(lang) = &r.language {
                 write!(out, ",LANGUAGE=\"{lang}\"")
                     .map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
             }
             write!(out, ",DEFAULT={}", if r.is_default { "YES" } else { "NO" })
                 .map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
-            write!(out, ",AUTOSELECT={}", if r.auto_select { "YES" } else { "NO" })
-                .map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
+            write!(
+                out,
+                ",AUTOSELECT={}",
+                if r.auto_select { "YES" } else { "NO" }
+            )
+            .map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
             if let Some(uri) = &r.uri {
                 write!(out, ",URI=\"{uri}\"")
                     .map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
@@ -651,8 +648,7 @@ impl HlsPlaylist {
                     .map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
             }
             writeln!(out).map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
-            writeln!(out, "{}", v.uri)
-                .map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
+            writeln!(out, "{}", v.uri).map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
         }
 
         Ok(())
@@ -666,8 +662,12 @@ impl HlsPlaylist {
         writeln!(out, "#EXT-X-MEDIA-SEQUENCE:{}", self.media_sequence)
             .map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
         if self.discontinuity_sequence > 0 {
-            writeln!(out, "#EXT-X-DISCONTINUITY-SEQUENCE:{}", self.discontinuity_sequence)
-                .map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
+            writeln!(
+                out,
+                "#EXT-X-DISCONTINUITY-SEQUENCE:{}",
+                self.discontinuity_sequence
+            )
+            .map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
         }
         if let Some(pt) = &self.playlist_type {
             writeln!(out, "#EXT-X-PLAYLIST-TYPE:{pt}")
@@ -687,8 +687,7 @@ impl HlsPlaylist {
             }
             // Extra tags
             for tag in &seg.extra_tags {
-                writeln!(out, "{tag}")
-                    .map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
+                writeln!(out, "{tag}").map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
             }
             if seg.discontinuity {
                 writeln!(out, "#EXT-X-DISCONTINUITY")
@@ -716,8 +715,7 @@ impl HlsPlaylist {
             };
             writeln!(out, "#EXTINF:{:.6},{}", seg.duration_secs, title.trim())
                 .map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
-            writeln!(out, "{}", seg.uri)
-                .map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
+            writeln!(out, "{}", seg.uri).map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
         }
 
         if self.is_ended {
@@ -735,12 +733,10 @@ fn write_key_tag(out: &mut String, k: &HlsKey) -> Result<()> {
     write!(out, "#EXT-X-KEY:METHOD={}", k.method.as_str())
         .map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
     if let Some(uri) = &k.uri {
-        write!(out, ",URI=\"{uri}\"")
-            .map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
+        write!(out, ",URI=\"{uri}\"").map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
     }
     if let Some(iv) = &k.iv {
-        write!(out, ",IV={iv}")
-            .map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
+        write!(out, ",IV={iv}").map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
     }
     if let Some(fmt) = &k.key_format {
         write!(out, ",KEYFORMAT=\"{fmt}\"")
@@ -765,25 +761,26 @@ fn write_map_tag(out: &mut String, m: &HlsMap) -> Result<()> {
 
 fn write_ad_cue(out: &mut String, cue: &HlsAdCue) -> Result<()> {
     match &cue.source {
-        Scte35Source::HlsCue(data) => {
-            writeln!(out, "#EXT-X-SCTE35:CUE=\"{data}\"")
-                .map_err(|e| PlaylistError::InvalidItem(e.to_string()))
-        }
-        Scte35Source::OatCls(data) => {
-            writeln!(out, "#EXT-OATCLS-SCTE35:{data}")
-                .map_err(|e| PlaylistError::InvalidItem(e.to_string()))
-        }
-        Scte35Source::CueOut(secs) => {
-            writeln!(out, "#EXT-X-CUE-OUT:{secs}")
-                .map_err(|e| PlaylistError::InvalidItem(e.to_string()))
-        }
+        Scte35Source::HlsCue(data) => writeln!(out, "#EXT-X-SCTE35:CUE=\"{data}\"")
+            .map_err(|e| PlaylistError::InvalidItem(e.to_string())),
+        Scte35Source::OatCls(data) => writeln!(out, "#EXT-OATCLS-SCTE35:{data}")
+            .map_err(|e| PlaylistError::InvalidItem(e.to_string())),
+        Scte35Source::CueOut(secs) => writeln!(out, "#EXT-X-CUE-OUT:{secs}")
+            .map_err(|e| PlaylistError::InvalidItem(e.to_string())),
         Scte35Source::CueIn => {
-            writeln!(out, "#EXT-X-CUE-IN")
-                .map_err(|e| PlaylistError::InvalidItem(e.to_string()))
+            writeln!(out, "#EXT-X-CUE-IN").map_err(|e| PlaylistError::InvalidItem(e.to_string()))
         }
-        Scte35Source::DateRange { id, start_date, scte35_cmd, duration } => {
-            write!(out, "#EXT-X-DATERANGE:ID=\"{id}\",START-DATE=\"{start_date}\"")
-                .map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
+        Scte35Source::DateRange {
+            id,
+            start_date,
+            scte35_cmd,
+            duration,
+        } => {
+            write!(
+                out,
+                "#EXT-X-DATERANGE:ID=\"{id}\",START-DATE=\"{start_date}\""
+            )
+            .map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
             if let Some(cmd) = scte35_cmd {
                 write!(out, ",SCTE35-CMD={cmd}")
                     .map_err(|e| PlaylistError::InvalidItem(e.to_string()))?;
@@ -820,7 +817,11 @@ fn parse_attr_list(input: &str) -> HashMap<String, String> {
         };
 
         map.insert(key, value.to_string());
-        rest = if consumed < rest.len() { &rest[consumed..] } else { "" };
+        rest = if consumed < rest.len() {
+            &rest[consumed..]
+        } else {
+            ""
+        };
         // Skip leading comma
         rest = rest.trim_start_matches(',').trim_start();
     }
@@ -1002,10 +1003,7 @@ high.m3u8
         assert_eq!(pl.variant_streams.len(), 3);
         assert_eq!(pl.variant_streams[0].bandwidth, 800_000);
         assert_eq!(pl.variant_streams[0].uri, "low.m3u8");
-        assert_eq!(
-            pl.variant_streams[0].resolution.as_deref(),
-            Some("640x360")
-        );
+        assert_eq!(pl.variant_streams[0].resolution.as_deref(), Some("640x360"));
     }
 
     #[test]

@@ -62,10 +62,26 @@
 //!
 //! Use the [`declare_plugin!`] macro to generate these exports.
 
+pub mod capability;
+pub mod config_persist;
+pub mod config_persistence;
 pub mod error;
+pub mod filter_plugin;
+pub mod graceful_reload;
+pub mod harness;
+pub mod health;
+pub mod health_check;
+pub mod health_monitor;
 pub mod hot_reload;
+pub mod lazy;
+pub mod lazy_init;
 pub mod manifest;
+pub mod plugin_config;
+pub mod plugin_telemetry;
+pub mod pool;
+pub mod priority;
 pub mod registry;
+pub mod resources;
 pub mod sandbox;
 pub mod static_plugin;
 pub mod traits;

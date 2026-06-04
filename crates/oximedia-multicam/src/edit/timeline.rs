@@ -1,5 +1,6 @@
 //! Multi-angle timeline for multi-camera editing.
 
+use super::lazy_frame::LazyFrameRef;
 use super::{EditDecision, TransitionType};
 use crate::sync::SyncResult;
 use crate::{AngleId, FrameNumber, Result};
@@ -259,6 +260,62 @@ impl MultiCamTimeline {
         true
     }
 
+    /// Return a [`LazyFrameRef`] for the given `(angle_idx, frame_number)` pair.
+    ///
+    /// The returned reference carries the metadata needed to decode the frame
+    /// but does **not** decode pixel data immediately.  The caller must call
+    /// [`LazyFrameRef::resolve_with`] and supply a resolver closure to actually
+    /// load the bytes — this defers I/O to the moment the data is truly needed.
+    ///
+    /// Inactive angles (i.e. not the current active angle at `frame_number`)
+    /// should generally remain unresolved.  Only the active angle should have
+    /// its `LazyFrameRef` forced via `resolve_with`.
+    ///
+    /// # Arguments
+    ///
+    /// * `angle_idx` – Index of the camera angle (0-based, must be `<
+    ///   angle_count`).
+    /// * `frame_number` – Frame number within the timeline.
+    /// * `width` / `height` – Pixel dimensions of the decoded frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `angle_idx >= angle_count`.
+    pub fn frame_at(
+        &self,
+        angle_idx: AngleId,
+        frame_number: FrameNumber,
+        width: u32,
+        height: u32,
+    ) -> Result<LazyFrameRef> {
+        if angle_idx >= self.angle_count {
+            return Err(crate::MultiCamError::AngleNotFound(angle_idx));
+        }
+        Ok(LazyFrameRef::new(angle_idx, frame_number, width, height))
+    }
+
+    /// Return a `LazyFrameRef` for every angle at the given frame number.
+    ///
+    /// The slice is indexed by angle: `refs[i]` corresponds to angle `i`.
+    /// Only the ref whose `angle_idx` matches the current active angle should
+    /// be resolved; all others should remain lazy to avoid unnecessary decodes.
+    ///
+    /// # Arguments
+    ///
+    /// * `frame_number` – Frame number within the timeline.
+    /// * `width` / `height` – Pixel dimensions assumed equal for all angles.
+    #[must_use]
+    pub fn frames_at(
+        &self,
+        frame_number: FrameNumber,
+        width: u32,
+        height: u32,
+    ) -> Vec<LazyFrameRef> {
+        (0..self.angle_count)
+            .map(|idx| LazyFrameRef::new(idx, frame_number, width, height))
+            .collect()
+    }
+
     /// Export EDL (Edit Decision List)
     #[must_use]
     pub fn export_edl(&self) -> String {
@@ -433,5 +490,61 @@ mod tests {
             .add_cut(200, 0)
             .expect("multicam test operation should succeed");
         assert!(timeline.validate());
+    }
+
+    // ── Lazy-frame tests ─────────────────────────────────────────────────────
+
+    /// An inactive angle's LazyFrameRef should NOT be decoded until the caller
+    /// explicitly calls `resolve_with`.
+    #[test]
+    fn test_lazy_frame_inactive_angle_not_decoded() {
+        let mut timeline = MultiCamTimeline::new(2);
+        timeline.set_duration(200);
+        // Angle 0 is active from frame 0 onwards (initial_angle default = 0).
+        // Angle 1 becomes active at frame 100.
+        timeline
+            .add_cut(100, 1)
+            .expect("multicam test operation should succeed");
+
+        // At frame 50 the active angle is 0 — angle 1 is inactive.
+        let active = timeline.get_angle_at_frame(50);
+        assert_eq!(active, 0);
+
+        // Obtain lazy refs for both angles.
+        let refs = timeline.frames_at(50, 1920, 1080);
+        assert_eq!(refs.len(), 2);
+
+        // The inactive angle (1) must not be loaded yet.
+        assert!(
+            !refs[1].is_loaded(),
+            "inactive angle should not be decoded before resolve_with"
+        );
+    }
+
+    /// Forcing `resolve_with` on the active angle's LazyFrameRef should
+    /// produce pixel data.
+    #[test]
+    fn test_lazy_frame_active_angle_decoded() {
+        let timeline = MultiCamTimeline::new(2);
+        // Default initial_angle = 0; no edits → angle 0 is always active.
+        let refs = timeline.frames_at(0, 4, 4);
+        assert!(!refs[0].is_loaded(), "should start unloaded");
+
+        // Simulate a resolver that fills the frame with 0xFF bytes.
+        let _bytes = refs[0].resolve_with(|_angle, _frame| vec![0xFFu8; 4 * 4 * 3]);
+        assert!(
+            refs[0].is_loaded(),
+            "active angle should be loaded after resolve_with"
+        );
+    }
+
+    /// frame_at should return an error for an out-of-range angle index.
+    #[test]
+    fn test_frame_at_invalid_angle_returns_error() {
+        let timeline = MultiCamTimeline::new(2);
+        assert!(
+            timeline.frame_at(5, 0, 1920, 1080).is_err(),
+            "out-of-range angle should produce an error"
+        );
     }
 }

@@ -252,9 +252,7 @@ impl RigPath {
     /// Add a keyframe, keeping the list sorted.
     pub fn add_keyframe(&mut self, kf: PathKeyframe) {
         let t = kf.time.clamp(0.0, 1.0);
-        let idx = self
-            .keyframes
-            .partition_point(|k| k.time <= t);
+        let idx = self.keyframes.partition_point(|k| k.time <= t);
         self.keyframes.insert(idx, kf);
     }
 

@@ -113,12 +113,8 @@ fn value_to_json(value: &MetadataValue) -> String {
         MetadataValue::DateTime(dt) => {
             format!(r#"{{"type":"datetime","value":"{}"}}"#, json_escape(dt))
         }
-        MetadataValue::Picture(_) => {
-            r#"{"type":"picture","value":null}"#.to_string()
-        }
-        MetadataValue::Pictures(_) => {
-            r#"{"type":"pictures","value":null}"#.to_string()
-        }
+        MetadataValue::Picture(_) => r#"{"type":"picture","value":null}"#.to_string(),
+        MetadataValue::Pictures(_) => r#"{"type":"pictures","value":null}"#.to_string(),
     }
 }
 
@@ -252,18 +248,15 @@ impl<'a> Parser<'a> {
                             let hex_str = std::str::from_utf8(&code_buf).map_err(|_| {
                                 Error::ParseError("invalid unicode escape".to_string())
                             })?;
-                            let codepoint = u32::from_str_radix(hex_str, 16).map_err(|_| {
-                                Error::ParseError(format!("invalid \\u{hex_str}"))
-                            })?;
+                            let codepoint = u32::from_str_radix(hex_str, 16)
+                                .map_err(|_| Error::ParseError(format!("invalid \\u{hex_str}")))?;
                             let ch = char::from_u32(codepoint).ok_or_else(|| {
                                 Error::ParseError(format!("invalid codepoint {codepoint}"))
                             })?;
                             s.push(ch);
                         }
                         Some(b) => s.push(b as char),
-                        None => {
-                            return Err(Error::ParseError("unterminated escape".to_string()))
-                        }
+                        None => return Err(Error::ParseError("unterminated escape".to_string())),
                     }
                 }
                 Some(b) => s.push(b as char),
@@ -280,13 +273,7 @@ impl<'a> Parser<'a> {
             self.pos += 1;
         }
         while let Some(b) = self.peek() {
-            if b.is_ascii_digit()
-                || b == b'.'
-                || b == b'e'
-                || b == b'E'
-                || b == b'+'
-                || b == b'-'
-            {
+            if b.is_ascii_digit() || b == b'.' || b == b'e' || b == b'E' || b == b'+' || b == b'-' {
                 self.pos += 1;
             } else {
                 break;
@@ -375,16 +362,16 @@ impl<'a> Parser<'a> {
             }
             "integer" => {
                 let raw = self.parse_number_raw()?;
-                let n: i64 = raw.parse().map_err(|_| {
-                    Error::ParseError(format!("invalid integer: {raw}"))
-                })?;
+                let n: i64 = raw
+                    .parse()
+                    .map_err(|_| Error::ParseError(format!("invalid integer: {raw}")))?;
                 MetadataValue::Integer(n)
             }
             "float" => {
                 let raw = self.parse_number_raw()?;
-                let f: f64 = raw.parse().map_err(|_| {
-                    Error::ParseError(format!("invalid float: {raw}"))
-                })?;
+                let f: f64 = raw
+                    .parse()
+                    .map_err(|_| Error::ParseError(format!("invalid float: {raw}")))?;
                 MetadataValue::Float(f)
             }
             "boolean" => MetadataValue::Boolean(self.parse_bool()?),
@@ -484,8 +471,7 @@ pub fn from_json(json: &str) -> Result<Metadata, Error> {
 
     parser.expect(b'}')?;
 
-    let format = format
-        .ok_or_else(|| Error::ParseError("missing 'format' field".to_string()))?;
+    let format = format.ok_or_else(|| Error::ParseError("missing 'format' field".to_string()))?;
     let mut metadata = Metadata::new(format);
     for (k, v) in fields {
         metadata.insert(k, v);
@@ -508,7 +494,10 @@ mod tests {
     #[test]
     fn test_serialize_text_field() {
         let mut m = Metadata::new(MetadataFormat::Id3v2);
-        m.insert("TIT2".to_string(), MetadataValue::Text("My Song".to_string()));
+        m.insert(
+            "TIT2".to_string(),
+            MetadataValue::Text("My Song".to_string()),
+        );
         let json = to_json(&m).expect("should succeed in test");
         assert!(json.contains(r#""type":"text""#));
         assert!(json.contains("My Song"));
@@ -517,7 +506,10 @@ mod tests {
     #[test]
     fn test_round_trip_text() {
         let mut m = Metadata::new(MetadataFormat::Id3v2);
-        m.insert("TIT2".to_string(), MetadataValue::Text("My Song".to_string()));
+        m.insert(
+            "TIT2".to_string(),
+            MetadataValue::Text("My Song".to_string()),
+        );
         let m2 = round_trip(&m);
         assert_eq!(
             m2.get("TIT2").and_then(MetadataValue::as_text),
@@ -530,7 +522,10 @@ mod tests {
         let mut m = Metadata::new(MetadataFormat::Matroska);
         m.insert("duration".to_string(), MetadataValue::Integer(180_000));
         let m2 = round_trip(&m);
-        assert_eq!(m2.get("duration").and_then(MetadataValue::as_integer), Some(180_000));
+        assert_eq!(
+            m2.get("duration").and_then(MetadataValue::as_integer),
+            Some(180_000)
+        );
     }
 
     #[test]
@@ -538,7 +533,10 @@ mod tests {
         let mut m = Metadata::new(MetadataFormat::Exif);
         m.insert("latitude".to_string(), MetadataValue::Float(48.8566));
         let m2 = round_trip(&m);
-        let f = m2.get("latitude").and_then(MetadataValue::as_float).expect("should succeed in test");
+        let f = m2
+            .get("latitude")
+            .and_then(MetadataValue::as_float)
+            .expect("should succeed in test");
         assert!((f - 48.8566_f64).abs() < 1e-10);
     }
 
@@ -547,13 +545,19 @@ mod tests {
         let mut m = Metadata::new(MetadataFormat::iTunes);
         m.insert("compilation".to_string(), MetadataValue::Boolean(true));
         let m2 = round_trip(&m);
-        assert_eq!(m2.get("compilation").and_then(MetadataValue::as_boolean), Some(true));
+        assert_eq!(
+            m2.get("compilation").and_then(MetadataValue::as_boolean),
+            Some(true)
+        );
     }
 
     #[test]
     fn test_round_trip_binary() {
         let mut m = Metadata::new(MetadataFormat::Apev2);
-        m.insert("cover".to_string(), MetadataValue::Binary(vec![0xDE, 0xAD, 0xBE, 0xEF]));
+        m.insert(
+            "cover".to_string(),
+            MetadataValue::Binary(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        );
         let m2 = round_trip(&m);
         assert_eq!(
             m2.get("cover").and_then(MetadataValue::as_binary),
@@ -580,7 +584,10 @@ mod tests {
     #[test]
     fn test_round_trip_datetime() {
         let mut m = Metadata::new(MetadataFormat::Xmp);
-        m.insert("CreateDate".to_string(), MetadataValue::DateTime("2026-03-11T12:00:00Z".to_string()));
+        m.insert(
+            "CreateDate".to_string(),
+            MetadataValue::DateTime("2026-03-11T12:00:00Z".to_string()),
+        );
         let m2 = round_trip(&m);
         assert_eq!(
             m2.get("CreateDate").and_then(MetadataValue::as_datetime),
@@ -638,7 +645,10 @@ mod tests {
     fn test_multiple_fields_round_trip() {
         let mut m = Metadata::new(MetadataFormat::Id3v2);
         m.insert("TIT2".to_string(), MetadataValue::Text("Song".to_string()));
-        m.insert("TPE1".to_string(), MetadataValue::Text("Artist".to_string()));
+        m.insert(
+            "TPE1".to_string(),
+            MetadataValue::Text("Artist".to_string()),
+        );
         m.insert("TRCK".to_string(), MetadataValue::Integer(7));
         let m2 = round_trip(&m);
         assert_eq!(m2.fields().len(), 3);

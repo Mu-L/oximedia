@@ -2,10 +2,12 @@
 
 pub mod alert;
 pub mod assess;
+pub mod migration_trigger;
 pub mod monitor;
 
 pub use alert::{RiskAlert, RiskAlertLevel};
 pub use assess::{FormatRisk, RiskAssessor};
+pub use migration_trigger::MigrationTriggerPolicy;
 pub use monitor::{MonitoringReport, RiskMonitor};
 
 use serde::{Deserialize, Serialize};

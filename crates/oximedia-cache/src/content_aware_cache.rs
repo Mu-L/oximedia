@@ -13,6 +13,7 @@
 //! scored by a combined recency × priority × size-efficiency metric rather
 //! than pure LRU order.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::lru_cache::LruCache;
@@ -127,7 +128,7 @@ impl CacheEntry {
         }
     }
 
-    /// Compute the eviction score for this entry.
+    /// Compute the eviction score for this entry using default weights.
     ///
     /// A higher score means the entry is a *better* eviction candidate (i.e.
     /// it should be evicted first).
@@ -142,11 +143,30 @@ impl CacheEntry {
     /// * `size_factor = size_bytes / 1_048_576.0 + 1.0` — larger entries score
     ///   higher (give bigger bang for the eviction buck).
     pub fn score_for_eviction(&self) -> f32 {
-        let age_secs = self.last_accessed.elapsed().as_secs_f32();
-        let recency = (-age_secs / 60.0_f32).exp(); // 1.0 when just accessed, → 0 with age
-        let priority = ContentCachePriority::for_type(&self.content_type).0 as f32;
-        let size_factor = self.size_bytes as f32 / 1_048_576.0 + 1.0;
-        (1.0 - recency) * (1.0 / priority.max(0.001)) * size_factor
+        self.score_for_eviction_weighted(&ScoringWeights::default())
+    }
+
+    /// Compute the eviction score using configurable [`ScoringWeights`].
+    ///
+    /// ```text
+    /// score = (1 - recency).powf(w.recency_exp)
+    ///       × (1 / priority).powf(w.priority_exp)
+    ///       × size_factor.powf(w.size_exp)
+    /// ```
+    ///
+    /// Default weights (`recency_exp = priority_exp = size_exp = 1.0`)
+    /// reproduce the original behaviour exactly.
+    pub fn score_for_eviction_weighted(&self, w: &ScoringWeights) -> f32 {
+        let age_secs = self.last_accessed.elapsed().as_secs_f64();
+        let recency = (-age_secs / 60.0_f64).exp(); // 1.0 when just accessed, → 0 with age
+        let base_priority = ContentCachePriority::for_type(&self.content_type).0 as f64;
+        let multiplier = w.priority_multiplier(&self.content_type);
+        let effective_priority = (base_priority * multiplier).max(0.001);
+        let size_factor = self.size_bytes as f64 / 1_048_576.0 + 1.0;
+        let score = (1.0 - recency).powf(w.recency_exp)
+            * (1.0 / effective_priority).powf(w.priority_exp)
+            * size_factor.powf(w.size_exp);
+        score as f32
     }
 }
 
@@ -173,6 +193,78 @@ pub fn ttl_for_type(content_type: &MediaContentType) -> Duration {
     }
 }
 
+// ── ScoringWeights ────────────────────────────────────────────────────────────
+
+/// Configurable exponent weights used by `score_for_eviction`.
+///
+/// The eviction score formula is:
+/// ```text
+/// score = (1 - recency).powf(recency_exp)
+///       × (1/priority).powf(priority_exp)
+///       × size_factor.powf(size_exp)
+/// ```
+///
+/// Defaults (`recency_exp = 1.0`, `priority_exp = 1.0`, `size_exp = 1.0`)
+/// reproduce the original behaviour exactly.
+///
+/// `per_type_priority` overrides the `priority` weight multiplier per
+/// [`MediaContentType`] variant; keys are matched by discriminant tag, so
+/// only the variant kind matters (e.g. all `VideoSegment` variants share one
+/// entry).
+#[derive(Debug, Clone)]
+pub struct ScoringWeights {
+    /// Exponent applied to the recency factor `(1 - recency)`.  Higher = aged
+    /// entries are penalised more aggressively.
+    pub recency_exp: f64,
+    /// Exponent applied to `(1 / priority)`.  Higher = low-priority items are
+    /// more strongly preferred for eviction.
+    pub priority_exp: f64,
+    /// Exponent applied to `size_factor`.  Higher = large entries are more
+    /// strongly preferred for eviction.
+    pub size_exp: f64,
+    /// Per-type priority weight override.  When a content type has an entry
+    /// here, its `priority` value is multiplied by this factor before the
+    /// scoring formula is applied.  Values < 1.0 make the type *harder* to
+    /// evict; values > 1.0 make it *easier* to evict.
+    pub per_type_priority: HashMap<String, f64>,
+}
+
+impl Default for ScoringWeights {
+    fn default() -> Self {
+        Self {
+            recency_exp: 1.0,
+            priority_exp: 1.0,
+            size_exp: 1.0,
+            per_type_priority: HashMap::new(),
+        }
+    }
+}
+
+impl ScoringWeights {
+    /// Create default weights that reproduce the original eviction behaviour.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return the per-type priority multiplier for the given content type.
+    fn type_key(content_type: &MediaContentType) -> &'static str {
+        match content_type {
+            MediaContentType::VideoSegment { .. } => "VideoSegment",
+            MediaContentType::AudioSegment { .. } => "AudioSegment",
+            MediaContentType::Image { .. } => "Image",
+            MediaContentType::Manifest => "Manifest",
+            MediaContentType::Thumbnail => "Thumbnail",
+            MediaContentType::Metadata => "Metadata",
+        }
+    }
+
+    /// Look up the priority multiplier for a content type.
+    pub fn priority_multiplier(&self, content_type: &MediaContentType) -> f64 {
+        let key = Self::type_key(content_type);
+        self.per_type_priority.get(key).copied().unwrap_or(1.0)
+    }
+}
+
 // ── ContentAwareCache ─────────────────────────────────────────────────────────
 
 /// A media-content-aware cache that scores eviction candidates by a
@@ -189,6 +281,8 @@ pub struct ContentAwareCache {
     /// Optional byte-level capacity; entries whose cumulative size exceeds
     /// this trigger an additional content-aware eviction pass.
     max_bytes: Option<usize>,
+    /// Configurable scoring weights used by `score_for_eviction`.
+    scoring_weights: ScoringWeights,
 }
 
 impl ContentAwareCache {
@@ -199,6 +293,7 @@ impl ContentAwareCache {
             capacity,
             total_bytes: 0,
             max_bytes: None,
+            scoring_weights: ScoringWeights::default(),
         }
     }
 
@@ -206,6 +301,22 @@ impl ContentAwareCache {
     pub fn with_max_bytes(mut self, max_bytes: usize) -> Self {
         self.max_bytes = Some(max_bytes);
         self
+    }
+
+    /// Set custom scoring weights used for eviction candidate selection.
+    pub fn with_scoring_weights(mut self, weights: ScoringWeights) -> Self {
+        self.scoring_weights = weights;
+        self
+    }
+
+    /// Update scoring weights at runtime.
+    pub fn set_scoring_weights(&mut self, weights: ScoringWeights) {
+        self.scoring_weights = weights;
+    }
+
+    /// Return a reference to the current scoring weights.
+    pub fn scoring_weights(&self) -> &ScoringWeights {
+        &self.scoring_weights
     }
 
     // ── Insertion ─────────────────────────────────────────────────────────────
@@ -376,6 +487,10 @@ impl ContentAwareCache {
             return;
         }
 
+        // Capture the current weights — we cannot borrow self.scoring_weights
+        // and self.inner mutably at the same time.
+        let weights = self.scoring_weights.clone();
+
         // Drain everything, find the worst, re-insert the rest.
         let mut entries: Vec<(String, CacheEntry)> = Vec::with_capacity(self.inner.len());
         while let Some((k, entry)) = self.inner.evict_lru() {
@@ -387,8 +502,8 @@ impl ContentAwareCache {
             .iter()
             .enumerate()
             .max_by(|(_, (_, a)), (_, (_, b))| {
-                a.score_for_eviction()
-                    .partial_cmp(&b.score_for_eviction())
+                a.score_for_eviction_weighted(&weights)
+                    .partial_cmp(&b.score_for_eviction_weighted(&weights))
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|(i, _)| i)

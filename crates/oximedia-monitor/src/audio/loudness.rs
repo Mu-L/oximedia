@@ -1,7 +1,7 @@
 //! Loudness monitoring (LUFS/LKFS) using oximedia-metering.
 
 use crate::{MonitorError, MonitorResult};
-use oximedia_metering::{LoudnessMeter, MeterConfig, Standard, LoudnessMetrics};
+use oximedia_metering::{LoudnessMeter, LoudnessMetrics, MeterConfig, Standard};
 use serde::{Deserialize, Serialize};
 
 /// Loudness monitor metrics.
@@ -46,8 +46,8 @@ impl LoudnessMonitor {
     /// Returns an error if meter creation fails.
     pub fn new(sample_rate: f64, channels: usize) -> MonitorResult<Self> {
         let config = MeterConfig::new(Standard::EbuR128, sample_rate, channels);
-        let meter = LoudnessMeter::new(config)
-            .map_err(|e| MonitorError::MeteringError(e.to_string()))?;
+        let meter =
+            LoudnessMeter::new(config).map_err(|e| MonitorError::MeteringError(e.to_string()))?;
 
         Ok(Self {
             meter,
@@ -66,8 +66,8 @@ impl LoudnessMonitor {
         standard: Standard,
     ) -> MonitorResult<Self> {
         let config = MeterConfig::new(standard, sample_rate, channels);
-        let meter = LoudnessMeter::new(config)
-            .map_err(|e| MonitorError::MeteringError(e.to_string()))?;
+        let meter =
+            LoudnessMeter::new(config).map_err(|e| MonitorError::MeteringError(e.to_string()))?;
 
         Ok(Self {
             meter,

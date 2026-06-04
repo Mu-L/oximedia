@@ -189,7 +189,8 @@ mod tests {
     #[test]
     fn test_open_nonexistent_file_returns_error() {
         let missing = std::env::temp_dir().join("oximedia-io-async-nonexistent_xyz.bin");
-        let result = BufferedAsyncReader::new(&missing, 1024);
+        let path_str = missing.to_string_lossy().to_string();
+        let result = BufferedAsyncReader::new(&path_str, 1024);
         assert!(result.is_err());
     }
 

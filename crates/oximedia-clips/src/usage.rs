@@ -61,10 +61,7 @@ impl ClipUsageTracker {
     ///
     /// Returns an empty `Vec` when the clip has never been recorded.
     pub fn usages_of(&self, clip_id: u64) -> Vec<u64> {
-        self.usages
-            .get(&clip_id)
-            .cloned()
-            .unwrap_or_default()
+        self.usages.get(&clip_id).cloned().unwrap_or_default()
     }
 
     /// Return the deduplicated set of sequence IDs that reference `clip_id`.

@@ -138,7 +138,7 @@ mod tests {
     #[test]
     fn test_max_safe_gain_basic() {
         let mgr = HeadroomManager::new(1.0); // ceiling = -1 dBFS
-        // peak at -6, ceiling at -1 → max gain = 5 dB
+                                             // peak at -6, ceiling at -1 → max gain = 5 dB
         let g = mgr.max_safe_gain_db(-6.0);
         assert!((g - 5.0).abs() < 0.001, "g={g}");
     }
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn test_max_safe_gain_over_ceiling() {
         let mgr = HeadroomManager::new(3.0); // ceiling = -3 dBFS
-        // peak at -1 dBFS → already above ceiling, gain = -2 dB (attenuation)
+                                             // peak at -1 dBFS → already above ceiling, gain = -2 dB (attenuation)
         let g = mgr.max_safe_gain_db(-1.0);
         assert!((g - (-2.0)).abs() < 0.001, "g={g}");
     }
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn test_apply_gain_attenuates_over_ceiling() {
         let mgr = HeadroomManager::new(6.0); // ceiling = -6 dBFS
-        // peak already at 0 dBFS → should attenuate by -6 dB
+                                             // peak already at 0 dBFS → should attenuate by -6 dB
         let mut samples = vec![1.0f32; 4];
         mgr.apply_gain(&mut samples, 0.0);
         let expected = db_to_linear(-6.0); // ≈ 0.501

@@ -67,7 +67,12 @@ impl MovementDetector {
         Ok(movements)
     }
 
-    /// Calculate optical flow between two frames (simplified Lucas-Kanade).
+    /// Calculate optical flow between two frames using proxy downscaling.
+    ///
+    /// Both frames are box-downsampled to a 160-pixel-wide proxy before running
+    /// Lucas-Kanade gradient estimation.  The resulting motion vectors are scaled
+    /// back to full-resolution coordinates before being returned, giving the same
+    /// semantic meaning at a fraction of the computational cost.
     fn calculate_optical_flow(
         &self,
         frame1: &FrameBuffer,
@@ -80,17 +85,31 @@ impl MovementDetector {
         }
 
         let shape = frame1.dim();
+        let full_w = shape.1 as u32;
+        let full_h = shape.0 as u32;
+
+        // Convert to grayscale then build proxy frames for optical flow.
         let gray1 = self.to_grayscale(frame1);
         let gray2 = self.to_grayscale(frame2);
 
-        let mut dx_sum = 0.0;
-        let mut dy_sum = 0.0;
-        let mut count = 0;
+        let (proxy1, proxy_w, proxy_h) = box_downsample_to_proxy(&gray1, full_w, full_h);
+        let (proxy2, _, _) = box_downsample_to_proxy(&gray2, full_w, full_h);
 
-        // Sample grid points
-        for y in (5..shape.0.saturating_sub(5)).step_by(10) {
-            for x in (5..shape.1.saturating_sub(5)).step_by(10) {
-                if let Some((dx, dy)) = self.compute_local_flow(&gray1, &gray2, x, y) {
+        // Build GrayImage wrappers around proxy data.
+        let pg1 = GrayImageProxy::new(proxy1, proxy_h as usize, proxy_w as usize);
+        let pg2 = GrayImageProxy::new(proxy2, proxy_h as usize, proxy_w as usize);
+
+        let pw = proxy_w as usize;
+        let ph = proxy_h as usize;
+
+        let mut dx_sum = 0.0_f32;
+        let mut dy_sum = 0.0_f32;
+        let mut count = 0u32;
+
+        // Sample grid points on the proxy.
+        for y in (5..ph.saturating_sub(5)).step_by(5) {
+            for x in (5..pw.saturating_sub(5)).step_by(5) {
+                if let Some((dx, dy)) = self.compute_local_flow_gray(&pg1, &pg2, x, y) {
                     dx_sum += dx;
                     dy_sum += dy;
                     count += 1;
@@ -102,34 +121,41 @@ impl MovementDetector {
             return Ok((0.0, 0.0));
         }
 
-        Ok((dx_sum / count as f32, dy_sum / count as f32))
+        // Scale motion vectors back to full-resolution coordinates.
+        let scale_x = full_w as f32 / proxy_w as f32;
+        let scale_y = full_h as f32 / proxy_h as f32;
+
+        Ok((
+            dx_sum / count as f32 * scale_x,
+            dy_sum / count as f32 * scale_y,
+        ))
     }
 
-    /// Compute local optical flow at a point.
-    fn compute_local_flow(
+    /// Compute local optical flow at a point (operates on [`GrayImageProxy`]).
+    fn compute_local_flow_gray(
         &self,
-        gray1: &GrayImage,
-        gray2: &GrayImage,
+        gray1: &GrayImageProxy,
+        gray2: &GrayImageProxy,
         x: usize,
         y: usize,
     ) -> Option<(f32, f32)> {
         let window_size = 5;
-        let shape = gray1.dim();
+        let (ph, pw) = (gray1.height, gray1.width);
 
         if y < window_size
-            || y >= shape.0 - window_size
+            || y >= ph.saturating_sub(window_size)
             || x < window_size
-            || x >= shape.1 - window_size
+            || x >= pw.saturating_sub(window_size)
         {
             return None;
         }
 
-        // Compute image gradients
+        // Compute image gradients (central difference).
         let ix = (f32::from(gray1.get(y, x + 1)) - f32::from(gray1.get(y, x - 1))) / 2.0;
         let iy = (f32::from(gray1.get(y + 1, x)) - f32::from(gray1.get(y - 1, x))) / 2.0;
         let it = f32::from(gray2.get(y, x)) - f32::from(gray1.get(y, x));
 
-        // Solve for flow using least squares
+        // Solve for flow using least-squares (Lucas-Kanade single-point form).
         let denom = ix * ix + iy * iy;
         if denom < 1.0 {
             return None;
@@ -243,6 +269,93 @@ impl Default for MovementDetector {
     }
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Proxy downsampling helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Target proxy width in pixels used for optical-flow estimation.
+pub const PROXY_WIDTH: u32 = 160;
+
+/// Lightweight grayscale image wrapper used for proxy-resolution optical flow.
+///
+/// Avoids allocating a full [`GrayImage`] when operating on proxy frames stored
+/// as flat `Vec<u8>`.
+struct GrayImageProxy {
+    data: Vec<u8>,
+    height: usize,
+    width: usize,
+}
+
+impl GrayImageProxy {
+    fn new(data: Vec<u8>, height: usize, width: usize) -> Self {
+        Self {
+            data,
+            height,
+            width,
+        }
+    }
+
+    #[inline]
+    fn get(&self, y: usize, x: usize) -> u8 {
+        self.data[y * self.width + x]
+    }
+}
+
+/// Box-downsample a [`GrayImage`] to a proxy whose width is [`PROXY_WIDTH`],
+/// preserving the original aspect ratio.
+///
+/// Returns `(pixel_data, proxy_width, proxy_height)`.  When the source is
+/// already narrower than the target, the source is returned unchanged.
+fn box_downsample_to_proxy(gray: &GrayImage, src_w: u32, src_h: u32) -> (Vec<u8>, u32, u32) {
+    if src_w == 0 || src_h == 0 {
+        return (Vec::new(), 0, 0);
+    }
+
+    // If the frame is already at or below the proxy size, return as-is.
+    if src_w <= PROXY_WIDTH {
+        let (gh, gw) = gray.dim();
+        let mut data = Vec::with_capacity(gh * gw);
+        for y in 0..gh {
+            for x in 0..gw {
+                data.push(gray.get(y, x));
+            }
+        }
+        return (data, src_w, src_h);
+    }
+
+    let proxy_w = PROXY_WIDTH;
+    let proxy_h = (src_h * proxy_w / src_w).max(1);
+
+    // Block dimensions (truncated to whole pixels).
+    let bx = src_w / proxy_w;
+    let by = src_h / proxy_h;
+    // Guard against zero block sizes.
+    let bx = bx.max(1);
+    let by = by.max(1);
+
+    let mut dst = vec![0u8; (proxy_w * proxy_h) as usize];
+
+    for py in 0..proxy_h {
+        for px in 0..proxy_w {
+            let mut sum = 0u32;
+            let mut count = 0u32;
+            for dy in 0..by {
+                for dx in 0..bx {
+                    let sy = py * by + dy;
+                    let sx = px * bx + dx;
+                    if sy < src_h && sx < src_w {
+                        sum += u32::from(gray.get(sy as usize, sx as usize));
+                        count += 1;
+                    }
+                }
+            }
+            dst[(py * proxy_w + px) as usize] = sum.checked_div(count).map_or(0, |v| v as u8);
+        }
+    }
+
+    (dst, proxy_w, proxy_h)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,5 +383,65 @@ mod tests {
         let frames = vec![FrameBuffer::zeros(100, 100, 3); 10];
         let result = detector.detect_movements(&frames);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_proxy_flow_direction_matches_full() {
+        // Two grayscale 640×360 frames: frame2 is frame1 shifted right by 8px.
+        // We expect the estimated horizontal motion to be positive (rightward).
+        let height = 360usize;
+        let width = 640usize;
+        let channels = 3usize;
+        let shift = 8usize;
+
+        // Build a frame with a diagonal brightness ramp to create detectable gradients.
+        let mut frame1 = FrameBuffer::zeros(height, width, channels);
+        for y in 0..height {
+            for x in 0..width {
+                let v = ((x + y) % 256) as u8;
+                for c in 0..channels {
+                    frame1.set(y, x, c, v);
+                }
+            }
+        }
+        // frame2: shift frame1 right by `shift` pixels (fill left edge with zeros).
+        let mut frame2 = FrameBuffer::zeros(height, width, channels);
+        for y in 0..height {
+            for x in shift..width {
+                for c in 0..channels {
+                    let v = frame1.get(y, x - shift, c);
+                    frame2.set(y, x, c, v);
+                }
+            }
+        }
+
+        let detector = MovementDetector::new();
+        let result = detector.calculate_optical_flow(&frame1, &frame2);
+        assert!(result.is_ok(), "optical flow should not error");
+        let (dx, _dy) = result.expect("ok");
+        // The shift is rightward so the estimated dx should be positive.
+        assert!(
+            dx > 0.0,
+            "expected positive dx for rightward shift, got {dx}"
+        );
+    }
+
+    #[test]
+    fn test_box_downsample_to_proxy_aspect_ratio() {
+        // A 640×360 grayscale image should downsample to 160×90.
+        let gray = GrayImage::zeros(360, 640);
+        let (_, pw, ph) = box_downsample_to_proxy(&gray, 640, 360);
+        assert_eq!(pw, PROXY_WIDTH);
+        assert_eq!(ph, 90);
+    }
+
+    #[test]
+    fn test_box_downsample_preserves_small_frames() {
+        // Frames already narrower than PROXY_WIDTH should pass through unchanged.
+        let gray = GrayImage::zeros(90, 100);
+        let (data, pw, ph) = box_downsample_to_proxy(&gray, 100, 90);
+        assert_eq!(pw, 100);
+        assert_eq!(ph, 90);
+        assert_eq!(data.len(), 100 * 90);
     }
 }

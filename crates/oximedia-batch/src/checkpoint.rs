@@ -5,8 +5,6 @@
 //! rotation (keep last N) and corrupted-checkpoint detection via SHA-256
 //! integrity hashes.
 
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -103,8 +101,7 @@ struct CheckpointEnvelope {
 
 impl CheckpointEnvelope {
     fn wrap(checkpoint: &Checkpoint) -> Result<Self> {
-        let payload =
-            serde_json::to_string(checkpoint).map_err(BatchError::SerializationError)?;
+        let payload = serde_json::to_string(checkpoint).map_err(BatchError::SerializationError)?;
         let hash = sha256_hex(payload.as_bytes());
         Ok(Self { hash, payload })
     }
@@ -271,10 +268,7 @@ impl CheckpointManager {
     /// Returns an error if the directory cannot be read.
     pub fn list_sequences(&self) -> Result<Vec<u64>> {
         let files = list_checkpoint_files(&self.dir)?;
-        let mut seqs: Vec<u64> = files
-            .iter()
-            .filter_map(|p| sequence_from_path(p))
-            .collect();
+        let mut seqs: Vec<u64> = files.iter().filter_map(|p| sequence_from_path(p)).collect();
         seqs.sort_unstable();
         Ok(seqs)
     }
@@ -441,11 +435,8 @@ mod tests {
 
         // Corrupt the file by overwriting part of the payload.
         let path = dir.join("checkpoint_1.json");
-        let mut content = std::fs::read_to_string(&path).expect("read");
-        content = content.replace("\"hash\"", "\"hash_x\"");
         // Actually corrupt the payload hash: write garbage hash
-        let corrupted =
-            r#"{"hash":"0000000000000000000000000000000000000000000000000000000000000000","payload":"{\"sequence\":1}"}"#;
+        let corrupted = r#"{"hash":"0000000000000000000000000000000000000000000000000000000000000000","payload":"{\"sequence\":1}"}"#;
         std::fs::write(&path, corrupted).expect("write corrupt");
 
         // load_by_sequence should fail
@@ -472,7 +463,10 @@ mod tests {
         let loaded = mgr.load_latest().expect("load").expect("Some");
         assert_eq!(loaded.worker_assignments.len(), 2);
         assert_eq!(
-            loaded.worker_assignments.get("worker-0").map(String::as_str),
+            loaded
+                .worker_assignments
+                .get("worker-0")
+                .map(String::as_str),
             Some("job-a")
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -536,9 +530,6 @@ mod tests {
         let env = CheckpointEnvelope::wrap(&cp).expect("wrap");
         let restored = env.unwrap_verified().expect("unwrap");
         assert_eq!(restored.sequence, 42);
-        assert_eq!(
-            restored.metadata.get("k").map(String::as_str),
-            Some("v")
-        );
+        assert_eq!(restored.metadata.get("k").map(String::as_str), Some("v"));
     }
 }

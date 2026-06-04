@@ -270,6 +270,8 @@ never_loop = "allow"
 metal-backend = ["dep:metal"]
 # Real WebGPU compute dispatch using wgpu (optional; CPU fallback when absent)
 webgpu = ["dep:wgpu", "dep:pollster"]
+# Detect Vulkan availability at runtime via the device module
+vulkan-detect = []
 
 [dependencies]
 oximedia-core.workspace = true

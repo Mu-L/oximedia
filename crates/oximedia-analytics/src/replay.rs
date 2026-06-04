@@ -263,14 +263,17 @@ impl ReplayReconstructor {
                     ));
                 }
 
-                PlaybackEvent::Pause { timestamp_ms, position_ms } => {
+                PlaybackEvent::Pause {
+                    timestamp_ms,
+                    position_ms,
+                } => {
                     // Advance wall clock based on content position change.
                     if *timestamp_ms >= 0 {
                         wall_ms = *timestamp_ms - session.started_at_ms;
                     } else if state == PlayerState::Playing {
                         let content_delta = position_ms.saturating_sub(play_start_content_ms);
-                        wall_ms = play_start_wall_ms
-                            + (content_delta as f64 / playback_rate) as i64;
+                        wall_ms =
+                            play_start_wall_ms + (content_delta as f64 / playback_rate) as i64;
                     }
 
                     if state == PlayerState::Playing {
@@ -306,8 +309,8 @@ impl ReplayReconstructor {
                 PlaybackEvent::Seek { from_ms, to_ms } => {
                     if state == PlayerState::Playing {
                         let content_delta = from_ms.saturating_sub(play_start_content_ms);
-                        wall_ms = play_start_wall_ms
-                            + (content_delta as f64 / playback_rate) as i64;
+                        wall_ms =
+                            play_start_wall_ms + (content_delta as f64 / playback_rate) as i64;
 
                         if let Some(step) = self.config.interpolation_step_ms {
                             frames.extend(make_interpolated_frames(
@@ -344,8 +347,8 @@ impl ReplayReconstructor {
                 PlaybackEvent::BufferStart { position_ms } => {
                     if state == PlayerState::Playing {
                         let content_delta = position_ms.saturating_sub(play_start_content_ms);
-                        wall_ms = play_start_wall_ms
-                            + (content_delta as f64 / playback_rate) as i64;
+                        wall_ms =
+                            play_start_wall_ms + (content_delta as f64 / playback_rate) as i64;
                     }
 
                     content_pos_ms = *position_ms;
@@ -362,7 +365,10 @@ impl ReplayReconstructor {
                     ));
                 }
 
-                PlaybackEvent::BufferEnd { position_ms, duration_ms } => {
+                PlaybackEvent::BufferEnd {
+                    position_ms,
+                    duration_ms,
+                } => {
                     // Advance wall clock by stall duration.
                     wall_ms += i64::from(*duration_ms);
                     content_pos_ms = *position_ms;
@@ -381,7 +387,11 @@ impl ReplayReconstructor {
                     ));
                 }
 
-                PlaybackEvent::QualityChange { from_height: _, to_height, bitrate } => {
+                PlaybackEvent::QualityChange {
+                    from_height: _,
+                    to_height,
+                    bitrate,
+                } => {
                     if state == PlayerState::Playing {
                         // We can't know exact wall time without a timestamp in
                         // QualityChange, so we don't advance the clock here.
@@ -402,12 +412,15 @@ impl ReplayReconstructor {
                     ));
                 }
 
-                PlaybackEvent::End { position_ms, watch_duration_ms } => {
+                PlaybackEvent::End {
+                    position_ms,
+                    watch_duration_ms,
+                } => {
                     if state == PlayerState::Playing {
                         // Use watch_duration_ms to compute wall-clock end.
                         let content_delta = position_ms.saturating_sub(play_start_content_ms);
-                        wall_ms = play_start_wall_ms
-                            + (content_delta as f64 / playback_rate) as i64;
+                        wall_ms =
+                            play_start_wall_ms + (content_delta as f64 / playback_rate) as i64;
 
                         if let Some(step) = self.config.interpolation_step_ms {
                             frames.extend(make_interpolated_frames(
@@ -467,12 +480,10 @@ impl ReplayReconstructor {
                 }
                 PlaybackEvent::QualityChange { to_height, .. } => {
                     quality_change_count += 1;
-                    min_quality_height = Some(
-                        min_quality_height.map_or(*to_height, |m: u32| m.min(*to_height)),
-                    );
-                    max_quality_height = Some(
-                        max_quality_height.map_or(*to_height, |m: u32| m.max(*to_height)),
-                    );
+                    min_quality_height =
+                        Some(min_quality_height.map_or(*to_height, |m: u32| m.min(*to_height)));
+                    max_quality_height =
+                        Some(max_quality_height.map_or(*to_height, |m: u32| m.max(*to_height)));
                 }
                 _ => {}
             }
@@ -573,10 +584,7 @@ mod tests {
 
     #[test]
     fn single_play_event_produces_playing_frame() {
-        let session = make_session(
-            "s1",
-            vec![PlaybackEvent::Play { timestamp_ms: 0 }],
-        );
+        let session = make_session("s1", vec![PlaybackEvent::Play { timestamp_ms: 0 }]);
         let rec = ReplayReconstructor::new(ReplayConfig::default());
         let frames = rec.reconstruct(&session).expect("should succeed");
         assert_eq!(frames.len(), 1);
@@ -628,7 +636,9 @@ mod tests {
             "s1",
             vec![
                 PlaybackEvent::Play { timestamp_ms: 0 },
-                PlaybackEvent::BufferStart { position_ms: 10_000 },
+                PlaybackEvent::BufferStart {
+                    position_ms: 10_000,
+                },
                 PlaybackEvent::BufferEnd {
                     position_ms: 10_000,
                     duration_ms: 500,
@@ -724,7 +734,9 @@ mod tests {
                     timestamp_ms: 5_000,
                     position_ms: 5_000,
                 },
-                PlaybackEvent::Play { timestamp_ms: 7_000 },
+                PlaybackEvent::Play {
+                    timestamp_ms: 7_000,
+                },
                 PlaybackEvent::End {
                     position_ms: 20_000,
                     watch_duration_ms: 18_000,

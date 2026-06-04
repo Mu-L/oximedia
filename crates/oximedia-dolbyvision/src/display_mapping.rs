@@ -181,7 +181,11 @@ impl DisplayMappingParams {
         // Power operation; guard against NaN from negative base
         let after_power = if self.trim_power.abs() < 1e-6 {
             // power ≈ 0 → output is 1.0 for any non-zero input
-            if clamped > 0.0 { 1.0 } else { 0.0 }
+            if clamped > 0.0 {
+                1.0
+            } else {
+                0.0
+            }
         } else {
             clamped.powf(self.trim_power)
         };
@@ -411,7 +415,10 @@ mod tests {
             let pq = nits_to_pq(nits);
             let back = pq_to_nits(pq);
             let rel_err = (back - nits).abs() / nits;
-            assert!(rel_err < 0.001, "nits={nits} pq={pq} back={back} err={rel_err}");
+            assert!(
+                rel_err < 0.001,
+                "nits={nits} pq={pq} back={back} err={rel_err}"
+            );
         }
     }
 
@@ -438,7 +445,11 @@ mod tests {
         let mapper = DisplayMapper::new(display);
         let params = mapper.compute_trim(&display);
         // Slope should be approximately 1.0 for same-display mapping
-        assert!((params.trim_slope - 1.0).abs() < 1e-4, "slope={}", params.trim_slope);
+        assert!(
+            (params.trim_slope - 1.0).abs() < 1e-4,
+            "slope={}",
+            params.trim_slope
+        );
     }
 
     #[test]
@@ -470,7 +481,9 @@ mod tests {
             DisplayProfile::HDR_4000,
         ];
         let matcher = DisplayCapabilityMatcher;
-        let best = matcher.find_closest(&candidates, 800.0).expect("should find closest");
+        let best = matcher
+            .find_closest(&candidates, 800.0)
+            .expect("should find closest");
         assert_eq!(best.peak_nits, 600.0); // 600 is closer than 1000 to 800
     }
 

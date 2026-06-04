@@ -230,8 +230,7 @@ impl PreservationPolicy {
 
     /// Adds a requirement for a specific content type.
     pub fn set_requirement(&mut self, content_type: &str, level: PreservationLevel) {
-        self.requirements
-            .insert(content_type.to_string(), level);
+        self.requirements.insert(content_type.to_string(), level);
     }
 
     /// Gets the required level for a content type.
@@ -386,10 +385,7 @@ mod tests {
     #[test]
     fn test_policy_default_level() {
         let policy = PreservationPolicy::new(PreservationLevel::Logical);
-        assert_eq!(
-            policy.required_level("unknown"),
-            PreservationLevel::Logical
-        );
+        assert_eq!(policy.required_level("unknown"), PreservationLevel::Logical);
     }
 
     #[test]

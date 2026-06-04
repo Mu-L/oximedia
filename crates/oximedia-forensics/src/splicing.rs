@@ -109,6 +109,129 @@ impl SplicingDetector {
         let noise_map = self.estimate_noise_by_region(luma, width, height, self.block_size);
         self.detect_splicing(&noise_map, width, height)
     }
+
+    /// Analyse compression artifacts at a potential splice boundary.
+    ///
+    /// Measures three independent artifact signals that typically spike when
+    /// frames from different sources are joined:
+    ///
+    /// * **`blocking_level`** — mean `|curr[x] - curr[x+1]|` at 8-pixel column
+    ///   boundaries, normalised to [0, 1].
+    /// * **`color_balance_delta`** — `|mean(curr) - mean(prev)| / 255`.
+    /// * **`noise_floor_jump`** — absolute delta in high-frequency energy proxy
+    ///   (mean row-adjacent difference).
+    ///
+    /// The combined `confidence` is the clamped sum of the three signals.
+    ///
+    /// # Arguments
+    ///
+    /// * `prev`, `curr` — grayscale u8 frames, `w * h` bytes each.
+    /// * `w`, `h`       — frame dimensions.
+    #[must_use]
+    pub fn analyze_boundary_artifacts(
+        &self,
+        prev: &[u8],
+        curr: &[u8],
+        w: u32,
+        h: u32,
+    ) -> BoundaryArtifactAnalysis {
+        analyze_boundary_artifacts_impl(prev, curr, w, h)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Boundary artifact analysis
+// ---------------------------------------------------------------------------
+
+/// Quantitative analysis of compression artifacts at a splice boundary.
+#[derive(Debug, Clone)]
+pub struct BoundaryArtifactAnalysis {
+    /// 8×8 grid boundary energy, normalised to [0, 1].
+    pub blocking_level: f32,
+    /// Mean absolute luma shift between frames, normalised to [0, 1].
+    pub color_balance_delta: f32,
+    /// Absolute delta in high-frequency (row-adjacent) energy, normalised.
+    pub noise_floor_jump: f32,
+    /// Combined confidence (clamped sum of the three signals), in [0, 1].
+    pub confidence: f32,
+}
+
+/// Inner implementation of boundary artifact analysis, exposed as a free
+/// function so tests can call it without a [`SplicingDetector`] instance.
+#[allow(clippy::cast_precision_loss)]
+fn analyze_boundary_artifacts_impl(
+    prev: &[u8],
+    curr: &[u8],
+    w: u32,
+    h: u32,
+) -> BoundaryArtifactAnalysis {
+    let w_usize = w as usize;
+    let h_usize = h as usize;
+    let total = w_usize * h_usize;
+
+    // ── Blocking level (8-pixel column boundaries in curr) ──────────────────
+    let blocking_level = if total == 0 {
+        0.0_f32
+    } else {
+        let mut energy: f64 = 0.0;
+        let mut count: f64 = 0.0;
+        for y in 0..h_usize {
+            for x in (0..w_usize.saturating_sub(1)).step_by(8) {
+                let left = curr[y * w_usize + x] as f64;
+                let right = curr[y * w_usize + x + 1] as f64;
+                energy += (left - right).abs();
+                count += 1.0;
+            }
+        }
+        if count > 0.0 {
+            (energy / (count * 255.0)) as f32
+        } else {
+            0.0
+        }
+    };
+
+    // ── Color balance delta ──────────────────────────────────────────────────
+    let color_balance_delta = if total == 0 {
+        0.0_f32
+    } else {
+        let mean_prev: f64 = prev.iter().map(|&v| v as f64).sum::<f64>() / total as f64;
+        let mean_curr: f64 = curr.iter().map(|&v| v as f64).sum::<f64>() / total as f64;
+        ((mean_curr - mean_prev).abs() / 255.0) as f32
+    };
+
+    // ── Noise floor jump (high-frequency energy proxy) ───────────────────────
+    let noise_floor_jump = if h_usize < 2 || w_usize == 0 {
+        0.0_f32
+    } else {
+        let hf_energy = |frame: &[u8]| -> f64 {
+            let mut sum: f64 = 0.0;
+            let count = (h_usize - 1) * w_usize;
+            for y in 0..h_usize - 1 {
+                for x in 0..w_usize {
+                    let top = frame[y * w_usize + x] as f64;
+                    let bot = frame[(y + 1) * w_usize + x] as f64;
+                    sum += (top - bot).abs();
+                }
+            }
+            if count > 0 {
+                sum / (count as f64 * 255.0)
+            } else {
+                0.0
+            }
+        };
+        let hf_prev = hf_energy(prev);
+        let hf_curr = hf_energy(curr);
+        ((hf_curr - hf_prev).abs()) as f32
+    };
+
+    let confidence = (blocking_level + color_balance_delta + noise_floor_jump).min(1.0);
+
+    BoundaryArtifactAnalysis {
+        blocking_level,
+        color_balance_delta,
+        noise_floor_jump,
+        confidence,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -380,5 +503,96 @@ mod tests {
         let map = det.estimate_noise_by_region(&luma, 100, 100, 32);
         // Should not panic; blocks_x = ceil(100/32) = 4, blocks_y = 4
         assert_eq!(map.len(), 4 * 4);
+    }
+
+    // ── BoundaryArtifactAnalysis tests ────────────────────────────────────────
+
+    /// Low-noise prev frame: smooth luma ramp.
+    fn smooth_u8_frame(w: usize, h: usize) -> Vec<u8> {
+        (0..w * h)
+            .map(|i| ((i % w) as f32 / w as f32 * 128.0) as u8)
+            .collect()
+    }
+
+    /// High-noise frame: every pixel is pseudo-random based on its index.
+    fn high_noise_u8_frame(w: usize, h: usize) -> Vec<u8> {
+        (0..w * h)
+            .map(|i| {
+                // Simple deterministic "random-ish" pattern via bit mixing.
+                let v = ((i.wrapping_mul(2654435761) ^ (i >> 16)) & 0xFF) as u8;
+                v
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_splice_boundary_detects_artificial_splice() {
+        let (w, h) = (64_u32, 64_u32);
+        let prev = smooth_u8_frame(w as usize, h as usize);
+        let curr = high_noise_u8_frame(w as usize, h as usize);
+
+        let det = SplicingDetector::default();
+        let analysis = det.analyze_boundary_artifacts(&prev, &curr, w, h);
+
+        assert!(
+            analysis.confidence > 0.5,
+            "High-noise splice should produce confidence > 0.5, got {}",
+            analysis.confidence
+        );
+    }
+
+    #[test]
+    fn test_splice_boundary_no_false_positive_clean() {
+        let (w, h) = (64_u32, 64_u32);
+        let frame = smooth_u8_frame(w as usize, h as usize);
+
+        let det = SplicingDetector::default();
+        let analysis = det.analyze_boundary_artifacts(&frame, &frame, w, h);
+
+        assert!(
+            analysis.confidence < 0.15,
+            "Identical frames should produce confidence < 0.15, got {}",
+            analysis.confidence
+        );
+    }
+
+    #[test]
+    fn test_splice_boundary_confidence_fields_normalised() {
+        let (w, h) = (64_u32, 64_u32);
+        let prev = smooth_u8_frame(w as usize, h as usize);
+        let curr = high_noise_u8_frame(w as usize, h as usize);
+
+        let det = SplicingDetector::default();
+        let a = det.analyze_boundary_artifacts(&prev, &curr, w, h);
+
+        assert!(
+            (0.0..=1.0).contains(&a.blocking_level),
+            "blocking_level out of range: {}",
+            a.blocking_level
+        );
+        assert!(
+            (0.0..=1.0).contains(&a.color_balance_delta),
+            "color_balance_delta out of range: {}",
+            a.color_balance_delta
+        );
+        assert!(
+            (0.0..=1.0).contains(&a.noise_floor_jump),
+            "noise_floor_jump out of range: {}",
+            a.noise_floor_jump
+        );
+        assert!(
+            (0.0..=1.0).contains(&a.confidence),
+            "confidence out of range: {}",
+            a.confidence
+        );
+    }
+
+    #[test]
+    fn test_splice_boundary_empty_frame_no_panic() {
+        // Zero-size frame — should not panic.
+        let det = SplicingDetector::default();
+        let empty: &[u8] = &[];
+        let analysis = det.analyze_boundary_artifacts(empty, empty, 0, 0);
+        assert_eq!(analysis.confidence, 0.0);
     }
 }

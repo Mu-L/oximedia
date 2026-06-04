@@ -150,7 +150,12 @@ pub struct CopyPlan {
 impl CopyPlan {
     /// Create a copy plan for a given file size.
     #[allow(clippy::cast_possible_truncation)]
-    pub fn create(source: &str, destination: &str, file_size: u64, config: ParallelCopyConfig) -> Self {
+    pub fn create(
+        source: &str,
+        destination: &str,
+        file_size: u64,
+        config: ParallelCopyConfig,
+    ) -> Self {
         let chunk_size = config.chunk_size;
         let mut chunks = Vec::new();
         let mut offset = 0u64;
@@ -384,19 +389,31 @@ mod tests {
 
     #[test]
     fn test_copy_plan_create() {
-        let plan = CopyPlan::create("src.bin", "dst.bin", 3000, ParallelCopyConfig::default().with_chunk_size(1000));
-        assert_eq!(plan.chunk_count(), 3);
+        // chunk_size min is 4096; use 8192-byte chunks on a 16384-byte file → 2 chunks
+        let plan = CopyPlan::create(
+            "src.bin",
+            "dst.bin",
+            16_384,
+            ParallelCopyConfig::default().with_chunk_size(8192),
+        );
+        assert_eq!(plan.chunk_count(), 2);
         assert_eq!(plan.chunks[0].offset, 0);
-        assert_eq!(plan.chunks[0].length, 1000);
-        assert_eq!(plan.chunks[2].offset, 2000);
-        assert_eq!(plan.chunks[2].length, 1000);
+        assert_eq!(plan.chunks[0].length, 8192);
+        assert_eq!(plan.chunks[1].offset, 8192);
+        assert_eq!(plan.chunks[1].length, 8192);
     }
 
     #[test]
     fn test_copy_plan_uneven() {
-        let plan = CopyPlan::create("a", "b", 2500, ParallelCopyConfig::default().with_chunk_size(1000));
+        // 10000 bytes with 4096-byte chunks → ceil(10000/4096) = 3 chunks (4096+4096+1808)
+        let plan = CopyPlan::create(
+            "a",
+            "b",
+            10_000,
+            ParallelCopyConfig::default().with_chunk_size(4096),
+        );
         assert_eq!(plan.chunk_count(), 3);
-        assert_eq!(plan.chunks[2].length, 500);
+        assert_eq!(plan.chunks[2].length, 10_000 - 2 * 4096);
     }
 
     #[test]
@@ -407,7 +424,13 @@ mod tests {
 
     #[test]
     fn test_work_queue_lifecycle() {
-        let plan = CopyPlan::create("a", "b", 3000, ParallelCopyConfig::default().with_chunk_size(1000));
+        // 12288 bytes with 4096-byte chunks = exactly 3 chunks
+        let plan = CopyPlan::create(
+            "a",
+            "b",
+            12_288,
+            ParallelCopyConfig::default().with_chunk_size(4096),
+        );
         let mut queue = CopyWorkQueue::from_plan(&plan);
         assert_eq!(queue.remaining(), 3);
         assert!(!queue.is_finished());
@@ -444,7 +467,9 @@ mod tests {
         assert!(calc.estimate_remaining_secs(1000).is_none());
 
         calc.add_sample(1000, 1_000_000_000);
-        let est = calc.estimate_remaining_secs(5000).expect("estimate should succeed");
+        let est = calc
+            .estimate_remaining_secs(5000)
+            .expect("estimate should succeed");
         assert!((est - 5.0).abs() < 0.01);
     }
 

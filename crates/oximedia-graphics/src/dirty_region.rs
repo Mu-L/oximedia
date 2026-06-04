@@ -394,9 +394,7 @@ impl DirtyRegionTracker {
                     let combined = a.area() + b.area();
                     let union_area = a.union(&b).area();
                     // If union wastes <= limit% extra, merge.
-                    if combined == 0
-                        || (union_area as f64 / combined as f64 - 1.0) <= limit_frac
-                    {
+                    if combined == 0 || (union_area as f64 / combined as f64 - 1.0) <= limit_frac {
                         self.regions[i] = a.union(&b);
                         self.regions.remove(j);
                         merged = true;
@@ -417,11 +415,9 @@ impl DirtyRegionTracker {
 /// overlapping).  Adjacent rects can be merged without adding waste.
 fn rects_adjacent(a: &DirtyRect, b: &DirtyRect) -> bool {
     // Horizontally adjacent (share a vertical edge)
-    let h_adj = (a.right() == b.x || b.right() == a.x)
-        && !(a.y >= b.bottom() || b.y >= a.bottom());
+    let h_adj = (a.right() == b.x || b.right() == a.x) && !(a.y >= b.bottom() || b.y >= a.bottom());
     // Vertically adjacent (share a horizontal edge)
-    let v_adj = (a.bottom() == b.y || b.bottom() == a.y)
-        && !(a.x >= b.right() || b.x >= a.right());
+    let v_adj = (a.bottom() == b.y || b.bottom() == a.y) && !(a.x >= b.right() || b.x >= a.right());
     h_adj || v_adj
 }
 
@@ -644,11 +640,10 @@ mod tests {
 
     #[test]
     fn test_tracker_merge_overlapping_reduces_count() {
-        let mut tracker =
-            DirtyRegionTracker::with_policy(1920, 1080, MergePolicy::Overlapping, 64);
+        let mut tracker = DirtyRegionTracker::with_policy(1920, 1080, MergePolicy::Overlapping, 64);
         tracker.mark(DirtyRect::new(0, 0, 100, 100));
         tracker.mark(DirtyRect::new(50, 50, 100, 100)); // overlaps
-        // After merge the two rects should collapse to one.
+                                                        // After merge the two rects should collapse to one.
         assert_eq!(tracker.region_count(), 1);
     }
 

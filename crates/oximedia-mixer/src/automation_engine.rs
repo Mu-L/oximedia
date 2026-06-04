@@ -365,12 +365,7 @@ impl AutomationEngine {
 
     /// Resolve the effective value for a sample position, taking mode into
     /// account.
-    fn resolve_value(
-        &self,
-        lane: &AutomationLaneData,
-        state: &LaneState,
-        sample_pos: u64,
-    ) -> f32 {
+    fn resolve_value(&self, lane: &AutomationLaneData, state: &LaneState, sample_pos: u64) -> f32 {
         match state.mode {
             AutomationMode::Read => lane.evaluate(sample_pos),
             AutomationMode::Touch => {

@@ -177,8 +177,7 @@ pub fn delta_e_2000_precomputed(p1: &PrecomputedLab, p2: &PrecomputedLab) -> f64
     };
 
     // T factor
-    let t = 1.0
-        - 0.17 * ((h_bar_prime - 30.0) * PI / 180.0).cos()
+    let t = 1.0 - 0.17 * ((h_bar_prime - 30.0) * PI / 180.0).cos()
         + 0.24 * ((2.0 * h_bar_prime) * PI / 180.0).cos()
         + 0.32 * ((3.0 * h_bar_prime + 6.0) * PI / 180.0).cos()
         - 0.20 * ((4.0 * h_bar_prime - 63.0) * PI / 180.0).cos();
@@ -190,8 +189,7 @@ pub fn delta_e_2000_precomputed(p1: &PrecomputedLab, p2: &PrecomputedLab) -> f64
     let s_h = 1.0 + 0.015 * c_bar_prime * t;
 
     // Rotation term
-    let delta_theta =
-        30.0 * (-(((h_bar_prime - 275.0) / 25.0).powi(2))).exp();
+    let delta_theta = 30.0 * (-(((h_bar_prime - 275.0) / 25.0).powi(2))).exp();
     let c7 = c_bar_prime.powi(7);
     let r_c = 2.0 * (c7 / (c7 + 25.0_f64.powi(7))).sqrt();
     let r_t = -r_c * (2.0 * delta_theta * PI / 180.0).sin();
@@ -237,10 +235,7 @@ pub fn batch_g_factor(labs: &[Lab]) -> f64 {
 ///
 /// # Errors
 /// Returns an error if the slice lengths differ.
-pub fn delta_e_2000_batch_pairs(
-    labs1: &[Lab],
-    labs2: &[Lab],
-) -> crate::error::Result<Vec<f64>> {
+pub fn delta_e_2000_batch_pairs(labs1: &[Lab], labs2: &[Lab]) -> crate::error::Result<Vec<f64>> {
     if labs1.len() != labs2.len() {
         return Err(crate::error::ColorError::InvalidColor(
             "labs1 and labs2 must have the same length for pairwise comparison".to_string(),
@@ -355,8 +350,7 @@ pub fn delta_e_2000_weighted(lab1: &Lab, lab2: &Lab, k_l: f64, k_c: f64, k_h: f6
         h_mean_deg
     };
 
-    let t = 1.0
-        - 0.17 * ((h_bar_prime - 30.0) * PI / 180.0).cos()
+    let t = 1.0 - 0.17 * ((h_bar_prime - 30.0) * PI / 180.0).cos()
         + 0.24 * ((2.0 * h_bar_prime) * PI / 180.0).cos()
         + 0.32 * ((3.0 * h_bar_prime + 6.0) * PI / 180.0).cos()
         - 0.20 * ((4.0 * h_bar_prime - 63.0) * PI / 180.0).cos();
@@ -429,7 +423,7 @@ mod tests {
         let batch = delta_e_2000_batch_pairs(&labs1, &labs2).expect("should succeed");
         assert_eq!(batch.len(), 2);
 
-        for (i, (&ref a, &ref b)) in labs1.iter().zip(labs2.iter()).enumerate() {
+        for (i, (a, b)) in labs1.iter().zip(labs2.iter()).enumerate() {
             let expected = reference_de2000(a, b);
             assert!(
                 (batch[i] - expected).abs() < 1e-8,
@@ -450,7 +444,11 @@ mod tests {
     #[test]
     fn test_delta_e_matrix_dimensions() {
         let queries = vec![lab(40.0, 10.0, 5.0), lab(60.0, -5.0, 20.0)];
-        let references = vec![lab(45.0, 8.0, 4.0), lab(55.0, -3.0, 18.0), lab(70.0, 0.0, 0.0)];
+        let references = vec![
+            lab(45.0, 8.0, 4.0),
+            lab(55.0, -3.0, 18.0),
+            lab(70.0, 0.0, 0.0),
+        ];
 
         let result = delta_e_2000_matrix(&queries, &references);
         assert_eq!(result.len(), 2 * 3, "should be n*m = 6 elements");
@@ -498,7 +496,10 @@ mod tests {
         // Achromatic (a=b=0) → C=0 → G = 0.5*(1-0) = 0.5
         let labs = vec![lab(50.0, 0.0, 0.0), lab(70.0, 0.0, 0.0)];
         let g = batch_g_factor(&labs);
-        assert!((g - 0.5).abs() < 1e-10, "achromatic G should be 0.5, got {g}");
+        assert!(
+            (g - 0.5).abs() < 1e-10,
+            "achromatic G should be 0.5, got {g}"
+        );
     }
 
     #[test]

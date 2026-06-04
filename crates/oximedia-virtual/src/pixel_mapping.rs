@@ -197,8 +197,136 @@ impl HdrToneMapper {
     }
 }
 
+/// Precomputed lookup table mapping every global pixel coordinate to its
+/// (panel_idx, panel_col, panel_row) triple.
+///
+/// When the total pixel count fits within `memory_cap_pixels`, the LUT is
+/// built eagerly so that subsequent lookups are O(1) array access.  For
+/// very large walls it returns `None` from `build`, and the caller should
+/// fall back to arithmetic (`PixelMapper::global_to_panel`).
+pub struct GlobalPixelLut {
+    /// Flat Vec of (panel_idx, panel_col, panel_row) — row-major order.
+    entries: Vec<(u32, u32, u32)>,
+    frame_width: u32,
+    frame_height: u32,
+    /// Maximum pixels before refusing to allocate.
+    memory_cap_pixels: usize,
+}
+
+/// Default memory cap: 32 megapixels (≈ 384 MB at 12 bytes/entry).
+pub const DEFAULT_MEMORY_CAP: usize = 32 * 1024 * 1024;
+
+/// Minimal description of a panel needed to build the LUT.
+#[derive(Debug, Clone, Copy)]
+pub struct PanelDesc {
+    /// Horizontal pixel offset of this panel within the global frame.
+    pub x_offset: u32,
+    /// Vertical pixel offset of this panel within the global frame.
+    pub y_offset: u32,
+    /// Width of this panel in pixels.
+    pub width: u32,
+    /// Height of this panel in pixels.
+    pub height: u32,
+}
+
+impl GlobalPixelLut {
+    /// Build the LUT from a slice of panels and the overall frame dimensions.
+    ///
+    /// Returns `None` when total pixel count exceeds `DEFAULT_MEMORY_CAP`.
+    #[must_use]
+    pub fn build(panels: &[PanelDesc], frame_width: u32, frame_height: u32) -> Option<Self> {
+        Self::build_with_cap(panels, frame_width, frame_height, DEFAULT_MEMORY_CAP)
+    }
+
+    /// Build with an explicit memory cap.
+    ///
+    /// Returns `None` when total pixel count exceeds `memory_cap_pixels`.
+    #[must_use]
+    pub fn build_with_cap(
+        panels: &[PanelDesc],
+        frame_width: u32,
+        frame_height: u32,
+        memory_cap_pixels: usize,
+    ) -> Option<Self> {
+        let total = frame_width as usize * frame_height as usize;
+        if total > memory_cap_pixels {
+            return None;
+        }
+
+        // Fill entries with a sentinel meaning "no panel" (u32::MAX).
+        let sentinel = (u32::MAX, u32::MAX, u32::MAX);
+        let mut entries = vec![sentinel; total];
+
+        for (idx, panel) in panels.iter().enumerate() {
+            let panel_idx = idx as u32;
+            for row in 0..panel.height {
+                for col in 0..panel.width {
+                    let gx = panel.x_offset + col;
+                    let gy = panel.y_offset + row;
+                    if gx < frame_width && gy < frame_height {
+                        let gi = gy as usize * frame_width as usize + gx as usize;
+                        entries[gi] = (panel_idx, col, row);
+                    }
+                }
+            }
+        }
+
+        Some(Self {
+            entries,
+            frame_width,
+            frame_height,
+            memory_cap_pixels,
+        })
+    }
+
+    /// Look up a global pixel coordinate.
+    ///
+    /// Returns `None` when the coordinate is out of range or lies in an
+    /// uncovered region between panels.
+    #[must_use]
+    pub fn lookup(&self, global_x: u32, global_y: u32) -> Option<(u32, u32, u32)> {
+        if global_x >= self.frame_width || global_y >= self.frame_height {
+            return None;
+        }
+        let idx = global_y as usize * self.frame_width as usize + global_x as usize;
+        let entry = self.entries[idx];
+        if entry.0 == u32::MAX {
+            None
+        } else {
+            Some(entry)
+        }
+    }
+
+    /// Frame width this LUT was built for.
+    #[must_use]
+    pub fn frame_width(&self) -> u32 {
+        self.frame_width
+    }
+
+    /// Frame height this LUT was built for.
+    #[must_use]
+    pub fn frame_height(&self) -> u32 {
+        self.frame_height
+    }
+
+    /// Memory cap (pixels) used to gate construction.
+    #[must_use]
+    pub fn memory_cap_pixels(&self) -> usize {
+        self.memory_cap_pixels
+    }
+
+    /// Number of entries in the LUT (frame_width × frame_height).
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+}
+
 /// Maps a 2D buffer of pixels to panel-local pixel buffers.
-#[allow(dead_code)]
+///
+/// When the wall fits within `DEFAULT_MEMORY_CAP` pixels, a `GlobalPixelLut`
+/// is built at construction time and used for O(1) lookups.  For larger walls
+/// the arithmetic path is used instead.
 pub struct PixelMapper {
     /// Total wall width in pixels.
     wall_width: u32,
@@ -208,17 +336,48 @@ pub struct PixelMapper {
     tile_width: u32,
     /// Height of each panel tile.
     tile_height: u32,
+    /// Optional precomputed LUT (available when wall fits in memory cap).
+    lut: Option<GlobalPixelLut>,
 }
 
 impl PixelMapper {
     /// Create a new pixel mapper.
+    ///
+    /// A `GlobalPixelLut` is built automatically when the total pixel count
+    /// is within `DEFAULT_MEMORY_CAP`.  For larger walls the LUT is omitted
+    /// and arithmetic is used instead.
     #[must_use]
     pub fn new(wall_width: u32, wall_height: u32, tile_width: u32, tile_height: u32) -> Self {
+        let lut = if tile_width > 0 && tile_height > 0 {
+            // Build a uniform-tile panel descriptor list.
+            let cols = wall_width.div_ceil(tile_width);
+            let rows = wall_height.div_ceil(tile_height);
+            let mut panels: Vec<PanelDesc> = Vec::with_capacity((cols * rows) as usize);
+            for row in 0..rows {
+                for col in 0..cols {
+                    let x_offset = col * tile_width;
+                    let y_offset = row * tile_height;
+                    let w = tile_width.min(wall_width.saturating_sub(x_offset));
+                    let h = tile_height.min(wall_height.saturating_sub(y_offset));
+                    panels.push(PanelDesc {
+                        x_offset,
+                        y_offset,
+                        width: w,
+                        height: h,
+                    });
+                }
+            }
+            GlobalPixelLut::build(&panels, wall_width, wall_height)
+        } else {
+            None
+        };
+
         Self {
             wall_width,
             wall_height,
             tile_width,
             tile_height,
+            lut,
         }
     }
 
@@ -241,6 +400,9 @@ impl PixelMapper {
     }
 
     /// Convert a global pixel coordinate to (col, row, `local_x`, `local_y`).
+    ///
+    /// Uses the precomputed LUT when available, otherwise falls back to
+    /// arithmetic division.
     #[must_use]
     pub fn global_to_panel(&self, gx: u32, gy: u32) -> Option<(u32, u32, u32, u32)> {
         if self.tile_width == 0 || self.tile_height == 0 {
@@ -249,6 +411,21 @@ impl PixelMapper {
         if gx >= self.wall_width || gy >= self.wall_height {
             return None;
         }
+
+        // Fast path: LUT available.
+        if let Some(ref lut) = self.lut {
+            // LUT entry is (panel_idx_in_col_row_order, panel_col, panel_row).
+            // panel_idx = row * num_cols + col  →  col = idx % num_cols
+            if let Some((pidx, local_x, local_y)) = lut.lookup(gx, gy) {
+                let num_cols = self.panel_cols();
+                let col = pidx % num_cols;
+                let row = pidx / num_cols;
+                return Some((col, row, local_x, local_y));
+            }
+            return None;
+        }
+
+        // Arithmetic fallback.
         let col = gx / self.tile_width;
         let row = gy / self.tile_height;
         let local_x = gx % self.tile_width;
@@ -269,6 +446,12 @@ impl PixelMapper {
     #[must_use]
     pub fn resolution(&self) -> (u32, u32) {
         (self.wall_width, self.wall_height)
+    }
+
+    /// Returns a reference to the precomputed LUT, if available.
+    #[must_use]
+    pub fn lut(&self) -> Option<&GlobalPixelLut> {
+        self.lut.as_ref()
     }
 }
 

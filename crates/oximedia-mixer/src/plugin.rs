@@ -384,11 +384,7 @@ impl PluginInstance {
     /// # Errors
     ///
     /// Returns `PluginError::ProcessingError` if the plugin is not prepared.
-    pub fn process_stereo(
-        &mut self,
-        left: &mut [f32],
-        right: &mut [f32],
-    ) -> PluginResult<()> {
+    pub fn process_stereo(&mut self, left: &mut [f32], right: &mut [f32]) -> PluginResult<()> {
         if !self.prepared {
             return Err(PluginError::ProcessingError(
                 "Plugin not prepared (call prepare() first)".to_string(),
@@ -415,8 +411,8 @@ impl PluginInstance {
         let input_right: Vec<f32> = right[..num_samples].to_vec();
 
         let in_refs: Vec<&[f32]> = vec![&input_left, &input_right];
-        let mut out_left = vec![0.0_f32; num_samples];
-        let mut out_right = vec![0.0_f32; num_samples];
+        let out_left = vec![0.0_f32; num_samples];
+        let out_right = vec![0.0_f32; num_samples];
 
         let mut out_bufs: Vec<Vec<f32>> = (0..num_out.max(2))
             .map(|i| {
@@ -660,12 +656,7 @@ mod tests {
 
         fn prepare(&mut self, _sample_rate: f64, _max_block_size: usize) {}
 
-        fn process(
-            &mut self,
-            inputs: &[&[f32]],
-            outputs: &mut [&mut [f32]],
-            num_samples: usize,
-        ) {
+        fn process(&mut self, inputs: &[&[f32]], outputs: &mut [&mut [f32]], num_samples: usize) {
             for (inp, out) in inputs.iter().zip(outputs.iter_mut()) {
                 for i in 0..num_samples.min(inp.len()).min(out.len()) {
                     out[i] = inp[i] * self.gain;
@@ -752,7 +743,10 @@ mod tests {
             .expect("chain should succeed");
 
         for &v in &left {
-            assert!((v - 1.0).abs() < 1e-5, "bypassed plugin should pass through");
+            assert!(
+                (v - 1.0).abs() < 1e-5,
+                "bypassed plugin should pass through"
+            );
         }
     }
 

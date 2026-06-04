@@ -13,8 +13,8 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
 use oximedia_transcode::{PresetConfig, QualityMode};
+use std::collections::HashMap;
 
 use crate::{AbrLadder, Preset, PresetCategory, PresetMetadata};
 
@@ -78,13 +78,11 @@ impl PresetMatcher {
     /// Returns `None` when `presets` is empty.
     #[must_use]
     pub fn find_best<'a>(content: &ContentAnalysis, presets: &'a [Preset]) -> Option<&'a Preset> {
-        presets
-            .iter()
-            .max_by(|a, b| {
-                let sa = Self::score(content, a);
-                let sb = Self::score(content, b);
-                sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
-            })
+        presets.iter().max_by(|a, b| {
+            let sa = Self::score(content, a);
+            let sb = Self::score(content, b);
+            sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+        })
     }
 
     /// Compute a score in `[0.0, 1.0]` for a single preset against the content.
@@ -405,19 +403,23 @@ impl PresetExporter {
         let id = Self::escape_xml(&preset.metadata.id);
         let name = Self::escape_xml(&preset.metadata.name);
 
-        xml.push_str(&format!(
-            "<preset id=\"{id}\" name=\"{name}\">\n"
-        ));
+        xml.push_str(&format!("<preset id=\"{id}\" name=\"{name}\">\n"));
         xml.push_str(&format!(
             "  <description>{}</description>\n",
             Self::escape_xml(&preset.metadata.description)
         ));
 
         if let Some(ref vc) = preset.config.video_codec {
-            xml.push_str(&format!("  <video_codec>{}</video_codec>\n", Self::escape_xml(vc)));
+            xml.push_str(&format!(
+                "  <video_codec>{}</video_codec>\n",
+                Self::escape_xml(vc)
+            ));
         }
         if let Some(ref ac) = preset.config.audio_codec {
-            xml.push_str(&format!("  <audio_codec>{}</audio_codec>\n", Self::escape_xml(ac)));
+            xml.push_str(&format!(
+                "  <audio_codec>{}</audio_codec>\n",
+                Self::escape_xml(ac)
+            ));
         }
         if let Some(vbr) = preset.config.video_bitrate {
             xml.push_str(&format!("  <video_bitrate>{vbr}</video_bitrate>\n"));
@@ -432,7 +434,10 @@ impl PresetExporter {
             xml.push_str(&format!("  <frame_rate>{num}/{den}</frame_rate>\n"));
         }
         if let Some(ref container) = preset.config.container {
-            xml.push_str(&format!("  <container>{}</container>\n", Self::escape_xml(container)));
+            xml.push_str(&format!(
+                "  <container>{}</container>\n",
+                Self::escape_xml(container)
+            ));
         }
 
         xml.push_str("</preset>\n");
@@ -750,7 +755,9 @@ impl CodecProfileRegistry {
     /// Create an empty registry.
     #[must_use]
     pub fn new() -> Self {
-        Self { profiles: HashMap::new() }
+        Self {
+            profiles: HashMap::new(),
+        }
     }
 
     /// Register a codec profile.
@@ -992,7 +999,10 @@ mod tests {
         let args = PresetExporter::to_ffmpeg_args(&p);
         let joined = args.join(" ");
         // "-c:v" followed by ffmpeg codec name
-        assert!(joined.contains("libx264") || joined.contains("h264"), "Should contain codec: {joined}");
+        assert!(
+            joined.contains("libx264") || joined.contains("h264"),
+            "Should contain codec: {joined}"
+        );
     }
 
     #[test]
@@ -1104,10 +1114,17 @@ mod tests {
     #[test]
     fn test_codec_profile_registry_custom() {
         let mut reg = CodecProfileRegistry::new();
-        reg.register("hevc", CodecProfile::new(
-            "hevc", "HEVC Main", (18, 51), (1_000_000, 50_000_000),
-            vec!["mp4".to_string()], "H.265 Main Profile",
-        ));
+        reg.register(
+            "hevc",
+            CodecProfile::new(
+                "hevc",
+                "HEVC Main",
+                (18, 51),
+                (1_000_000, 50_000_000),
+                vec!["mp4".to_string()],
+                "H.265 Main Profile",
+            ),
+        );
         assert!(reg.get("hevc").is_some());
     }
 

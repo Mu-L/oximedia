@@ -107,17 +107,19 @@ impl SearchThrottle {
     /// Try to consume one token for the given user at the given time.
     pub fn try_acquire(&mut self, user_id: u64, now_secs: f64) -> ThrottleDecision {
         // Refill & check per-user bucket.
-        let bucket = self
-            .buckets
-            .entry(user_id)
-            .or_insert_with(|| Bucket {
-                tokens: self.config.initial_tokens as f64,
-                last_refill: now_secs,
-                total_attempts: 0,
-                total_allowed: 0,
-            });
+        let bucket = self.buckets.entry(user_id).or_insert_with(|| Bucket {
+            tokens: self.config.initial_tokens as f64,
+            last_refill: now_secs,
+            total_attempts: 0,
+            total_allowed: 0,
+        });
 
-        Self::refill(bucket, now_secs, self.config.refill_rate, self.config.capacity);
+        Self::refill(
+            bucket,
+            now_secs,
+            self.config.refill_rate,
+            self.config.capacity,
+        );
         bucket.total_attempts += 1;
 
         if bucket.tokens < 1.0 {

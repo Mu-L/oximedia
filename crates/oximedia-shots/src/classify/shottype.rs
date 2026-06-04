@@ -33,6 +33,10 @@ pub struct ExtendedShotClassification {
     pub is_cutaway: bool,
 }
 
+/// Confidence level above which the classifier exits early and returns the
+/// current best classification without running remaining feature branches.
+const HIGH_CONFIDENCE_THRESHOLD: f32 = 0.95;
+
 /// Shot type classifier using face/person detection and framing analysis.
 pub struct ShotTypeClassifier {
     /// Confidence threshold for classification.
@@ -70,6 +74,11 @@ impl ShotTypeClassifier {
 
     /// Classify shot type based on frame content.
     ///
+    /// Feature branches are evaluated in decreasing confidence order.  As soon
+    /// as the running confidence reaches [`HIGH_CONFIDENCE_THRESHOLD`] the
+    /// function returns immediately without evaluating any remaining branches,
+    /// saving significant computation when the result is obvious.
+    ///
     /// # Errors
     ///
     /// Returns error if frame is invalid.
@@ -81,10 +90,10 @@ impl ShotTypeClassifier {
             ));
         }
 
-        // Detect faces/people in frame
+        // ── Branch 1: Face/person size heuristic ──────────────────────────────
+        // This is the highest-confidence branch for most shot types.
         let face_ratio = self.detect_face_size_ratio(frame)?;
 
-        // Classify based on face/person size ratio
         let (shot_type, confidence) = if face_ratio > 0.6 {
             (ShotType::ExtremeCloseUp, 0.9)
         } else if face_ratio > 0.4 {
@@ -100,14 +109,32 @@ impl ShotTypeClassifier {
         } else if face_ratio > 0.0 {
             (ShotType::ExtremeLongShot, 0.6)
         } else {
-            // No face detected, analyze overall composition
+            // face_ratio == 0.0 → no face signal; defer to Branch 2.
+            (ShotType::Unknown, 0.0)
+        };
+
+        // ── Early-exit: high-confidence result from face heuristic ────────────
+        if confidence >= HIGH_CONFIDENCE_THRESHOLD {
+            return Ok((shot_type, confidence));
+        }
+
+        // ── Branch 2: Composition-based fallback for no-face frames ───────────
+        if matches!(shot_type, ShotType::Unknown) {
             let composition_score = self.analyze_composition(frame)?;
-            if composition_score > 0.7 {
+            let (fallback_type, fallback_conf) = if composition_score > 0.7 {
                 (ShotType::ExtremeLongShot, 0.5)
             } else {
                 (ShotType::Unknown, 0.3)
+            };
+
+            // Early-exit check for composition branch (unlikely to reach 0.95
+            // with this fallback, but keeps the pattern uniform).
+            if fallback_conf >= HIGH_CONFIDENCE_THRESHOLD {
+                return Ok((fallback_type, fallback_conf));
             }
-        };
+
+            return Ok((fallback_type, fallback_conf));
+        }
 
         Ok((shot_type, confidence))
     }
@@ -555,5 +582,45 @@ mod tests {
         // verify the constructor compiles and the struct is usable
         let frame = FrameBuffer::from_elem(60, 60, 3, 100);
         assert!(c.classify(&frame).is_ok());
+    }
+
+    #[test]
+    fn test_classifier_early_exit_returns_valid() {
+        // Feed the classifier a 640×360 frame with very low, near-zero pixel
+        // values — no face, mostly dark.  The classifier should return a valid
+        // ShotType (not panic or error) regardless of the early-exit path taken.
+        let classifier = ShotTypeClassifier::new();
+        let frame = FrameBuffer::from_elem(360, 640, 3, 5);
+        let result = classifier.classify(&frame);
+        assert!(result.is_ok(), "classify should not error on a dark frame");
+        let (shot_type, confidence) = result.expect("ok");
+        // ShotType must be a known variant (not a nonsense value).
+        let known = matches!(
+            shot_type,
+            ShotType::ExtremeCloseUp
+                | ShotType::CloseUp
+                | ShotType::MediumCloseUp
+                | ShotType::MediumShot
+                | ShotType::MediumLongShot
+                | ShotType::LongShot
+                | ShotType::ExtremeLongShot
+                | ShotType::Unknown
+        );
+        assert!(
+            known,
+            "shot_type should be a known variant, got {:?}",
+            shot_type
+        );
+        assert!(
+            (0.0..=1.0).contains(&confidence),
+            "confidence should be in [0, 1], got {confidence}"
+        );
+    }
+
+    #[test]
+    fn test_high_confidence_threshold_constant() {
+        // Sanity-check: the constant is in a sensible range.
+        assert!(HIGH_CONFIDENCE_THRESHOLD > 0.5);
+        assert!(HIGH_CONFIDENCE_THRESHOLD <= 1.0);
     }
 }

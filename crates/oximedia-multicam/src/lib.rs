@@ -133,7 +133,9 @@ pub mod angle_priority;
 pub mod angle_score;
 pub mod angle_sync;
 pub mod angle_sync_ext;
+pub mod audio_selection;
 pub mod auto;
+pub mod auto_frame;
 pub mod bank_ctrl;
 pub mod bank_system;
 pub mod cam_label;
@@ -143,10 +145,16 @@ pub mod color;
 pub mod composite;
 pub mod coverage_map;
 pub mod cut_analysis;
+/// EDL cut-list export from multi-camera timeline.
+pub mod cut_export;
 pub mod cut_point;
 pub mod edit;
 pub mod edit_decision;
 pub mod error;
+/// FCP XML export for multi-camera projects.
+pub mod fcp_xml;
+pub mod framing_suggest;
+pub mod genlock;
 pub mod genlock_master;
 pub mod highlight;
 pub mod highlight_detect;
@@ -158,15 +166,23 @@ pub mod manual;
 pub mod metadata;
 pub mod multicam_export;
 pub mod proxy;
+pub mod proxy_gen;
+pub mod proxy_generator;
 pub mod replay_buffer;
 pub mod spatial;
+pub mod sub_frame_sync;
 pub mod switch_list;
 pub mod switcher;
 pub mod sync;
+pub mod sync_points;
 pub mod sync_report;
 pub mod sync_verify;
+/// Parallel synchronization verification across all camera angles.
+pub mod sync_verify_parallel;
 pub mod tally_system;
 pub mod timecode_sync;
+/// VISCA protocol camera control for PTZ cameras.
+pub mod visca;
 
 // Re-exports
 pub use error::{MultiCamError, Result};

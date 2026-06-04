@@ -13,11 +13,11 @@
 //!
 //! # Design
 //!
-//! - [`MaterializedNode`] — a folder/category node with id, name, and path.
-//! - [`PathTree`] — in-memory store that indexes nodes by their materialized
+//! - `MaterializedNode` — a folder/category node with id, name, and path.
+//! - `PathTree` — in-memory store that indexes nodes by their materialized
 //!   path and supports the operations described above.
-//! - [`PathQuery`] — declarative query builder for common path-based lookups.
-//! - [`PathStats`] — aggregate statistics over the tree.
+//! - `PathQuery` — declarative query builder for common path-based lookups.
+//! - `PathStats` — aggregate statistics over the tree.
 
 use std::collections::HashMap;
 
@@ -103,8 +103,7 @@ impl MaterializedNode {
     /// Returns `true` if `potential_ancestor` is an ancestor of this node.
     #[must_use]
     pub fn is_descendant_of(&self, potential_ancestor: &MaterializedNode) -> bool {
-        self.path.starts_with(&potential_ancestor.path)
-            && self.path != potential_ancestor.path
+        self.path.starts_with(&potential_ancestor.path) && self.path != potential_ancestor.path
     }
 
     /// Attach an asset id to this node.
@@ -206,7 +205,11 @@ impl PathTree {
     /// # Errors
     ///
     /// Returns an error if a node with the same id already exists.
-    pub fn insert_root(&mut self, id: impl Into<String>, name: impl Into<String>) -> Result<(), PathError> {
+    pub fn insert_root(
+        &mut self,
+        id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Result<(), PathError> {
         let node = MaterializedNode::root(id, name);
         self.insert(node)
     }
@@ -533,12 +536,17 @@ mod tests {
     fn build_tree() -> PathTree {
         let mut tree = PathTree::new();
         tree.insert_root("root", "root").expect("ok");
-        tree.insert_child("root", "projects", "Projects").expect("ok");
-        tree.insert_child("projects", "proj-2024", "2024").expect("ok");
-        tree.insert_child("proj-2024", "interviews", "Interviews").expect("ok");
-        tree.insert_child("proj-2024", "broll", "BRoll").expect("ok");
+        tree.insert_child("root", "projects", "Projects")
+            .expect("ok");
+        tree.insert_child("projects", "proj-2024", "2024")
+            .expect("ok");
+        tree.insert_child("proj-2024", "interviews", "Interviews")
+            .expect("ok");
+        tree.insert_child("proj-2024", "broll", "BRoll")
+            .expect("ok");
         tree.insert_child("root", "archive", "Archive").expect("ok");
-        tree.insert_child("archive", "arch-2023", "2023").expect("ok");
+        tree.insert_child("archive", "arch-2023", "2023")
+            .expect("ok");
         tree
     }
 

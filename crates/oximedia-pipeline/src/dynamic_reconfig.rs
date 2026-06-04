@@ -94,10 +94,7 @@ pub enum ReconfigOp {
     ///
     /// Input and output pads are **not** changed, so this is safe only when the
     /// replacement has identical stream kind requirements.
-    ReplaceNodeType {
-        node_id: NodeId,
-        new_type: NodeType,
-    },
+    ReplaceNodeType { node_id: NodeId, new_type: NodeType },
 
     /// Insert a new filter node immediately after the named upstream node,
     /// redirecting the upstream's out-edges to pass through the new node first.
@@ -413,8 +410,18 @@ fn remove_and_bypass(g: &mut PipelineGraph, id: NodeId) -> Result<(), PipelineEr
         return Err(PipelineError::NodeNotFound(id.to_string()));
     }
 
-    let in_edges: Vec<Edge> = g.edges.iter().filter(|e| e.to_node == id).cloned().collect();
-    let out_edges: Vec<Edge> = g.edges.iter().filter(|e| e.from_node == id).cloned().collect();
+    let in_edges: Vec<Edge> = g
+        .edges
+        .iter()
+        .filter(|e| e.to_node == id)
+        .cloned()
+        .collect();
+    let out_edges: Vec<Edge> = g
+        .edges
+        .iter()
+        .filter(|e| e.from_node == id)
+        .cloned()
+        .collect();
 
     let mut bypass: Vec<Edge> = Vec::new();
     for ie in &in_edges {
@@ -596,7 +603,8 @@ mod tests {
         let tx = dp
             .begin()
             .insert_filter_after_name("scale", "hflip", FilterConfig::Hflip);
-        dp.commit(tx).expect("commit insert_filter_after should succeed");
+        dp.commit(tx)
+            .expect("commit insert_filter_after should succeed");
 
         assert_eq!(dp.graph().node_count(), before + 1);
     }
@@ -610,7 +618,8 @@ mod tests {
         let tx = dp
             .begin()
             .insert_filter_before_name("scale", "vflip", FilterConfig::Vflip);
-        dp.commit(tx).expect("commit insert_filter_before should succeed");
+        dp.commit(tx)
+            .expect("commit insert_filter_before should succeed");
 
         assert_eq!(dp.graph().node_count(), before + 1);
     }
@@ -645,7 +654,10 @@ mod tests {
             .edges
             .iter()
             .any(|e| e.from_node == src_id && e.to_node == sink_id);
-        assert!(connected, "source and sink should be connected after bypass");
+        assert!(
+            connected,
+            "source and sink should be connected after bypass"
+        );
     }
 
     #[test]
@@ -657,7 +669,8 @@ mod tests {
         let tx = dp
             .begin()
             .insert_filter_after_name("scale", "hflip", FilterConfig::Hflip);
-        dp.commit(tx).expect("commit should succeed and increment generation");
+        dp.commit(tx)
+            .expect("commit should succeed and increment generation");
         assert_eq!(dp.generation(), 1);
     }
 
@@ -667,9 +680,7 @@ mod tests {
         let before_count = g.node_count();
         let mut dp = DynamicPipeline::new(g);
 
-        let tx = dp
-            .begin()
-            .remove_node_by_name("nonexistent_node");
+        let tx = dp.begin().remove_node_by_name("nonexistent_node");
         let result = dp.commit(tx);
 
         assert!(result.is_err());
@@ -695,9 +706,14 @@ mod tests {
         let tx = dp
             .begin()
             .replace_node_type(scale_id, NodeType::Filter(FilterConfig::Hflip));
-        dp.commit(tx).expect("commit replace_node_type should succeed");
+        dp.commit(tx)
+            .expect("commit replace_node_type should succeed");
 
-        let updated_spec = dp.graph().nodes.get(&scale_id).expect("scale node should still exist after type replacement");
+        let updated_spec = dp
+            .graph()
+            .nodes
+            .get(&scale_id)
+            .expect("scale node should still exist after type replacement");
         assert!(matches!(
             updated_spec.node_type,
             NodeType::Filter(FilterConfig::Hflip)
@@ -739,9 +755,13 @@ mod tests {
         let tx = dp
             .begin()
             .insert_filter_after_name("scale", "hflip", FilterConfig::Hflip);
-        dp.commit(tx).expect("commit should succeed and fire callback");
+        dp.commit(tx)
+            .expect("commit should succeed and fire callback");
 
-        assert!(*fired.lock().expect("lock should not be poisoned"), "callback should have fired");
+        assert!(
+            *fired.lock().expect("lock should not be poisoned"),
+            "callback should have fired"
+        );
     }
 
     #[test]

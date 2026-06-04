@@ -323,8 +323,7 @@ impl TypeReprMap {
 
     /// Register a template for a given type.
     pub fn register(&mut self, template: ReprTemplate) {
-        self.entries
-            .insert(template.type_name.clone(), template);
+        self.entries.insert(template.type_name.clone(), template);
     }
 
     /// Look up the template for a type.
@@ -471,9 +470,7 @@ mod tests {
 
     #[test]
     fn test_repr_builder_field_bool_true() {
-        let r = ReprBuilder::new("Opts")
-            .field_bool("verbose", true)
-            .build();
+        let r = ReprBuilder::new("Opts").field_bool("verbose", true).build();
         assert_eq!(r, "Opts(verbose=True)");
     }
 
@@ -487,9 +484,7 @@ mod tests {
 
     #[test]
     fn test_repr_builder_field_raw() {
-        let r = ReprBuilder::new("T")
-            .field_raw("codec", "AV1")
-            .build();
+        let r = ReprBuilder::new("T").field_raw("codec", "AV1").build();
         assert_eq!(r, "T(codec=AV1)");
     }
 

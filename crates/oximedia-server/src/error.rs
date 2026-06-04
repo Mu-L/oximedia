@@ -132,6 +132,12 @@ impl From<argon2::password_hash::Error> for ServerError {
     }
 }
 
+impl From<oximedia_net::error::NetError> for ServerError {
+    fn from(err: oximedia_net::error::NetError) -> Self {
+        Self::Internal(format!("Network/streaming error: {err}"))
+    }
+}
+
 impl IntoResponse for ServerError {
     fn into_response(self) -> Response {
         let status = self.status_code();

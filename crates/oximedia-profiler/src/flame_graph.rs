@@ -153,9 +153,7 @@ impl FlameGraph {
         let mut current_children = &self.root.children;
 
         loop {
-            let hottest = current_children
-                .iter()
-                .max_by_key(|n| n.total_us);
+            let hottest = current_children.iter().max_by_key(|n| n.total_us);
             match hottest {
                 None => break,
                 Some(node) => {
@@ -351,10 +349,7 @@ mod tests {
 
     #[test]
     fn test_nested_stacks_accumulate_total_us() {
-        let fg = build(&[
-            (&["main", "render"], 400),
-            (&["main", "audio"], 200),
-        ]);
+        let fg = build(&[(&["main", "render"], 400), (&["main", "audio"], 200)]);
         // "main" total_us should be 600
         let main_node = fg
             .root
@@ -368,15 +363,15 @@ mod tests {
     #[test]
     fn test_self_time_correct_for_shared_parent() {
         // "main" is never a leaf — self_us should be 0.
-        let fg = build(&[
-            (&["main", "render"], 100),
-            (&["main", "audio"], 50),
-        ]);
+        let fg = build(&[(&["main", "render"], 100), (&["main", "audio"], 50)]);
         let self_times = fg.self_time_top_n(10);
         // Only "render" and "audio" should appear.
         let names: Vec<&str> = self_times.iter().map(|(n, _)| *n).collect();
-        assert!(!names.contains(&"main"),
-            "main should have self_us == 0, names: {:?}", names);
+        assert!(
+            !names.contains(&"main"),
+            "main should have self_us == 0, names: {:?}",
+            names
+        );
     }
 
     // ------------------------------------------------------------------
@@ -385,10 +380,7 @@ mod tests {
 
     #[test]
     fn test_hottest_path_follows_max_total_us() {
-        let fg = build(&[
-            (&["main", "slow", "decode"], 900),
-            (&["main", "fast"], 100),
-        ]);
+        let fg = build(&[(&["main", "slow", "decode"], 900), (&["main", "fast"], 100)]);
         let path = fg.hottest_path();
         assert_eq!(path, vec!["main", "slow", "decode"]);
     }
@@ -414,10 +406,7 @@ mod tests {
 
     #[test]
     fn test_folded_format_multiple_stacks() {
-        let fg = build(&[
-            (&["main", "a"], 300),
-            (&["main", "b"], 200),
-        ]);
+        let fg = build(&[(&["main", "a"], 300), (&["main", "b"], 200)]);
         let folded = fg.to_folded();
         assert!(folded.contains("main;a 300"), "folded was: {folded}");
         assert!(folded.contains("main;b 200"), "folded was: {folded}");
@@ -429,10 +418,7 @@ mod tests {
 
     #[test]
     fn test_total_nodes_two_roots() {
-        let fg = build(&[
-            (&["root_a", "child"], 100),
-            (&["root_b"], 50),
-        ]);
+        let fg = build(&[(&["root_a", "child"], 100), (&["root_b"], 50)]);
         // root_a + child + root_b = 3
         assert_eq!(fg.total_nodes(), 3);
     }
@@ -443,10 +429,7 @@ mod tests {
 
     #[test]
     fn test_self_time_top_n_ordering() {
-        let fg = build(&[
-            (&["main", "slow_leaf"], 800),
-            (&["main", "fast_leaf"], 200),
-        ]);
+        let fg = build(&[(&["main", "slow_leaf"], 800), (&["main", "fast_leaf"], 200)]);
         let top2 = fg.self_time_top_n(2);
         assert_eq!(top2[0].0, "slow_leaf");
         assert_eq!(top2[1].0, "fast_leaf");

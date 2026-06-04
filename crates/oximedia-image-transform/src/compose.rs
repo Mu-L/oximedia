@@ -61,11 +61,7 @@ impl TransformMatrix {
     /// ```
     #[must_use]
     pub fn identity() -> Self {
-        Self([
-            1.0, 0.0, 0.0,
-            0.0, 1.0, 0.0,
-            0.0, 0.0, 1.0,
-        ])
+        Self([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])
     }
 
     /// Translation by `(tx, ty)`.
@@ -80,11 +76,7 @@ impl TransformMatrix {
     /// ```
     #[must_use]
     pub fn translation(tx: f64, ty: f64) -> Self {
-        Self([
-            1.0, 0.0, tx,
-            0.0, 1.0, ty,
-            0.0, 0.0, 1.0,
-        ])
+        Self([1.0, 0.0, tx, 0.0, 1.0, ty, 0.0, 0.0, 1.0])
     }
 
     /// Uniform or non-uniform scaling about the origin.
@@ -99,11 +91,7 @@ impl TransformMatrix {
     /// ```
     #[must_use]
     pub fn scale(sx: f64, sy: f64) -> Self {
-        Self([
-            sx,  0.0, 0.0,
-            0.0, sy,  0.0,
-            0.0, 0.0, 1.0,
-        ])
+        Self([sx, 0.0, 0.0, 0.0, sy, 0.0, 0.0, 0.0, 1.0])
     }
 
     /// Counter-clockwise rotation by `angle_radians` about the origin.
@@ -111,11 +99,7 @@ impl TransformMatrix {
     pub fn rotation(angle_radians: f64) -> Self {
         let cos = angle_radians.cos();
         let sin = angle_radians.sin();
-        Self([
-            cos, -sin, 0.0,
-            sin,  cos, 0.0,
-            0.0,  0.0, 1.0,
-        ])
+        Self([cos, -sin, 0.0, sin, cos, 0.0, 0.0, 0.0, 1.0])
     }
 
     /// Apply the transform to the 2-D point `(x, y)`.

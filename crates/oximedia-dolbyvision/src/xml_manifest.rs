@@ -184,14 +184,20 @@ mod tests {
     fn test_title_xml_escaping() {
         let builder = DvManifestBuilder::new().with_title("Film & \"Crew\"");
         let xml = builder.build_xml();
-        assert!(xml.contains("Film &amp; &quot;Crew&quot;"), "escaped: {xml}");
+        assert!(
+            xml.contains("Film &amp; &quot;Crew&quot;"),
+            "escaped: {xml}"
+        );
     }
 
     #[test]
     fn test_manifest_with_frame_rate() {
         let builder = DvManifestBuilder::new().with_frame_rate(24000, 1001);
         let xml = builder.build_xml();
-        assert!(xml.contains("frameRate=\"24000/1001\""), "frame rate: {xml}");
+        assert!(
+            xml.contains("frameRate=\"24000/1001\""),
+            "frame rate: {xml}"
+        );
     }
 
     #[test]

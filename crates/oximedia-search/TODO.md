@@ -32,7 +32,7 @@
 - [x] Add index sharding — `search_shard.rs` with `ShardedIndex` (FNV-1a hash assignment, parallel Bloom pre-check + rayon-ready)
 - [x] Implement Bloom filter pre-check in shards — counting Bloom filter with 3 FNV hash functions supports add/remove
 - [x] Add result caching in `search_pipeline` with TTL-based invalidation on index updates
-- [ ] Optimize `visual::index::VisualIndex` with VP-tree or ball-tree for sub-linear similarity search
+- [x] Optimize `visual::index::VisualIndex` with VP-tree or ball-tree for sub-linear similarity search — VisualIndex now routes through FloatVpTree for N >= 8
 - [ ] Add batch indexing in `SearchEngine::index_document` for bulk import throughput
 
 ## Testing

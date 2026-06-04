@@ -198,6 +198,12 @@ impl WatermarkAnalyzer {
         }
     }
 
+    /// Return the sample rate this analyser was configured with.
+    #[must_use]
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
     /// Analyse `watermarked` without access to the original signal (blind).
     #[must_use]
     pub fn analyze_blind(&self, watermarked: &[f32]) -> AnalysisReport {
@@ -220,11 +226,7 @@ impl WatermarkAnalyzer {
 
     /// Analyse `watermarked` with access to the `original` signal.
     #[must_use]
-    pub fn analyze_with_reference(
-        &self,
-        original: &[f32],
-        watermarked: &[f32],
-    ) -> AnalysisReport {
+    pub fn analyze_with_reference(&self, original: &[f32], watermarked: &[f32]) -> AnalysisReport {
         let quality_metrics = calculate_metrics(original, watermarked);
         let strength_estimate = StrengthEstimate::compute(original, watermarked);
         let degradation_level = DegradationLevel::from_snr(quality_metrics.snr_db as f64);
@@ -273,11 +275,7 @@ impl WatermarkAnalyzer {
     }
 
     /// Detect watermark presence by looking for non-natural energy patterns.
-    fn detect_watermark_presence(
-        &self,
-        band_energies: &[f64],
-        samples: &[f32],
-    ) -> (bool, f64) {
+    fn detect_watermark_presence(&self, band_energies: &[f64], samples: &[f32]) -> (bool, f64) {
         // Heuristic 1: abnormal energy variance across bands.
         let variance = compute_variance(band_energies);
         let mean = band_energies.iter().sum::<f64>() / band_energies.len() as f64;
@@ -400,12 +398,8 @@ impl WatermarkAnalyzer {
         // A simple check: if any 512-sample block has unusually high energy
         // at specific frequency bins commonly used for sync, flag it.
         let check_len = 512.min(samples.len());
-        let rms: f32 = (samples[..check_len]
-            .iter()
-            .map(|&s| s * s)
-            .sum::<f32>()
-            / check_len as f32)
-            .sqrt();
+        let rms: f32 =
+            (samples[..check_len].iter().map(|&s| s * s).sum::<f32>() / check_len as f32).sqrt();
         // Presence of non-silence is a weak indicator.
         rms > 1e-8
     }
@@ -463,11 +457,7 @@ fn compute_variance(values: &[f64]) -> f64 {
         return 0.0;
     }
     let mean = values.iter().sum::<f64>() / values.len() as f64;
-    values
-        .iter()
-        .map(|&v| (v - mean) * (v - mean))
-        .sum::<f64>()
-        / values.len() as f64
+    values.iter().map(|&v| (v - mean) * (v - mean)).sum::<f64>() / values.len() as f64
 }
 
 // ---------------------------------------------------------------------------
@@ -486,8 +476,14 @@ mod tests {
 
     #[test]
     fn test_degradation_level_from_snr() {
-        assert_eq!(DegradationLevel::from_snr(55.0), DegradationLevel::Transparent);
-        assert_eq!(DegradationLevel::from_snr(45.0), DegradationLevel::Excellent);
+        assert_eq!(
+            DegradationLevel::from_snr(55.0),
+            DegradationLevel::Transparent
+        );
+        assert_eq!(
+            DegradationLevel::from_snr(45.0),
+            DegradationLevel::Excellent
+        );
         assert_eq!(DegradationLevel::from_snr(35.0), DegradationLevel::Good);
         assert_eq!(DegradationLevel::from_snr(25.0), DegradationLevel::Fair);
         assert_eq!(DegradationLevel::from_snr(10.0), DegradationLevel::Poor);
@@ -548,8 +544,14 @@ mod tests {
         let original = sine_signal(4096, 0.5);
         let watermarked: Vec<f32> = original.iter().map(|&s| s + 0.001).collect();
         let report = analyzer.analyze_with_reference(&original, &watermarked);
-        let snr = report.quality_metrics.expect("quality metrics should be present").snr_db;
-        assert!(snr > 30.0, "SNR should be > 30 dB for small watermark, got {snr}");
+        let snr = report
+            .quality_metrics
+            .expect("quality metrics should be present")
+            .snr_db;
+        assert!(
+            snr > 30.0,
+            "SNR should be > 30 dB for small watermark, got {snr}"
+        );
     }
 
     #[test]

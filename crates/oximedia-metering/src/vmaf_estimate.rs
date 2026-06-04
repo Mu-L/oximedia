@@ -410,7 +410,10 @@ mod tests {
             .map(|i| (i % 256) as f32 / 255.0)
             .collect();
         let vif = compute_vif(&pixels, &pixels, w, h, 0);
-        assert!(vif >= 0.9, "Identical frames VIF should be ≥ 0.9, got {vif}");
+        assert!(
+            vif >= 0.9,
+            "Identical frames VIF should be ≥ 0.9, got {vif}"
+        );
     }
 
     #[test]
@@ -426,7 +429,10 @@ mod tests {
         let ref_f: Vec<f32> = (0..(w * h) as usize)
             .map(|i| (i % 256) as f32 / 255.0)
             .collect();
-        let cmp_f: Vec<f32> = ref_f.iter().map(|&v| (v * 0.5 + 0.25).clamp(0.0, 1.0)).collect();
+        let cmp_f: Vec<f32> = ref_f
+            .iter()
+            .map(|&v| (v * 0.5 + 0.25).clamp(0.0, 1.0))
+            .collect();
         let vif_identical = compute_vif(&ref_f, &ref_f, w, h, 0);
         let vif_degraded = compute_vif(&ref_f, &cmp_f, w, h, 0);
         assert!(
@@ -443,7 +449,10 @@ mod tests {
         let h = 32u32;
         let pixels = gradient_u8(w, h);
         let score = estimate_vmaf(&pixels, &pixels, w, h);
-        assert!(score > 80.0, "Identical frames VMAF should be > 80, got {score}");
+        assert!(
+            score > 80.0,
+            "Identical frames VMAF should be > 80, got {score}"
+        );
     }
 
     #[test]
@@ -456,10 +465,7 @@ mod tests {
         let w = 32u32;
         let h = 32u32;
         let ref_pixels = gradient_u8(w, h);
-        let cmp_pixels: Vec<u8> = ref_pixels
-            .iter()
-            .map(|&v| v.saturating_add(30))
-            .collect();
+        let cmp_pixels: Vec<u8> = ref_pixels.iter().map(|&v| v.saturating_add(30)).collect();
         let score = estimate_vmaf(&ref_pixels, &cmp_pixels, w, h);
         assert!(
             score >= 0.0 && score <= 100.0,

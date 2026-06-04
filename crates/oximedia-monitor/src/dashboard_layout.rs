@@ -139,16 +139,10 @@ impl DashboardPanel {
             ));
         }
         if self.width_units == 0 {
-            errors.push(format!(
-                "Panel '{}': width_units must be >= 1",
-                self.title
-            ));
+            errors.push(format!("Panel '{}': width_units must be >= 1", self.title));
         }
         if self.height_units == 0 {
-            errors.push(format!(
-                "Panel '{}': height_units must be >= 1",
-                self.title
-            ));
+            errors.push(format!("Panel '{}': height_units must be >= 1", self.title));
         }
 
         errors
@@ -192,7 +186,10 @@ impl DashboardRow {
     /// Validate all panels in this row.
     #[must_use]
     pub fn validate(&self) -> Vec<String> {
-        self.panels.iter().flat_map(DashboardPanel::validate).collect()
+        self.panels
+            .iter()
+            .flat_map(DashboardPanel::validate)
+            .collect()
     }
 }
 
@@ -440,13 +437,8 @@ impl TemplateLibrary {
             .with_size(8, 6),
         );
         row1.push(
-            DashboardPanel::new(
-                "vmaf",
-                "VMAF",
-                PanelType::Gauge,
-                "encoding_quality_vmaf",
-            )
-            .with_size(8, 6),
+            DashboardPanel::new("vmaf", "VMAF", PanelType::Gauge, "encoding_quality_vmaf")
+                .with_size(8, 6),
         );
         layout.push_row(row1);
 
@@ -475,13 +467,8 @@ impl TemplateLibrary {
         // Row 3 — Notes
         let mut row3 = DashboardRow::new("Notes");
         row3.push(
-            DashboardPanel::new(
-                "pipeline_notes",
-                "Pipeline Notes",
-                PanelType::Text,
-                "",
-            )
-            .with_size(24, 4),
+            DashboardPanel::new("pipeline_notes", "Pipeline Notes", PanelType::Text, "")
+                .with_size(24, 4),
         );
         layout.push_row(row3);
 
@@ -675,7 +662,12 @@ mod tests {
     fn test_validate_empty_name_error() {
         let mut layout = DashboardLayout::new("", "no name");
         let mut row = DashboardRow::new("Row");
-        row.push(DashboardPanel::new("p1", "Panel", PanelType::Gauge, "some_metric"));
+        row.push(DashboardPanel::new(
+            "p1",
+            "Panel",
+            PanelType::Gauge,
+            "some_metric",
+        ));
         layout.push_row(row);
         let errors = layout.validate();
         assert!(
@@ -717,8 +709,18 @@ mod tests {
     fn test_validate_duplicate_panel_ids() {
         let mut layout = DashboardLayout::new("dash", "desc");
         let mut row = DashboardRow::new("Row 1");
-        row.push(DashboardPanel::new("p1", "Panel A", PanelType::Gauge, "metric_a"));
-        row.push(DashboardPanel::new("p1", "Panel B", PanelType::Gauge, "metric_b"));
+        row.push(DashboardPanel::new(
+            "p1",
+            "Panel A",
+            PanelType::Gauge,
+            "metric_a",
+        ));
+        row.push(DashboardPanel::new(
+            "p1",
+            "Panel B",
+            PanelType::Gauge,
+            "metric_b",
+        ));
         layout.push_row(row);
         let errors = layout.validate();
         assert!(

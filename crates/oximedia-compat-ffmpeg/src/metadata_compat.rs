@@ -407,6 +407,61 @@ pub fn extract_metadata_from_args(args: &[String]) -> Vec<(MetadataScope, String
     result
 }
 
+/// Translate a raw FFmpeg argument slice that may contain `-metadata key=value` pairs
+/// into a flat list of `(key, value)` tuples.
+///
+/// This function scans the argument slice for `-metadata` flags and extracts
+/// the following `KEY=VALUE` argument. Keys are normalised through
+/// [`normalise_key_owned`].  All other arguments (codec flags, paths, etc.) are
+/// ignored.
+///
+/// Only the well-known tag keys are explicitly normalised; arbitrary user-defined
+/// keys are returned in lowercase as-is.
+///
+/// Supported keys: `title`, `artist`, `album`, `year`, `comment`, `genre`,
+/// `copyright`, `encoder`, `language`, `tracknumber`, `description`, `synopsis`.
+///
+/// # Example
+///
+/// ```rust
+/// use oximedia_compat_ffmpeg::metadata_compat::translate_metadata_args;
+///
+/// let args = &["-i", "in.mp4",
+///              "-metadata", "title=Foo",
+///              "-metadata", "artist=Bar",
+///              "-metadata", "album=Baz",
+///              "out.mp4"];
+/// let pairs = translate_metadata_args(args);
+/// assert_eq!(pairs.len(), 3);
+/// assert!(pairs.iter().any(|(k, v)| k == "title" && v == "Foo"));
+/// assert!(pairs.iter().any(|(k, v)| k == "artist" && v == "Bar"));
+/// assert!(pairs.iter().any(|(k, v)| k == "album" && v == "Baz"));
+/// ```
+pub fn translate_metadata_args(args: &[&str]) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    let mut iter = args.iter().copied().peekable();
+
+    while let Some(arg) = iter.next() {
+        if arg == "-metadata" {
+            if let Some(val) = iter.next() {
+                if let Ok((k, v)) = parse_metadata_arg(val) {
+                    result.push((k, v));
+                }
+            }
+        } else if let Some(suffix) = arg.strip_prefix("-metadata:") {
+            // Scoped metadata (e.g. -metadata:s:v:0) — still extract the value.
+            let _ = suffix; // scope info discarded in simple translate
+            if let Some(val) = iter.next() {
+                if let Ok((k, v)) = parse_metadata_arg(val) {
+                    result.push((k, v));
+                }
+            }
+        }
+    }
+
+    result
+}
+
 /// Build a [`MetadataMap`] from a raw `HashMap<String, String>` that came from
 /// an `FfmpegArgs` output specification's `.metadata` field.
 ///
@@ -713,5 +768,94 @@ mod tests {
         let map = MetadataMap::from_args(&args, MetadataScope::Global).expect("should succeed");
         let inner = map.into_inner();
         assert_eq!(inner.get("title").map(|s| s.as_str()), Some("T"));
+    }
+
+    // ── translate_metadata_args ──────────────────────────────────────────────
+
+    #[test]
+    fn test_translate_metadata_args_three_keys() {
+        let args = &[
+            "-i",
+            "in.mp4",
+            "-metadata",
+            "title=Foo",
+            "-metadata",
+            "artist=Bar",
+            "-metadata",
+            "album=Baz",
+            "out.mp4",
+        ];
+        let pairs = translate_metadata_args(args);
+        assert_eq!(pairs.len(), 3);
+        assert!(pairs.iter().any(|(k, v)| k == "title" && v == "Foo"));
+        assert!(pairs.iter().any(|(k, v)| k == "artist" && v == "Bar"));
+        assert!(pairs.iter().any(|(k, v)| k == "album" && v == "Baz"));
+    }
+
+    #[test]
+    fn test_translate_metadata_args_normalises_keys() {
+        // "date" should normalise to "year", "author" to "artist"
+        let args = &["-metadata", "date=2026", "-metadata", "author=Someone"];
+        let pairs = translate_metadata_args(args);
+        assert_eq!(pairs.len(), 2);
+        assert!(pairs.iter().any(|(k, _)| k == "year"), "date→year");
+        assert!(pairs.iter().any(|(k, _)| k == "artist"), "author→artist");
+    }
+
+    #[test]
+    fn test_translate_metadata_args_ignores_non_metadata_args() {
+        let args = &["-i", "in.mp4", "-c:v", "libvpx-vp9", "out.webm"];
+        let pairs = translate_metadata_args(args);
+        assert!(pairs.is_empty(), "no metadata flags → empty vec");
+    }
+
+    #[test]
+    fn test_translate_metadata_args_copyright_and_encoder() {
+        let args = &[
+            "-metadata",
+            "copyright=COOLJAPAN OU",
+            "-metadata",
+            "encoder=OxiMedia 0.1.8",
+        ];
+        let pairs = translate_metadata_args(args);
+        assert_eq!(pairs.len(), 2);
+        assert!(pairs
+            .iter()
+            .any(|(k, v)| k == "copyright" && v == "COOLJAPAN OU"));
+        assert!(pairs
+            .iter()
+            .any(|(k, v)| k == "encoder" && v == "OxiMedia 0.1.8"));
+    }
+
+    #[test]
+    fn test_translate_metadata_args_genre_and_year() {
+        let args = &["-metadata", "genre=Documentary", "-metadata", "year=2026"];
+        let pairs = translate_metadata_args(args);
+        assert!(pairs
+            .iter()
+            .any(|(k, v)| k == "genre" && v == "Documentary"));
+        assert!(pairs.iter().any(|(k, v)| k == "year" && v == "2026"));
+    }
+
+    #[test]
+    fn test_translate_metadata_args_scoped_metadata_included() {
+        // -metadata:s:a:0 is scoped but still extracted
+        let args = &[
+            "-metadata:s:a:0",
+            "language=eng",
+            "-metadata",
+            "title=Movie",
+        ];
+        let pairs = translate_metadata_args(args);
+        assert_eq!(pairs.len(), 2);
+        assert!(pairs.iter().any(|(k, v)| k == "language" && v == "eng"));
+        assert!(pairs.iter().any(|(k, v)| k == "title" && v == "Movie"));
+    }
+
+    #[test]
+    fn test_translate_metadata_args_empty_input() {
+        let args: &[&str] = &[];
+        let pairs = translate_metadata_args(args);
+        assert!(pairs.is_empty());
     }
 }

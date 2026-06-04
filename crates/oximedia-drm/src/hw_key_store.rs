@@ -29,21 +29,69 @@ use std::collections::HashMap;
 // ---------------------------------------------------------------------------
 
 /// The type of hardware security backend.
+///
+/// Hardware variants ([`Tpm2`](HwBackend::Tpm2),
+/// [`SecureEnclave`](HwBackend::SecureEnclave)) are reserved for builds that
+/// link against a real platform TSS 2.0 stack or Apple Security framework.
+/// Until those `cfg`-gated integrations land, software emulators of the same
+/// authorization model report [`SoftwareTpm`](HwBackend::SoftwareTpm) /
+/// [`SoftwareSecureEnclave`](HwBackend::SoftwareSecureEnclave) so that callers
+/// can reliably distinguish a real hardware root of trust from an in-process
+/// emulation. This is the security-correct behaviour: the [`is_hardware`]
+/// predicate stays `true` only for the genuine hardware variants.
+///
+/// [`is_hardware`]: HwBackend::is_hardware
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HwBackend {
     /// TPM 2.0 (Trusted Platform Module) – hardware-backed, PC/server.
+    ///
+    /// Reserved for a future `cfg(feature = "hw-tpm", target_os = "linux")`
+    /// integration that talks to `tss-esapi`/`/dev/tpmrm0`.
     Tpm2,
     /// Apple Secure Enclave – hardware-backed, Apple Silicon / T2.
+    ///
+    /// Reserved for a future `cfg(target_os = "macos")` integration that
+    /// calls into CryptoKit / Security.framework.
     SecureEnclave,
-    /// Software-only fallback (AES-GCM wrapped with a master key).
+    /// Software-emulated TPM 2.0 state machine
+    /// (see [`sw_tpm`](crate::sw_tpm)).
+    ///
+    /// Implements PCR banks, HMAC-protected sealed objects, and policy
+    /// authorization sessions entirely in Pure Rust. Reported by
+    /// [`TpmKeyStore`] when no real hardware TPM is linked in.
+    SoftwareTpm,
+    /// Software-emulated Apple Secure Enclave
+    /// (see [`sw_secure_enclave`](crate::sw_secure_enclave)).
+    ///
+    /// Enforces the Secure Enclave non-exportability boundary in software.
+    /// Reported by [`SecureEnclaveKeyStore`] when no real Secure Enclave is
+    /// linked in.
+    SoftwareSecureEnclave,
+    /// Software-only fallback (XOR keystream wrapped with a master key).
     Software,
 }
 
 impl HwBackend {
-    /// Returns `true` if the backend is hardware-accelerated.
+    /// Returns `true` if the backend is backed by genuine secure hardware.
+    ///
+    /// Software-emulated backends ([`SoftwareTpm`](HwBackend::SoftwareTpm),
+    /// [`SoftwareSecureEnclave`](HwBackend::SoftwareSecureEnclave),
+    /// [`Software`](HwBackend::Software)) all return `false` — they model
+    /// the protocol surface of a hardware root of trust without providing
+    /// its security guarantees.
     #[must_use]
     pub fn is_hardware(&self) -> bool {
         matches!(self, HwBackend::Tpm2 | HwBackend::SecureEnclave)
+    }
+
+    /// Returns `true` if the backend emulates a hardware root of trust in
+    /// software (TPM 2.0 emulator, Secure Enclave emulator).
+    #[must_use]
+    pub fn is_software_emulated(&self) -> bool {
+        matches!(
+            self,
+            HwBackend::SoftwareTpm | HwBackend::SoftwareSecureEnclave
+        )
     }
 }
 
@@ -52,6 +100,8 @@ impl std::fmt::Display for HwBackend {
         match self {
             Self::Tpm2 => write!(f, "TPM 2.0"),
             Self::SecureEnclave => write!(f, "Secure Enclave"),
+            Self::SoftwareTpm => write!(f, "Software TPM 2.0"),
+            Self::SoftwareSecureEnclave => write!(f, "Software Secure Enclave"),
             Self::Software => write!(f, "Software"),
         }
     }
@@ -240,7 +290,11 @@ fn software_unwrap(master: &[u8; 32], wrapped_with_nonce: &[u8]) -> Result<Vec<u
 }
 
 /// Minimal SHA-256 (same pure-Rust implementation as in key_rotation.rs).
-fn sha256_mini(msg: &[u8]) -> [u8; 32] {
+///
+/// Exposed to sibling modules (`sw_tpm`, `sw_secure_enclave`) so that the
+/// emulators can reuse the existing in-crate primitive without pulling in
+/// another SHA-256 implementation.
+pub(crate) fn sha256_mini(msg: &[u8]) -> [u8; 32] {
     #[allow(clippy::unreadable_literal)]
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
@@ -474,48 +528,100 @@ impl HwKeyStore for SoftwareKeyStore {
 }
 
 // ---------------------------------------------------------------------------
-// TPM 2.0 stub
+// TPM 2.0 software-emulated backend
 // ---------------------------------------------------------------------------
 
-/// Stub implementation representing a TPM 2.0 hardware backend.
+/// Software-emulated TPM 2.0 backend.
 ///
-/// In production this would call into the TSS 2.0 library (e.g. `tss-esapi`).
-/// Here it delegates to the software store while reporting `HwBackend::Tpm2`.
+/// Wraps a [`SwTpm`](crate::sw_tpm::SwTpm) state machine that models the
+/// TPM 2.0 authorization surface: object handles, an HMAC-SHA-256 protected
+/// sealed-object store, a 24-slot SHA-256 PCR bank, and PolicyPCR /
+/// PolicyAuthValue authorization sessions. The result is reported as
+/// [`HwBackend::SoftwareTpm`] — **not** [`HwBackend::Tpm2`] — because no
+/// hardware root of trust is actually contacted. A future
+/// `cfg(feature = "hw-tpm", target_os = "linux")` implementation may replace
+/// this delegate with calls into `tss-esapi`/`/dev/tpmrm0`, at which point
+/// the backend identifier may transition to [`HwBackend::Tpm2`].
 pub struct TpmKeyStore {
-    inner: SoftwareKeyStore,
+    inner: crate::sw_tpm::SwTpm,
 }
 
 impl TpmKeyStore {
-    /// Create a new (simulated) TPM key store.
+    /// Create a new (software-emulated) TPM key store.
+    ///
+    /// The `master_key` seeds the SP 800-108 HMAC integrity layer that
+    /// protects every sealed object. In a real hardware TPM the analogous
+    /// secret is the storage hierarchy seed and never leaves the device.
     pub fn new(master_key: [u8; 32]) -> Self {
         Self {
-            inner: SoftwareKeyStore::new(master_key),
+            inner: crate::sw_tpm::SwTpm::new(master_key),
         }
+    }
+
+    /// Extend PCR `index` with `data` (PCR_Extend: `PCR ← SHA256(PCR ‖ data)`).
+    ///
+    /// Returns the new PCR value. Subsequent
+    /// [`unseal_with_policy`](TpmKeyStore::unseal_with_policy) calls that
+    /// reference this PCR will only succeed when the PCR bank matches the
+    /// digest captured at policy creation.
+    pub fn pcr_extend(&mut self, index: usize, data: &[u8]) -> Result<[u8; 32]> {
+        self.inner.pcr_extend(index, data)
+    }
+
+    /// Read the current value of PCR `index`.
+    pub fn pcr_read(&self, index: usize) -> Result<[u8; 32]> {
+        self.inner.pcr_read(index)
+    }
+
+    /// Import a key sealed against the current values of `pcr_selection`.
+    ///
+    /// The returned slot can only be unsealed via
+    /// [`unseal_with_policy`](TpmKeyStore::unseal_with_policy) when those
+    /// PCRs still contain the values captured here.
+    pub fn import_sealed_pcr(
+        &mut self,
+        label: &str,
+        key_bytes: &[u8],
+        pcr_selection: &[usize],
+    ) -> Result<KeySlot> {
+        self.inner
+            .import_sealed_pcr(label, key_bytes, pcr_selection)
+    }
+
+    /// Unseal a slot whose policy requires the current PCR bank to match the
+    /// policy digest captured at import time.
+    pub fn unseal_with_policy(&self, slot: &KeySlot) -> Result<Vec<u8>> {
+        self.inner.unseal_with_policy(slot)
     }
 }
 
 impl HwKeyStore for TpmKeyStore {
     fn backend(&self) -> HwBackend {
-        HwBackend::Tpm2
+        // Reports SoftwareTpm — never Tpm2 — until a real hardware backend
+        // is linked in. See the type-level documentation on this struct.
+        HwBackend::SoftwareTpm
     }
 
     fn import_key(&mut self, label: &str, key_bytes: &[u8], exportable: bool) -> Result<KeySlot> {
-        // In production: TPM2_Create() → hierarchy = STORAGE_PRIMARY
+        // Maps to TPM2_Create + TPM2_Load in the software emulator: the
+        // primary key is the SwTpm master key, and the resulting handle is
+        // returned as a transient object.
         self.inner.import_key(label, key_bytes, exportable)
     }
 
     fn export_wrapped(&self, slot: &KeySlot) -> Result<Vec<u8>> {
-        // In production: TPM2_ContextSave()
+        // Maps to TPM2_ContextSave: the returned bytes are the HMAC-wrapped
+        // sealed-object blob and are safe to persist to disk.
         self.inner.export_wrapped(slot)
     }
 
     fn unseal(&self, slot: &KeySlot) -> Result<Vec<u8>> {
-        // In production: TPM2_Unseal() inside PCR-gated policy session
+        // Maps to TPM2_Unseal under an HMAC session (no policy).
         self.inner.unseal(slot)
     }
 
     fn delete_key(&mut self, slot: &KeySlot) -> Result<()> {
-        // In production: TPM2_FlushContext()
+        // Maps to TPM2_FlushContext.
         self.inner.delete_key(slot)
     }
 
@@ -529,50 +635,61 @@ impl HwKeyStore for TpmKeyStore {
 }
 
 // ---------------------------------------------------------------------------
-// Secure Enclave stub
+// Apple Secure Enclave software-emulated backend
 // ---------------------------------------------------------------------------
 
-/// Stub implementation representing an Apple Secure Enclave backend.
+/// Software-emulated Apple Secure Enclave backend.
 ///
-/// In production this would call into CryptoKit / Security.framework on Apple
-/// platforms. Here it delegates to the software store while reporting
-/// `HwBackend::SecureEnclave`.
+/// Wraps a [`SwSecureEnclave`](crate::sw_secure_enclave::SwSecureEnclave)
+/// state machine that models the Secure Enclave's strongest behavioural
+/// invariant: keys are **non-exportable**. The result is reported as
+/// [`HwBackend::SoftwareSecureEnclave`] — **not** [`HwBackend::SecureEnclave`]
+/// — because no T2/Apple Silicon coprocessor is actually contacted. A future
+/// `cfg(target_os = "macos")` implementation may replace this delegate with
+/// calls into CryptoKit / Security.framework, at which point the backend
+/// identifier may transition to [`HwBackend::SecureEnclave`].
 pub struct SecureEnclaveKeyStore {
-    inner: SoftwareKeyStore,
+    inner: crate::sw_secure_enclave::SwSecureEnclave,
 }
 
 impl SecureEnclaveKeyStore {
-    /// Create a new (simulated) Secure Enclave key store.
+    /// Create a new (software-emulated) Secure Enclave key store.
     pub fn new(master_key: [u8; 32]) -> Self {
         Self {
-            inner: SoftwareKeyStore::new(master_key),
+            inner: crate::sw_secure_enclave::SwSecureEnclave::new(master_key),
         }
     }
 }
 
 impl HwKeyStore for SecureEnclaveKeyStore {
     fn backend(&self) -> HwBackend {
-        HwBackend::SecureEnclave
+        // Reports SoftwareSecureEnclave — never SecureEnclave — until a real
+        // Apple Security framework integration ships.
+        HwBackend::SoftwareSecureEnclave
     }
 
     fn import_key(&mut self, label: &str, key_bytes: &[u8], exportable: bool) -> Result<KeySlot> {
-        // In production: SecKeyCreateRandomKey() + kSecAttrTokenIDSecureEnclave
+        // Maps to SecKeyCreateRandomKey + kSecAttrTokenIDSecureEnclave.
+        // The `exportable` flag is rejected: Secure Enclave keys are
+        // non-exportable by hardware mandate. We mirror that boundary in
+        // software so callers cannot accidentally rely on exportability.
         self.inner.import_key(label, key_bytes, exportable)
     }
 
     fn export_wrapped(&self, slot: &KeySlot) -> Result<Vec<u8>> {
-        // In production: SecItemCopyMatching() – Secure Enclave keys are
-        // non-exportable by hardware mandate; this would return an error.
+        // Real Secure Enclave: SecItemCopyMatching can never return raw key
+        // material — the hardware rejects export requests. We replicate that
+        // exact failure mode so tests catch any callers depending on a leak.
         self.inner.export_wrapped(slot)
     }
 
     fn unseal(&self, slot: &KeySlot) -> Result<Vec<u8>> {
-        // In production: SecKeyCreateDecryptedData() – inside Secure Enclave context
+        // Maps to SecKeyCreateDecryptedData inside a Secure Enclave context.
         self.inner.unseal(slot)
     }
 
     fn delete_key(&mut self, slot: &KeySlot) -> Result<()> {
-        // In production: SecItemDelete()
+        // Maps to SecItemDelete.
         self.inner.delete_key(slot)
     }
 
@@ -589,29 +706,40 @@ impl HwKeyStore for SecureEnclaveKeyStore {
 // Factory
 // ---------------------------------------------------------------------------
 
-/// Detect and instantiate the best available hardware key store for the
-/// current platform.
+/// Detect and instantiate the best available key store for the current
+/// platform.
 ///
-/// Returns the backend type and a boxed `HwKeyStore` implementation. The
-/// master key is used only for the `Software` backend; for TPM/Secure Enclave
-/// it would typically be derived from hardware-bound secrets.
+/// Until a real `cfg(feature = "hw-tpm", target_os = "linux")` or
+/// `cfg(target_os = "macos")` integration ships, this function returns the
+/// matching **software emulator** (reported as [`HwBackend::SoftwareTpm`] or
+/// [`HwBackend::SoftwareSecureEnclave`]) rather than pretending to have
+/// reached genuine hardware. Callers that require a hardware root of trust
+/// should additionally check [`HwBackend::is_hardware`] on the returned
+/// backend.
+///
+/// The `master_key` seeds the emulator's HMAC integrity layer. A real
+/// hardware backend would derive its protection secrets internally and would
+/// ignore this argument.
 pub fn detect_hw_backend(master_key: [u8; 32]) -> (HwBackend, Box<dyn HwKeyStore>) {
-    // Platform detection heuristic (compile-time + runtime).
+    // Platform-driven choice of emulator. We deliberately do NOT probe for a
+    // real device here — the emulator is the safe default until a
+    // hardware-gated backend is wired in. Hardware probing belongs in a
+    // future `cfg(feature = "hw-tpm", ...)` branch that replaces these
+    // emulator constructors with real TSS-Esapi / Security.framework calls.
     #[cfg(target_os = "macos")]
     {
-        // On macOS we report Secure Enclave availability.
-        // In production: check for T2/Apple Silicon via IOKit.
         (
-            HwBackend::SecureEnclave,
+            HwBackend::SoftwareSecureEnclave,
             Box::new(SecureEnclaveKeyStore::new(master_key)),
         )
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        // On other platforms assume TPM 2.0 may be present.
-        // In production: query tpm2-tools or check /dev/tpm0.
-        (HwBackend::Tpm2, Box::new(TpmKeyStore::new(master_key)))
+        (
+            HwBackend::SoftwareTpm,
+            Box::new(TpmKeyStore::new(master_key)),
+        )
     }
 }
 
@@ -782,22 +910,62 @@ mod tests {
     #[test]
     fn test_tpm_backend_type() {
         let store = TpmKeyStore::new(MASTER);
-        assert_eq!(store.backend(), HwBackend::Tpm2);
-        assert!(store.backend().is_hardware());
+        // The emulated TPM must NOT claim to be a real TPM 2.0 device.
+        // It reports SoftwareTpm so callers that gate on hardware presence
+        // can refuse to use it for high-assurance flows.
+        assert_eq!(store.backend(), HwBackend::SoftwareTpm);
+        assert!(!store.backend().is_hardware());
+        assert!(store.backend().is_software_emulated());
     }
 
     #[test]
     fn test_secure_enclave_backend_type() {
         let store = SecureEnclaveKeyStore::new(MASTER);
-        assert_eq!(store.backend(), HwBackend::SecureEnclave);
-        assert!(store.backend().is_hardware());
+        // Likewise: the emulated Secure Enclave reports SoftwareSecureEnclave,
+        // never SecureEnclave, until a real Apple integration ships.
+        assert_eq!(store.backend(), HwBackend::SoftwareSecureEnclave);
+        assert!(!store.backend().is_hardware());
+        assert!(store.backend().is_software_emulated());
     }
 
     #[test]
     fn test_hw_backend_display() {
         assert_eq!(HwBackend::Tpm2.to_string(), "TPM 2.0");
         assert_eq!(HwBackend::SecureEnclave.to_string(), "Secure Enclave");
+        assert_eq!(HwBackend::SoftwareTpm.to_string(), "Software TPM 2.0");
+        assert_eq!(
+            HwBackend::SoftwareSecureEnclave.to_string(),
+            "Software Secure Enclave"
+        );
         assert_eq!(HwBackend::Software.to_string(), "Software");
+    }
+
+    #[test]
+    fn test_hw_backend_is_software_emulated_partition() {
+        // Disjoint partition: every variant is in exactly one of
+        // {hardware, software-emulated, software}.
+        let all = [
+            HwBackend::Tpm2,
+            HwBackend::SecureEnclave,
+            HwBackend::SoftwareTpm,
+            HwBackend::SoftwareSecureEnclave,
+            HwBackend::Software,
+        ];
+        for backend in &all {
+            let hw = backend.is_hardware();
+            let sw_em = backend.is_software_emulated();
+            // hardware and software-emulated must never overlap
+            assert!(!(hw && sw_em), "backend {backend:?} overlapping classes");
+        }
+        // Hardware-only set
+        assert!(HwBackend::Tpm2.is_hardware());
+        assert!(HwBackend::SecureEnclave.is_hardware());
+        // Software-emulated-only set
+        assert!(HwBackend::SoftwareTpm.is_software_emulated());
+        assert!(HwBackend::SoftwareSecureEnclave.is_software_emulated());
+        // Plain software fallback is neither
+        assert!(!HwBackend::Software.is_hardware());
+        assert!(!HwBackend::Software.is_software_emulated());
     }
 
     #[test]
@@ -819,10 +987,20 @@ mod tests {
     #[test]
     fn test_detect_hw_backend_returns_valid_store() {
         let (backend, mut store) = detect_hw_backend(MASTER);
-        assert!(backend.is_hardware() || backend == HwBackend::Software);
+        // Until a real hardware integration ships, detection MUST report a
+        // software-emulated backend (or the plain software fallback). It
+        // must never lie about reaching genuine hardware.
+        assert!(
+            backend.is_software_emulated() || backend == HwBackend::Software,
+            "detect_hw_backend returned {backend:?} without real hardware integration"
+        );
+        assert!(!backend.is_hardware());
 
+        // Secure Enclave emulator imports are forced non-exportable; use a
+        // non-exportable import here so the round-trip succeeds on both
+        // platforms.
         let slot = store
-            .import_key("detect-test", &[0xAB; 16], true)
+            .import_key("detect-test", &[0xAB; 16], false)
             .expect("import should succeed");
         let unsealed = store.unseal(&slot).expect("unseal should succeed");
         assert_eq!(unsealed, vec![0xAB; 16]);
@@ -843,10 +1021,62 @@ mod tests {
     fn test_secure_enclave_store_import_and_unseal() {
         let mut store = SecureEnclaveKeyStore::new(MASTER);
         let key = vec![0xCA_u8; 32];
+        // Secure Enclave keys are non-exportable by hardware mandate; the
+        // emulator enforces the same boundary. Import as non-exportable.
         let slot = store
-            .import_key("se-key", &key, true)
+            .import_key("se-key", &key, false)
             .expect("import should succeed");
         let unsealed = store.unseal(&slot).expect("unseal should succeed");
         assert_eq!(unsealed, key);
+    }
+
+    #[test]
+    fn test_secure_enclave_store_rejects_exportable_import() {
+        // Mirrors kSecAttrTokenIDSecureEnclave: exportable=true must fail
+        // because Secure Enclave keys cannot ever leave the device.
+        let mut store = SecureEnclaveKeyStore::new(MASTER);
+        let result = store.import_key("leaky-key", &[0xCA_u8; 32], true);
+        assert!(
+            result.is_err(),
+            "Secure Enclave must reject exportable=true imports"
+        );
+    }
+
+    #[test]
+    fn test_secure_enclave_store_export_wrapped_is_blocked() {
+        // Even with exportable=false, the explicit export API must fail.
+        let mut store = SecureEnclaveKeyStore::new(MASTER);
+        let slot = store
+            .import_key("se-key", &[0xCA_u8; 32], false)
+            .expect("import should succeed");
+        let result = store.export_wrapped(&slot);
+        assert!(
+            result.is_err(),
+            "Secure Enclave export_wrapped must always fail"
+        );
+    }
+
+    #[test]
+    fn test_tpm_store_pcr_extend_and_policy_unseal_roundtrip() {
+        // Exercises the SwTpm policy path through the public HwKeyStore facade.
+        let mut store = TpmKeyStore::new(MASTER);
+        store.pcr_extend(0, b"boot").expect("pcr extend 0");
+        store.pcr_extend(7, b"firmware").expect("pcr extend 7");
+
+        let secret = vec![0x77_u8; 16];
+        let slot = store
+            .import_sealed_pcr("policy", &secret, &[0, 7])
+            .expect("import sealed pcr");
+        let recovered = store
+            .unseal_with_policy(&slot)
+            .expect("policy unseal should succeed when PCRs match");
+        assert_eq!(recovered, secret);
+
+        // Mutating the PCR must invalidate the policy.
+        store.pcr_extend(7, b"tampered").expect("pcr extend 7'");
+        assert!(
+            store.unseal_with_policy(&slot).is_err(),
+            "policy unseal must fail after PCR divergence"
+        );
     }
 }

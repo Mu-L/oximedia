@@ -5,8 +5,6 @@
 //! statistical analysis (mean, median, percentiles, linear regression) to predict
 //! future job costs with increasing accuracy over time.
 
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 
 use parking_lot::RwLock;
@@ -300,14 +298,18 @@ impl CostEstimator {
         }
     }
 
-    /// Predict using simple mean.
+    /// Predict using simple mean (duration via median for outlier robustness).
     #[allow(clippy::cast_precision_loss)]
     fn predict_mean(&self, records: &[JobRecord]) -> CostPrediction {
         let n = records.len() as f64;
-        let avg_duration = records.iter().map(|r| r.duration_secs).sum::<f64>() / n;
+        // Use median for duration to resist outliers; mean for CPU/memory.
+        let mut durations: Vec<f64> = records.iter().map(|r| r.duration_secs).collect();
+        let avg_duration = median(&mut durations);
         let avg_cpu = records.iter().map(|r| r.peak_cpu).sum::<f64>() / n;
-        let avg_mem = records.iter().map(|r| r.peak_memory_bytes).sum::<u64>() / records.len() as u64;
-        let avg_disk = records.iter().map(|r| r.peak_disk_bytes).sum::<u64>() / records.len() as u64;
+        let avg_mem =
+            records.iter().map(|r| r.peak_memory_bytes).sum::<u64>() / records.len() as u64;
+        let avg_disk =
+            records.iter().map(|r| r.peak_disk_bytes).sum::<u64>() / records.len() as u64;
 
         // Confidence based on sample count (caps at 0.7 for mean-only).
         let confidence = (records.len() as f64 / 20.0).min(0.7);
@@ -357,11 +359,7 @@ impl CostEstimator {
     /// Memory and CPU are predicted using the mean since they correlate less
     /// linearly with input size.
     #[allow(clippy::cast_precision_loss)]
-    fn predict_regression(
-        &self,
-        records: &[JobRecord],
-        input_size_bytes: u64,
-    ) -> CostPrediction {
+    fn predict_regression(&self, records: &[JobRecord], input_size_bytes: u64) -> CostPrediction {
         let n = records.len() as f64;
 
         // Linear regression: duration = slope * input_size + intercept
@@ -396,8 +394,10 @@ impl CostEstimator {
 
         // For CPU, memory, disk: use mean.
         let avg_cpu = records.iter().map(|r| r.peak_cpu).sum::<f64>() / n;
-        let avg_mem = records.iter().map(|r| r.peak_memory_bytes).sum::<u64>() / records.len() as u64;
-        let avg_disk = records.iter().map(|r| r.peak_disk_bytes).sum::<u64>() / records.len() as u64;
+        let avg_mem =
+            records.iter().map(|r| r.peak_memory_bytes).sum::<u64>() / records.len() as u64;
+        let avg_disk =
+            records.iter().map(|r| r.peak_disk_bytes).sum::<u64>() / records.len() as u64;
 
         // Compute R-squared for confidence.
         let ss_tot: f64 = records
@@ -669,7 +669,11 @@ mod tests {
     fn test_cost_estimator_ewma_with_moderate_samples() {
         let estimator = CostEstimator::new();
         for i in 0..5 {
-            estimator.record(sample_record("ewma_test", (i + 1) * 1000, (i + 1) as f64 * 10.0));
+            estimator.record(sample_record(
+                "ewma_test",
+                (i + 1) * 1000,
+                (i + 1) as f64 * 10.0,
+            ));
         }
         let pred = estimator
             .predict("ewma_test", 3000)
@@ -773,15 +777,16 @@ mod tests {
     #[test]
     fn test_prediction_method_display() {
         assert_eq!(PredictionMethod::Mean.to_string(), "mean");
-        assert_eq!(PredictionMethod::LinearRegression.to_string(), "linear_regression");
+        assert_eq!(
+            PredictionMethod::LinearRegression.to_string(),
+            "linear_regression"
+        );
         assert_eq!(PredictionMethod::Fallback.to_string(), "fallback");
     }
 
     #[test]
     fn test_job_record_builder() {
-        let r = sample_record("cat", 1000, 10.0)
-            .with_disk(5000)
-            .failed();
+        let r = sample_record("cat", 1000, 10.0).with_disk(5000).failed();
         assert_eq!(r.peak_disk_bytes, 5000);
         assert!(!r.succeeded);
     }

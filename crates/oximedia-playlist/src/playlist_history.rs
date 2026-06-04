@@ -97,7 +97,10 @@ impl PlaylistEdit {
                 new_duration_ms: *old_duration_ms,
             },
             // No clean inverse — return unchanged.
-            Self::SetCrossfade { item_id, duration_ms } => Self::SetCrossfade {
+            Self::SetCrossfade {
+                item_id,
+                duration_ms,
+            } => Self::SetCrossfade {
                 item_id: item_id.clone(),
                 duration_ms: *duration_ms,
             },
@@ -254,7 +257,10 @@ mod tests {
         assert!(hist.can_redo(), "redo should be available after undo");
         // A new push must clear the redo stack.
         hist.push(insert(1, "b"));
-        assert!(!hist.can_redo(), "redo stack should be cleared after new push");
+        assert!(
+            !hist.can_redo(),
+            "redo stack should be cleared after new push"
+        );
     }
 
     // T2: undo returns inverse edit

@@ -151,6 +151,9 @@ impl StructuringElement {
 ///
 /// Pixels outside the image boundary are treated as `u8::MAX` (neutral element
 /// for the min operation), so the erosion does not artificially darken borders.
+///
+/// **Dispatch**: flat rectangular and axis-aligned line SEs use the O(1)
+/// van Herk–Gil–Werman algorithm; all other shapes fall through to brute force.
 #[must_use]
 pub fn morphology_erode(
     pixels: &[u8],
@@ -158,6 +161,13 @@ pub fn morphology_erode(
     height: u32,
     se: &StructuringElement,
 ) -> Vec<u8> {
+    use crate::morphology_vhgw;
+    if se_is_flat_rect(se) {
+        return morphology_vhgw::erode_rect_vhgw(pixels, width, height, se.width, se.height);
+    }
+    if let Some((length, horizontal)) = se_is_axis_aligned_line(se) {
+        return morphology_vhgw::erode_line_vhgw(pixels, width, height, length, horizontal);
+    }
     morph_op(pixels, width, height, se, u8::MAX, u8::min)
 }
 
@@ -166,6 +176,9 @@ pub fn morphology_erode(
 ///
 /// Pixels outside the image boundary are treated as `u8::MIN` (neutral element
 /// for the max operation).
+///
+/// **Dispatch**: flat rectangular and axis-aligned line SEs use the O(1)
+/// van Herk–Gil–Werman algorithm; all other shapes fall through to brute force.
 #[must_use]
 pub fn morphology_dilate(
     pixels: &[u8],
@@ -173,7 +186,34 @@ pub fn morphology_dilate(
     height: u32,
     se: &StructuringElement,
 ) -> Vec<u8> {
+    use crate::morphology_vhgw;
+    if se_is_flat_rect(se) {
+        return morphology_vhgw::dilate_rect_vhgw(pixels, width, height, se.width, se.height);
+    }
+    if let Some((length, horizontal)) = se_is_axis_aligned_line(se) {
+        return morphology_vhgw::dilate_line_vhgw(pixels, width, height, length, horizontal);
+    }
     morph_op(pixels, width, height, se, u8::MIN, u8::max)
+}
+
+/// Returns `true` when `se` is a fully-active flat rectangle whose origin is
+/// at the centre (as produced by `StructuringElement::rectangle`).
+fn se_is_flat_rect(se: &StructuringElement) -> bool {
+    se.origin == (se.width / 2, se.height / 2) && se.data.iter().all(|&v| v)
+}
+
+/// Returns `Some((length, horizontal))` when `se` is an axis-aligned,
+/// fully-active, centred line SE, or `None` otherwise.
+fn se_is_axis_aligned_line(se: &StructuringElement) -> Option<(u32, bool)> {
+    // Horizontal line: height == 1, all active, centred
+    if se.height == 1 && se.origin == (se.width / 2, 0) && se.data.iter().all(|&v| v) {
+        return Some((se.width, true));
+    }
+    // Vertical line: width == 1, all active, centred
+    if se.width == 1 && se.origin == (0, se.height / 2) && se.data.iter().all(|&v| v) {
+        return Some((se.height, false));
+    }
+    None
 }
 
 /// Grayscale opening: erosion followed by dilation.  Removes small bright

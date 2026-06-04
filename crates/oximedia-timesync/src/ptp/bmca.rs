@@ -470,6 +470,87 @@ impl ReElectionEngine {
 }
 
 // ---------------------------------------------------------------------------
+// BmcaSelector — direct grandmaster election from identity records
+// ---------------------------------------------------------------------------
+
+/// A compact descriptor for a PTP clock candidate used in
+/// [`BmcaSelector::select_grandmaster`].
+///
+/// Fields follow the IEEE 1588-2019 dataset comparison order:
+/// `clockClass → clockAccuracy → offsetScaledLogVariance → priority1 → priority2 → identity`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PtpClockIdentity {
+    /// Clock class (lower is better, class 6 = locked to primary).
+    pub clock_class: u8,
+    /// Clock accuracy (lower is better).
+    pub clock_accuracy: u8,
+    /// Offset scaled log variance (lower is better).
+    pub offset_scaled_log_variance: u16,
+    /// Priority 1 (lower is better).
+    pub priority1: u8,
+    /// Priority 2 (lower is better).
+    pub priority2: u8,
+    /// 64-bit clock identity (EUI-64); lexicographically lower is preferred.
+    pub identity: ClockIdentity,
+}
+
+/// Stateless BMCA grandmaster selector.
+///
+/// Implements the IEEE 1588-2019 §9.3.4 dataset comparison algorithm over a
+/// slice of [`PtpClockIdentity`] candidates and returns the winner.
+pub struct BmcaSelector;
+
+impl BmcaSelector {
+    /// Selects the grandmaster from `candidates` using the IEEE 1588 BMCA
+    /// dataset comparison algorithm.
+    ///
+    /// Comparison order (lower value wins at each step):
+    /// 1. `priority1`
+    /// 2. `clock_class`
+    /// 3. `clock_accuracy`
+    /// 4. `offset_scaled_log_variance`
+    /// 5. `priority2`
+    /// 6. `identity` (lexicographic)
+    ///
+    /// Returns `None` when `candidates` is empty.
+    #[must_use]
+    pub fn select_grandmaster(candidates: &[PtpClockIdentity]) -> Option<PtpClockIdentity> {
+        candidates.iter().fold(None, |best, candidate| {
+            Some(match best {
+                None => candidate.clone(),
+                Some(ref current) => {
+                    let quality_a = ClockQuality {
+                        clock_class: candidate.clock_class,
+                        clock_accuracy: candidate.clock_accuracy,
+                        offset_scaled_log_variance: candidate.offset_scaled_log_variance,
+                    };
+                    let quality_b = ClockQuality {
+                        clock_class: current.clock_class,
+                        clock_accuracy: current.clock_accuracy,
+                        offset_scaled_log_variance: current.offset_scaled_log_variance,
+                    };
+                    let ord = compare_dataset_quality(
+                        candidate.priority1,
+                        &quality_a,
+                        candidate.priority2,
+                        candidate.identity,
+                        current.priority1,
+                        &quality_b,
+                        current.priority2,
+                        current.identity,
+                    );
+                    if ord == std::cmp::Ordering::Greater {
+                        candidate.clone()
+                    } else {
+                        current.clone()
+                    }
+                }
+            })
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Additional tests
 // ---------------------------------------------------------------------------
 
@@ -667,6 +748,103 @@ mod timeout_tests {
         assert!(
             best.is_none(),
             "local clock wins, no foreign master should be elected"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // BmcaSelector tests — IEEE 1588 grandmaster election
+    // -----------------------------------------------------------------------
+
+    fn make_ptp_clock_identity(
+        priority1: u8,
+        priority2: u8,
+        clock_class: u8,
+        id_byte: u8,
+    ) -> super::PtpClockIdentity {
+        super::PtpClockIdentity {
+            clock_class,
+            clock_accuracy: 0x20,
+            offset_scaled_log_variance: 0x4000,
+            priority1,
+            priority2,
+            identity: ClockIdentity([id_byte; 8]),
+        }
+    }
+
+    #[test]
+    fn test_bmca_selector_empty() {
+        assert!(super::BmcaSelector::select_grandmaster(&[]).is_none());
+    }
+
+    #[test]
+    fn test_bmca_selector_single_clock() {
+        let clocks = vec![make_ptp_clock_identity(128, 128, 135, 0x01)];
+        let gm = super::BmcaSelector::select_grandmaster(&clocks).expect("should elect one clock");
+        assert_eq!(gm.identity.0[0], 0x01);
+    }
+
+    #[test]
+    fn test_bmca_selector_lowest_priority1_wins() {
+        // Three clocks with different priority1; lowest should win.
+        let clocks = vec![
+            make_ptp_clock_identity(200, 128, 135, 0x0A),
+            make_ptp_clock_identity(100, 128, 135, 0x0B), // best
+            make_ptp_clock_identity(150, 128, 135, 0x0C),
+        ];
+        let gm =
+            super::BmcaSelector::select_grandmaster(&clocks).expect("should elect grandmaster");
+        assert_eq!(
+            gm.priority1, 100,
+            "clock with lowest priority1 should be grandmaster"
+        );
+        assert_eq!(gm.identity.0[0], 0x0B);
+    }
+
+    #[test]
+    fn test_bmca_selector_clock_class_tiebreaker() {
+        // Same priority1; lower clock_class (= closer to primary ref) wins.
+        let mut clocks = vec![
+            make_ptp_clock_identity(128, 128, 135, 0x01),
+            make_ptp_clock_identity(128, 128, 6, 0x02), // class 6 = stratum 1
+            make_ptp_clock_identity(128, 128, 248, 0x03),
+        ];
+        // Adjust clock_class for first element explicitly.
+        clocks[0].clock_class = 248;
+
+        let gm =
+            super::BmcaSelector::select_grandmaster(&clocks).expect("should elect grandmaster");
+        assert_eq!(
+            gm.clock_class, 6,
+            "clock with lowest clock_class (6) should win"
+        );
+    }
+
+    #[test]
+    fn test_bmca_selector_priority2_tiebreaker() {
+        // Same priority1, class, accuracy, variance; lowest priority2 wins.
+        let clocks = vec![
+            make_ptp_clock_identity(128, 200, 135, 0x10),
+            make_ptp_clock_identity(128, 50, 135, 0x20), // lowest priority2
+            make_ptp_clock_identity(128, 128, 135, 0x30),
+        ];
+        let gm =
+            super::BmcaSelector::select_grandmaster(&clocks).expect("should elect grandmaster");
+        assert_eq!(gm.priority2, 50, "clock with lowest priority2 should win");
+    }
+
+    #[test]
+    fn test_bmca_selector_identity_final_tiebreaker() {
+        // All parameters equal; lowest identity bytes break the tie.
+        let clocks = vec![
+            make_ptp_clock_identity(128, 128, 135, 0xFF),
+            make_ptp_clock_identity(128, 128, 135, 0x01), // lowest identity
+            make_ptp_clock_identity(128, 128, 135, 0x80),
+        ];
+        let gm =
+            super::BmcaSelector::select_grandmaster(&clocks).expect("should elect grandmaster");
+        assert_eq!(
+            gm.identity.0[0], 0x01,
+            "clock with lowest identity should win final tiebreak"
         );
     }
 }

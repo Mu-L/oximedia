@@ -416,18 +416,9 @@ mod tests {
         // A pixel perfectly inside gamut should not be altered by desaturation.
         let (r, g, b) = mapper.map_pixel(0.4, 0.4, 0.4).expect("map_pixel failed");
         // Achromatic pixel: r == g == b and equal to the luminance.
-        assert!(
-            (r - 0.4).abs() < 1e-5,
-            "Expected r~0.4, got {r}"
-        );
-        assert!(
-            (g - 0.4).abs() < 1e-5,
-            "Expected g~0.4, got {g}"
-        );
-        assert!(
-            (b - 0.4).abs() < 1e-5,
-            "Expected b~0.4, got {b}"
-        );
+        assert!((r - 0.4).abs() < 1e-5, "Expected r~0.4, got {r}");
+        assert!((g - 0.4).abs() < 1e-5, "Expected g~0.4, got {g}");
+        assert!((b - 0.4).abs() < 1e-5, "Expected b~0.4, got {b}");
     }
 
     // ── SoftClipGamutMapper – BT.2390 chroma rescaling ────────────────────────
@@ -437,7 +428,9 @@ mod tests {
         // After BT.2390 compression the ratio R:G:B must be preserved.
         let mapper = SoftClipGamutMapper::default_bt2390();
         let (r_in, g_in, b_in) = (1.8, 0.9, 0.3);
-        let (r, g, b) = mapper.map_pixel(r_in, g_in, b_in).expect("map_pixel failed");
+        let (r, g, _b) = mapper
+            .map_pixel(r_in, g_in, b_in)
+            .expect("map_pixel failed");
         // The ratios should be equal (hue preserved).
         let ratio_rg_in = r_in / g_in;
         let ratio_rg_out = r / g;
@@ -457,7 +450,10 @@ mod tests {
             (5.0, 3.0, 1.0),
         ] {
             let (ro, go, bo) = mapper.map_pixel(r, g, b).expect("map_pixel failed");
-            assert!(ro <= 1.0 && go <= 1.0 && bo <= 1.0, "({ro},{go},{bo}) out of gamut");
+            assert!(
+                ro <= 1.0 && go <= 1.0 && bo <= 1.0,
+                "({ro},{go},{bo}) out of gamut"
+            );
         }
     }
 
@@ -470,7 +466,7 @@ mod tests {
         mapper.map_frame(&mut pixels).expect("map_frame failed");
         for &v in &pixels {
             assert!(
-                v <= 1.0 + 1e-6 && v >= -1e-6,
+                (-1e-6..=1.0 + 1e-6).contains(&v),
                 "Out-of-gamut pixel after map_frame: {v}"
             );
         }
@@ -489,7 +485,7 @@ mod tests {
     fn soft_clip_scalar_bounded() {
         for v in [-0.5_f32, 0.0, 0.5, 1.0, 1.5, 3.0] {
             let out = soft_clip_scalar(v, 0.85);
-            assert!(out <= 1.0 && out >= 0.0, "soft_clip_scalar({v}) = {out}");
+            assert!((0.0..=1.0).contains(&out), "soft_clip_scalar({v}) = {out}");
         }
     }
 

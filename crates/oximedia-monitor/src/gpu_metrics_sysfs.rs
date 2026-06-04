@@ -124,9 +124,7 @@ impl GpuMetricsSnapshot {
     #[must_use]
     pub fn vram_utilisation_pct(&self) -> Option<f32> {
         match (self.vram_used_bytes, self.vram_total_bytes) {
-            (Some(used), Some(total)) if total > 0 => {
-                Some((used as f32 / total as f32) * 100.0)
-            }
+            (Some(used), Some(total)) if total > 0 => Some((used as f32 / total as f32) * 100.0),
             _ => None,
         }
     }
@@ -135,9 +133,7 @@ impl GpuMetricsSnapshot {
     /// (utilisation ≥ 90%).
     #[must_use]
     pub fn is_saturated(&self) -> bool {
-        self.utilisation_pct
-            .map(|u| u >= 90.0)
-            .unwrap_or(false)
+        self.utilisation_pct.map(|u| u >= 90.0).unwrap_or(false)
     }
 
     /// Returns `true` if the GPU temperature exceeds the supplied threshold.
@@ -441,7 +437,7 @@ impl IntelSysfsReader {
             self.card_dirs()
                 .into_iter()
                 .filter(|p| Self::is_intel_card(p))
-                .map(|p| self.collect_card(p))
+                .map(|p| self.collect_card(&p))
                 .collect()
         }
     }

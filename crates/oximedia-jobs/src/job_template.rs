@@ -348,6 +348,270 @@ impl TemplateRegistry {
     }
 }
 
+// ===========================================================================
+// Conditional stage execution
+// ===========================================================================
+
+/// Arbitrary output produced by a pipeline stage.
+///
+/// Kept as a simple key-value map so stages can carry typed payloads without
+/// imposing a rigid schema.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StageOutput {
+    /// Key-value fields emitted by the stage.
+    pub fields: HashMap<String, String>,
+}
+
+impl StageOutput {
+    /// Create an empty output.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert a key-value field.
+    pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.fields.insert(key.into(), value.into());
+    }
+
+    /// Retrieve a field by key.
+    #[must_use]
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.fields.get(key).map(|s| s.as_str())
+    }
+}
+
+/// The outcome of executing a pipeline stage.
+#[derive(Debug, Clone)]
+pub enum StageOutcome {
+    /// The stage ran successfully and produced `output`.
+    Completed(StageOutput),
+    /// The stage ran but failed with the given error message.
+    Failed(String),
+    /// The stage was skipped for the given reason (e.g. predecessor failed or
+    /// a condition predicate returned `false`).
+    Skipped(String),
+}
+
+impl StageOutcome {
+    /// Returns `true` for the [`Completed`] variant.
+    ///
+    /// [`Completed`]: StageOutcome::Completed
+    #[must_use]
+    pub fn is_completed(&self) -> bool {
+        matches!(self, Self::Completed(_))
+    }
+
+    /// Returns `true` for the [`Failed`] variant.
+    ///
+    /// [`Failed`]: StageOutcome::Failed
+    #[must_use]
+    pub fn is_failed(&self) -> bool {
+        matches!(self, Self::Failed(_))
+    }
+
+    /// Returns `true` for the [`Skipped`] variant.
+    ///
+    /// [`Skipped`]: StageOutcome::Skipped
+    #[must_use]
+    pub fn is_skipped(&self) -> bool {
+        matches!(self, Self::Skipped(_))
+    }
+}
+
+/// Gate condition for a pipeline stage.
+///
+/// Both `require_success` and `output_predicate` are evaluated when the
+/// previous stage's [`StageOutcome`] is available.  If either test fails the
+/// current stage is emitted as [`StageOutcome::Skipped`].
+pub struct StageCondition {
+    /// When `true`, the stage is skipped if the *previous* stage failed.
+    pub require_success: bool,
+    /// Optional additional predicate evaluated against the previous stage's
+    /// [`StageOutput`].  A return value of `false` causes the stage to be
+    /// skipped.
+    pub output_predicate: Option<Box<dyn Fn(&StageOutput) -> bool + Send + Sync>>,
+}
+
+impl fmt::Debug for StageCondition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StageCondition")
+            .field("require_success", &self.require_success)
+            .field(
+                "output_predicate",
+                &self.output_predicate.as_ref().map(|_| "<fn>"),
+            )
+            .finish()
+    }
+}
+
+impl StageCondition {
+    /// Create a condition that simply requires the predecessor to succeed.
+    #[must_use]
+    pub fn require_success() -> Self {
+        Self {
+            require_success: true,
+            output_predicate: None,
+        }
+    }
+
+    /// Create a condition with a custom output predicate.
+    pub fn with_predicate(
+        predicate: impl Fn(&StageOutput) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            require_success: false,
+            output_predicate: Some(Box::new(predicate)),
+        }
+    }
+
+    /// Evaluate the condition against `prev_outcome`.
+    ///
+    /// Returns `Ok(())` when the stage should run, or
+    /// `Err(reason)` when it should be skipped.
+    pub fn evaluate(&self, prev_outcome: &StageOutcome) -> Result<(), String> {
+        if self.require_success && prev_outcome.is_failed() {
+            return Err("predecessor failed".to_string());
+        }
+        if let Some(pred) = &self.output_predicate {
+            match prev_outcome {
+                StageOutcome::Completed(output) => {
+                    if !pred(output) {
+                        return Err("predicate not met".to_string());
+                    }
+                }
+                StageOutcome::Skipped(_) => {
+                    // A skipped predecessor never satisfies a predicate.
+                    return Err("predecessor was skipped".to_string());
+                }
+                StageOutcome::Failed(_) => {
+                    // Failed predecessors never satisfy a predicate either.
+                    return Err("predecessor failed".to_string());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A single named stage in a [`ConditionalPipeline`].
+///
+/// The `executor` closure is called when the stage should run.  It receives
+/// the previous stage's [`StageOutput`] (or a default for the first stage)
+/// and returns a new [`StageOutput`].
+pub struct ConditionalStage {
+    /// Human-readable name for this stage.
+    pub name: String,
+    /// Optional gate condition evaluated against the preceding stage.
+    pub condition: Option<StageCondition>,
+    /// Execution closure.  Receives the previous output, returns new output.
+    executor: Box<dyn Fn(&StageOutput) -> Result<StageOutput, String> + Send + Sync>,
+}
+
+impl fmt::Debug for ConditionalStage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConditionalStage")
+            .field("name", &self.name)
+            .field("condition", &self.condition)
+            .finish()
+    }
+}
+
+impl ConditionalStage {
+    /// Create a new stage without a condition.
+    pub fn new(
+        name: impl Into<String>,
+        executor: impl Fn(&StageOutput) -> Result<StageOutput, String> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            condition: None,
+            executor: Box::new(executor),
+        }
+    }
+
+    /// Attach a condition to this stage (builder style).
+    #[must_use]
+    pub fn with_condition(mut self, cond: StageCondition) -> Self {
+        self.condition = Some(cond);
+        self
+    }
+}
+
+/// A simple sequential pipeline of [`ConditionalStage`]s.
+///
+/// Stages are executed in order.  Each stage is given the opportunity to skip
+/// itself based on the outcome of the preceding stage via [`StageCondition`].
+#[derive(Debug, Default)]
+pub struct ConditionalPipeline {
+    stages: Vec<ConditionalStage>,
+}
+
+impl ConditionalPipeline {
+    /// Create an empty pipeline.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append a stage.
+    pub fn add_stage(&mut self, stage: ConditionalStage) {
+        self.stages.push(stage);
+    }
+
+    /// Execute all stages sequentially, returning a [`StageOutcome`] per stage.
+    ///
+    /// The first stage always runs (it has no predecessor to check).
+    /// Subsequent stages are gated by their [`StageCondition`] (if any).
+    pub fn execute(&self) -> Vec<(String, StageOutcome)> {
+        let mut results: Vec<(String, StageOutcome)> = Vec::new();
+        let mut prev_outcome: StageOutcome = StageOutcome::Completed(StageOutput::new());
+
+        for (idx, stage) in self.stages.iter().enumerate() {
+            // The very first stage runs unconditionally.
+            let outcome = if idx == 0 {
+                match (stage.executor)(&StageOutput::new()) {
+                    Ok(output) => StageOutcome::Completed(output),
+                    Err(msg) => StageOutcome::Failed(msg),
+                }
+            } else {
+                // Evaluate gate condition (if any) against the previous stage.
+                if let Some(cond) = &stage.condition {
+                    match cond.evaluate(&prev_outcome) {
+                        Err(reason) => StageOutcome::Skipped(reason),
+                        Ok(()) => {
+                            let empty = StageOutput::new();
+                            let prev_output = match &prev_outcome {
+                                StageOutcome::Completed(o) => o,
+                                _ => &empty,
+                            };
+                            match (stage.executor)(prev_output) {
+                                Ok(output) => StageOutcome::Completed(output),
+                                Err(msg) => StageOutcome::Failed(msg),
+                            }
+                        }
+                    }
+                } else {
+                    // No condition — run unconditionally.
+                    let empty = StageOutput::new();
+                    let prev_output = match &prev_outcome {
+                        StageOutcome::Completed(o) => o,
+                        _ => &empty,
+                    };
+                    match (stage.executor)(prev_output) {
+                        Ok(output) => StageOutcome::Completed(output),
+                        Err(msg) => StageOutcome::Failed(msg),
+                    }
+                }
+            };
+
+            prev_outcome = outcome.clone();
+            results.push((stage.name.clone(), outcome));
+        }
+        results
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,5 +773,125 @@ mod tests {
         assert_eq!(e.to_string(), "Missing required parameter: input");
         let e2 = TemplateError::Duplicate("dup".to_string());
         assert_eq!(e2.to_string(), "Duplicate template: dup");
+    }
+
+    // -----------------------------------------------------------------------
+    // ConditionalPipeline / StageCondition tests
+    // -----------------------------------------------------------------------
+
+    fn ok_stage(name: &str) -> ConditionalStage {
+        let name = name.to_string();
+        ConditionalStage::new(name, |_prev| {
+            let mut out = StageOutput::new();
+            out.insert("status", "ok");
+            Ok(out)
+        })
+    }
+
+    fn fail_stage(name: &str) -> ConditionalStage {
+        let name = name.to_string();
+        ConditionalStage::new(name, |_prev| Err("stage error".to_string()))
+    }
+
+    /// A stage with `require_success` must be skipped when its predecessor
+    /// fails.
+    #[test]
+    fn test_conditional_stage_skips_on_failed_predecessor() {
+        let mut pipeline = ConditionalPipeline::new();
+        pipeline.add_stage(fail_stage("stage-1"));
+        pipeline.add_stage(
+            ConditionalStage::new("stage-2", |_| {
+                let mut out = StageOutput::new();
+                out.insert("ran", "yes");
+                Ok(out)
+            })
+            .with_condition(StageCondition::require_success()),
+        );
+
+        let results = pipeline.execute();
+        assert_eq!(results.len(), 2);
+        assert!(results[0].1.is_failed(), "stage-1 should fail");
+        assert!(
+            results[1].1.is_skipped(),
+            "stage-2 should be skipped due to failed predecessor"
+        );
+    }
+
+    /// A stage with `require_success` must run when its predecessor succeeds.
+    #[test]
+    fn test_conditional_stage_runs_on_success_predecessor() {
+        let mut pipeline = ConditionalPipeline::new();
+        pipeline.add_stage(ok_stage("stage-1"));
+        pipeline.add_stage(
+            ConditionalStage::new("stage-2", |_| {
+                let mut out = StageOutput::new();
+                out.insert("ran", "yes");
+                Ok(out)
+            })
+            .with_condition(StageCondition::require_success()),
+        );
+
+        let results = pipeline.execute();
+        assert_eq!(results.len(), 2);
+        assert!(results[0].1.is_completed(), "stage-1 should complete");
+        assert!(
+            results[1].1.is_completed(),
+            "stage-2 should run after successful predecessor"
+        );
+    }
+
+    /// A stage gated by an output predicate must be skipped when the predicate
+    /// returns `false` and run when it returns `true`.
+    #[test]
+    fn test_conditional_stage_output_predicate_gating() {
+        // Stage 1 sets a "quality" field to "high".
+        let mut pipeline = ConditionalPipeline::new();
+        pipeline.add_stage(ConditionalStage::new("ingest", |_| {
+            let mut out = StageOutput::new();
+            out.insert("quality", "low"); // predicate will reject this
+            Ok(out)
+        }));
+        // Stage 2 only runs when quality == "high".
+        pipeline.add_stage(
+            ConditionalStage::new("premium-encode", |_| {
+                let mut out = StageOutput::new();
+                out.insert("encoded", "premium");
+                Ok(out)
+            })
+            .with_condition(StageCondition::with_predicate(|prev_out| {
+                prev_out.get("quality") == Some("high")
+            })),
+        );
+
+        let results = pipeline.execute();
+        assert_eq!(results.len(), 2);
+        assert!(results[0].1.is_completed(), "ingest should complete");
+        assert!(
+            results[1].1.is_skipped(),
+            "premium-encode should be skipped because quality != high"
+        );
+
+        // Now verify that "high" quality passes the predicate.
+        let mut pipeline2 = ConditionalPipeline::new();
+        pipeline2.add_stage(ConditionalStage::new("ingest", |_| {
+            let mut out = StageOutput::new();
+            out.insert("quality", "high");
+            Ok(out)
+        }));
+        pipeline2.add_stage(
+            ConditionalStage::new("premium-encode", |_| {
+                let mut out = StageOutput::new();
+                out.insert("encoded", "premium");
+                Ok(out)
+            })
+            .with_condition(StageCondition::with_predicate(|prev_out| {
+                prev_out.get("quality") == Some("high")
+            })),
+        );
+        let results2 = pipeline2.execute();
+        assert!(
+            results2[1].1.is_completed(),
+            "premium-encode should run when quality == high"
+        );
     }
 }

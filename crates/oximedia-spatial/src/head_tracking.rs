@@ -22,7 +22,68 @@
 //! q_new   = slerp(q_accel, q_gyro, alpha)  (approximated as weighted average + renorm)
 //! ```
 
+use std::collections::HashMap;
 use std::f32::consts::PI;
+use std::sync::{Mutex, OnceLock};
+
+// ─── Rotation matrix LUT ──────────────────────────────────────────────────────
+
+/// Quantisation step in degrees for the rotation-matrix cache.
+const ROTATION_CACHE_STEP_DEG: f32 = 1.0;
+
+/// Quantise an angle to the nearest cache-key integer.
+fn quantize_angle(angle_deg: f32, step: f32) -> i32 {
+    (angle_deg / step).round() as i32
+}
+
+/// Global rotation-matrix cache keyed by quantised (yaw, pitch, roll).
+static ROTATION_CACHE: OnceLock<Mutex<HashMap<(i32, i32, i32), [[f32; 3]; 3]>>> = OnceLock::new();
+
+/// Return a 3×3 rotation matrix for the given Euler angles (ZYX convention),
+/// serving the result from an in-process LUT when the quantised key is cached.
+///
+/// Angles are quantised to the nearest [`ROTATION_CACHE_STEP_DEG`] degree before
+/// lookup so that repeated calls with nearby values share the same entry.
+///
+/// # Example
+/// ```
+/// use oximedia_spatial::head_tracking::cached_rotation_matrix;
+/// let mat = cached_rotation_matrix(0.0, 0.0, 0.0);
+/// // Identity rotation
+/// assert!((mat[0][0] - 1.0).abs() < 1e-5);
+/// ```
+pub fn cached_rotation_matrix(yaw_deg: f32, pitch_deg: f32, roll_deg: f32) -> [[f32; 3]; 3] {
+    let key = (
+        quantize_angle(yaw_deg, ROTATION_CACHE_STEP_DEG),
+        quantize_angle(pitch_deg, ROTATION_CACHE_STEP_DEG),
+        quantize_angle(roll_deg, ROTATION_CACHE_STEP_DEG),
+    );
+    let cache = ROTATION_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(&mat) = guard.get(&key) {
+        return mat;
+    }
+    let mat = compute_rotation_matrix(yaw_deg, pitch_deg, roll_deg);
+    guard.insert(key, mat);
+    mat
+}
+
+/// Compute the ZYX Euler rotation matrix R = Rz(yaw) × Ry(pitch) × Rx(roll).
+///
+/// All angles are supplied in degrees.
+pub fn compute_rotation_matrix(yaw_deg: f32, pitch_deg: f32, roll_deg: f32) -> [[f32; 3]; 3] {
+    let y = yaw_deg.to_radians();
+    let p = pitch_deg.to_radians();
+    let r = roll_deg.to_radians();
+    let (cy, sy) = (y.cos(), y.sin());
+    let (cp, sp) = (p.cos(), p.sin());
+    let (cr, sr) = (r.cos(), r.sin());
+    [
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr],
+    ]
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -1319,5 +1380,72 @@ mod tests {
             euler.yaw_deg.is_finite(),
             "Yaw should be finite after declination"
         );
+    }
+
+    // ── Rotation matrix LUT ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_rotation_cache_identity() {
+        let mat = cached_rotation_matrix(0.0, 0.0, 0.0);
+        // R(0,0,0) must be the 3×3 identity matrix.
+        for i in 0..3 {
+            for j in 0..3 {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert_near(mat[i][j], expected, 1e-5, &format!("identity[{i}][{j}]"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_rotation_cache_hit() {
+        // Two calls with identical angles must return the same matrix.
+        let mat1 = cached_rotation_matrix(37.0, 12.0, -5.0);
+        let mat2 = cached_rotation_matrix(37.0, 12.0, -5.0);
+        for i in 0..3 {
+            for j in 0..3 {
+                assert_eq!(
+                    mat1[i][j], mat2[i][j],
+                    "Cache hit should return equal value at [{i}][{j}]"
+                );
+            }
+        }
+        // Sanity: the cached value must match a fresh computation.
+        let expected = compute_rotation_matrix(37.0, 12.0, -5.0);
+        for i in 0..3 {
+            for j in 0..3 {
+                assert_near(
+                    mat1[i][j],
+                    expected[i][j],
+                    1e-5,
+                    &format!("cache vs compute [{i}][{j}]"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_rotation_matrix_yaw_90() {
+        // Rz(90°): x→y, y→-x, z→z
+        // Expected column-major result for R = Rz(90°)*Ry(0)*Rx(0):
+        // row0: [cos90, 0, 0] = [0, 0, 0]  — Rz only affects x/y rows
+        // Actual Rz(yaw) * Ry(0) * Rx(0):
+        //   [cy*cp,  cy*sp*sr - sy*cr,  cy*sp*cr + sy*sr]
+        //   [sy*cp,  sy*sp*sr + cy*cr,  sy*sp*cr - cy*sr]
+        //   [-sp,    cp*sr,             cp*cr            ]
+        // With yaw=90°, pitch=0°, roll=0°:
+        //   cy=0, sy=1, cp=1, sp=0, cr=1, sr=0
+        //   row0: [0, -1,  0]
+        //   row1: [1,  0,  0]
+        //   row2: [0,  0,  1]
+        let mat = cached_rotation_matrix(90.0, 0.0, 0.0);
+        assert_near(mat[0][0], 0.0, 1e-5, "R[0][0] yaw90");
+        assert_near(mat[0][1], -1.0, 1e-5, "R[0][1] yaw90");
+        assert_near(mat[0][2], 0.0, 1e-5, "R[0][2] yaw90");
+        assert_near(mat[1][0], 1.0, 1e-5, "R[1][0] yaw90");
+        assert_near(mat[1][1], 0.0, 1e-5, "R[1][1] yaw90");
+        assert_near(mat[1][2], 0.0, 1e-5, "R[1][2] yaw90");
+        assert_near(mat[2][0], 0.0, 1e-5, "R[2][0] yaw90");
+        assert_near(mat[2][1], 0.0, 1e-5, "R[2][1] yaw90");
+        assert_near(mat[2][2], 1.0, 1e-5, "R[2][2] yaw90");
     }
 }

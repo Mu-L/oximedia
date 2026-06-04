@@ -89,10 +89,7 @@ impl TranscodeProfileExport {
 /// # Errors
 ///
 /// Returns an [`std::io::Error`] if the file cannot be created or written.
-pub fn export_profile_to_file(
-    profile: &TranscodeProfileExport,
-    path: &str,
-) -> std::io::Result<()> {
+pub fn export_profile_to_file(profile: &TranscodeProfileExport, path: &str) -> std::io::Result<()> {
     let json = profile.to_json();
     let mut file = std::fs::File::create(path)?;
     file.write_all(json.as_bytes())?;
@@ -140,16 +137,23 @@ pub fn import_profile_from_json(json: &str) -> Result<TranscodeProfileExport, St
         };
 
         // Skip whitespace and the mandatory ':'.
-        while i < len && (chars[i] == ' ' || chars[i] == '\t' || chars[i] == '\n' || chars[i] == '\r') {
+        while i < len
+            && (chars[i] == ' ' || chars[i] == '\t' || chars[i] == '\n' || chars[i] == '\r')
+        {
             i += 1;
         }
         if i >= len || chars[i] != ':' {
-            return Err(format!("Expected ':' after key \"{}\" at position {}", key, i));
+            return Err(format!(
+                "Expected ':' after key \"{}\" at position {}",
+                key, i
+            ));
         }
         i += 1; // consume ':'
 
         // Skip whitespace.
-        while i < len && (chars[i] == ' ' || chars[i] == '\t' || chars[i] == '\n' || chars[i] == '\r') {
+        while i < len
+            && (chars[i] == ' ' || chars[i] == '\t' || chars[i] == '\n' || chars[i] == '\r')
+        {
             i += 1;
         }
 
@@ -167,7 +171,12 @@ pub fn import_profile_from_json(json: &str) -> Result<TranscodeProfileExport, St
                 i = end;
                 v
             }
-            None => return Err(format!("Malformed JSON value for key \"{}\" at position {}", key, i)),
+            None => {
+                return Err(format!(
+                    "Malformed JSON value for key \"{}\" at position {}",
+                    key, i
+                ))
+            }
         };
 
         match key.as_str() {
@@ -239,11 +248,7 @@ fn parse_quoted_string(chars: &[char], start: usize) -> Option<(String, usize)> 
                     Some('t') => out.push('\t'),
                     Some('u') => {
                         // \uXXXX
-                        let hex: String = chars
-                            .get(i + 1..i + 5)
-                            .unwrap_or(&[])
-                            .iter()
-                            .collect();
+                        let hex: String = chars.get(i + 1..i + 5).unwrap_or(&[]).iter().collect();
                         if let Ok(code) = u32::from_str_radix(&hex, 16) {
                             if let Some(c) = char::from_u32(code) {
                                 out.push(c);
@@ -270,14 +275,7 @@ mod tests {
     use super::*;
 
     fn sample_profile() -> TranscodeProfileExport {
-        TranscodeProfileExport::new(
-            "youtube_1080p",
-            "vp9",
-            "opus",
-            "5000k",
-            "128k",
-            "good",
-        )
+        TranscodeProfileExport::new("youtube_1080p", "vp9", "opus", "5000k", "128k", "good")
     }
 
     // ── to_json ────────────────────────────────────────────────────────────
@@ -288,8 +286,14 @@ mod tests {
         assert!(json.contains("\"name\""), "missing name key");
         assert!(json.contains("\"video_codec\""), "missing video_codec key");
         assert!(json.contains("\"audio_codec\""), "missing audio_codec key");
-        assert!(json.contains("\"video_bitrate\""), "missing video_bitrate key");
-        assert!(json.contains("\"audio_bitrate\""), "missing audio_bitrate key");
+        assert!(
+            json.contains("\"video_bitrate\""),
+            "missing video_bitrate key"
+        );
+        assert!(
+            json.contains("\"audio_bitrate\""),
+            "missing audio_bitrate key"
+        );
         assert!(json.contains("\"preset\""), "missing preset key");
     }
 
@@ -318,8 +322,7 @@ mod tests {
     fn test_round_trip() {
         let original = sample_profile();
         let json = original.to_json();
-        let parsed = TranscodeProfileExport::from_json(&json)
-            .expect("round-trip parse failed");
+        let parsed = TranscodeProfileExport::from_json(&json).expect("round-trip parse failed");
         assert_eq!(parsed, original);
     }
 
@@ -348,14 +351,8 @@ mod tests {
 
     #[test]
     fn test_json_escape_special_chars() {
-        let profile = TranscodeProfileExport::new(
-            "test\"quote",
-            "vp9",
-            "opus",
-            "1M",
-            "64k",
-            "good",
-        );
+        let profile =
+            TranscodeProfileExport::new("test\"quote", "vp9", "opus", "1M", "64k", "good");
         let json = profile.to_json();
         let parsed = TranscodeProfileExport::from_json(&json).expect("parse with escaped chars");
         assert_eq!(parsed.name, "test\"quote");
@@ -369,12 +366,10 @@ mod tests {
         let tmp_path = std::env::temp_dir().join("oximedia_profile_test.json");
         let path_str = tmp_path.to_string_lossy().into_owned();
 
-        export_profile_to_file(&profile, &path_str)
-            .expect("export to file failed");
+        export_profile_to_file(&profile, &path_str).expect("export to file failed");
 
         let contents = std::fs::read_to_string(&tmp_path).expect("read file");
-        let reimported = TranscodeProfileExport::from_json(&contents)
-            .expect("reimport failed");
+        let reimported = TranscodeProfileExport::from_json(&contents).expect("reimport failed");
 
         assert_eq!(reimported, profile);
         let _ = std::fs::remove_file(&tmp_path);

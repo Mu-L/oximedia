@@ -239,10 +239,7 @@ fn string_similarity(a: &str, b: &str) -> f64 {
     let a_bigrams: Vec<(char, char)> = a_lower.chars().zip(a_lower.chars().skip(1)).collect();
     let b_bigrams: Vec<(char, char)> = b_lower.chars().zip(b_lower.chars().skip(1)).collect();
 
-    let matches = a_bigrams
-        .iter()
-        .filter(|bg| b_bigrams.contains(bg))
-        .count();
+    let matches = a_bigrams.iter().filter(|bg| b_bigrams.contains(bg)).count();
     (2 * matches) as f64 / (a_bigrams.len() + b_bigrams.len()) as f64
 }
 
@@ -271,11 +268,7 @@ impl ClipResolver {
     /// Add a media file to the search index.
     pub fn add_media(&mut self, path: PathBuf) {
         let entry = MediaEntry::from_path(path);
-        if self
-            .config
-            .media_extensions
-            .contains(&entry.extension)
-        {
+        if self.config.media_extensions.contains(&entry.extension) {
             self.media_index.push(entry);
         }
     }
@@ -333,11 +326,8 @@ impl ClipResolver {
                 }
                 ResolveStrategy::Stem => {
                     if let Some(stem) = clip.original_stem() {
-                        let matches: Vec<&MediaEntry> = self
-                            .media_index
-                            .iter()
-                            .filter(|e| e.stem == stem)
-                            .collect();
+                        let matches: Vec<&MediaEntry> =
+                            self.media_index.iter().filter(|e| e.stem == stem).collect();
                         if matches.len() == 1 {
                             return ResolveResult::resolved(
                                 clip.id.clone(),
@@ -585,10 +575,20 @@ mod tests {
     fn test_resolve_batch() {
         let resolver = make_resolver();
         let clips = vec![
-            ClipRef::new("1".to_string(), "R1".to_string(), "01:00:00:00".to_string(), "01:00:10:00".to_string())
-                .with_original_path("/media/A001_C001.mxf".to_string()),
-            ClipRef::new("2".to_string(), "R2".to_string(), "01:00:10:00".to_string(), "01:00:20:00".to_string())
-                .with_original_path("/nonexistent/ZZZ.dpx".to_string()),
+            ClipRef::new(
+                "1".to_string(),
+                "R1".to_string(),
+                "01:00:00:00".to_string(),
+                "01:00:10:00".to_string(),
+            )
+            .with_original_path("/media/A001_C001.mxf".to_string()),
+            ClipRef::new(
+                "2".to_string(),
+                "R2".to_string(),
+                "01:00:10:00".to_string(),
+                "01:00:20:00".to_string(),
+            )
+            .with_original_path("/nonexistent/ZZZ.dpx".to_string()),
         ];
         let results = resolver.resolve_batch(&clips);
         assert_eq!(results.len(), 2);
@@ -600,9 +600,19 @@ mod tests {
     fn test_batch_summary() {
         let resolver = make_resolver();
         let clips = vec![
-            ClipRef::new("1".to_string(), "R1".to_string(), "01:00:00:00".to_string(), "01:00:10:00".to_string())
-                .with_original_path("/media/A001_C001.mxf".to_string()),
-            ClipRef::new("2".to_string(), "R2".to_string(), "01:00:10:00".to_string(), "01:00:20:00".to_string()),
+            ClipRef::new(
+                "1".to_string(),
+                "R1".to_string(),
+                "01:00:00:00".to_string(),
+                "01:00:10:00".to_string(),
+            )
+            .with_original_path("/media/A001_C001.mxf".to_string()),
+            ClipRef::new(
+                "2".to_string(),
+                "R2".to_string(),
+                "01:00:10:00".to_string(),
+                "01:00:20:00".to_string(),
+            ),
         ];
         let results = resolver.resolve_batch(&clips);
         let summary = ClipResolver::batch_summary(&results);
@@ -619,8 +629,13 @@ mod tests {
 
     #[test]
     fn test_clip_ref_original_filename() {
-        let clip = ClipRef::new("1".to_string(), "R1".to_string(), "00:00:00:00".to_string(), "00:00:10:00".to_string())
-            .with_original_path("/path/to/clip.mxf".to_string());
+        let clip = ClipRef::new(
+            "1".to_string(),
+            "R1".to_string(),
+            "00:00:00:00".to_string(),
+            "00:00:10:00".to_string(),
+        )
+        .with_original_path("/path/to/clip.mxf".to_string());
         assert_eq!(clip.original_filename(), Some("clip.mxf"));
         assert_eq!(clip.original_stem(), Some("clip"));
     }

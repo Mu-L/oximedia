@@ -78,11 +78,7 @@ pub fn hdr_bt2020_to_bt709(rgb: [f32; 3], knee: f32) -> [f32; 3] {
 /// * `knee`   — highlight knee point; see [`hdr_bt2020_to_bt709`].
 #[must_use]
 pub fn pq_bt2020_to_linear_bt709(pq_rgb: [f32; 3], knee: f32) -> [f32; 3] {
-    let linear = [
-        pq_eotf(pq_rgb[0]),
-        pq_eotf(pq_rgb[1]),
-        pq_eotf(pq_rgb[2]),
-    ];
+    let linear = [pq_eotf(pq_rgb[0]), pq_eotf(pq_rgb[1]), pq_eotf(pq_rgb[2])];
     hdr_bt2020_to_bt709(linear, knee)
 }
 
@@ -169,7 +165,9 @@ mod tests {
         assert!(
             approx_eq(out[0], out[1], 1e-4) && approx_eq(out[1], out[2], 1e-4),
             "White should remain neutral: ({}, {}, {})",
-            out[0], out[1], out[2]
+            out[0],
+            out[1],
+            out[2]
         );
     }
 

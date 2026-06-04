@@ -205,10 +205,7 @@ impl DiffItem {
             }
             Self::ClipRemoved { name, .. } => format!("Clip removed: '{name}'"),
             Self::ClipMoved(m) => {
-                format!(
-                    "Clip moved: frame {} → {}",
-                    m.from.0, m.to.0
-                )
+                format!("Clip moved: frame {} → {}", m.from.0, m.to.0)
             }
             Self::ClipTrimmed(t) => {
                 format!("Clip trimmed: {} → {} frames", t.from.0, t.to.0)

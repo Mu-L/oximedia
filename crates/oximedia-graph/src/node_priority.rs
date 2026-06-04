@@ -133,8 +133,13 @@ impl NodePriorityEntry {
 
 impl fmt::Display for NodePriorityEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} [{}] priority={} ({}{})",
-            self.label, self.node_id, self.effective, self.class,
+        write!(
+            f,
+            "{} [{}] priority={} ({}{})",
+            self.label,
+            self.node_id,
+            self.effective,
+            self.class,
             if self.boost != 0 {
                 format!("{:+}", self.boost)
             } else {
@@ -173,7 +178,8 @@ impl PriorityManager {
 
     /// Register a node with a specific priority class.
     pub fn register(&mut self, node_id: PriorityNodeId, class: PriorityClass, label: &str) {
-        self.entries.insert(node_id, NodePriorityEntry::new(node_id, class, label));
+        self.entries
+            .insert(node_id, NodePriorityEntry::new(node_id, class, label));
     }
 
     /// Register a node with the default priority class.
@@ -304,7 +310,8 @@ mod tests {
 
     #[test]
     fn test_node_priority_entry_new() {
-        let entry = NodePriorityEntry::new(PriorityNodeId(1), PriorityClass::Interactive, "preview");
+        let entry =
+            NodePriorityEntry::new(PriorityNodeId(1), PriorityClass::Interactive, "preview");
         assert_eq!(entry.effective, 500);
         assert_eq!(entry.boost, 0);
         assert_eq!(entry.label, "preview");
@@ -312,16 +319,16 @@ mod tests {
 
     #[test]
     fn test_node_priority_entry_with_boost() {
-        let entry = NodePriorityEntry::new(PriorityNodeId(1), PriorityClass::Normal, "n")
-            .with_boost(50);
+        let entry =
+            NodePriorityEntry::new(PriorityNodeId(1), PriorityClass::Normal, "n").with_boost(50);
         assert_eq!(entry.effective, 150);
         assert_eq!(entry.boost, 50);
     }
 
     #[test]
     fn test_boost_clamp() {
-        let entry = NodePriorityEntry::new(PriorityNodeId(1), PriorityClass::Normal, "n")
-            .with_boost(9999);
+        let entry =
+            NodePriorityEntry::new(PriorityNodeId(1), PriorityClass::Normal, "n").with_boost(9999);
         assert_eq!(entry.boost, 500);
     }
 

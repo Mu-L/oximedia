@@ -382,6 +382,87 @@ fn extract_time_range(
     data[start_byte..end_byte].to_vec()
 }
 
+// ── Profile-string-based convenience API ─────────────────────────────────────
+
+/// Decision on whether individual streams can be copied when evaluated against
+/// a named conversion profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileStreamCopyDecision {
+    /// Whether the video stream can be copied.
+    pub can_copy_video: bool,
+    /// Whether the audio stream can be copied.
+    pub can_copy_audio: bool,
+    /// Human-readable explanation of the decision.
+    pub reason: String,
+}
+
+/// Decide whether stream copy is feasible given an input codec name and a target
+/// [`crate::conv_profile::ConversionProfile`].
+///
+/// Rules:
+/// 1. Codecs match **and** no video filter is requested **and** no quality change
+///    → `can_copy = true`.
+/// 2. Any codec mismatch or an explicit quality change → `can_copy = false`.
+///
+/// `input_codec` is compared case-insensitively against the profile's target
+/// codec.  A quality change is inferred when the profile's video bitrate differs
+/// significantly (>20%) from a canonical "no-change" sentinel of 0 kbps (which
+/// means "keep original").
+#[must_use]
+pub fn decide_stream_copy(
+    input_codec: &str,
+    output_profile: &crate::conv_profile::ConversionProfile,
+) -> ProfileStreamCopyDecision {
+    let input_lower = input_codec.to_ascii_lowercase();
+    let profile_video = output_profile.video_codec.to_ascii_lowercase();
+    let profile_audio = output_profile.audio_codec.to_ascii_lowercase();
+
+    // Video: copy when input codec matches the profile's video codec and no
+    // quality change is requested (bitrate == 0 means "keep original").
+    let video_codecs_match = input_lower == profile_video;
+    let no_quality_change = output_profile.video_bitrate_kbps == 0;
+
+    let (can_copy_video, video_msg) = if video_codecs_match && no_quality_change {
+        (true, format!("codec '{input_codec}' matches profile and no quality change"))
+    } else if !video_codecs_match {
+        (
+            false,
+            format!(
+                "video codec mismatch: input='{}' profile='{}'",
+                input_codec, output_profile.video_codec
+            ),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "quality change requested (video_bitrate_kbps={})",
+                output_profile.video_bitrate_kbps
+            ),
+        )
+    };
+
+    // Audio: copy when audio codec from input matches the profile's audio codec.
+    // We cannot know the input audio codec from just `input_codec` (which is
+    // typically a video codec string), so we use a heuristic: if the profile
+    // targets a different audio codec than the conventional "copy" sentinel
+    // ("copy" or empty string), we flag re-encode.
+    let can_copy_audio = profile_audio == "copy" || profile_audio.is_empty();
+    let audio_msg = if can_copy_audio {
+        "audio copy mode".to_string()
+    } else {
+        format!("audio re-encode requested (target='{}')", output_profile.audio_codec)
+    };
+
+    let reason = format!("video: {video_msg}; audio: {audio_msg}");
+
+    ProfileStreamCopyDecision {
+        can_copy_video,
+        can_copy_audio,
+        reason,
+    }
+}
+
 /// Estimate the speedup of stream copy vs re-encoding.
 ///
 /// Returns an estimated speedup factor (e.g. 50x means stream copy is ~50
@@ -713,6 +794,57 @@ mod tests {
             &output_req,
         );
         assert!(result.is_err());
+    }
+
+    // ── decide_stream_copy tests ──────────────────────────────────────────────
+
+    fn make_profile(video_codec: &str, audio_codec: &str, video_bitrate_kbps: u32) -> crate::conv_profile::ConversionProfile {
+        crate::conv_profile::ConversionProfile {
+            name: "test-profile".to_string(),
+            video_codec: video_codec.to_string(),
+            video_bitrate_kbps,
+            audio_codec: audio_codec.to_string(),
+            audio_bitrate_kbps: 128,
+            width: 1920,
+            height: 1080,
+            fps_num: 30,
+            fps_den: 1,
+            preset: "medium".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_decide_stream_copy_same_codec_no_quality_change() {
+        // Same codec, bitrate == 0 (no quality change) → can copy video
+        let profile = make_profile("vp9", "copy", 0);
+        let decision = decide_stream_copy("vp9", &profile);
+        assert!(decision.can_copy_video, "should copy video when codecs match and no quality change");
+        assert!(decision.can_copy_audio, "should copy audio when profile says 'copy'");
+    }
+
+    #[test]
+    fn test_decide_stream_copy_different_codec() {
+        // Different codec → cannot copy video
+        let profile = make_profile("av1", "opus", 4_000);
+        let decision = decide_stream_copy("vp9", &profile);
+        assert!(!decision.can_copy_video, "should not copy video when codecs differ");
+        assert!(!decision.can_copy_audio, "should not copy audio when re-encoding");
+        assert!(!decision.reason.is_empty());
+    }
+
+    #[test]
+    fn test_decide_stream_copy_same_codec_with_quality_change() {
+        // Same codec but explicit quality change → cannot copy
+        let profile = make_profile("vp9", "copy", 2_500);
+        let decision = decide_stream_copy("vp9", &profile);
+        assert!(!decision.can_copy_video, "quality change blocks stream copy");
+    }
+
+    #[test]
+    fn test_decide_stream_copy_case_insensitive() {
+        let profile = make_profile("VP9", "copy", 0);
+        let decision = decide_stream_copy("vp9", &profile);
+        assert!(decision.can_copy_video);
     }
 
     #[test]

@@ -190,12 +190,7 @@ impl CapacityCalculator {
 
         let summary = format!(
             "{:?} on {:?}: {} bits ({} bytes) at {:.1} bps, ~{:.1} dB SNR",
-            self.algorithm,
-            params.media_type,
-            capacity_bits,
-            capacity_bytes,
-            bitrate_bps,
-            base_snr,
+            self.algorithm, params.media_type, capacity_bits, capacity_bytes, bitrate_bps, base_snr,
         );
 
         CapacityResult {
@@ -208,7 +203,11 @@ impl CapacityCalculator {
     }
 
     /// Compare capacity across all algorithms for the same media.
-    pub fn compare_all(params: &MediaParams, redundancy: f64, ecc_overhead: f64) -> Vec<CapacityResult> {
+    pub fn compare_all(
+        params: &MediaParams,
+        redundancy: f64,
+        ecc_overhead: f64,
+    ) -> Vec<CapacityResult> {
         let algorithms = [
             EmbedAlgorithm::SpreadSpectrum,
             EmbedAlgorithm::Lsb,

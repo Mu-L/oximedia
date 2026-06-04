@@ -820,4 +820,100 @@ mod tests {
         let out = denoiser.denoise_frame_parallel(&current, &reference, width, height);
         assert_eq!(out, expected, "parallel result must match serial reference");
     }
+
+    // 31. test_temporal_denoise_parallel_matches_sequential
+    //
+    // Runs temporal denoise on a 3-frame 64×64 sequence and verifies that
+    // the parallel output exactly matches the serial reference.
+    //
+    // Determinism relies on both implementations using the same pixel-level
+    // logic; the seed is fixed by constructing frames with a deterministic
+    // LCG hash.
+    #[test]
+    fn test_temporal_denoise_parallel_matches_sequential() {
+        const W: u32 = 64;
+        const H: u32 = 64;
+        const N: usize = (W * H) as usize;
+
+        // Deterministic frame generator: LCG-based, seeded per frame.
+        let make_frame = |seed: u64| -> Vec<u8> {
+            (0..N)
+                .map(|i| {
+                    let h = (seed ^ (i as u64))
+                        .wrapping_mul(6364136223846793005u64)
+                        .wrapping_add(1442695040888963407u64);
+                    (h >> 56) as u8
+                })
+                .collect()
+        };
+
+        let frame0 = make_frame(0xABCD_1234);
+        let frame1 = make_frame(0x5678_EF01);
+        let frame2 = make_frame(0x9012_3456);
+
+        // --- Serial reference: denoise frame1 with frame0 as reference ---
+        let serial_out: Vec<u8> = frame1
+            .iter()
+            .zip(frame0.iter())
+            .map(|(&cur, &ref_px)| {
+                if (cur as i32 - ref_px as i32).unsigned_abs() < 10 {
+                    ((cur as u32 + ref_px as u32) / 2) as u8
+                } else {
+                    cur
+                }
+            })
+            .collect();
+
+        // --- Parallel implementation ---
+        let mut denoiser = TemporalDenoiser::new(TemporalDenoiseMode::MotionCompensated, 0.5, 3);
+        // Seed the history with frame0.
+        denoiser.process_frame(&frame0, None, None, W, H);
+        // Denoise frame1 using frame0 as reference.
+        let parallel_out = denoiser.denoise_frame_parallel(&frame1, &frame0, W, H);
+
+        assert_eq!(
+            parallel_out, serial_out,
+            "parallel output must exactly match serial reference on 64×64 sequence"
+        );
+
+        // Verify frame2 can also be processed (no panic, deterministic output).
+        let _out2 = denoiser.denoise_frame_parallel(&frame2, &frame1, W, H);
+    }
+
+    // 32. test_temporal_denoise_parallel_performance
+    //
+    // Runs parallel temporal denoise on a 1920×1080 3-frame sequence.
+    // Verifies that it completes in < 2 seconds (wall-clock).
+    //
+    // This test is inherently performance-sensitive.  On extremely slow CI
+    // environments it could flake; the 2-second budget is generous for any
+    // modern machine where rayon can use multiple threads.
+    #[test]
+    fn test_temporal_denoise_parallel_performance() {
+        const W: u32 = 1920;
+        const H: u32 = 1080;
+        const N: usize = (W * H) as usize;
+
+        // Allocate three synthetic frames filled with a ramp pattern.
+        let frame0: Vec<u8> = (0..N).map(|i| (i % 256) as u8).collect();
+        let frame1: Vec<u8> = (0..N).map(|i| ((i + 17) % 256) as u8).collect();
+        let frame2: Vec<u8> = (0..N).map(|i| ((i + 33) % 256) as u8).collect();
+
+        let start = std::time::Instant::now();
+
+        let mut denoiser = TemporalDenoiser::new(TemporalDenoiseMode::MotionCompensated, 0.5, 3);
+        denoiser.process_frame(&frame0, None, None, W, H);
+        let _out1 = denoiser.denoise_frame_parallel(&frame1, &frame0, W, H);
+        let _out2 = denoiser.denoise_frame_parallel(&frame2, &frame1, W, H);
+
+        let elapsed = start.elapsed();
+        // Debug builds are ~10-15x slower than release; give them 30 s headroom.
+        // Release builds should always finish well under 2 s.
+        let budget_secs: f64 = if cfg!(debug_assertions) { 30.0 } else { 2.0 };
+        assert!(
+            elapsed.as_secs_f64() < budget_secs,
+            "1920×1080 3-frame parallel denoise took {:.3}s — expected < {budget_secs}s",
+            elapsed.as_secs_f64()
+        );
+    }
 }

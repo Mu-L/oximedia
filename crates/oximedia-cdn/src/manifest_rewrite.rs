@@ -2,7 +2,7 @@
 //!
 //! # Overview
 //!
-//! [`ManifestRewriter`] transforms manifest files so that all asset URLs
+//! `ManifestRewriter` transforms manifest files so that all asset URLs
 //! (media segment URIs, `EXT-X-MAP`, `EXT-X-MEDIA`, `EXT-X-STREAM-INF`,
 //! rendition playlists, DASH `BaseURL`, `SegmentTemplate`, `media=`,
 //! `initialization=`, etc.) are rewritten to point to the edge node that

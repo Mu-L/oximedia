@@ -715,6 +715,14 @@ impl<R: Read + Seek> StorageReader<R> {
 }
 
 /// Structured storage writer
+///
+/// Builds a Microsoft Compound File Binary container. Streams and nested
+/// storages are added via [`StorageWriter::write_stream_in`] /
+/// [`StorageWriter::create_storage_in`]; the parent storage id is the
+/// previously-returned entry id (or `0` for the root). At
+/// [`StorageWriter::finalize`] time the writer links each parent's children
+/// into a left-leaning chain so the standard red-black tree traversal
+/// recovers them.
 pub struct StorageWriter<W: Write + Seek> {
     writer: W,
     header: Header,
@@ -723,6 +731,10 @@ pub struct StorageWriter<W: Write + Seek> {
     directory_entries: Vec<DirectoryEntry>,
     mini_stream_data: Vec<u8>,
     current_sector: u32,
+    /// Parent→children mapping built incrementally; consumed at finalize time.
+    children: std::collections::HashMap<u32, Vec<u32>>,
+    /// CLSID for the root entry (AAF-specific in normal usage).
+    root_clsid: [u8; 16],
 }
 
 impl<W: Write + Seek> StorageWriter<W> {
@@ -754,7 +766,16 @@ impl<W: Write + Seek> StorageWriter<W> {
             directory_entries: vec![root],
             mini_stream_data: Vec::new(),
             current_sector: 0,
+            children: std::collections::HashMap::new(),
+            root_clsid: [0u8; 16],
         })
+    }
+
+    /// Override the CLSID written into the root entry.
+    ///
+    /// AAF clients use this to mark the root with the AAF storage class id.
+    pub fn set_root_clsid(&mut self, clsid: [u8; 16]) {
+        self.root_clsid = clsid;
     }
 
     /// Allocate a new sector
@@ -765,11 +786,18 @@ impl<W: Write + Seek> StorageWriter<W> {
         sector
     }
 
-    /// Write stream data
+    /// Write a top-level stream into the root storage (back-compat wrapper).
     pub fn write_stream(&mut self, name: &str, data: &[u8]) -> Result<u32> {
+        self.write_stream_in(0, name, data)
+    }
+
+    /// Write a stream as a child of the given parent storage id.
+    pub fn write_stream_in(&mut self, parent_id: u32, name: &str, data: &[u8]) -> Result<u32> {
         let entry_id = self.directory_entries.len() as u32;
 
-        let (starting_sector, _uses_mini) = if data.len() < 4096 {
+        let (starting_sector, size) = if data.is_empty() {
+            (END_OF_CHAIN, 0u64)
+        } else if data.len() < self.header.mini_stream_cutoff_size as usize {
             // Use mini stream
             let mini_sector = (self.mini_stream_data.len() / MINI_SECTOR_SIZE) as u32;
             self.mini_stream_data.extend_from_slice(data);
@@ -789,34 +817,33 @@ impl<W: Write + Seek> StorageWriter<W> {
                 }
             }
 
-            (mini_sector, true)
+            (mini_sector, data.len() as u64)
         } else {
-            // Use regular stream
+            // Use regular stream — pre-allocate FAT chain so we never grow
+            // `self.fat` while iterating chunks.
+            let sector_size = self.header.sector_size();
+            let total_chunks = data.len().div_ceil(sector_size);
             let starting_sector = self.allocate_sector();
             let mut current_sector = starting_sector;
 
-            // Write data to sectors
-            let sector_size = self.header.sector_size();
-            for chunk in data.chunks(sector_size) {
+            for (idx, chunk) in data.chunks(sector_size).enumerate() {
                 let offset = 512 + (u64::from(current_sector) * sector_size as u64);
                 self.writer.seek(SeekFrom::Start(offset))?;
                 self.writer.write_all(chunk)?;
 
-                // Pad sector if needed
                 if chunk.len() < sector_size {
                     let padding = vec![0u8; sector_size - chunk.len()];
                     self.writer.write_all(&padding)?;
                 }
 
-                // Allocate next sector if more data
-                if chunk.len() == sector_size && !chunk.is_empty() {
+                if idx + 1 < total_chunks {
                     let next_sector = self.allocate_sector();
                     self.fat[current_sector as usize] = next_sector;
                     current_sector = next_sector;
                 }
             }
 
-            (starting_sector, false)
+            (starting_sector, data.len() as u64)
         };
 
         let entry = DirectoryEntry {
@@ -831,15 +858,29 @@ impl<W: Write + Seek> StorageWriter<W> {
             creation_time: 0,
             modified_time: 0,
             starting_sector,
-            size: data.len() as u64,
+            size,
         };
 
         self.directory_entries.push(entry);
+        self.children.entry(parent_id).or_default().push(entry_id);
         Ok(entry_id)
     }
 
-    /// Create storage (directory)
+    /// Create a nested storage under the root (back-compat wrapper).
     pub fn create_storage(&mut self, name: &str) -> Result<u32> {
+        self.create_storage_in(0, name, [0u8; 16])
+    }
+
+    /// Create a nested storage as a child of `parent_id`.
+    ///
+    /// `clsid` is written into the directory entry's CLSID field — for AAF
+    /// objects this is the class AUID.
+    pub fn create_storage_in(
+        &mut self,
+        parent_id: u32,
+        name: &str,
+        clsid: [u8; 16],
+    ) -> Result<u32> {
         let entry_id = self.directory_entries.len() as u32;
 
         let entry = DirectoryEntry {
@@ -849,7 +890,7 @@ impl<W: Write + Seek> StorageWriter<W> {
             left_sibling_id: 0xFFFFFFFF,
             right_sibling_id: 0xFFFFFFFF,
             child_id: 0xFFFFFFFF,
-            clsid: [0u8; 16],
+            clsid,
             state_bits: 0,
             creation_time: 0,
             modified_time: 0,
@@ -858,63 +899,122 @@ impl<W: Write + Seek> StorageWriter<W> {
         };
 
         self.directory_entries.push(entry);
+        self.children.entry(parent_id).or_default().push(entry_id);
         Ok(entry_id)
+    }
+
+    /// Link each parent's children list into a left-leaning chain so the
+    /// CFB tree-walking reader can recover them.
+    ///
+    /// A truly conformant CFB requires names sorted by (length, lexical) and
+    /// a balanced red-black tree — that's future-wave; this revision focuses
+    /// on byte-symmetric round-trip within the crate, which the existing
+    /// `StorageReader::collect_children` recovers via in-order DFS.
+    fn link_children(&mut self) {
+        let keys: Vec<u32> = self.children.keys().copied().collect();
+        for parent_id in keys {
+            let children = match self.children.get(&parent_id) {
+                Some(c) if !c.is_empty() => c.clone(),
+                _ => continue,
+            };
+            if let Some(parent) = self.directory_entries.get_mut(parent_id as usize) {
+                parent.child_id = children[0];
+            }
+            for window in children.windows(2) {
+                let cur = window[0];
+                let next = window[1];
+                if let Some(e) = self.directory_entries.get_mut(cur as usize) {
+                    e.left_sibling_id = 0xFFFFFFFF;
+                    e.right_sibling_id = next;
+                }
+            }
+            if let Some(&last) = children.last() {
+                if let Some(e) = self.directory_entries.get_mut(last as usize) {
+                    e.left_sibling_id = 0xFFFFFFFF;
+                    e.right_sibling_id = 0xFFFFFFFF;
+                }
+            }
+        }
     }
 
     /// Finalize and write all structures
     pub fn finalize(&mut self) -> Result<()> {
+        // Link the directory tree before serialization so children are
+        // reachable from each parent.
+        self.link_children();
+        // Apply user-set root CLSID
+        if let Some(root) = self.directory_entries.get_mut(0) {
+            root.clsid = self.root_clsid;
+        }
+
         // Update root entry with mini stream data
         if !self.mini_stream_data.is_empty() {
             let mini_stream_sector = self.allocate_sector();
             let sector_size = self.header.sector_size();
             let mini_stream_data = self.mini_stream_data.clone();
+            let total_chunks = mini_stream_data.len().div_ceil(sector_size);
 
             let mut current_sector = mini_stream_sector;
-            for chunk in mini_stream_data.chunks(sector_size) {
+            for (idx, chunk) in mini_stream_data.chunks(sector_size).enumerate() {
                 let offset = 512 + (u64::from(current_sector) * sector_size as u64);
                 self.writer.seek(SeekFrom::Start(offset))?;
                 self.writer.write_all(chunk)?;
+                if chunk.len() < sector_size {
+                    let padding = vec![0u8; sector_size - chunk.len()];
+                    self.writer.write_all(&padding)?;
+                }
 
-                if chunk.len() == sector_size {
+                if idx + 1 < total_chunks {
                     let next_sector = self.allocate_sector();
                     self.fat[current_sector as usize] = next_sector;
                     current_sector = next_sector;
                 }
             }
 
-            self.directory_entries[0].starting_sector = mini_stream_sector;
-            self.directory_entries[0].size = mini_stream_data.len() as u64;
+            if let Some(root) = self.directory_entries.get_mut(0) {
+                root.starting_sector = mini_stream_sector;
+                root.size = mini_stream_data.len() as u64;
+            }
         }
 
         // Write mini FAT if needed
         if !self.mini_fat.is_empty() {
-            self.header.first_mini_fat_sector = self.allocate_sector();
             let sector_size = self.header.sector_size();
             let entries_per_sector = sector_size / 4;
             let mini_fat = self.mini_fat.clone();
+            let needed_sectors = mini_fat.len().div_ceil(entries_per_sector);
 
-            let mut current_sector = self.header.first_mini_fat_sector;
-            for chunk in mini_fat.chunks(entries_per_sector) {
-                let offset = 512 + (u64::from(current_sector) * sector_size as u64);
+            // Pre-allocate all mini-FAT sectors so we can chain them in the
+            // FAT correctly (avoids growing self.fat while we iterate).
+            let mut mini_fat_sectors = Vec::with_capacity(needed_sectors);
+            for _ in 0..needed_sectors {
+                mini_fat_sectors.push(self.allocate_sector());
+            }
+            if let Some(&first) = mini_fat_sectors.first() {
+                self.header.first_mini_fat_sector = first;
+            }
+
+            for (i, chunk) in mini_fat.chunks(entries_per_sector).enumerate() {
+                let sector = mini_fat_sectors[i];
+                let offset = 512 + (u64::from(sector) * sector_size as u64);
                 self.writer.seek(SeekFrom::Start(offset))?;
 
                 for &entry in chunk {
                     self.writer.write_u32::<LittleEndian>(entry)?;
                 }
-
-                // Pad sector
                 for _ in chunk.len()..entries_per_sector {
                     self.writer.write_u32::<LittleEndian>(FREE_SECTOR)?;
                 }
 
-                if chunk.len() == entries_per_sector {
-                    let next_sector = self.allocate_sector();
-                    self.fat[current_sector as usize] = next_sector;
-                    current_sector = next_sector;
+                // Chain in FAT to next mini-FAT sector
+                if i + 1 < mini_fat_sectors.len() {
+                    self.fat[sector as usize] = mini_fat_sectors[i + 1];
+                } else {
+                    self.fat[sector as usize] = END_OF_CHAIN;
                 }
             }
 
-            self.header.mini_fat_sectors = mini_fat.len().div_ceil(entries_per_sector) as u32;
+            self.header.mini_fat_sectors = needed_sectors as u32;
         }
 
         // Write directory
@@ -923,78 +1023,115 @@ impl<W: Write + Seek> StorageWriter<W> {
         // Write FAT
         self.write_fat()?;
 
+        // Update total sectors before header is written
+        self.header.total_sectors = self.current_sector;
+
         // Write header
         self.header.write(&mut self.writer)?;
 
+        // Ensure file is padded to last sector boundary so readers don't
+        // hit EOF mid-sector when chunks happened to align exactly.
+        if self.current_sector > 0 {
+            let sector_size = self.header.sector_size();
+            let target_end = 512u64 + u64::from(self.current_sector) * sector_size as u64;
+            self.writer.seek(SeekFrom::Start(target_end - 1))?;
+            self.writer.write_all(&[0u8])?;
+        }
+
+        self.writer.flush()?;
         Ok(())
     }
 
     /// Write directory entries
     fn write_directory(&mut self) -> Result<()> {
-        let first_dir_sector = self.allocate_sector();
-        self.header.first_dir_sector = first_dir_sector;
-
         let sector_size = self.header.sector_size();
         let entries_per_sector = sector_size / DIR_ENTRY_SIZE;
         let directory_entries = self.directory_entries.clone();
+        let needed_sectors = directory_entries.len().div_ceil(entries_per_sector).max(1);
 
-        let mut current_sector = first_dir_sector;
-        for chunk in directory_entries.chunks(entries_per_sector) {
-            let offset = 512 + (u64::from(current_sector) * sector_size as u64);
+        // Pre-allocate directory sectors
+        let mut dir_sectors = Vec::with_capacity(needed_sectors);
+        for _ in 0..needed_sectors {
+            dir_sectors.push(self.allocate_sector());
+        }
+        if let Some(&first) = dir_sectors.first() {
+            self.header.first_dir_sector = first;
+        }
+
+        for (i, chunk) in directory_entries.chunks(entries_per_sector).enumerate() {
+            let sector = dir_sectors[i];
+            let offset = 512 + (u64::from(sector) * sector_size as u64);
             self.writer.seek(SeekFrom::Start(offset))?;
 
             for entry in chunk {
                 let data = entry.serialize()?;
                 self.writer.write_all(&data)?;
             }
-
             // Pad with empty entries
             for _ in chunk.len()..entries_per_sector {
                 self.writer.write_all(&[0u8; DIR_ENTRY_SIZE])?;
             }
 
-            if chunk.len() == entries_per_sector {
-                let next_sector = self.allocate_sector();
-                self.fat[current_sector as usize] = next_sector;
-                current_sector = next_sector;
+            if i + 1 < dir_sectors.len() {
+                self.fat[sector as usize] = dir_sectors[i + 1];
+            } else {
+                self.fat[sector as usize] = END_OF_CHAIN;
             }
         }
-
         Ok(())
     }
 
     /// Write FAT
+    ///
+    /// NOTE: only supports up to `HEADER_DIFAT_ENTRIES` (109) FAT sectors —
+    /// i.e. up to ~14 MiB of compound-file payload. Going beyond this needs
+    /// DIFAT sectors which are a future-wave concern; AAF compositions
+    /// typically fit comfortably.
     fn write_fat(&mut self) -> Result<()> {
         let sector_size = self.header.sector_size();
         let entries_per_sector = sector_size / 4;
 
-        // Calculate number of FAT sectors needed
-        let fat_sectors = self.fat.len().div_ceil(entries_per_sector);
-
-        // Allocate FAT sectors and update DIFAT
-        for i in 0..fat_sectors.min(HEADER_DIFAT_ENTRIES) {
-            let sector = self.allocate_sector();
-            self.header.difat[i] = sector;
-            self.fat[sector as usize] = FAT_SECTOR;
+        // Fixed-point iteration so that allocating FAT sectors (which extends
+        // self.fat) does not change the required sector count.
+        // For our scale this converges in ≤ 2 iterations.
+        let mut fat_sectors;
+        loop {
+            fat_sectors = self.fat.len().div_ceil(entries_per_sector);
+            let allocated = self
+                .header
+                .difat
+                .iter()
+                .take(HEADER_DIFAT_ENTRIES)
+                .filter(|&&s| s != FREE_SECTOR)
+                .count();
+            if allocated >= fat_sectors {
+                break;
+            }
+            let new_sector = self.allocate_sector();
+            self.header.difat[allocated] = new_sector;
+            // mark as FAT_SECTOR in the FAT itself
+            self.fat[new_sector as usize] = FAT_SECTOR;
         }
 
         self.header.fat_sectors = fat_sectors as u32;
 
         // Write FAT sectors
-        for (i, chunk) in self.fat.chunks(entries_per_sector).enumerate() {
-            if i < HEADER_DIFAT_ENTRIES {
-                let sector = self.header.difat[i];
-                let offset = 512 + (u64::from(sector) * sector_size as u64);
-                self.writer.seek(SeekFrom::Start(offset))?;
-
-                for &entry in chunk {
-                    self.writer.write_u32::<LittleEndian>(entry)?;
-                }
-
-                // Pad sector
-                for _ in chunk.len()..entries_per_sector {
-                    self.writer.write_u32::<LittleEndian>(FREE_SECTOR)?;
-                }
+        let fat_clone = self.fat.clone();
+        for (i, chunk) in fat_clone.chunks(entries_per_sector).enumerate() {
+            if i >= HEADER_DIFAT_ENTRIES {
+                break;
+            }
+            let sector = self.header.difat[i];
+            if sector == FREE_SECTOR {
+                break;
+            }
+            let offset = 512 + (u64::from(sector) * sector_size as u64);
+            self.writer.seek(SeekFrom::Start(offset))?;
+            for &entry in chunk {
+                self.writer.write_u32::<LittleEndian>(entry)?;
+            }
+            for _ in chunk.len()..entries_per_sector {
+                self.writer.write_u32::<LittleEndian>(FREE_SECTOR)?;
             }
         }
 

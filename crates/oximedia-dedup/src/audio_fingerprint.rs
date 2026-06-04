@@ -199,10 +199,8 @@ impl AudioFingerprintMatcher {
 
         for i in 0..n {
             for j in (i + 1)..n {
-                let dist = hamming_distance(
-                    self.fingerprints[i].1.hash,
-                    self.fingerprints[j].1.hash,
-                );
+                let dist =
+                    hamming_distance(self.fingerprints[i].1.hash, self.fingerprints[j].1.hash);
                 if dist <= self.threshold_bits {
                     union(&mut parent, i, j);
                 }
@@ -230,7 +228,10 @@ mod tests {
 
     #[test]
     fn test_hamming_distance_identical() {
-        assert_eq!(hamming_distance(0xDEAD_BEEF_CAFE_1234, 0xDEAD_BEEF_CAFE_1234), 0);
+        assert_eq!(
+            hamming_distance(0xDEAD_BEEF_CAFE_1234, 0xDEAD_BEEF_CAFE_1234),
+            0
+        );
     }
 
     #[test]
@@ -302,7 +303,9 @@ mod tests {
 
     #[test]
     fn test_fold_chroma_deterministic() {
-        let frame = [0.1, 0.05, 0.3, 0.0, 0.0, 0.2, 0.1, 0.05, 0.1, 0.05, 0.05, 0.0];
+        let frame = [
+            0.1, 0.05, 0.3, 0.0, 0.0, 0.2, 0.1, 0.05, 0.1, 0.05, 0.05, 0.0,
+        ];
         let h1 = fold_chroma_to_fingerprint(&[frame]);
         let h2 = fold_chroma_to_fingerprint(&[frame]);
         assert_eq!(h1, h2);
@@ -333,7 +336,10 @@ mod tests {
     #[test]
     fn test_cluster_single_item() {
         let mut matcher = AudioFingerprintMatcher::new(4);
-        matcher.add("solo", AudioFingerprint::new(0x1234_5678_9ABC_DEF0, 1000, 44100, 1));
+        matcher.add(
+            "solo",
+            AudioFingerprint::new(0x1234_5678_9ABC_DEF0, 1000, 44100, 1),
+        );
         let clusters = matcher.cluster_similar();
         assert_eq!(clusters.len(), 1);
         assert_eq!(clusters[0], vec!["solo".to_string()]);
@@ -343,11 +349,23 @@ mod tests {
     fn test_cluster_two_groups() {
         let mut matcher = AudioFingerprintMatcher::new(4);
         // Group A: very similar hashes
-        matcher.add("a1", AudioFingerprint::new(0x0000_0000_0000_0000, 1000, 44100, 1));
-        matcher.add("a2", AudioFingerprint::new(0x0000_0000_0000_0001, 1000, 44100, 1));
+        matcher.add(
+            "a1",
+            AudioFingerprint::new(0x0000_0000_0000_0000, 1000, 44100, 1),
+        );
+        matcher.add(
+            "a2",
+            AudioFingerprint::new(0x0000_0000_0000_0001, 1000, 44100, 1),
+        );
         // Group B: far from group A
-        matcher.add("b1", AudioFingerprint::new(0xFFFF_FFFF_FFFF_FFFF, 1000, 44100, 1));
-        matcher.add("b2", AudioFingerprint::new(0xFFFF_FFFF_FFFF_FFFE, 1000, 44100, 1));
+        matcher.add(
+            "b1",
+            AudioFingerprint::new(0xFFFF_FFFF_FFFF_FFFF, 1000, 44100, 1),
+        );
+        matcher.add(
+            "b2",
+            AudioFingerprint::new(0xFFFF_FFFF_FFFF_FFFE, 1000, 44100, 1),
+        );
         let clusters = matcher.cluster_similar();
         assert_eq!(clusters.len(), 2);
     }

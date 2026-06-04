@@ -39,7 +39,9 @@ struct Lcg {
 
 impl Lcg {
     fn new(seed: u64) -> Self {
-        Self { state: seed ^ 0xDEAD_BEEF_CAFE_1234 }
+        Self {
+            state: seed ^ 0xDEAD_BEEF_CAFE_1234,
+        }
     }
 
     /// Returns the next value in [0, 1).
@@ -462,9 +464,7 @@ impl RoomToneMatcher {
 
 fn hann_window(size: usize) -> Vec<f32> {
     (0..size)
-        .map(|i| {
-            0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (size - 1) as f32).cos())
-        })
+        .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (size - 1) as f32).cos()))
         .collect()
 }
 
@@ -529,7 +529,10 @@ mod tests {
         assert_eq!(fill.len(), 2400);
         // Fill must not be all-zero
         let energy: f32 = fill.iter().map(|&x| x * x).sum();
-        assert!(energy > 1e-6, "Synthesized fill should have non-zero energy");
+        assert!(
+            energy > 1e-6,
+            "Synthesized fill should have non-zero energy"
+        );
     }
 
     #[test]

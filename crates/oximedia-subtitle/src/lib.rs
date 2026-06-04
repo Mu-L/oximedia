@@ -134,6 +134,60 @@ pub mod ttml_v2;
 // CEA-708 DTVCC decoder
 pub mod cea708;
 
+// ── Wave 6 / Slice F orphan modules ──────────────────────────────────────────
+
+// ASS/SSA style override tag parser (\an, \pos, \clip, etc.)
+pub mod ass_override;
+
+// WebVTT / SRT cue positioning helpers (line, position, size, align)
+pub mod cue_positioning;
+
+// Real-time CEA-608 decoder for live streams (`Eia608Decoder`).
+// `parser::eia608_realtime` is a separate module with `RealtimeCea608Decoder`.
+pub mod eia608_realtime;
+
+// Fallback font chain for missing glyphs (CJK, Arabic, Devanagari)
+pub mod fallback_fonts;
+
+// Glyph atlas packing and GPU-ready texture atlas for subtitle rendering
+pub mod glyph_atlas;
+
+// ASS karaoke timing engine with syllable-level highlight events
+pub mod karaoke_engine;
+
+// Real-time roll-up / paint-on / pop-on live caption display manager
+pub mod live_caption;
+
+// Subtitle cue position (x, y, origin) calculation helpers
+pub mod position;
+
+// Full-text subtitle search utilities (index build, query, highlight)
+pub mod search;
+
+// Sign language overlay region and picture-in-picture positioning
+pub mod sign_language;
+
+// SSA/ASS style cache for O(1) style lookups per dialogue line
+pub mod ssa_style_cache;
+
+// CSS-like subtitle style inheritance resolver
+pub mod style_inherit;
+
+// Chapter-level subtitle segmentation and chapter marker extraction
+pub mod subtitle_chapters;
+
+// Bitmap-based subtitle OCR for PGS / VobSub pattern matching
+pub mod subtitle_ocr;
+
+// DVB Teletext (ETS 300 706) subtitle extraction
+pub mod teletext;
+
+// Higher-level Teletext subtitle struct wrappers and utilities
+pub mod teletext_subtitle;
+
+// WCAG 2.1 AA/AAA contrast ratio validator for subtitle colours
+pub mod wcag_validator;
+
 // Re-export main types
 pub use cea708::{CaptionWindow, Dtvcc708Command, Dtvcc708Decoder, Dtvcc708Packet};
 pub use error::{SubtitleError, SubtitleResult};

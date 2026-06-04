@@ -323,7 +323,8 @@ impl GamutCoverage {
     /// Check if content is purely Rec.709 (100% within Rec.709).
     #[must_use]
     pub fn is_pure_rec709(&self) -> bool {
-        (self.rec709_pct - 100.0).abs() < f64::EPSILON || self.rec709_only_count == self.total_pixels
+        (self.rec709_pct - 100.0).abs() < f64::EPSILON
+            || self.rec709_only_count == self.total_pixels
     }
 
     /// Check if content uses wide color gamut (any pixels outside Rec.709).
@@ -592,7 +593,9 @@ mod tests {
         for i in (3..buf.len()).step_by(4) {
             buf[i] = 255;
         }
-        overlay.render_onto(&mut buf).expect("render should succeed");
+        overlay
+            .render_onto(&mut buf)
+            .expect("render should succeed");
 
         // At least some pixels should have green > 0
         let has_green = buf.chunks(4).any(|px| px[1] > 0);
@@ -660,7 +663,9 @@ mod tests {
         let overlay = GamutBoundaryOverlay::new().with_dimensions(128, 128);
         let img = overlay.render_to_image().expect("render should succeed");
         // White point cross should have bright pixels.
-        let has_bright = img.chunks(4).any(|px| px[0] > 200 && px[1] > 200 && px[2] > 200);
+        let has_bright = img
+            .chunks(4)
+            .any(|px| px[0] > 200 && px[1] > 200 && px[2] > 200);
         assert!(has_bright);
     }
 

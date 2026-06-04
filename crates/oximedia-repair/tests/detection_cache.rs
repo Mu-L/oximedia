@@ -11,7 +11,11 @@ use std::io::Write;
 use std::path::PathBuf;
 
 fn temp_file(name: &str, data: &[u8]) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("oximedia_cache_test_{}", name));
+    let path = std::env::temp_dir().join(format!(
+        "oximedia_cache_test_{}_{}",
+        std::process::id(),
+        name
+    ));
     let mut f = std::fs::File::create(&path).expect("create temp file");
     f.write_all(data).expect("write temp file");
     path

@@ -269,6 +269,174 @@ impl Header {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Zero-copy PTP message parsing
+// ---------------------------------------------------------------------------
+
+/// Minimum wire size of a PTP Sync message (header 34 bytes + timestamp 10 bytes).
+const SYNC_MESSAGE_MIN_LEN: usize = 44;
+
+/// A zero-copy view of a PTP Sync message that holds references into the
+/// original byte slice, avoiding any allocation.
+///
+/// Field accessors decode each field on demand from the backing slice.
+#[derive(Debug, Clone, Copy)]
+pub struct SyncMessageView<'a> {
+    /// The raw byte slice backing this view.  Must be ≥ 44 bytes.
+    buf: &'a [u8],
+}
+
+impl<'a> SyncMessageView<'a> {
+    /// Returns the message type nibble (low 4 bits of byte 0).
+    #[must_use]
+    pub fn message_type_raw(&self) -> u8 {
+        self.buf[0] & 0x0F
+    }
+
+    /// Returns the PTP version (high 4 bits of byte 0, shifted down).
+    #[must_use]
+    pub fn version(&self) -> u8 {
+        (self.buf[0] >> 4) & 0x0F
+    }
+
+    /// Returns the message length field (big-endian u16 at bytes 2–3).
+    #[must_use]
+    pub fn message_length(&self) -> u16 {
+        u16::from_be_bytes([self.buf[2], self.buf[3]])
+    }
+
+    /// Returns the domain number (byte 4).
+    #[must_use]
+    pub fn domain(&self) -> u8 {
+        self.buf[4]
+    }
+
+    /// Returns the raw 2-byte flags field (bytes 6–7).
+    #[must_use]
+    pub fn flags_raw(&self) -> [u8; 2] {
+        [self.buf[6], self.buf[7]]
+    }
+
+    /// Returns the correction field as a signed 64-bit integer (bytes 8–15).
+    #[must_use]
+    pub fn correction_field(&self) -> i64 {
+        i64::from_be_bytes(self.buf[8..16].try_into().unwrap_or([0u8; 8]))
+    }
+
+    /// Returns the clock identity bytes (bytes 20–27) as a reference into the
+    /// backing buffer.
+    #[must_use]
+    pub fn clock_identity_bytes(&self) -> &'a [u8] {
+        &self.buf[20..28]
+    }
+
+    /// Returns the port number (big-endian u16 at bytes 28–29).
+    #[must_use]
+    pub fn port_number(&self) -> u16 {
+        u16::from_be_bytes([self.buf[28], self.buf[29]])
+    }
+
+    /// Returns the sequence ID (big-endian u16 at bytes 30–31).
+    #[must_use]
+    pub fn sequence_id(&self) -> u16 {
+        u16::from_be_bytes([self.buf[30], self.buf[31]])
+    }
+
+    /// Returns the log message interval (signed byte 33).
+    #[must_use]
+    pub fn log_message_interval(&self) -> i8 {
+        self.buf[33] as i8
+    }
+
+    /// Returns the origin timestamp seconds (6-byte big-endian at bytes 34–39).
+    #[must_use]
+    pub fn origin_seconds(&self) -> u64 {
+        let hi = u16::from_be_bytes([self.buf[34], self.buf[35]]) as u64;
+        let lo =
+            u32::from_be_bytes([self.buf[36], self.buf[37], self.buf[38], self.buf[39]]) as u64;
+        (hi << 32) | lo
+    }
+
+    /// Returns the origin timestamp nanoseconds (big-endian u32 at bytes 40–43).
+    #[must_use]
+    pub fn origin_nanoseconds(&self) -> u32 {
+        u32::from_be_bytes([self.buf[40], self.buf[41], self.buf[42], self.buf[43]])
+    }
+
+    /// Returns the raw backing slice.
+    #[must_use]
+    pub fn as_bytes(&self) -> &'a [u8] {
+        self.buf
+    }
+}
+
+/// PTP error type for zero-copy parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PtpError {
+    /// The buffer is too short to hold a valid message.
+    BufferTooShort {
+        /// Minimum number of bytes required.
+        needed: usize,
+        /// Actual number of bytes supplied.
+        got: usize,
+    },
+    /// The message type field does not indicate a Sync message.
+    NotASyncMessage {
+        /// The actual message-type nibble found in the buffer.
+        got: u8,
+    },
+}
+
+impl std::fmt::Display for PtpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BufferTooShort { needed, got } => {
+                write!(f, "buffer too short: need {needed} bytes, got {got}")
+            }
+            Self::NotASyncMessage { got } => {
+                write!(f, "expected Sync (0x0), got message type 0x{got:x}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PtpError {}
+
+/// Parses a PTP Sync message from `buf` without any allocation, returning a
+/// [`SyncMessageView`] that borrows directly from the input slice.
+///
+/// # Errors
+///
+/// Returns [`PtpError::BufferTooShort`] when `buf` is shorter than 44 bytes,
+/// or [`PtpError::NotASyncMessage`] when the message-type nibble is not 0x0.
+pub fn parse_sync_message_zerocopy(buf: &[u8]) -> Result<SyncMessageView<'_>, PtpError> {
+    if buf.len() < SYNC_MESSAGE_MIN_LEN {
+        return Err(PtpError::BufferTooShort {
+            needed: SYNC_MESSAGE_MIN_LEN,
+            got: buf.len(),
+        });
+    }
+    let msg_type = buf[0] & 0x0F;
+    if msg_type != 0x0 {
+        return Err(PtpError::NotASyncMessage { got: msg_type });
+    }
+    Ok(SyncMessageView { buf })
+}
+
+/// Parses a batch of PTP Sync messages from a slice of byte slices.
+///
+/// Allocates the output `Vec` once with `bufs.len()` capacity and fills it
+/// with the parse result for each buffer.  Each element is either a
+/// [`SyncMessageView`] borrowing from the corresponding input slice, or a
+/// [`PtpError`] describing why that buffer could not be parsed.
+pub fn parse_sync_batch<'a>(bufs: &'a [&'a [u8]]) -> Vec<Result<SyncMessageView<'a>, PtpError>> {
+    let mut out = Vec::with_capacity(bufs.len());
+    for buf in bufs {
+        out.push(parse_sync_message_zerocopy(buf));
+    }
+    out
+}
+
 /// PTP Sync message.
 #[derive(Debug, Clone)]
 pub struct SyncMessage {
@@ -665,5 +833,113 @@ mod tests {
             SyncMessage::deserialize(&serialized[..]).expect("should succeed in test");
         assert_eq!(deserialized.origin_timestamp.seconds, 1000);
         assert_eq!(deserialized.origin_timestamp.nanoseconds, 500_000_000);
+    }
+
+    // -----------------------------------------------------------------------
+    // Zero-copy Sync message parsing tests
+    // -----------------------------------------------------------------------
+
+    /// Builds a minimal 44-byte Sync wire frame with the given seconds and
+    /// nanoseconds in the origin timestamp.
+    fn make_sync_buf(seconds: u64, nanoseconds: u32) -> Vec<u8> {
+        let clock_id = ClockIdentity([0xAA; 8]);
+        let port_id = PortIdentity::new(clock_id, 1);
+        let header = Header {
+            message_type: MessageType::Sync,
+            version: 2,
+            message_length: 44,
+            domain: Domain::DEFAULT,
+            flags: Flags::default(),
+            correction_field: 0,
+            source_port_identity: port_id,
+            sequence_id: 7,
+            control: 0,
+            log_message_interval: -7,
+        };
+        let sync = SyncMessage {
+            header,
+            origin_timestamp: PtpTimestamp::new(seconds, nanoseconds).expect("valid timestamp"),
+        };
+        sync.serialize().expect("serialise should succeed").to_vec()
+    }
+
+    #[test]
+    fn test_zerocopy_parse_valid_sync() {
+        let buf = make_sync_buf(12345, 678_000_000);
+        let view = parse_sync_message_zerocopy(&buf).expect("parse should succeed");
+        assert_eq!(view.origin_seconds(), 12345);
+        assert_eq!(view.origin_nanoseconds(), 678_000_000);
+        assert_eq!(view.sequence_id(), 7);
+        assert_eq!(view.domain(), 0);
+    }
+
+    #[test]
+    fn test_zerocopy_parse_buffer_too_short() {
+        // 43 bytes is one byte short of the minimum.
+        let buf = vec![0u8; 43];
+        let result = parse_sync_message_zerocopy(&buf);
+        assert!(matches!(
+            result,
+            Err(PtpError::BufferTooShort {
+                needed: 44,
+                got: 43
+            })
+        ));
+    }
+
+    #[test]
+    fn test_zerocopy_parse_wrong_message_type() {
+        let mut buf = make_sync_buf(0, 0);
+        // Overwrite byte 0 to set message type = Announce (0x0B).
+        buf[0] = (buf[0] & 0xF0) | 0x0B;
+        let result = parse_sync_message_zerocopy(&buf);
+        assert!(matches!(
+            result,
+            Err(PtpError::NotASyncMessage { got: 0x0B })
+        ));
+    }
+
+    #[test]
+    fn test_zerocopy_clock_identity_bytes_reference() {
+        // Verify that clock_identity_bytes() points into the original buffer.
+        let buf = make_sync_buf(0, 0);
+        let view = parse_sync_message_zerocopy(&buf).expect("valid sync");
+        let id_bytes = view.clock_identity_bytes();
+        // The make_sync_buf sets clock identity to [0xAA; 8].
+        assert_eq!(id_bytes, &[0xAA_u8; 8]);
+        // Verify lifetime: id_bytes borrows from buf.
+        assert_eq!(id_bytes.as_ptr(), buf[20..28].as_ptr());
+    }
+
+    #[test]
+    fn test_parse_sync_batch() {
+        let buf1 = make_sync_buf(100, 0);
+        let buf2 = make_sync_buf(200, 500_000_000);
+        let too_short = vec![0u8; 10];
+        let bufs: &[&[u8]] = &[buf1.as_slice(), buf2.as_slice(), too_short.as_slice()];
+        let results = parse_sync_batch(bufs);
+        assert_eq!(results.len(), 3);
+        assert!(results[0].is_ok());
+        assert!(results[1].is_ok());
+        assert!(results[2].is_err());
+        let v0 = results[0].as_ref().expect("first should succeed");
+        assert_eq!(v0.origin_seconds(), 100);
+        let v1 = results[1].as_ref().expect("second should succeed");
+        assert_eq!(v1.origin_seconds(), 200);
+        assert_eq!(v1.origin_nanoseconds(), 500_000_000);
+    }
+
+    #[test]
+    fn test_zerocopy_roundtrip_matches_allocating_parse() {
+        let buf = make_sync_buf(9_999_999, 123_456_789);
+        let view = parse_sync_message_zerocopy(&buf).expect("zero-copy parse");
+        let allocating = SyncMessage::deserialize(buf.as_slice()).expect("allocating parse");
+        // Both parsers must agree on the origin timestamp.
+        assert_eq!(view.origin_seconds(), allocating.origin_timestamp.seconds);
+        assert_eq!(
+            view.origin_nanoseconds(),
+            allocating.origin_timestamp.nanoseconds
+        );
+        assert_eq!(view.sequence_id(), allocating.header.sequence_id);
     }
 }

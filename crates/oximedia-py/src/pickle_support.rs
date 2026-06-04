@@ -129,7 +129,10 @@ impl PyPickleEncoderConfig {
     }
 
     /// Pickle protocol: return (class, args, state).
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String, u32, u32, f64, u32, u32, String),)> {
+    fn __reduce__(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<(Py<PyAny>, (String, u32, u32, f64, u32, u32, String))> {
         let cls = py.get_type::<Self>().into_any().unbind();
         Ok((
             cls,
@@ -237,7 +240,10 @@ impl PyPickleQualityScore {
 
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (f64, f64, f64, String))> {
         let cls = py.get_type::<Self>().into_any().unbind();
-        Ok((cls, (self.psnr, self.ssim, self.overall, self.grade.clone())))
+        Ok((
+            cls,
+            (self.psnr, self.ssim, self.overall, self.grade.clone()),
+        ))
     }
 
     fn __repr__(&self) -> String {
@@ -395,7 +401,10 @@ impl PyPickleMediaMetadata {
     fn __reduce__(
         &self,
         py: Python<'_>,
-    ) -> PyResult<(Py<PyAny>, (String, f64, String, String, String, u32, u32, u32, u32))> {
+    ) -> PyResult<(
+        Py<PyAny>,
+        (String, f64, String, String, String, u32, u32, u32, u32),
+    )> {
         let cls = py.get_type::<Self>().into_any().unbind();
         Ok((
             cls,
@@ -416,8 +425,12 @@ impl PyPickleMediaMetadata {
     fn __repr__(&self) -> String {
         format!(
             "PyPickleMediaMetadata(path={:?}, {:.1}s, {}x{}, {} + {})",
-            self.path, self.duration_secs, self.width, self.height,
-            self.video_codec, self.audio_codec
+            self.path,
+            self.duration_secs,
+            self.width,
+            self.height,
+            self.video_codec,
+            self.audio_codec
         )
     }
 
@@ -545,8 +558,7 @@ mod tests {
     #[test]
     fn test_media_metadata_new() {
         let md = PyPickleMediaMetadata::new(
-            "test.mkv", 120.0, "matroska", "av1", "opus",
-            1920, 1080, 48000, 2,
+            "test.mkv", 120.0, "matroska", "av1", "opus", 1920, 1080, 48000, 2,
         );
         assert_eq!(md.path, "test.mkv");
         assert!((md.duration_secs - 120.0).abs() < f64::EPSILON);
@@ -555,20 +567,15 @@ mod tests {
 
     #[test]
     fn test_media_metadata_has_video() {
-        let md = PyPickleMediaMetadata::new(
-            "test.mkv", 10.0, "matroska", "av1", "",
-            1920, 1080, 0, 0,
-        );
+        let md =
+            PyPickleMediaMetadata::new("test.mkv", 10.0, "matroska", "av1", "", 1920, 1080, 0, 0);
         assert!(md.has_video());
         assert!(!md.has_audio());
     }
 
     #[test]
     fn test_media_metadata_has_audio() {
-        let md = PyPickleMediaMetadata::new(
-            "test.ogg", 10.0, "ogg", "", "opus",
-            0, 0, 48000, 2,
-        );
+        let md = PyPickleMediaMetadata::new("test.ogg", 10.0, "ogg", "", "opus", 0, 0, 48000, 2);
         assert!(!md.has_video());
         assert!(md.has_audio());
     }
@@ -576,8 +583,7 @@ mod tests {
     #[test]
     fn test_media_metadata_pixel_count() {
         let md = PyPickleMediaMetadata::new(
-            "test.mkv", 10.0, "matroska", "av1", "opus",
-            3840, 2160, 48000, 2,
+            "test.mkv", 10.0, "matroska", "av1", "opus", 3840, 2160, 48000, 2,
         );
         assert_eq!(md.pixel_count(), 3840 * 2160);
     }
@@ -585,8 +591,7 @@ mod tests {
     #[test]
     fn test_media_metadata_repr() {
         let md = PyPickleMediaMetadata::new(
-            "test.mkv", 120.5, "matroska", "av1", "opus",
-            1920, 1080, 48000, 2,
+            "test.mkv", 120.5, "matroska", "av1", "opus", 1920, 1080, 48000, 2,
         );
         let repr = md.__repr__();
         assert!(repr.contains("test.mkv"));
@@ -597,8 +602,7 @@ mod tests {
     #[test]
     fn test_media_metadata_clone_eq() {
         let md = PyPickleMediaMetadata::new(
-            "test.mkv", 10.0, "matroska", "av1", "opus",
-            1920, 1080, 48000, 2,
+            "test.mkv", 10.0, "matroska", "av1", "opus", 1920, 1080, 48000, 2,
         );
         let md2 = md.clone();
         assert_eq!(md, md2);

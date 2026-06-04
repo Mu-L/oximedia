@@ -36,8 +36,8 @@
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_possible_truncation)]
 
-use std::collections::BinaryHeap;
 use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -247,11 +247,7 @@ impl AdaptiveJitterBuffer {
     ///   previous packet's arrival timestamp (clock skew / out-of-range).
     pub fn insert(&mut self, seq_num: u16, timestamp_us: u64, data: Vec<u8>) -> JitterResult<()> {
         // Reject duplicate sequence numbers.
-        if self
-            .heap
-            .iter()
-            .any(|h| h.slot.seq_num == seq_num)
-        {
+        if self.heap.iter().any(|h| h.slot.seq_num == seq_num) {
             return Err(JitterError::DuplicatePacket { seq_num });
         }
 
@@ -266,9 +262,7 @@ impl AdaptiveJitterBuffer {
         // Update jitter EMA from inter-arrival delay.
         if let Some(last) = self.last_arrival_us {
             if timestamp_us < last {
-                return Err(JitterError::InvalidTimestamp {
-                    timestamp_us,
-                });
+                return Err(JitterError::InvalidTimestamp { timestamp_us });
             }
             let inter_arrival = (timestamp_us - last) as f64;
             let alpha = self.config.adaptation_rate as f64;
@@ -434,8 +428,10 @@ mod tests {
         // then seq 0 arrives slightly later, then seq 1 last.
         // The playout ordering will thus be by arrival time: seq 2, seq 0, seq 1.
         buf.insert(2, base, vec![0xCC]).expect("insert 2 at t=0");
-        buf.insert(0, base + 1_000, vec![0xAA]).expect("insert 0 at t=1ms");
-        buf.insert(1, base + 2_000, vec![0xBB]).expect("insert 1 at t=2ms");
+        buf.insert(0, base + 1_000, vec![0xAA])
+            .expect("insert 0 at t=1ms");
+        buf.insert(1, base + 2_000, vec![0xBB])
+            .expect("insert 1 at t=2ms");
 
         let far_future = base + 500_000;
         let first = buf.pop_ready(far_future).expect("first pop");
@@ -469,14 +465,18 @@ mod tests {
         let mut buf = default_buf();
         buf.insert(7, 0, vec![]).expect("first insert");
         let result = buf.insert(7, 1_000, vec![]);
-        assert!(matches!(result, Err(JitterError::DuplicatePacket { seq_num: 7 })));
+        assert!(matches!(
+            result,
+            Err(JitterError::DuplicatePacket { seq_num: 7 })
+        ));
     }
 
     // 5. Invalid timestamp (non-monotonic) returns error
     #[test]
     fn test_invalid_timestamp_error() {
         let mut buf = default_buf();
-        buf.insert(0, 1_000_000, vec![]).expect("first insert at 1s");
+        buf.insert(0, 1_000_000, vec![])
+            .expect("first insert at 1s");
         let result = buf.insert(1, 500_000, vec![]); // earlier than previous
         assert!(matches!(result, Err(JitterError::InvalidTimestamp { .. })));
     }
@@ -498,7 +498,7 @@ mod tests {
             initial_depth_ms: 20.0,
             depth_step_ms: 5.0,
             late_expand_threshold: 0.0, // always expand
-            adaptation_rate: 1.0,        // immediate
+            adaptation_rate: 1.0,       // immediate
             ..Default::default()
         };
         let mut buf = AdaptiveJitterBuffer::new(config);

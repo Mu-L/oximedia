@@ -305,7 +305,8 @@ impl DialogueEnhancer {
             // Compute target de-ess gain
             let target_gain = if self.hf_env > de_ess_threshold_linear {
                 // Over-threshold gain reduction
-                let over_db = linear_to_db_f64(self.hf_env) - f64::from(self.config.de_ess_threshold_db);
+                let over_db =
+                    linear_to_db_f64(self.hf_env) - f64::from(self.config.de_ess_threshold_db);
                 let reduction_db = over_db * (1.0 - 1.0 / ratio);
                 db_to_linear_f64(-reduction_db).clamp(0.0, 1.0)
             } else {
@@ -330,10 +331,7 @@ impl DialogueEnhancer {
     /// # Errors
     ///
     /// Returns [`DialogueError::EmptyInput`] or [`DialogueError::InvalidSampleRate`].
-    pub fn analyze(
-        samples: &[f32],
-        sample_rate: u32,
-    ) -> Result<DialogueAnalysis, DialogueError> {
+    pub fn analyze(samples: &[f32], sample_rate: u32) -> Result<DialogueAnalysis, DialogueError> {
         if sample_rate == 0 {
             return Err(DialogueError::InvalidSampleRate(sample_rate));
         }
@@ -372,7 +370,11 @@ impl DialogueEnhancer {
         let release_coeff = (-1.0 / (0.050 * fs)).exp();
         for &s in samples {
             let hf = hf_filter.process(f64::from(s)).abs();
-            let coeff = if hf > hf_env { attack_coeff } else { release_coeff };
+            let coeff = if hf > hf_env {
+                attack_coeff
+            } else {
+                release_coeff
+            };
             hf_env = coeff * hf_env + (1.0 - coeff) * hf;
             if hf_env > de_ess_thresh {
                 de_ess_count += 1;
@@ -452,10 +454,7 @@ mod tests {
 
     fn make_sine(freq: f32, amplitude: f32, n: usize, fs: u32) -> Vec<f32> {
         (0..n)
-            .map(|i| {
-                amplitude
-                    * (2.0 * std::f32::consts::PI * freq * i as f32 / fs as f32).sin()
-            })
+            .map(|i| amplitude * (2.0 * std::f32::consts::PI * freq * i as f32 / fs as f32).sin())
             .collect()
     }
 
@@ -465,28 +464,40 @@ mod tests {
     fn invalid_presence_boost_rejected() {
         let mut cfg = DialogueEnhancerConfig::default();
         cfg.presence_boost_db = -5.0;
-        assert!(matches!(cfg.validate(), Err(DialogueError::InvalidConfig(_))));
+        assert!(matches!(
+            cfg.validate(),
+            Err(DialogueError::InvalidConfig(_))
+        ));
     }
 
     #[test]
     fn invalid_presence_freq_rejected() {
         let mut cfg = DialogueEnhancerConfig::default();
         cfg.presence_freq_hz = 0.0;
-        assert!(matches!(cfg.validate(), Err(DialogueError::InvalidConfig(_))));
+        assert!(matches!(
+            cfg.validate(),
+            Err(DialogueError::InvalidConfig(_))
+        ));
     }
 
     #[test]
     fn invalid_q_rejected() {
         let mut cfg = DialogueEnhancerConfig::default();
         cfg.presence_q = 0.0;
-        assert!(matches!(cfg.validate(), Err(DialogueError::InvalidConfig(_))));
+        assert!(matches!(
+            cfg.validate(),
+            Err(DialogueError::InvalidConfig(_))
+        ));
     }
 
     #[test]
     fn invalid_de_ess_ratio_rejected() {
         let mut cfg = DialogueEnhancerConfig::default();
         cfg.de_ess_ratio = 0.5;
-        assert!(matches!(cfg.validate(), Err(DialogueError::InvalidConfig(_))));
+        assert!(matches!(
+            cfg.validate(),
+            Err(DialogueError::InvalidConfig(_))
+        ));
     }
 
     // ── Invalid sample rate ─────────────────────────────────────────────────
@@ -512,7 +523,9 @@ mod tests {
         };
         let mut enhancer = DialogueEnhancer::new(cfg, FS).expect("valid config");
         let mut samples = make_silence(512);
-        enhancer.process_block(&mut samples, FS).expect("process ok");
+        enhancer
+            .process_block(&mut samples, FS)
+            .expect("process ok");
         // All samples should be tiny (noise gate attenuated 60 dB)
         for &s in &samples {
             assert!(s.abs() < 1e-3, "expected near-zero, got {s}");
@@ -533,7 +546,9 @@ mod tests {
         // 1 kHz sine at -6 dBFS → well above -40 dBFS gate
         let mut samples = make_sine(1_000.0, 0.5, 512, FS);
         let original: Vec<f32> = samples.clone();
-        enhancer.process_block(&mut samples, FS).expect("process ok");
+        enhancer
+            .process_block(&mut samples, FS)
+            .expect("process ok");
         // Output should be significantly larger than gate-attenuated version
         let out_rms = block_rms(&samples);
         let in_rms = block_rms(&original);

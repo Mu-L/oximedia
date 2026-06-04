@@ -53,6 +53,12 @@
   - **Tests:** `tests/y4m_parse.rs` — round-trip 4-frame 64×64; reject malformed header; reject frame-size mismatch
 - [ ] Add guide for interpreting benchmark results and quality metrics
 - [ ] Document `regression_detect` module usage for CI-based performance regression detection
+- [x] Implement `Y4mReader` / `Y4mWriter` full y4m sequence parsing and frame iteration in `sequences.rs` (done 2026-05-29)
+  - **Goal:** Parse YUV4MPEG2 headers (W/H/F/I/A/C/X), iterate frames via FRAME separator, support C420jpeg/420mpeg2/420paldv/422/444 formats. `Y4mWriter` emits byte-identical output.
+  - **Design:** `Y4mReader` wraps `BufRead`, parses header with nom or hand-rolled parser, yields `BenchFrame { y_plane, u_plane, v_plane, width, height, color_format }`. `Y4mWriter` mirrors the reader.
+  - **Files:** `src/y4m_rw.rs` (new module), `src/sequences.rs` (re-exports)
+  - **Tests:** 5-frame synthetic sequence round-trip byte-identical. Color format parsing coverage. Mono round-trip.
+  - **Risk:** None — YUV4MPEG2 format is stable and well-documented.
 
 ## Planned (2026-05-04)
 
@@ -61,6 +67,13 @@
   - **Design:** SI = stddev(Sobel(frame)); TI = stddev(frame[t]−frame[t-1]); motion = 16×16 block-SAD vs prev frame, magnitude histogram
   - **Files:** `crates/oximedia-bench/src/runner.rs`
   - **Tests:** `tests/complexity.rs` — constant-color → 0 complexity; noise-frame → positive SI; translating square → positive TI
+
+- [x] Implement ITU-T P.910 SI/TI/motion complexity metrics in `itu_p910.rs` (done 2026-05-29)
+  - **Goal:** `P910Metrics { si_max, ti_max, motion_mean }` computable from a sequence of `BenchFrame`s. SI = max over frames of `std_dev(Sobel(Y))`; TI = max over frame-pairs of `std_dev(Y_n - Y_{n-1})`; motion = mean per-frame block SAD (16×16 blocks vs previous frame).
+  - **Design:** New `src/itu_p910.rs` with pure-scalar Sobel 3×3, frame-difference, block SAD. `P910Analyzer::feed_frame(&[u8])` + `P910Analyzer::metrics() -> P910Metrics`. No SciRS2 dep.
+  - **Files:** `src/itu_p910.rs` (new)
+  - **Tests:** Solid gray → SI=0; sharp edge → SI>50. Identical frames → TI=0; static frames → motion=0; max-contrast frames → motion>100.
+  - **Risk:** None — straightforward ITU spec.
 
 - [x] Implement Bjøntegaard Delta (BD-Rate, BD-PSNR) from 4-point RD curves (done 2026-05-05)
   - **Goal:** Bjøntegaard Delta (BD-Rate, BD-PSNR) from 4-point RD curves

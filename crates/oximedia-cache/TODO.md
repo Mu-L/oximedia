@@ -8,12 +8,12 @@
 
 ## Enhancements
 - [x] Add TTL (time-to-live) expiration support to `lru_cache::LruCache` entries
-- [ ] Extend `tiered_cache` with async disk tier using file-backed storage (not just simulated) (verified-open 2026-05-16: tiered_cache has simulated disk tier, not actual file I/O)
+- [x] Extend `tiered_cache` with async disk tier using file-backed storage (not just simulated) (verified: tiered_cache.rs:52-259)
 - [x] Add cache entry pinning in `lru_cache` to prevent eviction of critical items
-- [ ] Implement adaptive tier promotion thresholds in `tiered_cache` based on access frequency (verified-open 2026-05-16: promotion_threshold is a fixed config field, not dynamically adapted)
+- [x] Implement adaptive tier promotion thresholds in `tiered_cache` based on access frequency (Wave 13: P² quantile estimator, tiered_cache.rs)
 - [x] Extend `bloom_filter` with scalable Bloom filter variant that grows as elements are added
 - [x] Add `distributed_cache` virtual node support for better hash ring distribution (verified 2026-05-16; src/distributed_cache.rs:50 virtual_nodes_per_node, ConsistentHash ring)
-- [ ] Improve `content_aware_cache` scoring with configurable weight factors per media type (verified-open 2026-05-16: ContentCachePriority uses fixed per-type scoring, not user-configurable weights)
+- [x] Improve `content_aware_cache` scoring with configurable weight factors per media type (Wave 13: ScoringWeights, content_aware_cache.rs)
 - [x] Add cache entry compression option for `tiered_cache` L2+ tiers to reduce memory footprint (verified 2026-05-16; src/tiered_cache.rs:65 TierConfig.compress, run-length encoding:133)
 
 ## New Features
@@ -27,18 +27,18 @@
 
 ## Performance
 - [ ] Replace HashMap with a more cache-friendly data structure in `lru_cache` (e.g., Swiss table) (verified-open 2026-05-16: no hashbrown/Swiss table in lru_cache.rs)
-- [ ] Add SIMD-accelerated hash computation for `bloom_filter` FNV-1a double hashing (verified-open 2026-05-16: no SIMD hash in bloom_filter.rs)
+- [x] Add SIMD-accelerated hash computation for `bloom_filter` FNV-1a double hashing (Wave 13: hash_batch_fnv1a, AVX2+NEON+scalar, bloom_filter.rs)
 - [x] Implement sharded LRU cache for concurrent access without global lock contention (verified 2026-05-16; src/sharded_lru.rs)
-- [ ] Use arena allocation for `tiered_cache` tier entries to reduce allocator pressure (verified-open 2026-05-16: no arena/bump alloc in tiered_cache.rs)
-- [ ] Benchmark `eviction_policies::TinyLFU` admission gate overhead and optimize hot path (verified-open 2026-05-16: not yet profiled/optimized)
+- [x] Use arena allocation for `tiered_cache` tier entries to reduce allocator pressure (Wave 13: BumpArena, TierEntry::Arena, tiered_cache.rs)
+- [x] Benchmark `eviction_policies::TinyLFU` admission gate overhead and optimize hot path (Wave 13: benches/tinylfu.rs, inlined CMS, eviction_policies.rs)
 
 ## Testing
-- [ ] Add concurrent access stress test for `lru_cache` with multiple reader/writer threads
-- [ ] Test `tiered_cache` promotion/demotion correctness under mixed workload patterns
-- [ ] Add false positive rate validation test for `bloom_filter` against theoretical bounds
-- [ ] Test `distributed_cache` rebalancing when nodes join/leave the consistent hash ring
-- [ ] Add property-based test for `cache_warming` ensuring warmup plan respects capacity limits
-- [ ] Test `content_aware_cache` eviction ordering with heterogeneous entry sizes and priorities
+- [x] Add concurrent access stress test for `lru_cache` with multiple reader/writer threads (Wave 13: test_lru_concurrent_stress)
+- [x] Test `tiered_cache` promotion/demotion correctness under mixed workload patterns (Wave 13: test_tiered_promote_demote_correctness)
+- [x] Add false positive rate validation test for `bloom_filter` against theoretical bounds (Wave 13: test_bloom_fpr_validation)
+- [x] Test `distributed_cache` rebalancing when nodes join/leave the consistent hash ring (Wave 13: test_distributed_cache_rebalance)
+- [x] Add property-based test for `cache_warming` ensuring warmup plan respects capacity limits (Wave 13: warmup_plan_respects_capacity proptest)
+- [x] Test `content_aware_cache` eviction ordering with heterogeneous entry sizes and priorities (Wave 13: test_content_aware_eviction_order)
 
 ## Documentation
 - [ ] Add capacity planning guide: how to size LRU/tiered caches for different media workloads

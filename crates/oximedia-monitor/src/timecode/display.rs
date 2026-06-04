@@ -11,8 +11,7 @@ impl TimecodeDisplay {
     }
 
     /// Reset display.
-    pub fn reset(&mut self) {
-    }
+    pub fn reset(&mut self) {}
 }
 
 impl Default for TimecodeDisplay {

@@ -503,8 +503,11 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        // Include PID and thread-local counter so parallel nextest processes
+        // never collide on temp-file names.
+        let pid = std::process::id();
         let mut path = std::env::temp_dir();
-        path.push(format!("oximedia_lfr_test_{id}.bin"));
+        path.push(format!("oximedia_lfr_test_{pid}_{id}.bin"));
         let mut f = File::create(&path).expect("create temp file");
         f.write_all(data).expect("write temp data");
         // Ensure the file is flushed and metadata is visible.

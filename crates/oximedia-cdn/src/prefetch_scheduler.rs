@@ -3,9 +3,9 @@
 //!
 //! # Overview
 //!
-//! [`PrefetchScheduler`] analyses a rolling access log to identify **hot
+//! `PrefetchScheduler` analyses a rolling access log to identify **hot
 //! content** (ranked by a configurable popularity score), computes a list of
-//! edge PoPs that are missing that content, and generates [`PrefetchTask`]s
+//! edge PoPs that are missing that content, and generates `PrefetchTask`s
 //! that an operator's delivery pipeline can execute.
 //!
 //! Popularity scoring uses a combination of:

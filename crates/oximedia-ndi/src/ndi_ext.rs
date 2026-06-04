@@ -80,7 +80,11 @@ impl TallyV2Message {
     /// Create a new v2 tally message.
     #[must_use]
     pub fn new(program: bool, preview: bool, record: bool) -> Self {
-        Self { program, preview, record }
+        Self {
+            program,
+            preview,
+            record,
+        }
     }
 
     /// Serialise to 2 bytes representing the packed flag word (little-endian u16).
@@ -176,7 +180,9 @@ impl PtzCommandEncoder {
         } else {
             0x03 // stop
         };
-        vec![0x81, 0x01, 0x06, 0x01, speed_byte, speed_byte, pan_dir, tilt_dir]
+        vec![
+            0x81, 0x01, 0x06, 0x01, speed_byte, speed_byte, pan_dir, tilt_dir,
+        ]
     }
 
     /// Encode a zoom command as a VISCA-like binary sequence.
@@ -214,7 +220,12 @@ impl NdiAudioMetadata {
     /// Create a new audio metadata record.
     #[must_use]
     pub fn new(channels: u16, sample_rate: u32, bits_per_sample: u16, timestamp: u64) -> Self {
-        Self { channels, sample_rate, bits_per_sample, timestamp }
+        Self {
+            channels,
+            sample_rate,
+            bits_per_sample,
+            timestamp,
+        }
     }
 
     /// Serialise to bytes.
@@ -251,7 +262,12 @@ impl NdiAudioMetadata {
         let timestamp = u64::from_le_bytes([
             buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
         ]);
-        Ok(Self { channels, sample_rate, bits_per_sample, timestamp })
+        Ok(Self {
+            channels,
+            sample_rate,
+            bits_per_sample,
+            timestamp,
+        })
     }
 }
 
@@ -272,7 +288,10 @@ impl NdiSource {
     /// Create a new NDI source.
     #[must_use]
     pub fn new(name: impl Into<String>, address: impl Into<String>) -> Self {
-        Self { name: name.into(), address: address.into() }
+        Self {
+            name: name.into(),
+            address: address.into(),
+        }
     }
 }
 
@@ -307,10 +326,8 @@ impl DiscoveryCache {
     /// Insert or refresh `source` in the cache with expiry at `now + ttl`.
     pub fn insert(&mut self, source: NdiSource, now: u64) {
         let expires_at = now.saturating_add(self.ttl_secs);
-        self.entries.insert(
-            source.name.clone(),
-            CacheEntry { source, expires_at },
-        );
+        self.entries
+            .insert(source.name.clone(), CacheEntry { source, expires_at });
     }
 
     /// Return all sources that have not yet expired as of `now`.
@@ -356,7 +373,9 @@ impl NdiMetadataFrame {
     /// Create a new metadata frame.
     #[must_use]
     pub fn new(xml_data: impl Into<String>) -> Self {
-        Self { xml_data: xml_data.into() }
+        Self {
+            xml_data: xml_data.into(),
+        }
     }
 
     /// Return the byte length of the XML payload.
@@ -430,7 +449,8 @@ impl BandwidthEstimator {
         let measured_kbps = (bytes_sent as f64 * 8.0 / elapsed_ms as f64) as f32;
 
         if self.initialized {
-            self.estimate_kbps = self.alpha * measured_kbps + (1.0 - self.alpha) * self.estimate_kbps;
+            self.estimate_kbps =
+                self.alpha * measured_kbps + (1.0 - self.alpha) * self.estimate_kbps;
         } else {
             self.estimate_kbps = measured_kbps;
             self.initialized = true;
@@ -454,7 +474,6 @@ impl Default for BandwidthEstimator {
 // Multi-sender
 // ─────────────────────────────────────────────────────────────────────────────
 
-
 /// A stub video frame type for multi-sender demonstrations.
 #[derive(Debug, Clone)]
 pub struct VideoFrame {
@@ -470,7 +489,11 @@ impl VideoFrame {
     /// Create a new video frame.
     #[must_use]
     pub fn new(width: u32, height: u32, data: Vec<u8>) -> Self {
-        Self { width, height, data }
+        Self {
+            width,
+            height,
+            data,
+        }
     }
 }
 
@@ -501,10 +524,14 @@ impl NdiMultiSender {
     /// Returns [`NdiError::Protocol`] when `name` is empty or already registered.
     pub fn add_sender(&mut self, name: String) -> Result<usize> {
         if name.is_empty() {
-            return Err(NdiError::Protocol("Sender name must not be empty".to_string()));
+            return Err(NdiError::Protocol(
+                "Sender name must not be empty".to_string(),
+            ));
         }
         if self.sender_names.contains(&name) {
-            return Err(NdiError::Protocol(format!("Sender '{name}' already registered")));
+            return Err(NdiError::Protocol(format!(
+                "Sender '{name}' already registered"
+            )));
         }
         let idx = self.sender_names.len();
         self.sender_names.push(name);
@@ -599,7 +626,11 @@ mod tests {
 
     #[test]
     fn test_tally_v2_round_trip() {
-        for (p, pr, r) in [(true, false, false), (false, true, true), (true, true, true)] {
+        for (p, pr, r) in [
+            (true, false, false),
+            (false, true, true),
+            (true, true, true),
+        ] {
             let msg = TallyV2Message::new(p, pr, r);
             let bytes = msg.serialize_v2();
             let decoded = TallyV2Message::deserialize_v2(&bytes).expect("valid bytes");
@@ -697,7 +728,7 @@ mod tests {
         cache.insert(src.clone(), 0);
         // Refresh at t=5
         cache.insert(src, 5); // new expiry = 15
-        // At t=14, should still be active
+                              // At t=14, should still be active
         assert_eq!(cache.get_active(14).len(), 1);
     }
 
@@ -720,10 +751,13 @@ mod tests {
     #[test]
     fn test_bandwidth_estimator_1mbps() {
         let mut est = BandwidthEstimator::new(1.0); // α=1 (instant)
-        // 125_000 bytes in 1000ms = 1 Mbps = 1000 kbps
+                                                    // 125_000 bytes in 1000ms = 1 Mbps = 1000 kbps
         est.update(125_000, 1_000);
         let kbps = est.estimate_kbps();
-        assert!((kbps - 1000.0).abs() < 1.0, "expected ~1000 kbps, got {kbps}");
+        assert!(
+            (kbps - 1000.0).abs() < 1.0,
+            "expected ~1000 kbps, got {kbps}"
+        );
     }
 
     #[test]
@@ -731,9 +765,12 @@ mod tests {
         let mut est = BandwidthEstimator::new(0.5);
         est.update(125_000, 1_000); // 1000 kbps
         est.update(250_000, 1_000); // 2000 kbps
-        // 0.5 * 2000 + 0.5 * 1000 = 1500 kbps
+                                    // 0.5 * 2000 + 0.5 * 1000 = 1500 kbps
         let kbps = est.estimate_kbps();
-        assert!((kbps - 1500.0).abs() < 1.0, "expected ~1500 kbps, got {kbps}");
+        assert!(
+            (kbps - 1500.0).abs() < 1.0,
+            "expected ~1500 kbps, got {kbps}"
+        );
     }
 
     #[test]

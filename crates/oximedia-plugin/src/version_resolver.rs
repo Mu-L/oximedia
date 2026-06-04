@@ -252,13 +252,25 @@ pub enum ResolveError {
 ///
 /// 1. For each dependency, narrow the acceptable version set by intersecting
 ///    all constraints that target the same plugin.
-/// 2. From the resulting range, pick the highest available version that satisfies
+/// 2. Transitively propagate constraints via a BFS worklist: for each resolved
+///    plugin, its own registered deps (from `register_with_deps`) are merged
+///    into the combined constraint map; if any constraint narrows, the plugin
+///    is re-added to the worklist.  Monotone propagation terminates because
+///    constraints only ever narrow.
+/// 3. From the resulting range, pick the highest available version that satisfies
 ///    the combined constraint.
-/// 3. Perform a topological sort over the dependency graph to detect cycles and
+/// 4. Perform a topological sort over the dependency graph to detect cycles and
 ///    produce a safe load order.
 pub struct DependencyResolver {
     /// Registered plugin versions: `plugin_id → sorted Vec<SemVer>`.
     pub registered_plugins: HashMap<String, Vec<SemVer>>,
+    /// Per-provider dependency declarations used for transitive resolution.
+    ///
+    /// When a plugin is registered via [`register_with_deps`], its own
+    /// dependency list is stored here so that `resolve` can propagate
+    /// constraints transitively without the caller having to pre-expand
+    /// the full graph.
+    pub provider_deps: HashMap<String, Vec<PluginDependency>>,
 }
 
 impl DependencyResolver {
@@ -266,6 +278,7 @@ impl DependencyResolver {
     pub fn new() -> Self {
         Self {
             registered_plugins: HashMap::new(),
+            provider_deps: HashMap::new(),
         }
     }
 
@@ -277,7 +290,33 @@ impl DependencyResolver {
         self.registered_plugins.insert(plugin_id.into(), versions);
     }
 
+    /// Register versions **and** the plugin's own dependency declarations.
+    ///
+    /// The `deps` list is stored in [`provider_deps`] and used by `resolve`
+    /// to perform transitive diamond-dependency resolution via BFS constraint
+    /// propagation.
+    ///
+    /// [`provider_deps`]: DependencyResolver::provider_deps
+    pub fn register_with_deps(
+        &mut self,
+        plugin_id: impl Into<String>,
+        versions: Vec<SemVer>,
+        deps: Vec<PluginDependency>,
+    ) {
+        let id = plugin_id.into();
+        self.register(id.clone(), versions);
+        self.provider_deps.insert(id, deps);
+    }
+
     /// Resolve the given root dependencies to a concrete `HashMap<plugin_id, version>`.
+    ///
+    /// # Transitive resolution
+    ///
+    /// After the direct (root-level) constraint pass, a BFS worklist propagates
+    /// constraints from each resolved plugin's own declared dependencies
+    /// (registered via [`register_with_deps`]).  The process is monotone:
+    /// constraints only narrow, so it terminates in at most
+    /// `registered_plugins.len() * 10` iterations.
     ///
     /// # Errors
     ///
@@ -289,10 +328,9 @@ impl DependencyResolver {
         &self,
         root_deps: &[PluginDependency],
     ) -> Result<HashMap<String, SemVer>, ResolveError> {
-        // Step 1 — merge all constraints by plugin_id.
+        // Step 1 — merge all constraints by plugin_id (direct pass).
         let mut combined: HashMap<String, VersionConstraint> = HashMap::new();
         let mut queue: VecDeque<PluginDependency> = root_deps.iter().cloned().collect();
-        let mut visited: HashSet<String> = HashSet::new();
 
         while let Some(dep) = queue.pop_front() {
             let id = dep.plugin_id.clone();
@@ -310,11 +348,70 @@ impl DependencyResolver {
                 })?,
             };
             combined.insert(id.clone(), merged);
+        }
 
-            // Avoid re-visiting to prevent infinite loops on transitive deps.
-            if visited.insert(id) {
-                // No additional transitive deps at this level — if callers
-                // want transitive resolution they should expand deps themselves.
+        // Step 1b — transitive BFS propagation via provider_deps.
+        //
+        // For each plugin in the combined constraint map, look up its own
+        // declared dependencies.  If those dependencies add or narrow a
+        // constraint for a plugin, insert/update the constraint and put the
+        // newly constrained plugin back on the worklist (so *its* deps are
+        // also expanded).  Monotone: constraints only narrow → guaranteed to
+        // converge.  An iteration cap acts as a backstop against bugs.
+        let iteration_cap = self.registered_plugins.len().saturating_mul(10).max(64);
+        let mut iters: usize = 0;
+
+        // Initialise the worklist from all plugins reachable via root deps.
+        let mut worklist: VecDeque<String> = combined.keys().cloned().collect();
+
+        while let Some(provider_id) = worklist.pop_front() {
+            iters += 1;
+            if iters > iteration_cap {
+                return Err(ResolveError::Conflict(
+                    "cycle-or-infinite".to_owned(),
+                    SemVer::new(0, 0, 0),
+                    SemVer::new(0, 0, 0),
+                ));
+            }
+
+            let transitive = match self.provider_deps.get(&provider_id) {
+                Some(d) => d.clone(),
+                None => continue,
+            };
+
+            for trans_dep in &transitive {
+                let dep_id = &trans_dep.plugin_id;
+
+                if !self.registered_plugins.contains_key(dep_id.as_str()) {
+                    return Err(ResolveError::NotFound(dep_id.clone()));
+                }
+
+                let (new_constraint, did_narrow) = match combined.remove(dep_id.as_str()) {
+                    None => {
+                        // First time we see this transitive dep — add it.
+                        let c = trans_dep.constraint.clone();
+                        combined.insert(dep_id.clone(), c);
+                        // Enqueue so its own provider_deps are expanded too.
+                        worklist.push_back(dep_id.clone());
+                        continue;
+                    }
+                    Some(existing) => {
+                        let intersection =
+                            existing.intersect(&trans_dep.constraint).ok_or_else(|| {
+                                let (lo1, _) = existing.as_bounds();
+                                let (lo2, _) = trans_dep.constraint.as_bounds();
+                                ResolveError::Conflict(dep_id.clone(), lo1, lo2)
+                            })?;
+                        // Only re-enqueue if the constraint actually narrowed.
+                        let did_narrow = intersection != existing;
+                        (intersection, did_narrow)
+                    }
+                };
+
+                combined.insert(dep_id.clone(), new_constraint);
+                if did_narrow {
+                    worklist.push_back(dep_id.clone());
+                }
             }
         }
 
@@ -703,5 +800,126 @@ mod tests {
     fn test_dependency_resolver_default() {
         let r = DependencyResolver::default();
         assert!(r.registered_plugins.is_empty());
+        assert!(r.provider_deps.is_empty());
+    }
+
+    // ── Transitive diamond-dependency resolution ──────────────────────────────
+
+    /// Diamond conflict: A→B(^1.x) and A→C(^1.x), C→B(^2.x).
+    /// B exists at 1.0.0 and 2.0.0.  The combined constraint for B is
+    /// Compatible(1.x) ∩ Compatible(2.x) = empty → Conflict.
+    #[test]
+    fn test_diamond_conflict_transitive() {
+        let mut r = DependencyResolver::new();
+        r.register("B", vec![v(1, 0, 0), v(2, 0, 0)]);
+        r.register_with_deps(
+            "C",
+            vec![v(1, 0, 0)],
+            vec![dep("B", VersionConstraint::Compatible(v(2, 0, 0)))],
+        );
+
+        // Root requires B ^1.x and C ^1.x.  C itself requires B ^2.x.
+        let root_deps = vec![
+            dep("B", VersionConstraint::Compatible(v(1, 0, 0))),
+            dep("C", VersionConstraint::Compatible(v(1, 0, 0))),
+        ];
+
+        let err = r
+            .resolve(&root_deps)
+            .expect_err("diamond conflict expected");
+        match &err {
+            ResolveError::Conflict(id, _, _) => assert_eq!(id, "B"),
+            other => panic!("expected Conflict for B, got {other:?}"),
+        }
+    }
+
+    /// Diamond compatible: A→B(^1.x) and A→C(^1.x), C→B(>=1.5.0).
+    /// Combined: Compatible(1.x) ∩ AtLeast(1.5.0) = Range{1.5.0, 1.MAX.MAX}.
+    /// Available B: 1.0.0, 1.5.0, 1.9.0 → picks 1.9.0.
+    #[test]
+    fn test_diamond_compatible_transitive() {
+        let mut r = DependencyResolver::new();
+        r.register("B", vec![v(1, 0, 0), v(1, 5, 0), v(1, 9, 0)]);
+        r.register_with_deps(
+            "C",
+            vec![v(1, 0, 0)],
+            vec![dep("B", VersionConstraint::AtLeast(v(1, 5, 0)))],
+        );
+
+        let root_deps = vec![
+            dep("B", VersionConstraint::Compatible(v(1, 0, 0))),
+            dep("C", VersionConstraint::Compatible(v(1, 0, 0))),
+        ];
+
+        let result = r.resolve(&root_deps).expect("diamond compatible");
+        assert_eq!(result["B"], v(1, 9, 0), "should pick highest in [1.5, 1.x]");
+        assert_eq!(result["C"], v(1, 0, 0));
+    }
+
+    /// Large dep graph: 10 plugins in a linear chain, each declaring the next
+    /// as a transitive dep via `register_with_deps`.  All must resolve.
+    #[test]
+    fn test_large_dep_graph_chain() {
+        let mut r = DependencyResolver::new();
+
+        // Register p0..p9 with p_i → p_{i+1} >=1.0.0 (except p9 which has no deps).
+        for i in 0..9usize {
+            let next = format!("p{}", i + 1);
+            r.register_with_deps(
+                format!("p{i}"),
+                vec![v(1, 0, 0)],
+                vec![dep(&next, VersionConstraint::AtLeast(v(1, 0, 0)))],
+            );
+        }
+        r.register("p9", vec![v(1, 0, 0)]);
+
+        // Root only requests p0 — the rest must be discovered transitively.
+        let root_deps = vec![dep("p0", VersionConstraint::AtLeast(v(1, 0, 0)))];
+        let result = r.resolve(&root_deps).expect("chain resolve");
+
+        // All 10 plugins should be present in the resolved map.
+        for i in 0..10usize {
+            let key = format!("p{i}");
+            assert_eq!(
+                result[&key],
+                v(1, 0, 0),
+                "missing or wrong version for {key}"
+            );
+        }
+        assert_eq!(result.len(), 10);
+    }
+
+    /// `register_with_deps` stores provider_deps correctly.
+    #[test]
+    fn test_register_with_deps_stores_provider_deps() {
+        let mut r = DependencyResolver::new();
+        r.register("base", vec![v(1, 0, 0)]);
+        r.register_with_deps(
+            "ext",
+            vec![v(2, 0, 0)],
+            vec![dep("base", VersionConstraint::AtLeast(v(1, 0, 0)))],
+        );
+
+        assert!(r.provider_deps.contains_key("ext"));
+        assert_eq!(r.provider_deps["ext"].len(), 1);
+        assert_eq!(r.provider_deps["ext"][0].plugin_id, "base");
+    }
+
+    /// Transitive dep that is NOT registered should return NotFound.
+    #[test]
+    fn test_transitive_dep_not_found() {
+        let mut r = DependencyResolver::new();
+        r.register_with_deps(
+            "plugin-a",
+            vec![v(1, 0, 0)],
+            vec![dep("missing-lib", VersionConstraint::AtLeast(v(1, 0, 0)))],
+        );
+
+        let root_deps = vec![dep("plugin-a", VersionConstraint::AtLeast(v(1, 0, 0)))];
+        let err = r.resolve(&root_deps).expect_err("should be NotFound");
+        assert!(
+            matches!(&err, ResolveError::NotFound(id) if id == "missing-lib"),
+            "unexpected error: {err:?}"
+        );
     }
 }

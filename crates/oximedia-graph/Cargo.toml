@@ -22,3 +22,4 @@ oximedia-audio = { workspace = true }
 thiserror = { workspace = true }
 bytes = { workspace = true }
 fontdue = "0.9"
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time"] }

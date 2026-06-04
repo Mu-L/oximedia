@@ -784,6 +784,84 @@ impl CuspBasedGamutMapper {
     }
 }
 
+// ── ACES Gamut Compression Algorithm v1.0 ─────────────────────────────────────
+
+/// Configuration for ACES Gamut Compression Algorithm v1.0.
+///
+/// Reference: Mansencal & Sobott (2020),
+/// `ACESUtil.Rec2020_to_ACES_gamut_compress.ctl`.
+///
+/// The algorithm uses a tanh-based soft-knee function to smoothly map
+/// out-of-gamut (negative) components back into gamut without harsh clipping.
+#[derive(Debug, Clone)]
+pub struct AcesGamutCompressConfig {
+    /// Compression threshold (default: 0.815 for Rec.2020 out-gamut).
+    ///
+    /// Colors whose distance from the achromatic axis exceeds this value
+    /// enter the soft compression zone.
+    pub threshold: f32,
+    /// Compression limit (default: 1.147).
+    ///
+    /// The maximum distance from the achromatic axis that will be compressed.
+    /// Values beyond this are hard-clamped.
+    pub limit: f32,
+}
+
+impl Default for AcesGamutCompressConfig {
+    fn default() -> Self {
+        Self {
+            threshold: 0.815,
+            limit: 1.147,
+        }
+    }
+}
+
+/// Compress a single wide-gamut RGB pixel into gamut using the ACES GCA soft-knee.
+///
+/// All channels are in linear light (0..=1 for in-gamut, may exceed 1.0 for
+/// wide-gamut or go negative for out-of-gamut).  The achromatic axis is
+/// taken as `max(r, g, b)` and each channel's distance from that axis is
+/// independently compressed with a `tanh`-based knee function.
+///
+/// # Arguments
+///
+/// * `rgb` — linear-light `[r, g, b]` (may be outside `[0, 1]`).
+/// * `cfg` — compression parameters.
+///
+/// # Returns
+///
+/// Gamut-compressed `[r, g, b]` where every channel is `>= 0.0`.
+#[must_use]
+pub fn aces_gamut_compress_pixel(rgb: [f32; 3], cfg: &AcesGamutCompressConfig) -> [f32; 3] {
+    let achromatic = rgb[0].max(rgb[1]).max(rgb[2]);
+    let range = cfg.limit - cfg.threshold;
+
+    let mut out = rgb;
+    for c in &mut out {
+        let d = achromatic - *c;
+        if d > cfg.threshold {
+            // tanh-based soft-knee: smoothly maps (threshold, ∞) → (threshold, limit)
+            let compressed_d = cfg.limit - range * ((d - cfg.threshold) / range).tanh();
+            *c = achromatic - compressed_d;
+        }
+    }
+    out
+}
+
+/// Apply ACES gamut compression in-place to a frame of linear RGB pixels.
+///
+/// Processes every pixel in `pixels` using [`aces_gamut_compress_pixel`].
+///
+/// # Arguments
+///
+/// * `pixels` — mutable slice of `[r, g, b]` linear-light pixels.
+/// * `cfg` — compression parameters.
+pub fn aces_gamut_compress_frame(pixels: &mut [[f32; 3]], cfg: &AcesGamutCompressConfig) {
+    for px in pixels.iter_mut() {
+        *px = aces_gamut_compress_pixel(*px, cfg);
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1188,5 +1266,63 @@ mod tests {
             c2,
             c3
         );
+    }
+
+    // ── ACES Gamut Compression tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_aces_compress_wide_gamut_pixel_no_negative() {
+        // [2.0, 0.5, 0.5] has a large red, very negative G/B distance from achromatic
+        let result = aces_gamut_compress_pixel([2.0, 0.5, 0.5], &Default::default());
+        assert!(
+            result.iter().all(|&v| v >= 0.0),
+            "all channels must be >= 0 after compression, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_aces_compress_achromatic_identity() {
+        // [1.0, 1.0, 1.0] is achromatic (d = 0 for all channels) — no compression
+        let result = aces_gamut_compress_pixel([1.0, 1.0, 1.0], &Default::default());
+        for (&a, &b) in result.iter().zip([1.0f32, 1.0, 1.0].iter()) {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "achromatic pixel should be unchanged: expected {b}, got {a}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_aces_compress_in_gamut_unchanged() {
+        // [0.5, 0.3, 0.2] — distances from achromatic are all below threshold 0.815
+        let pixel = [0.5f32, 0.3, 0.2];
+        let result = aces_gamut_compress_pixel(pixel, &Default::default());
+        for (&a, &b) in result.iter().zip(pixel.iter()) {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "in-gamut pixel should be unchanged: expected {b}, got {a}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_aces_compress_frame_all_nonneg() {
+        let mut pixels = vec![[2.0f32, -0.5, 0.3], [0.5, 0.5, 0.5], [1.5, 0.8, -0.2]];
+        aces_gamut_compress_frame(&mut pixels, &Default::default());
+        for px in &pixels {
+            assert!(
+                px.iter().all(|&v| v >= 0.0),
+                "frame pixel has negative: {:?}",
+                px
+            );
+        }
+    }
+
+    #[test]
+    fn test_aces_compress_default_config() {
+        let cfg = AcesGamutCompressConfig::default();
+        assert!((cfg.threshold - 0.815).abs() < 1e-6);
+        assert!((cfg.limit - 1.147).abs() < 1e-6);
     }
 }

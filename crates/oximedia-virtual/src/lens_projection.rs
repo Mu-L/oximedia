@@ -196,8 +196,7 @@ impl ProjectionMapper {
         };
 
         // Apply radial distortion after projection.
-        let (dx, dy) =
-            Self::apply_distortion(nx, ny, params.distortion_k1, params.distortion_k2);
+        let (dx, dy) = Self::apply_distortion(nx, ny, params.distortion_k1, params.distortion_k2);
 
         Some((dx, dy))
     }
@@ -222,8 +221,7 @@ impl ProjectionMapper {
         model: ProjectionModel,
     ) -> (f32, f32, f32) {
         // Remove radial distortion first.
-        let (ux, uy) =
-            Self::remove_distortion(px, py, params.distortion_k1, params.distortion_k2);
+        let (ux, uy) = Self::remove_distortion(px, py, params.distortion_k1, params.distortion_k2);
 
         let fx = params.fx_norm();
         let fy = params.fy_norm();
@@ -384,10 +382,9 @@ impl FovCalculator {
         if params.focal_length_mm <= 0.0 {
             return 180.0;
         }
-        let diag_mm =
-            (params.sensor_width_mm * params.sensor_width_mm
-                + params.sensor_height_mm * params.sensor_height_mm)
-                .sqrt();
+        let diag_mm = (params.sensor_width_mm * params.sensor_width_mm
+            + params.sensor_height_mm * params.sensor_height_mm)
+            .sqrt();
         let half_angle = (diag_mm / (2.0 * params.focal_length_mm)).atan();
         half_angle.to_degrees() * 2.0
     }
@@ -415,7 +412,8 @@ mod tests {
 
     #[test]
     fn test_rectilinear_project_centre() {
-        let p = ProjectionMapper::project(0.0, 0.0, 1.0, &default_lens(), ProjectionModel::Rectilinear);
+        let p =
+            ProjectionMapper::project(0.0, 0.0, 1.0, &default_lens(), ProjectionModel::Rectilinear);
         let (px, py) = p.expect("centre should project successfully");
         assert!(approx_eq(px, 0.0, 1e-5), "centre x should be 0, got {px}");
         assert!(approx_eq(py, 0.0, 1e-5), "centre y should be 0, got {py}");
@@ -432,8 +430,7 @@ mod tests {
             .expect("point should be in front of camera");
 
         // Unproject back to a ray and verify it points in the right direction.
-        let (dx, dy, dz) =
-            ProjectionMapper::unproject(px, py, &lens, model);
+        let (dx, dy, dz) = ProjectionMapper::unproject(px, py, &lens, model);
 
         // Ray should be parallel to the original direction (x, y, z) / |(x,y,z)|.
         let orig_len = (x * x + y * y + z * z).sqrt();
@@ -449,19 +446,14 @@ mod tests {
     #[test]
     fn test_rectilinear_behind_camera_returns_none() {
         let lens = default_lens();
-        let result =
-            ProjectionMapper::project(0.0, 0.0, -1.0, &lens, ProjectionModel::Rectilinear);
-        assert!(
-            result.is_none(),
-            "point behind camera should return None"
-        );
+        let result = ProjectionMapper::project(0.0, 0.0, -1.0, &lens, ProjectionModel::Rectilinear);
+        assert!(result.is_none(), "point behind camera should return None");
     }
 
     #[test]
     fn test_rectilinear_z_zero_returns_none() {
         let lens = default_lens();
-        let result =
-            ProjectionMapper::project(1.0, 1.0, 0.0, &lens, ProjectionModel::Rectilinear);
+        let result = ProjectionMapper::project(1.0, 1.0, 0.0, &lens, ProjectionModel::Rectilinear);
         assert!(result.is_none(), "z=0 should return None");
     }
 
@@ -495,8 +487,7 @@ mod tests {
         let lens = default_lens();
         let model = ProjectionModel::Fisheye;
         let (x, y, z) = (0.2, 0.1, 1.0);
-        let (px, py) = ProjectionMapper::project(x, y, z, &lens, model)
-            .expect("fisheye project");
+        let (px, py) = ProjectionMapper::project(x, y, z, &lens, model).expect("fisheye project");
         let (dx, dy, dz) = ProjectionMapper::unproject(px, py, &lens, model);
 
         let orig_len = (x * x + y * y + z * z).sqrt();
@@ -514,8 +505,7 @@ mod tests {
         let lens = default_lens();
         let model = ProjectionModel::Equisolid;
         let (x, y, z) = (0.15, -0.1, 0.8);
-        let (px, py) = ProjectionMapper::project(x, y, z, &lens, model)
-            .expect("equisolid project");
+        let (px, py) = ProjectionMapper::project(x, y, z, &lens, model).expect("equisolid project");
         let (dx, dy, dz) = ProjectionMapper::unproject(px, py, &lens, model);
 
         let orig_len = (x * x + y * y + z * z).sqrt();
@@ -534,8 +524,8 @@ mod tests {
         let model = ProjectionModel::Orthographic;
         // Keep angle < 90° so point is not behind plane.
         let (x, y, z) = (0.05, 0.05, 1.0);
-        let (px, py) = ProjectionMapper::project(x, y, z, &lens, model)
-            .expect("orthographic project");
+        let (px, py) =
+            ProjectionMapper::project(x, y, z, &lens, model).expect("orthographic project");
         let (dx, dy, dz) = ProjectionMapper::unproject(px, py, &lens, model);
 
         let orig_len = (x * x + y * y + z * z).sqrt();
@@ -590,10 +580,7 @@ mod tests {
         // 50 mm on 36 mm sensor → HFOV ≈ 39.6°
         let lens = LensParams::new(50.0, 36.0, 24.0, 0.0, 0.0);
         let hfov = FovCalculator::horizontal_fov(&lens);
-        assert!(
-            approx_eq(hfov, 39.6, 0.2),
-            "Expected ~39.6°, got {hfov}"
-        );
+        assert!(approx_eq(hfov, 39.6, 0.2), "Expected ~39.6°, got {hfov}");
     }
 
     #[test]

@@ -18,6 +18,9 @@ workspace = true
 [dependencies]
 # Workspace dependencies
 oximedia-core = { workspace = true, optional = true }
+oximedia-metering = { workspace = true }
+oximedia-scopes = { workspace = true }
+oximedia-timecode = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -66,3 +69,7 @@ full = ["gpu", "integrations", "email", "sqlite"]
 [[test]]
 name = "integration"
 path = "tests/integration.rs"
+
+[[test]]
+name = "orphan_smoke"
+path = "tests/orphan_smoke.rs"

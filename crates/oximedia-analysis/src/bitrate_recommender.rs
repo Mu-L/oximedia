@@ -81,7 +81,13 @@ impl BitrateRecommender {
         fps: f32,
         complexity: f32,
     ) -> BitrateRecommendation {
-        let bps = recommend_impl(width, height, fps, complexity, self.bits_per_pixel_per_second);
+        let bps = recommend_impl(
+            width,
+            height,
+            fps,
+            complexity,
+            self.bits_per_pixel_per_second,
+        );
         BitrateRecommendation::from_bps(bps)
     }
 }
@@ -107,13 +113,7 @@ pub fn recommend(width: u32, height: u32, fps: f32, complexity: f32) -> u32 {
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn recommend_impl(
-    width: u32,
-    height: u32,
-    fps: f32,
-    complexity: f32,
-    bpp: f64,
-) -> u32 {
+fn recommend_impl(width: u32, height: u32, fps: f32, complexity: f32, bpp: f64) -> u32 {
     let w = width as f64;
     let h = height as f64;
     let f = fps as f64;

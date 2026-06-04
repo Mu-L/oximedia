@@ -865,6 +865,35 @@ impl BrailleDisplay {
         BrailleEncoder::cells_to_unicode(self.viewport())
     }
 
+    /// Render the entire cell buffer as a single UTF-8 Braille pattern string.
+    ///
+    /// Unlike [`render_unicode`] which only shows the current viewport, this
+    /// method serialises every cell in the buffer from start to finish.
+    /// Each `BrailleCell` value maps directly to the Unicode Braille Patterns
+    /// block (U+2800–U+28FF): `U+2800 + dot_bitmask`.
+    ///
+    /// [`render_unicode`]: BrailleDisplay::render_unicode
+    #[must_use]
+    pub fn render(&self) -> String {
+        self.buffer.iter().map(|cell| cell.to_unicode()).collect()
+    }
+
+    /// Render the entire cell buffer as a newline-separated Braille grid.
+    ///
+    /// The buffer is split into rows of exactly `width` cells (the last row
+    /// may be shorter).  Each row is converted to a Unicode Braille string and
+    /// the rows are joined with `'\n'`.  A `width` of 0 is treated as 1 to
+    /// avoid a panic on the chunk split.
+    #[must_use]
+    pub fn render_grid(&self, width: usize) -> String {
+        let w = width.max(1);
+        self.buffer
+            .chunks(w)
+            .map(|row| row.iter().map(|cell| cell.to_unicode()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// Pan the viewport right by one full page (cell_width cells).
     ///
     /// Returns `true` if there is more content after panning; `false` if we
@@ -1233,5 +1262,58 @@ mod braille_tests {
         let cfg = BrailleDisplayConfig::compact_20();
         assert_eq!(cfg.cell_width, 20);
         assert_eq!(cfg.grade, BrailleGrade::Grade1);
+    }
+
+    // ─── render() / render_grid() tests ───────────────────────────────────
+
+    #[test]
+    fn test_braille_render_basic() {
+        // Cell value 0x01 (dot 1 only) must map to U+2801 ('⠁').
+        let cfg = BrailleDisplayConfig {
+            cell_width: 40,
+            grade: BrailleGrade::Grade1,
+            wrap: false,
+        };
+        let mut display = BrailleDisplay::new(cfg);
+        // 'a' in Grade-1 Braille is mask 0b000001 = 0x01 → U+2801
+        display.load("a");
+        let rendered = display.render();
+        assert_eq!(rendered.chars().count(), 1, "one cell → one char");
+        let ch = rendered.chars().next().expect("render must be non-empty");
+        assert_eq!(ch, '\u{2801}', "dot-1-only cell must render as U+2801 (⠁)");
+    }
+
+    #[test]
+    fn test_braille_render_grid() {
+        // Load 4 cells (letters a, b, c, d) and render at width=2
+        // → should produce exactly 2 lines separated by '\n'.
+        let cfg = BrailleDisplayConfig {
+            cell_width: 40,
+            grade: BrailleGrade::Grade1,
+            wrap: false,
+        };
+        let mut display = BrailleDisplay::new(cfg);
+        display.load("abcd"); // 4 cells in Grade-1
+        let grid = display.render_grid(2);
+        let lines: Vec<&str> = grid.split('\n').collect();
+        assert_eq!(lines.len(), 2, "4 cells at width=2 must produce 2 lines");
+        assert_eq!(
+            lines[0].chars().count(),
+            2,
+            "first line must have exactly 2 Braille chars"
+        );
+        assert_eq!(
+            lines[1].chars().count(),
+            2,
+            "second line must have exactly 2 Braille chars"
+        );
+        // Every character must be in the Braille Unicode block.
+        for ch in grid.chars().filter(|&c| c != '\n') {
+            let code = ch as u32;
+            assert!(
+                code >= 0x2800 && code <= 0x28FF,
+                "char U+{code:04X} outside Braille block"
+            );
+        }
     }
 }

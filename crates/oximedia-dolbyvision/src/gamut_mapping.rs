@@ -518,8 +518,7 @@ mod tests {
 
     #[test]
     fn test_bt2020_to_bt709_white_maps_to_white() {
-        let mapping =
-            GamutMapping::new(GamutSpace::Bt2020, GamutSpace::Bt709, ClipStrategy::Clip);
+        let mapping = GamutMapping::new(GamutSpace::Bt2020, GamutSpace::Bt709, ClipStrategy::Clip);
         // Perfect white (1,1,1) should map to (1,1,1) in any gamut
         let out = mapping.convert([1.0, 1.0, 1.0]);
         assert!((out[0] - 1.0).abs() < EPSILON, "R={}", out[0]);
@@ -529,8 +528,7 @@ mod tests {
 
     #[test]
     fn test_bt2020_to_bt709_black_maps_to_black() {
-        let mapping =
-            GamutMapping::new(GamutSpace::Bt2020, GamutSpace::Bt709, ClipStrategy::Clip);
+        let mapping = GamutMapping::new(GamutSpace::Bt2020, GamutSpace::Bt709, ClipStrategy::Clip);
         let out = mapping.convert([0.0, 0.0, 0.0]);
         assert!(out[0].abs() < EPSILON);
         assert!(out[1].abs() < EPSILON);
@@ -539,15 +537,17 @@ mod tests {
 
     #[test]
     fn test_bt2020_to_p3_is_not_identity() {
-        let mapping =
-            GamutMapping::new(GamutSpace::Bt2020, GamutSpace::DciP3, ClipStrategy::Preserve);
+        let mapping = GamutMapping::new(
+            GamutSpace::Bt2020,
+            GamutSpace::DciP3,
+            ClipStrategy::Preserve,
+        );
         assert!(!mapping.is_identity());
     }
 
     #[test]
     fn test_gamut_mapping_convert_bulk() {
-        let mapping =
-            GamutMapping::new(GamutSpace::Bt2020, GamutSpace::Bt709, ClipStrategy::Clip);
+        let mapping = GamutMapping::new(GamutSpace::Bt2020, GamutSpace::Bt709, ClipStrategy::Clip);
         let mut pixels = vec![[0.5_f32, 0.3, 0.1], [1.0, 1.0, 1.0], [0.0, 0.0, 0.0]];
         mapping.convert_bulk(&mut pixels);
         // All components should be in [0, 1] due to Clip

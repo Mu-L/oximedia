@@ -1,0 +1,23 @@
+[package]
+name = "oximedia-restoration"
+description = "Image restoration algorithms for OxiMedia: blind deconvolution and content-aware inpainting"
+keywords = ["restoration", "deconvolution", "inpainting", "image", "patchmatch"]
+categories = ["multimedia::images", "multimedia"]
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+[lints]
+workspace = true
+
+[dependencies]
+oximedia-core = { workspace = true }
+thiserror = { workspace = true }
+rayon = { workspace = true }
+oxifft = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]

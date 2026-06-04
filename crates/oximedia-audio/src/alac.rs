@@ -21,7 +21,6 @@
 //! Reference: Apple's open-source ALAC decoder at
 //! <https://alac.macosforge.org/> and the ALAC decoder in FFmpeg.
 
-#![allow(dead_code)]
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_possible_wrap)]
@@ -186,7 +185,11 @@ fn decode_rice_residuals(
         }
 
         // Read remainder
-        let low = if k > 0 { reader.read_bits(k as usize)? } else { 0 };
+        let low = if k > 0 {
+            reader.read_bits(k as usize)?
+        } else {
+            0
+        };
         let high = m << k;
         let mut val = (high | low) as i32;
 
@@ -493,8 +496,7 @@ impl AudioDecoder for AlacDecoder {
         self.buffer.clear();
         self.frames.clear();
         if let Some(ref config) = self.config.clone() {
-            self.channel_states =
-                vec![ChannelState::new(32); config.num_channels as usize];
+            self.channel_states = vec![ChannelState::new(32); config.num_channels as usize];
         }
     }
 
@@ -535,7 +537,7 @@ mod tests {
         data[19..23].copy_from_slice(&sr.to_be_bytes());
         data[23] = 16; // bit depth = 16
         data[8] = 2; // num_channels = 2
-        // max_samples_per_frame = 4096
+                     // max_samples_per_frame = 4096
         let msf: u32 = 4096;
         data[2..6].copy_from_slice(&msf.to_be_bytes());
 

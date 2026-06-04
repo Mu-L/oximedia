@@ -559,6 +559,8 @@ impl TapeSaturator {
 // ─────────────────────────────────────────────────────────────────────────────
 
 impl AudioEffect for TapeSaturator {
+    const EFFECT_ID: &'static str = "tape_saturator";
+
     fn process_sample(&mut self, input: f32) -> f32 {
         self.process_channel(input, 0)
     }

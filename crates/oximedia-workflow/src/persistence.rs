@@ -2,14 +2,76 @@
 
 use crate::error::{Result, WorkflowError};
 use crate::task::{Task, TaskId, TaskState};
-use crate::workflow::{Workflow, WorkflowId, WorkflowState};
+use crate::workflow::{Workflow, WorkflowConfig, WorkflowId, WorkflowState};
 use chrono::Utc;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{params, Row};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
+
+// ---------------------------------------------------------------------------
+// Lazy deserialization helper
+// ---------------------------------------------------------------------------
+
+/// Wraps a raw JSON string and provides lazy on-demand deserialization of
+/// [`WorkflowConfig`].  Parsing occurs only on the first call to
+/// [`LazyWorkflowConfig::get`]; subsequent calls return the cached result.
+///
+/// The cache is stored inside a `Mutex<Option<WorkflowConfig>>` so the
+/// struct can be shared safely and `get()` can take `&self`.
+#[derive(Debug)]
+pub struct LazyWorkflowConfig {
+    raw_json: String,
+    parsed: Mutex<Option<WorkflowConfig>>,
+}
+
+impl LazyWorkflowConfig {
+    /// Construct a lazy wrapper around the raw JSON string. No parsing happens
+    /// until [`Self::get`] is first called.
+    #[must_use]
+    pub fn new(raw_json: String) -> Self {
+        Self {
+            raw_json,
+            parsed: Mutex::new(None),
+        }
+    }
+
+    /// Return a clone of the parsed [`WorkflowConfig`], parsing lazily on
+    /// first access and caching the result for subsequent calls.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the stored JSON string is invalid or the internal
+    /// mutex is poisoned.
+    pub fn get_cloned(&self) -> Result<WorkflowConfig> {
+        let mut guard = self
+            .parsed
+            .lock()
+            .map_err(|_| WorkflowError::generic("LazyWorkflowConfig mutex poisoned"))?;
+        if guard.is_none() {
+            let config: WorkflowConfig =
+                serde_json::from_str(&self.raw_json).map_err(WorkflowError::Serialization)?;
+            *guard = Some(config);
+        }
+        // SAFETY: we just ensured the Option is Some.
+        Ok(guard.as_ref().expect("just initialised above").clone())
+    }
+
+    /// Return a reference to the raw JSON string (always available without
+    /// any parsing cost).
+    #[must_use]
+    pub fn raw(&self) -> &str {
+        &self.raw_json
+    }
+
+    /// Return a clone of the raw JSON string.
+    #[must_use]
+    pub fn raw_json_owned(&self) -> String {
+        self.raw_json.clone()
+    }
+}
 
 /// Workflow persistence manager.
 pub struct PersistenceManager {
@@ -205,7 +267,13 @@ impl PersistenceManager {
             ))
         })?;
 
-        let config = serde_json::from_str(&workflow.4)?;
+        // Wrap config JSON in a lazy wrapper — parsing is deferred until
+        // the caller first accesses the config.  Here we call get_cloned()
+        // immediately (demonstrating the pattern), but in a scenario where
+        // config is only needed conditionally the parse can be skipped.
+        let lazy_config = LazyWorkflowConfig::new(workflow.4.clone());
+        let config = lazy_config.get_cloned()?;
+
         let metadata = serde_json::from_str(&workflow.5)?;
         let state = self.parse_workflow_state(&workflow.3);
 

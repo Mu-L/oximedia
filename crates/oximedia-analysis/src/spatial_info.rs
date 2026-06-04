@@ -105,7 +105,13 @@ impl SpatialInfoAnalyzer {
     ///
     /// `luma` is the Y-plane pixel data, `width` and `height` are dimensions.
     #[allow(clippy::cast_precision_loss)]
-    pub fn analyze_frame(&mut self, luma: &[u8], width: usize, height: usize, frame_index: u64) -> SpatialInfoResult {
+    pub fn analyze_frame(
+        &mut self,
+        luma: &[u8],
+        width: usize,
+        height: usize,
+        frame_index: u64,
+    ) -> SpatialInfoResult {
         let gradients = compute_sobel_magnitude(luma, width, height);
         let n = gradients.len();
 
@@ -269,11 +275,15 @@ mod tests {
         vec![value; width * height]
     }
 
+    /// Gradient frame with variable step sizes across rows to produce non-constant
+    /// Sobel magnitudes (required for SI > 0).
     fn gradient_frame(width: usize, height: usize) -> Vec<u8> {
         let mut data = vec![0u8; width * height];
         for y in 0..height {
             for x in 0..width {
-                data[y * width + x] = (x as u8).wrapping_mul(3);
+                // Vary both x and y contributions so rows have different slopes.
+                let val = ((x * 4 + y * 2) % 256) as u8;
+                data[y * width + x] = val;
             }
         }
         data
@@ -304,7 +314,10 @@ mod tests {
     fn test_mean_gradient_gradient_frame() {
         let frame = gradient_frame(32, 32);
         let mg = compute_mean_gradient(&frame, 32, 32);
-        assert!(mg > 0.0, "Gradient frame should have positive mean gradient");
+        assert!(
+            mg > 0.0,
+            "Gradient frame should have positive mean gradient"
+        );
     }
 
     #[test]
@@ -341,7 +354,10 @@ mod tests {
         assert_eq!(SpatialComplexity::from_si(35.0), SpatialComplexity::Low);
         assert_eq!(SpatialComplexity::from_si(70.0), SpatialComplexity::Medium);
         assert_eq!(SpatialComplexity::from_si(110.0), SpatialComplexity::High);
-        assert_eq!(SpatialComplexity::from_si(150.0), SpatialComplexity::VeryHigh);
+        assert_eq!(
+            SpatialComplexity::from_si(150.0),
+            SpatialComplexity::VeryHigh
+        );
     }
 
     #[test]

@@ -81,10 +81,7 @@ impl UnsyncedLyrics {
 
     /// Write to a `Metadata` container as an ID3v2 USLT-style field.
     pub fn to_metadata(&self, metadata: &mut Metadata) {
-        metadata.insert(
-            "USLT".to_string(),
-            MetadataValue::Text(self.text.clone()),
-        );
+        metadata.insert("USLT".to_string(), MetadataValue::Text(self.text.clone()));
         if !self.language.is_empty() && self.language != "und" {
             metadata.insert(
                 "USLT:language".to_string(),
@@ -150,8 +147,7 @@ impl LyricLine {
 
     /// Duration of this line in milliseconds (if end is set).
     pub fn duration_ms(&self) -> Option<u64> {
-        self.end_ms
-            .map(|end| end.saturating_sub(self.timestamp_ms))
+        self.end_ms.map(|end| end.saturating_sub(self.timestamp_ms))
     }
 
     /// Format the timestamp as `[mm:ss.xx]` (LRC format).
@@ -356,7 +352,8 @@ impl SyncedLyrics {
 
         // Lines
         for line in &self.lines {
-            lrc.push_str(&format!("{}{}",
+            lrc.push_str(&format!(
+                "{}{}",
                 format_lrc_time(line.timestamp_ms),
                 line.text,
             ));
@@ -447,10 +444,7 @@ impl SyncedLyrics {
     /// Write to a `Metadata` container.
     pub fn to_metadata(&self, metadata: &mut Metadata) {
         let lrc = self.to_lrc();
-        metadata.insert(
-            "SYLT".to_string(),
-            MetadataValue::Text(lrc),
-        );
+        metadata.insert("SYLT".to_string(), MetadataValue::Text(lrc));
         if !self.language.is_empty() && self.language != "und" {
             metadata.insert(
                 "SYLT:language".to_string(),
@@ -476,10 +470,7 @@ impl SyncedLyrics {
 
         let mut synced = Self::from_lrc(lrc_text)?;
 
-        if let Some(lang) = metadata
-            .get("SYLT:language")
-            .and_then(|v| v.as_text())
-        {
+        if let Some(lang) = metadata.get("SYLT:language").and_then(|v| v.as_text()) {
             synced.language = lang.to_string();
         }
 
@@ -629,8 +620,7 @@ mod tests {
         let mut metadata = Metadata::new(MetadataFormat::Id3v2);
         original.to_metadata(&mut metadata);
 
-        let restored = UnsyncedLyrics::from_metadata(&metadata)
-            .expect("should parse");
+        let restored = UnsyncedLyrics::from_metadata(&metadata).expect("should parse");
         assert_eq!(restored.text, original.text);
         assert_eq!(restored.language, "eng");
         assert_eq!(restored.description, "Main lyrics");
@@ -725,10 +715,7 @@ mod tests {
         lyrics.add_line(LyricLine::new(5000, "Line 2"));
         lyrics.add_line(LyricLine::new(10_000, "Line 3"));
 
-        assert_eq!(
-            lyrics.line_at(0).map(|l| l.text.as_str()),
-            Some("Line 1")
-        );
+        assert_eq!(lyrics.line_at(0).map(|l| l.text.as_str()), Some("Line 1"));
         assert_eq!(
             lyrics.line_at(3000).map(|l| l.text.as_str()),
             Some("Line 1")
@@ -893,8 +880,7 @@ mod tests {
     #[test]
     fn test_synced_lyrics_from_metadata_missing() {
         let metadata = Metadata::new(MetadataFormat::Id3v2);
-        let result = SyncedLyrics::from_metadata(&metadata)
-            .expect("should not error");
+        let result = SyncedLyrics::from_metadata(&metadata).expect("should not error");
         assert!(result.is_none());
     }
 
@@ -911,14 +897,8 @@ mod tests {
     fn test_lyrics_collection_multi_language() {
         let mut coll = LyricsCollection::new();
 
-        coll.add_unsynced(
-            UnsyncedLyrics::new("English lyrics")
-                .with_language("eng"),
-        );
-        coll.add_unsynced(
-            UnsyncedLyrics::new("Japanese lyrics")
-                .with_language("jpn"),
-        );
+        coll.add_unsynced(UnsyncedLyrics::new("English lyrics").with_language("eng"));
+        coll.add_unsynced(UnsyncedLyrics::new("Japanese lyrics").with_language("jpn"));
 
         assert_eq!(coll.total_count(), 2);
         assert_eq!(
@@ -973,7 +953,10 @@ mod tests {
     #[test]
     fn test_extract_lrc_tag() {
         assert_eq!(extract_lrc_tag("[ti:My Song]", "ti"), Some("My Song"));
-        assert_eq!(extract_lrc_tag("[ar:Artist Name]", "ar"), Some("Artist Name"));
+        assert_eq!(
+            extract_lrc_tag("[ar:Artist Name]", "ar"),
+            Some("Artist Name")
+        );
         assert_eq!(extract_lrc_tag("[offset:100]", "offset"), Some("100"));
         assert_eq!(extract_lrc_tag("[00:05.50]text", "ti"), None);
     }

@@ -1,11 +1,8 @@
 //! DAG-based workflow definition with `WorkflowNode`, `WorkflowEdge`, `WorkflowDag`,
 //! `WorkflowEngine` with node-level status tracking, and `WorkflowTemplate`.
 
-#![allow(dead_code)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::type_complexity)]
-
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -198,12 +195,41 @@ pub enum DagError {
 /// A directed acyclic graph of `WorkflowNode`s connected by `WorkflowEdge`s.
 ///
 /// Provides cycle detection and Kahn's-algorithm topological sort.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+///
+/// The topological sort result is cached after the first computation and
+/// invalidated automatically whenever the graph topology changes (node or
+/// edge mutations).
+#[derive(Debug, Serialize, Deserialize)]
 pub struct WorkflowDag {
     /// Nodes, keyed by their ID.
     pub nodes: HashMap<NodeId, WorkflowNode>,
     /// Edges in insertion order.
     pub edges: Vec<WorkflowEdge>,
+    /// Cached topological order. Invalidated on any mutation.
+    /// `#[serde(skip)]` keeps this out of the serialized form.
+    #[serde(skip)]
+    topo_cache: RefCell<Option<Vec<NodeId>>>,
+}
+
+impl Clone for WorkflowDag {
+    fn clone(&self) -> Self {
+        Self {
+            nodes: self.nodes.clone(),
+            edges: self.edges.clone(),
+            // The cache is NOT propagated to the clone; the clone must recompute.
+            topo_cache: RefCell::new(None),
+        }
+    }
+}
+
+impl Default for WorkflowDag {
+    fn default() -> Self {
+        Self {
+            nodes: HashMap::new(),
+            edges: Vec::new(),
+            topo_cache: RefCell::new(None),
+        }
+    }
 }
 
 impl WorkflowDag {
@@ -213,6 +239,11 @@ impl WorkflowDag {
         Self::default()
     }
 
+    /// Invalidate the topology cache. Must be called after any structural mutation.
+    fn invalidate_topo_cache(&self) {
+        *self.topo_cache.borrow_mut() = None;
+    }
+
     /// Add a node. Returns an error if the node ID already exists.
     pub fn add_node(&mut self, node: WorkflowNode) -> Result<NodeId, DagError> {
         let id = node.node_id;
@@ -220,6 +251,7 @@ impl WorkflowDag {
             return Err(DagError::DuplicateNode(id));
         }
         self.nodes.insert(id, node);
+        self.invalidate_topo_cache();
         Ok(id)
     }
 
@@ -238,6 +270,7 @@ impl WorkflowDag {
             self.edges.pop();
             return Err(DagError::CycleDetected);
         }
+        self.invalidate_topo_cache();
         Ok(())
     }
 
@@ -280,8 +313,17 @@ impl WorkflowDag {
     /// Topological sort using Kahn's algorithm.
     ///
     /// Returns nodes in an order where every dependency appears before its
-    /// dependents.
+    /// dependents. The result is cached after the first call and reused on
+    /// subsequent calls until the graph topology changes.
     pub fn topological_sort(&self) -> Result<Vec<NodeId>, DagError> {
+        // Return cached result if valid.
+        {
+            let cached = self.topo_cache.borrow();
+            if let Some(ref order) = *cached {
+                return Ok(order.clone());
+            }
+        }
+
         if self.has_cycle() {
             return Err(DagError::CycleDetected);
         }
@@ -311,6 +353,9 @@ impl WorkflowDag {
                 }
             }
         }
+
+        // Store result in cache.
+        *self.topo_cache.borrow_mut() = Some(result.clone());
 
         Ok(result)
     }

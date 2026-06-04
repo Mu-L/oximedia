@@ -145,6 +145,171 @@ impl MatroskaTrackV4 {
     }
 }
 
+// ─── BlockMore ───────────────────────────────────────────────────────────────
+
+/// A single additional data block payload extracted from a Matroska `BlockGroup`.
+///
+/// Corresponds to one `BlockMore` (0xA6) master element inside `BlockAdditions`
+/// (0x75A1).  Each `BlockMore` carries:
+/// - a `BlockAddID` (0xEE) — the numeric type identifying the payload semantics
+/// - a `BlockAdditional` (0xA5) — the raw payload bytes
+///
+/// The `BlockAddID` 0 means "default/opaque".  Well-known IDs are enumerated in
+/// [`BlockAddIdType`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlockMore {
+    /// `BlockAddID` — the type of additional data (`0` means default/opaque).
+    pub add_id: u64,
+    /// Raw payload bytes from the `BlockAdditional` element.
+    pub additional: Vec<u8>,
+}
+
+// ─── BlockAddIdType ───────────────────────────────────────────────────────────
+
+/// Registered `BlockAddID` type registry per Matroska spec.
+///
+/// Maps well-known `BlockAddID` numeric values to semantically named variants.
+/// Unknown values are represented by [`BlockAddIdType::Unknown`].
+///
+/// # Reference
+///
+/// - [Matroska Block Addition Mapping Registry](https://www.matroska.org/technical/block_addition_mapping.html)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BlockAddIdType {
+    /// Default/opaque additional data (`BlockAddID` = 0).
+    Default,
+    /// ITU T.35 metadata (`BlockAddID` = 4).
+    ///
+    /// Used for HDR10+ dynamic metadata per SMPTE ST 2094-40 / ITU-T T.35.
+    ItuT35,
+    /// Dolby Vision configuration (`BlockAddID` = 5).
+    ///
+    /// Carries the Dolby Vision RPU or configuration payload.
+    DolbyVisionConfig,
+    /// HDR10+ metadata (`BlockAddID` = 6).
+    ///
+    /// Carries HDR10+ dynamic metadata (SMPTE ST 2094-40 SEI payload).
+    Hdr10Plus,
+    /// IAMF audio (`BlockAddID` = 12).
+    ///
+    /// Carries Immersive Audio Model and Formats (IAMF) data.
+    Iamf,
+    /// Unknown or unregistered type.
+    Unknown(u64),
+}
+
+impl BlockAddIdType {
+    /// Converts a raw `BlockAddID` integer to a typed variant.
+    #[must_use]
+    pub fn from_id(id: u64) -> Self {
+        match id {
+            0 => Self::Default,
+            4 => Self::ItuT35,
+            5 => Self::DolbyVisionConfig,
+            6 => Self::Hdr10Plus,
+            12 => Self::Iamf,
+            n => Self::Unknown(n),
+        }
+    }
+
+    /// Returns the raw `BlockAddID` integer for this type.
+    #[must_use]
+    pub fn id(self) -> u64 {
+        match self {
+            Self::Default => 0,
+            Self::ItuT35 => 4,
+            Self::DolbyVisionConfig => 5,
+            Self::Hdr10Plus => 6,
+            Self::Iamf => 12,
+            Self::Unknown(n) => n,
+        }
+    }
+
+    /// Returns `true` if this is a known (non-`Unknown`) type.
+    #[must_use]
+    pub const fn is_known(&self) -> bool {
+        !matches!(self, Self::Unknown(_))
+    }
+}
+
+// ─── parse_block_additions ────────────────────────────────────────────────────
+
+/// Parses the content of a `BlockAdditions` (0x75A1) master element.
+///
+/// `data` must be the raw content bytes of the `BlockAdditions` element
+/// (excluding its EBML element header).  `size` is the byte length of the
+/// content region.
+///
+/// Returns a `Vec<BlockMore>` containing one entry per `BlockMore` child
+/// element found.  Unknown child elements are silently skipped.
+///
+/// # Errors
+///
+/// Returns an `OxiError::Parse` error if a child element header cannot be decoded.
+pub fn parse_block_additions(data: &[u8], size: u64) -> OxiResult<Vec<BlockMore>> {
+    use super::ebml::element_id;
+
+    let mut parser = MatroskaParser::new(data);
+    let end_pos = size as usize;
+    let mut additions = Vec::new();
+
+    while parser.position() < end_pos && !parser.is_eof() {
+        let element = parser.read_element()?;
+        let elem_size = element.size as usize;
+
+        if element.id == element_id::BLOCK_MORE {
+            let block_more_data = parser.read_data(elem_size)?;
+            let more = parse_block_more(block_more_data, element.size)?;
+            additions.push(more);
+        } else {
+            parser.skip(elem_size);
+        }
+    }
+
+    Ok(additions)
+}
+
+/// Parses a single `BlockMore` (0xA6) master element.
+///
+/// `data` must be the raw content bytes of the `BlockMore` element
+/// (excluding its EBML element header).  `size` is the byte length of the
+/// content region.
+///
+/// Returns a [`BlockMore`] with `add_id` defaulting to `0` if no
+/// `BlockAddID` child is present, and `additional` empty if no
+/// `BlockAdditional` child is present.
+///
+/// # Errors
+///
+/// Returns an `OxiError::Parse` error if a child element header cannot be decoded.
+pub fn parse_block_more(data: &[u8], size: u64) -> OxiResult<BlockMore> {
+    use super::ebml::element_id;
+
+    let mut parser = MatroskaParser::new(data);
+    let end_pos = size as usize;
+    let mut add_id: u64 = 0;
+    let mut additional: Vec<u8> = Vec::new();
+
+    while parser.position() < end_pos && !parser.is_eof() {
+        let element = parser.read_element()?;
+        let elem_size = element.size as usize;
+
+        match element.id {
+            element_id::BLOCK_ADD_ID => {
+                add_id = parser.read_uint(elem_size)?;
+            }
+            element_id::BLOCK_ADDITIONAL => {
+                additional = parser.read_binary(elem_size)?;
+            }
+            _ => {
+                parser.skip(elem_size);
+            }
+        }
+    }
+
+    Ok(BlockMore { add_id, additional })
+}
+
 // ─── parse_block_addition_mapping ────────────────────────────────────────────
 
 /// Parses a single `BlockAdditionMapping` EBML element from `data`.

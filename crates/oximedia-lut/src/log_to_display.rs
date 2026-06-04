@@ -89,20 +89,19 @@ impl LogCurve {
 // Sony S-Log3 constants (from Sony S-Log3 Technical Summary v1.3)
 // Encode: cv = (420 + log10((x + 0.01) / (0.18 + 0.01)) * 261.5) / 1023  for x >= 0.014
 //         cv = (x * (171.2102946 - 95.0) / 0.014 + 95.0) / 1023           for x < 0.014
-const SLOG3_CUT_SCENE: f64 = 0.014;         // scene-linear cut
-const SLOG3_CUT_CV: f64 = 171.2102946;      // corresponding cut in code-value domain
-const SLOG3_LOG_OFFSET: f64 = 0.01;         // log offset (black offset)
-const SLOG3_REF_WHITE: f64 = 0.18;          // scene-linear 18% grey
-const SLOG3_LOG_SLOPE: f64 = 261.5;         // log slope
-const SLOG3_LOG_OFFSET_CV: f64 = 420.0;     // code-value offset at 18% grey
+const SLOG3_CUT_SCENE: f64 = 0.014; // scene-linear cut
+const SLOG3_CUT_CV: f64 = 171.2102946; // corresponding cut in code-value domain
+const SLOG3_LOG_OFFSET: f64 = 0.01; // log offset (black offset)
+const SLOG3_REF_WHITE: f64 = 0.18; // scene-linear 18% grey
+const SLOG3_LOG_SLOPE: f64 = 261.5; // log slope
+const SLOG3_LOG_OFFSET_CV: f64 = 420.0; // code-value offset at 18% grey
 const SLOG3_LIN_SLOPE: f64 = (171.2102946 - 95.0) / 0.014; // linear-segment slope
-const SLOG3_LIN_OFFSET_CV: f64 = 95.0;      // linear-segment offset
+const SLOG3_LIN_OFFSET_CV: f64 = 95.0; // linear-segment offset
 
 fn slog3_encode(x: f64) -> f64 {
     let cv = if x >= SLOG3_CUT_SCENE {
         // log10((x + 0.01) / (0.18 + 0.01)) * 261.5 + 420
-        ((x + SLOG3_LOG_OFFSET) / (SLOG3_REF_WHITE + SLOG3_LOG_OFFSET)).log10()
-            * SLOG3_LOG_SLOPE
+        ((x + SLOG3_LOG_OFFSET) / (SLOG3_REF_WHITE + SLOG3_LOG_OFFSET)).log10() * SLOG3_LOG_SLOPE
             + SLOG3_LOG_OFFSET_CV
     } else {
         x * SLOG3_LIN_SLOPE + SLOG3_LIN_OFFSET_CV
@@ -561,7 +560,7 @@ mod tests {
         let params = LogToDisplayParams::new(LogCurve::SLog3, DisplayTarget::Srgb);
         let lut = generate_log_to_display_lut(2, &params).expect("should succeed");
         assert_eq!(lut.len(), 8); // 2³
-        // (0,0,0) input → blackest output
+                                  // (0,0,0) input → blackest output
         let black = lut[0];
         assert!(black[0] <= 0.5);
     }
@@ -604,8 +603,8 @@ mod tests {
 
     #[test]
     fn test_lift_raises_black() {
-        let params = LogToDisplayParams::new(LogCurve::SLog3, DisplayTarget::Srgb)
-            .lift_gain(0.05, 1.0);
+        let params =
+            LogToDisplayParams::new(LogCurve::SLog3, DisplayTarget::Srgb).lift_gain(0.05, 1.0);
         let pixel = [0.0, 0.0, 0.0];
         let out = process_rgb_log_to_display(&pixel, &params);
         assert!(out[0] >= 0.05 - 1e-6);

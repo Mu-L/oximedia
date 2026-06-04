@@ -126,7 +126,13 @@ impl WrapConfig {
     pub fn measure(&self, text: &str) -> f32 {
         let space_w = self.effective_space_width();
         text.chars()
-            .map(|c| if c == ' ' { space_w } else { self.char_width_px })
+            .map(|c| {
+                if c == ' ' {
+                    space_w
+                } else {
+                    self.char_width_px
+                }
+            })
             .sum()
     }
 }
@@ -161,7 +167,12 @@ fn tokenize(text: &str) -> Vec<(String, bool)> {
 }
 
 /// Apply [`JustifyMode`] to compute per-line x_offset and word_spacing.
-fn justify_line(line_text: &str, natural_width: f32, is_last: bool, config: &WrapConfig) -> (f32, f32) {
+fn justify_line(
+    line_text: &str,
+    natural_width: f32,
+    is_last: bool,
+    config: &WrapConfig,
+) -> (f32, f32) {
     let avail = config.max_width_px;
     match config.justify {
         JustifyMode::None | JustifyMode::Left => (0.0, 0.0),
@@ -224,7 +235,11 @@ pub fn wrap_text(text: &str, config: &WrapConfig) -> Vec<WrappedLine> {
             let mut partial = String::new();
             let mut partial_width = 0.0;
             for ch in token.chars() {
-                let cw = if ch == ' ' { space_w } else { config.char_width_px };
+                let cw = if ch == ' ' {
+                    space_w
+                } else {
+                    config.char_width_px
+                };
                 if partial_width + cw > config.max_width_px && !partial.is_empty() {
                     lines.push(partial.clone());
                     partial.clear();
@@ -375,7 +390,11 @@ mod tests {
         // "Hi" = 20px → x_offset = (200 - 20) / 2 = 90
         let lines = wrap_text("Hi", &config);
         assert_eq!(lines.len(), 1);
-        assert!((lines[0].x_offset_px - 90.0).abs() < 0.5, "expected center offset ~90, got {}", lines[0].x_offset_px);
+        assert!(
+            (lines[0].x_offset_px - 90.0).abs() < 0.5,
+            "expected center offset ~90, got {}",
+            lines[0].x_offset_px
+        );
     }
 
     // 7. JustifyMode::Right shifts x_offset to right.
@@ -406,12 +425,18 @@ mod tests {
         };
         // Force a multi-line wrap so there is a non-last line.
         let lines = wrap_text("hello world foo bar baz qux", &config);
-        assert!(lines.len() > 1, "expected multiple lines for full justify test");
+        assert!(
+            lines.len() > 1,
+            "expected multiple lines for full justify test"
+        );
         // First (non-last) line with multiple words should have positive word_spacing_px.
         let first = &lines[0];
         let word_count = first.text.split_whitespace().count();
         if word_count > 1 {
-            assert!(first.word_spacing_px >= 0.0, "word_spacing must be non-negative");
+            assert!(
+                first.word_spacing_px >= 0.0,
+                "word_spacing must be non-negative"
+            );
         }
     }
 

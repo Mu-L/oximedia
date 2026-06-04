@@ -254,9 +254,9 @@ pub fn render_analysis(analysis: &NoiseFloorAnalysis, config: &NoiseFloorConfig)
     }
 
     let channels: &[(&NoiseFloorAnalysis, [u8; 4])] = &[
-        (analysis, [220, 60, 60, 230]),  // R
-        (analysis, [60, 220, 60, 230]),  // G
-        (analysis, [60, 60, 220, 230]),  // B
+        (analysis, [220, 60, 60, 230]),   // R
+        (analysis, [60, 220, 60, 230]),   // G
+        (analysis, [60, 60, 220, 230]),   // B
         (analysis, [200, 200, 200, 220]), // Luma
     ];
 
@@ -424,7 +424,11 @@ mod tests {
             ..Default::default()
         };
         let result = analyze_noise_floor(&frame, 8, 8, &config).expect("ok");
-        assert!((result.snr_r_db - 96.0).abs() < 0.01, "SNR={}", result.snr_r_db);
+        assert!(
+            (result.snr_r_db - 96.0).abs() < 0.01,
+            "SNR={}",
+            result.snr_r_db
+        );
     }
 
     #[test]

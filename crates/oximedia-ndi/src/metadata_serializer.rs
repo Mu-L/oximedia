@@ -283,8 +283,7 @@ fn parse_attr(xml: &str, attr: &str) -> Option<String> {
 /// Parse a required f32 attribute, returning [`MetaError::MissingField`] or
 /// [`MetaError::ParseError`] as appropriate.
 fn parse_f32_attr(xml: &str, attr: &str) -> Result<f32, MetaError> {
-    let raw = parse_attr(xml, attr)
-        .ok_or_else(|| MetaError::MissingField(attr.to_string()))?;
+    let raw = parse_attr(xml, attr).ok_or_else(|| MetaError::MissingField(attr.to_string()))?;
     raw.parse::<f32>()
         .map_err(|e| MetaError::ParseError(format!("{attr}: {e}")))
 }

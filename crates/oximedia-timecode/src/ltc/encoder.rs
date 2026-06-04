@@ -233,6 +233,43 @@ impl LtcEncoder {
         samples
     }
 
+    /// Encode multiple timecodes in a single batch call.
+    ///
+    /// Returns one inner `Vec<i16>` per timecode, each holding one LTC frame
+    /// worth of PCM samples at the given `sample_rate`.  The `i16` samples
+    /// are scaled from `amplitude` (0.0 – 1.0): `+amplitude → i16::MAX`,
+    /// `−amplitude → i16::MIN`.
+    ///
+    /// A fresh encoder polarity state is used for each timecode, matching the
+    /// per-frame reset semantics that many LTC editors expect.
+    pub fn encode_batch(timecodes: &[Timecode], sample_rate: u32) -> Vec<Vec<i16>> {
+        timecodes
+            .iter()
+            .map(|tc| {
+                let frame_rate = crate::frame_rate_from_info(&tc.frame_rate);
+                let mut enc = LtcEncoder::new(sample_rate, frame_rate, 1.0);
+                let f32_samples = enc.encode_frame(tc).unwrap_or_default();
+                f32_to_i16_samples(&f32_samples)
+            })
+            .collect()
+    }
+
+    /// Encode multiple timecodes and interleave all resulting PCM samples into
+    /// a single flat `Vec<i16>`.
+    ///
+    /// Equivalent to calling [`encode_batch`](Self::encode_batch) and
+    /// flattening the result, but avoids an intermediate allocation per frame.
+    pub fn encode_batch_interleaved(timecodes: &[Timecode], sample_rate: u32) -> Vec<i16> {
+        let mut out = Vec::new();
+        for tc in timecodes {
+            let frame_rate = crate::frame_rate_from_info(&tc.frame_rate);
+            let mut enc = LtcEncoder::new(sample_rate, frame_rate, 1.0);
+            let f32_samples = enc.encode_frame(tc).unwrap_or_default();
+            out.extend(f32_to_i16_samples(&f32_samples));
+        }
+        out
+    }
+
     /// Reset encoder state
     pub fn reset(&mut self) {
         self.phase = 0.0;
@@ -248,6 +285,17 @@ impl LtcEncoder {
     pub fn amplitude(&self) -> f32 {
         self.amplitude
     }
+}
+
+/// Scale f32 samples (`-1.0 …+1.0`) to i16 PCM.
+fn f32_to_i16_samples(samples: &[f32]) -> Vec<i16> {
+    samples
+        .iter()
+        .map(|&s| {
+            let clamped = s.clamp(-1.0, 1.0);
+            (clamped * i16::MAX as f32) as i16
+        })
+        .collect()
 }
 
 /// Waveform shaper for improved signal quality
@@ -630,5 +678,53 @@ mod tests {
 
         let bits = [true, false, false]; // 1 true bit = odd
         assert!(encoder.calculate_even_parity(&bits));
+    }
+
+    #[test]
+    fn test_encode_batch_25_frames_count() {
+        // 25 consecutive timecodes at 25fps must produce exactly 25 frame buffers.
+        let timecodes: Vec<Timecode> = (0u8..25)
+            .map(|f| Timecode::new(0, 0, 0, f, FrameRate::Fps25).expect("valid"))
+            .collect();
+        let frames = LtcEncoder::encode_batch(&timecodes, 48000);
+        assert_eq!(frames.len(), 25, "batch must yield one buffer per timecode");
+    }
+
+    #[test]
+    fn test_encode_batch_frame_length_correct() {
+        // At 48000 Hz and 25fps: 48000/25 = 1920 samples per frame.
+        // Each sample maps to 80 LTC bits → 1920 / 80 = 24 samples per bit.
+        let tc = Timecode::new(0, 0, 0, 0, FrameRate::Fps25).expect("valid");
+        let frames = LtcEncoder::encode_batch(&[tc], 48000);
+        let expected_samples = 48000usize / 25; // 1920
+        assert_eq!(
+            frames[0].len(),
+            expected_samples,
+            "frame audio length must equal sample_rate / fps"
+        );
+    }
+
+    #[test]
+    fn test_encode_batch_interleaved_length() {
+        let timecodes: Vec<Timecode> = (0u8..25)
+            .map(|f| Timecode::new(0, 0, 0, f, FrameRate::Fps25).expect("valid"))
+            .collect();
+        let flat = LtcEncoder::encode_batch_interleaved(&timecodes, 48000);
+        // 25 frames × 1920 samples = 48000 samples (exactly one second)
+        assert_eq!(flat.len(), 48000);
+    }
+
+    #[test]
+    fn test_encode_batch_matches_interleaved() {
+        let timecodes: Vec<Timecode> = (0u8..5)
+            .map(|f| Timecode::new(0, 0, 0, f, FrameRate::Fps25).expect("valid"))
+            .collect();
+        let batched = LtcEncoder::encode_batch(&timecodes, 48000);
+        let flat: Vec<i16> = batched.iter().flatten().copied().collect();
+        let interleaved = LtcEncoder::encode_batch_interleaved(&timecodes, 48000);
+        assert_eq!(
+            flat, interleaved,
+            "batch and interleaved must produce identical output"
+        );
     }
 }

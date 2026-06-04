@@ -118,10 +118,7 @@ impl DownsampledPoint {
 /// Points are grouped by `floor(ts / resolution_ms) * resolution_ms`.
 /// Empty input produces an empty output.
 #[must_use]
-pub fn downsample_points(
-    points: &[(u64, f32)],
-    resolution_ms: u64,
-) -> Vec<DownsampledPoint> {
+pub fn downsample_points(points: &[(u64, f32)], resolution_ms: u64) -> Vec<DownsampledPoint> {
     if points.is_empty() || resolution_ms == 0 {
         return Vec::new();
     }
@@ -194,7 +191,12 @@ impl MetricTierStorage {
 
     /// Query a specific tier for data within `[from_ms, to_ms]`.
     #[must_use]
-    pub fn query_tier(&self, tier_index: usize, from_ms: u64, to_ms: u64) -> Vec<&DownsampledPoint> {
+    pub fn query_tier(
+        &self,
+        tier_index: usize,
+        from_ms: u64,
+        to_ms: u64,
+    ) -> Vec<&DownsampledPoint> {
         match self.tiers.get(tier_index) {
             None => Vec::new(),
             Some((_, stored)) => stored
@@ -298,12 +300,7 @@ mod tests {
     #[test]
     fn test_downsample_points_groups_correctly() {
         // Three points in the first 1-second window, one in the next.
-        let points = vec![
-            (0u64, 10.0f32),
-            (200, 20.0),
-            (800, 30.0),
-            (1_000, 40.0),
-        ];
+        let points = vec![(0u64, 10.0f32), (200, 20.0), (800, 30.0), (1_000, 40.0)];
         let result = downsample_points(&points, 1_000);
         assert_eq!(result.len(), 2, "should produce 2 windows");
         let w0 = &result[0];
@@ -340,25 +337,28 @@ mod tests {
 
     #[test]
     fn test_tier_storage_ingest_then_query() {
-        let mut storage = MetricTierStorage::new(vec![
-            RetentionPolicy::one_second_for_one_hour(),
-        ]);
+        let mut storage = MetricTierStorage::new(vec![RetentionPolicy::one_second_for_one_hour()]);
         let now_ms = 10_000u64;
-        let points = vec![(now_ms, 50.0f32), (now_ms + 200, 60.0), (now_ms + 700, 70.0)];
+        let points = vec![
+            (now_ms, 50.0f32),
+            (now_ms + 200, 60.0),
+            (now_ms + 700, 70.0),
+        ];
         storage.ingest(&points, now_ms + 1_000);
 
         let result = storage.query_tier(0, now_ms, now_ms + 1_000);
-        assert!(!result.is_empty(), "should have at least one point after ingest");
+        assert!(
+            !result.is_empty(),
+            "should have at least one point after ingest"
+        );
     }
 
     #[test]
     fn test_tier_storage_prune_removes_old_data() {
-        let mut storage = MetricTierStorage::new(vec![
-            RetentionPolicy {
-                resolution_ms: 1_000,
-                retention_ms: 5_000, // keep only 5 seconds
-            },
-        ]);
+        let mut storage = MetricTierStorage::new(vec![RetentionPolicy {
+            resolution_ms: 1_000,
+            retention_ms: 5_000, // keep only 5 seconds
+        }]);
         // Ingest old data.
         let old_ts = 0u64;
         storage.ingest(&[(old_ts, 1.0)], old_ts + 100);
@@ -390,14 +390,15 @@ mod tests {
             tier0.len() >= tier1.len(),
             "finer tier should have >= points than coarser tier"
         );
-        assert!(tier1.len() >= 1, "coarser tier should have at least one point");
+        assert!(
+            tier1.len() >= 1,
+            "coarser tier should have at least one point"
+        );
     }
 
     #[test]
     fn test_tier_storage_query_out_of_bounds_tier() {
-        let storage = MetricTierStorage::new(vec![
-            RetentionPolicy::one_second_for_one_hour(),
-        ]);
+        let storage = MetricTierStorage::new(vec![RetentionPolicy::one_second_for_one_hour()]);
         let result = storage.query_tier(99, 0, u64::MAX);
         assert!(result.is_empty());
     }

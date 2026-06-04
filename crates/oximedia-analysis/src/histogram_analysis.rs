@@ -195,6 +195,132 @@ impl HistogramAnalyzer {
     }
 }
 
+// ─────────────────────────────────────────────────────────────
+// FrameHistogramCache — memoized per-frame histogram
+// ─────────────────────────────────────────────────────────────
+
+/// Generic histogram payload that can be cached.
+///
+/// Wraps an [`ImageHistogram`] so callers can store it by value and look it
+/// up without recomputing on each sub-analyzer that processes the same frame.
+#[derive(Debug, Clone)]
+pub struct HistogramData {
+    /// The underlying 256-bin histogram.
+    pub histogram: ImageHistogram,
+}
+
+impl From<ImageHistogram> for HistogramData {
+    fn from(h: ImageHistogram) -> Self {
+        Self { histogram: h }
+    }
+}
+
+/// Compute a fast, low-collision hash key for a pixel buffer.
+///
+/// Hashes `(width, height)` plus up to 64 pixels from the front and 64 from
+/// the back of the buffer.  This is intentionally a *sample* — it runs in
+/// O(1) regardless of frame size.
+///
+/// # Collision note
+/// Two different frames with the same dimensions, identical first 64 pixels,
+/// and identical last 64 pixels will hash identically.  For media analysis
+/// use-cases (sub-analyzers processing the **same** frame object) this is
+/// sufficient.  Do not use this as a cryptographic identifier.
+#[must_use]
+pub fn frame_hash_key(pixels: &[u8], width: usize, height: usize) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut h = DefaultHasher::new();
+    width.hash(&mut h);
+    height.hash(&mut h);
+    // Sample: first 64 bytes + last 64 bytes.
+    let head_end = pixels.len().min(64);
+    let tail_start = pixels.len().saturating_sub(64);
+    pixels[..head_end].hash(&mut h);
+    if tail_start > head_end {
+        pixels[tail_start..].hash(&mut h);
+    }
+    h.finish()
+}
+
+/// A bounded LRU-style cache that memoises [`HistogramData`] per frame.
+///
+/// Keyed on a [`u64`] frame hash produced by [`frame_hash_key`].  When the
+/// cache reaches `max_entries` the oldest entry (by insertion order) is
+/// evicted before the new one is inserted.
+///
+/// # Example
+/// ```rust
+/// use oximedia_analysis::histogram_analysis::{
+///     FrameHistogramCache, HistogramData, ImageHistogram, frame_hash_key,
+/// };
+///
+/// let mut cache = FrameHistogramCache::new(8);
+/// let pixels = vec![128u8; 1920 * 1080];
+/// let key = frame_hash_key(&pixels, 1920, 1080);
+/// let data = cache.get_or_compute(key, || {
+///     HistogramData::from(ImageHistogram::from_luma(&pixels))
+/// });
+/// assert_eq!(data.histogram.total_pixels, 1920 * 1080);
+/// ```
+pub struct FrameHistogramCache {
+    map: std::collections::HashMap<u64, HistogramData>,
+    max_entries: usize,
+    insertion_order: std::collections::VecDeque<u64>,
+}
+
+impl FrameHistogramCache {
+    /// Create a new cache that retains at most `max_entries` histograms.
+    ///
+    /// `max_entries` must be ≥ 1; if 0 is passed it is silently raised to 1.
+    #[must_use]
+    pub fn new(max_entries: usize) -> Self {
+        let cap = max_entries.max(1);
+        Self {
+            map: std::collections::HashMap::with_capacity(cap),
+            max_entries: cap,
+            insertion_order: std::collections::VecDeque::with_capacity(cap),
+        }
+    }
+
+    /// Return the cached [`HistogramData`] for `frame_key`, or compute and
+    /// cache it if not present.
+    ///
+    /// The closure `compute` is called **at most once** per unique key.
+    pub fn get_or_compute<F>(&mut self, frame_key: u64, compute: F) -> &HistogramData
+    where
+        F: FnOnce() -> HistogramData,
+    {
+        // Avoid double-lookup: check presence first, then insert if missing.
+        if !self.map.contains_key(&frame_key) {
+            // Evict oldest entry if at capacity.
+            if self.map.len() >= self.max_entries {
+                if let Some(evict_key) = self.insertion_order.pop_front() {
+                    self.map.remove(&evict_key);
+                }
+            }
+            let data = compute();
+            self.map.insert(frame_key, data);
+            self.insertion_order.push_back(frame_key);
+        }
+        // SAFETY: we just inserted if missing; the key is present.
+        &self.map[&frame_key]
+    }
+
+    /// Returns the number of entries currently held in the cache.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    /// Returns `true` if the cache holds no entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,5 +426,77 @@ mod tests {
         let h = ImageHistogram::default();
         assert_eq!(h.total_pixels, 0);
         assert_eq!(h.mean(), 0.0);
+    }
+
+    // ── FrameHistogramCache ───────────────────────────────────
+
+    /// The compute closure must be called exactly once on the first access and
+    /// zero times on subsequent accesses with the same key.
+    #[test]
+    fn test_histogram_cache_hit_skips_recompute() {
+        let mut cache = FrameHistogramCache::new(4);
+        let pixels = vec![100u8; 64 * 64];
+        let key = frame_hash_key(&pixels, 64, 64);
+
+        let mut call_count = 0usize;
+
+        // First call: compute closure fires.
+        {
+            let _data = cache.get_or_compute(key, || {
+                call_count += 1;
+                HistogramData::from(ImageHistogram::from_luma(&pixels))
+            });
+        }
+        assert_eq!(call_count, 1, "compute must be called once on cache miss");
+
+        // Second call with identical key: compute closure must NOT fire.
+        {
+            let _data = cache.get_or_compute(key, || {
+                call_count += 1;
+                HistogramData::from(ImageHistogram::from_luma(&pixels))
+            });
+        }
+        assert_eq!(call_count, 1, "compute must be skipped on cache hit");
+
+        // The cached entry has the correct pixel count.
+        let data = cache.get_or_compute(key, || {
+            call_count += 1;
+            HistogramData::from(ImageHistogram::from_luma(&pixels))
+        });
+        assert_eq!(data.histogram.total_pixels, 64 * 64);
+        assert_eq!(call_count, 1, "total compute calls must remain 1");
+    }
+
+    /// A different frame (different pixel data) must produce a different hash
+    /// and therefore trigger a new compute.
+    #[test]
+    fn test_histogram_cache_miss_on_new_frame() {
+        let mut cache = FrameHistogramCache::new(4);
+
+        let pixels_a = vec![50u8; 64 * 64];
+        let pixels_b = vec![200u8; 64 * 64];
+        let key_a = frame_hash_key(&pixels_a, 64, 64);
+        let key_b = frame_hash_key(&pixels_b, 64, 64);
+
+        // The two frames must hash differently.
+        assert_ne!(key_a, key_b, "distinct frames must have distinct hash keys");
+
+        let mut calls = 0usize;
+
+        cache.get_or_compute(key_a, || {
+            calls += 1;
+            HistogramData::from(ImageHistogram::from_luma(&pixels_a))
+        });
+        assert_eq!(calls, 1);
+
+        // New frame → cache miss → compute fires again.
+        cache.get_or_compute(key_b, || {
+            calls += 1;
+            HistogramData::from(ImageHistogram::from_luma(&pixels_b))
+        });
+        assert_eq!(calls, 2, "cache miss on new frame must trigger compute");
+
+        // Both entries are present in the cache.
+        assert_eq!(cache.len(), 2);
     }
 }

@@ -69,9 +69,7 @@ impl FrameSubstitutor {
 
         match self.strategy {
             SubstitutionStrategy::Freeze => {
-                (0..missing_count)
-                    .map(|_| prev_frame.to_vec())
-                    .collect()
+                (0..missing_count).map(|_| prev_frame.to_vec()).collect()
             }
             SubstitutionStrategy::FadeToBlack => {
                 (0..missing_count)
@@ -89,11 +87,9 @@ impl FrameSubstitutor {
                     })
                     .collect()
             }
-            SubstitutionStrategy::Black => {
-                (0..missing_count)
-                    .map(|_| vec![0u8; prev_frame.len()])
-                    .collect()
-            }
+            SubstitutionStrategy::Black => (0..missing_count)
+                .map(|_| vec![0u8; prev_frame.len()])
+                .collect(),
         }
     }
 
@@ -144,8 +140,8 @@ mod tests {
     #[test]
     fn black_fills_with_zeros() {
         let prev = make_frame(0xFF);
-        let subs = FrameSubstitutor::with_strategy(SubstitutionStrategy::Black)
-            .substitute(&prev, 3);
+        let subs =
+            FrameSubstitutor::with_strategy(SubstitutionStrategy::Black).substitute(&prev, 3);
         assert_eq!(subs.len(), 3);
         for f in &subs {
             assert!(f.iter().all(|&b| b == 0));
@@ -155,8 +151,8 @@ mod tests {
     #[test]
     fn fade_to_black_single_frame_is_black() {
         let prev = make_frame(200);
-        let subs = FrameSubstitutor::with_strategy(SubstitutionStrategy::FadeToBlack)
-            .substitute(&prev, 1);
+        let subs =
+            FrameSubstitutor::with_strategy(SubstitutionStrategy::FadeToBlack).substitute(&prev, 1);
         // Single frame: alpha = 0.0 → should equal prev
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0], prev);
@@ -165,8 +161,8 @@ mod tests {
     #[test]
     fn fade_to_black_decreases_brightness() {
         let prev = make_frame(200);
-        let subs = FrameSubstitutor::with_strategy(SubstitutionStrategy::FadeToBlack)
-            .substitute(&prev, 5);
+        let subs =
+            FrameSubstitutor::with_strategy(SubstitutionStrategy::FadeToBlack).substitute(&prev, 5);
         assert_eq!(subs.len(), 5);
         // First frame should equal prev (alpha=0)
         assert_eq!(subs[0], prev);
@@ -190,6 +186,9 @@ mod tests {
 
     #[test]
     fn default_strategy_is_freeze() {
-        assert_eq!(SubstitutionStrategy::default(), SubstitutionStrategy::Freeze);
+        assert_eq!(
+            SubstitutionStrategy::default(),
+            SubstitutionStrategy::Freeze
+        );
     }
 }

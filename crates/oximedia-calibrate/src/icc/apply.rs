@@ -5,6 +5,7 @@
 use crate::error::{CalibrationError, CalibrationResult};
 use crate::icc::IccProfile;
 use crate::Rgb;
+use rayon::prelude::*;
 
 /// ICC profile applicator.
 pub struct IccProfileApplicator {
@@ -51,19 +52,28 @@ impl IccProfileApplicator {
             ));
         }
 
-        let mut output = Vec::with_capacity(image_data.len());
+        // Pre-allocate the output buffer as flat bytes so rayon can write into it
+        // in parallel without any synchronization.  Each 3-byte output chunk
+        // (one pixel) maps to the same-index 3-byte input chunk.
+        let mut output = vec![0u8; image_data.len()];
 
-        for chunk in image_data.chunks_exact(3) {
-            let r = f64::from(chunk[0]) / 255.0;
-            let g = f64::from(chunk[1]) / 255.0;
-            let b = f64::from(chunk[2]) / 255.0;
+        // Split output into non-overlapping 3-byte chunks and process in parallel.
+        // Each chunk holds [R_out, G_out, B_out] for one pixel.
+        output
+            .par_chunks_exact_mut(3)
+            .enumerate()
+            .for_each(|(idx, out_chunk)| {
+                let in_off = idx * 3;
+                let r = f64::from(image_data[in_off]) / 255.0;
+                let g = f64::from(image_data[in_off + 1]) / 255.0;
+                let b = f64::from(image_data[in_off + 2]) / 255.0;
 
-            let transformed = self.apply_to_color(&[r, g, b]);
+                let transformed = self.apply_to_color(&[r, g, b]);
 
-            output.push((transformed[0] * 255.0).clamp(0.0, 255.0) as u8);
-            output.push((transformed[1] * 255.0).clamp(0.0, 255.0) as u8);
-            output.push((transformed[2] * 255.0).clamp(0.0, 255.0) as u8);
-        }
+                out_chunk[0] = (transformed[0] * 255.0).clamp(0.0, 255.0) as u8;
+                out_chunk[1] = (transformed[1] * 255.0).clamp(0.0, 255.0) as u8;
+                out_chunk[2] = (transformed[2] * 255.0).clamp(0.0, 255.0) as u8;
+            });
 
         Ok(output)
     }

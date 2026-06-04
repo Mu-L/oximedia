@@ -141,23 +141,22 @@ impl OperatorActionKind {
     /// `None` if the action is not reversible.
     pub fn undo_description(&self) -> Option<String> {
         match self {
-            Self::SwitchSource { from_source, to_source } => Some(format!(
+            Self::SwitchSource {
+                from_source,
+                to_source,
+            } => Some(format!(
                 "Switch source back from {to_source} to {from_source}"
             )),
             Self::PlayClip { clip_id } => Some(format!("Stop clip {clip_id}")),
             Self::StopPlayout { clip_id } => Some(format!("Resume clip {clip_id}")),
-            Self::GraphicInsert { template_id } => {
-                Some(format!("Remove graphic {template_id}"))
-            }
-            Self::GraphicRemove { template_id } => {
-                Some(format!("Re-insert graphic {template_id}"))
-            }
-            Self::AudioLevelChange { channel, from_db, .. } => {
-                Some(format!("Restore audio level on {channel} to {from_db:.1} dB"))
-            }
-            Self::ApproveItem { item_id } => {
-                Some(format!("Revert approval of item {item_id}"))
-            }
+            Self::GraphicInsert { template_id } => Some(format!("Remove graphic {template_id}")),
+            Self::GraphicRemove { template_id } => Some(format!("Re-insert graphic {template_id}")),
+            Self::AudioLevelChange {
+                channel, from_db, ..
+            } => Some(format!(
+                "Restore audio level on {channel} to {from_db:.1} dB"
+            )),
+            Self::ApproveItem { item_id } => Some(format!("Revert approval of item {item_id}")),
             // These cannot be undone in a meaningful way:
             Self::ManualCue { .. } => None,
             Self::SkipItem { .. } => None,
@@ -194,11 +193,7 @@ pub struct JournalEntry {
 
 impl JournalEntry {
     /// Create a new journal entry.
-    pub fn new(
-        operator: impl Into<String>,
-        kind: OperatorActionKind,
-        timestamp_ms: u64,
-    ) -> Self {
+    pub fn new(operator: impl Into<String>, kind: OperatorActionKind, timestamp_ms: u64) -> Self {
         Self {
             operator: operator.into(),
             kind,
@@ -357,17 +352,29 @@ impl OperatorJournal {
 
     /// Return the number of applied (non-undone) entries.
     pub fn applied_count(&self) -> usize {
-        self.entries.iter().take(self.cursor).filter(|e| !e.undone).count()
+        self.entries
+            .iter()
+            .take(self.cursor)
+            .filter(|e| !e.undone)
+            .count()
     }
 
     /// Return the number of entries that can be undone.
     pub fn undo_depth(&self) -> usize {
-        self.entries.iter().take(self.cursor).filter(|e| !e.undone && e.is_reversible()).count()
+        self.entries
+            .iter()
+            .take(self.cursor)
+            .filter(|e| !e.undone && e.is_reversible())
+            .count()
     }
 
     /// Return the number of entries that can be redone.
     pub fn redo_depth(&self) -> usize {
-        self.entries.iter().skip(self.cursor).filter(|e| e.undone).count()
+        self.entries
+            .iter()
+            .skip(self.cursor)
+            .filter(|e| e.undone)
+            .count()
     }
 
     /// Total number of entries stored (applied + undone / redo stack).
@@ -447,11 +454,15 @@ mod tests {
     }
 
     fn play(clip: &str) -> OperatorActionKind {
-        OperatorActionKind::PlayClip { clip_id: clip.to_string() }
+        OperatorActionKind::PlayClip {
+            clip_id: clip.to_string(),
+        }
     }
 
     fn cue(id: &str) -> OperatorActionKind {
-        OperatorActionKind::ManualCue { cue_id: id.to_string() }
+        OperatorActionKind::ManualCue {
+            cue_id: id.to_string(),
+        }
     }
 
     fn entry(op: &str, kind: OperatorActionKind, ts: u64) -> JournalEntry {
@@ -545,7 +556,7 @@ mod tests {
     fn test_undo_depth() {
         let mut j = OperatorJournal::new(50);
         j.record(entry("op1", switch("A", "B"), 1000)); // reversible
-        j.record(entry("op1", cue("c1"), 2000));        // not reversible
+        j.record(entry("op1", cue("c1"), 2000)); // not reversible
         j.record(entry("op1", switch("B", "C"), 3000)); // reversible
         assert_eq!(j.undo_depth(), 2);
     }
@@ -604,7 +615,10 @@ mod tests {
         assert!(switch("A", "B").is_reversible());
         assert!(play("x").is_reversible());
         assert!(!cue("c").is_reversible());
-        assert!(!OperatorActionKind::EmergencyAlert { alert_type: "t".to_string() }.is_reversible());
+        assert!(!OperatorActionKind::EmergencyAlert {
+            alert_type: "t".to_string()
+        }
+        .is_reversible());
     }
 
     #[test]
@@ -642,8 +656,12 @@ mod tests {
 
     #[test]
     fn test_graphic_insert_remove_reversible() {
-        let insert = OperatorActionKind::GraphicInsert { template_id: "lower_third".to_string() };
-        let remove = OperatorActionKind::GraphicRemove { template_id: "lower_third".to_string() };
+        let insert = OperatorActionKind::GraphicInsert {
+            template_id: "lower_third".to_string(),
+        };
+        let remove = OperatorActionKind::GraphicRemove {
+            template_id: "lower_third".to_string(),
+        };
         assert!(insert.is_reversible());
         assert!(remove.is_reversible());
     }

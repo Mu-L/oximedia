@@ -255,10 +255,7 @@ impl RpuTimeline {
                 TimelineEdit::DeleteAtPts(pts) => {
                     self.delete_at_pts(*pts);
                 }
-                TimelineEdit::DeleteRange {
-                    start_pts,
-                    end_pts,
-                } => {
+                TimelineEdit::DeleteRange { start_pts, end_pts } => {
                     self.delete_range(*start_pts, *end_pts);
                 }
                 TimelineEdit::Shift(delta) => self.shift(*delta),
@@ -506,10 +503,7 @@ mod tests {
         t.insert(TimedRpu::new(3000, make_rpu()));
         t.insert(TimedRpu::new(6000, make_rpu()));
 
-        let edits = vec![
-            TimelineEdit::DeleteAtPts(3000),
-            TimelineEdit::Shift(500),
-        ];
+        let edits = vec![TimelineEdit::DeleteAtPts(3000), TimelineEdit::Shift(500)];
         t.apply_edits(&edits).expect("edits should succeed");
 
         assert_eq!(t.len(), 2);

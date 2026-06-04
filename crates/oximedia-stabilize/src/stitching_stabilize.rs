@@ -274,11 +274,7 @@ impl StitchingStabilizer {
     }
 
     /// Warp a single frame with horizontal wrap-around.
-    fn warp_frame(
-        &self,
-        frame: &Frame,
-        transform: &SphericalTransform,
-    ) -> StabilizeResult<Frame> {
+    fn warp_frame(&self, frame: &Frame, transform: &SphericalTransform) -> StabilizeResult<Frame> {
         let w = frame.width;
         let h = frame.height;
         let mut out = Array2::zeros((h, w));
@@ -412,8 +408,8 @@ impl StitchingStabilizer {
                 let wc = wrap_x(c as i64 - 1, w);
                 let ec = wrap_x(c as i64 + 1, w);
                 gx[[r, c]] = image[[r, ec]] as f64 - image[[r, wc]] as f64;
-                gy[[r, c]] = image[[(r + 1).min(h - 1), c]] as f64
-                    - image[[r.saturating_sub(1), c]] as f64;
+                gy[[r, c]] =
+                    image[[(r + 1).min(h - 1), c]] as f64 - image[[r.saturating_sub(1), c]] as f64;
             }
         }
 
@@ -523,7 +519,7 @@ mod tests {
         // Rightmost and leftmost columns should be adjacent.
         let mut data = Array2::zeros((10, 10));
         data[[5, 9]] = 200; // rightmost
-        // Sampling at x=-0.5 should blend leftmost (0) and wrap from rightmost (200).
+                            // Sampling at x=-0.5 should blend leftmost (0) and wrap from rightmost (200).
         let val = sample_wrapped(&data, -0.5, 5.0);
         // Interpolated: 0*(0.5) + 200*(0.5) = 100.
         assert!((val as i32 - 100).abs() <= 1);
@@ -584,10 +580,9 @@ mod tests {
     #[test]
     fn test_stitching_stabilizer_apply_length() {
         let stab = StitchingStabilizer::new(StitchingStabilizeConfig::default());
-        let frames: Vec<Frame> = (0..3).map(|i| gradient_frame(64, 32)).collect();
-        let transforms: Vec<SphericalTransform> = (0..3)
-            .map(SphericalTransform::identity)
-            .collect();
+        let frames: Vec<Frame> = (0..3).map(|_i| gradient_frame(64, 32)).collect();
+        let transforms: Vec<SphericalTransform> =
+            (0..3).map(SphericalTransform::identity).collect();
         let out = stab.apply(&frames, &transforms).expect("ok");
         assert_eq!(out.len(), 3);
     }
@@ -596,11 +591,13 @@ mod tests {
     fn test_stitching_stabilizer_apply_mismatch_error() {
         let stab = StitchingStabilizer::new(StitchingStabilizeConfig::default());
         let frames = vec![solid_frame(64, 32, 100)];
-        let transforms: Vec<SphericalTransform> = (0..3)
-            .map(SphericalTransform::identity)
-            .collect();
+        let transforms: Vec<SphericalTransform> =
+            (0..3).map(SphericalTransform::identity).collect();
         let result = stab.apply(&frames, &transforms);
-        assert!(matches!(result, Err(StabilizeError::DimensionMismatch { .. })));
+        assert!(matches!(
+            result,
+            Err(StabilizeError::DimensionMismatch { .. })
+        ));
     }
 
     #[test]
@@ -608,7 +605,7 @@ mod tests {
         let stab = StitchingStabilizer::new(StitchingStabilizeConfig::default());
         let frame = gradient_frame(32, 16);
         let t = SphericalTransform::identity(0);
-        let out = stab.apply(&[frame.clone()], &[t]).expect("ok");
+        let out = stab.apply(std::slice::from_ref(&frame), &[t]).expect("ok");
         // Identity warp should exactly reproduce the input.
         assert_eq!(out[0].data, frame.data);
     }
@@ -624,7 +621,7 @@ mod tests {
             tilt_px: 0.0,
             roll_rad: 0.0,
         };
-        let out = stab.apply(&[frame.clone()], &[t]).expect("ok");
+        let out = stab.apply(std::slice::from_ref(&frame), &[t]).expect("ok");
         assert_eq!(out[0].data, frame.data);
     }
 }

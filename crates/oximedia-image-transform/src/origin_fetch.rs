@@ -266,10 +266,7 @@ impl OriginFetcher {
 
     /// Returns the number of entries currently in the cache.
     pub fn cache_size(&self) -> usize {
-        self.cache
-            .lock()
-            .map(|c| c.len())
-            .unwrap_or(0)
+        self.cache.lock().map(|c| c.len()).unwrap_or(0)
     }
 
     /// Returns `true` if the given URL is currently in the cache and not expired.
@@ -295,10 +292,7 @@ impl OriginFetcher {
 ///
 /// Returns the portion between `://` and the next `/` (or end of string).
 fn extract_host(url: &str) -> &str {
-    let after_scheme = url
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(url);
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
     after_scheme
         .split_once('/')
         .map(|(host, _)| host)
@@ -390,14 +384,18 @@ mod tests {
     #[test]
     fn test_reject_http_scheme() {
         let fetcher = make_fetcher(vec![]);
-        let err = fetcher.fetch("http://example.com/x.jpg").expect_err("should fail");
+        let err = fetcher
+            .fetch("http://example.com/x.jpg")
+            .expect_err("should fail");
         assert!(err.contains("https"));
     }
 
     #[test]
     fn test_reject_file_scheme() {
         let fetcher = make_fetcher(vec![]);
-        let err = fetcher.fetch("file:///etc/passwd").expect_err("should fail");
+        let err = fetcher
+            .fetch("file:///etc/passwd")
+            .expect_err("should fail");
         assert!(err.contains("https"));
     }
 
@@ -405,16 +403,14 @@ mod tests {
 
     #[test]
     fn test_allowlist_permits_matching_host() {
-        let fetcher = make_fetcher(vec![42])
-            .with_allowed_hosts(["example.com".to_string()]);
+        let fetcher = make_fetcher(vec![42]).with_allowed_hosts(["example.com".to_string()]);
         let data = fetcher.fetch("https://example.com/img.jpg").expect("ok");
         assert_eq!(data, vec![42]);
     }
 
     #[test]
     fn test_allowlist_rejects_unknown_host() {
-        let fetcher = make_fetcher(vec![])
-            .with_allowed_hosts(["trusted.com".to_string()]);
+        let fetcher = make_fetcher(vec![]).with_allowed_hosts(["trusted.com".to_string()]);
         let err = fetcher
             .fetch("https://malicious.example.com/x.jpg")
             .expect_err("should be blocked");
@@ -425,10 +421,7 @@ mod tests {
 
     #[test]
     fn test_backend_error_propagates() {
-        let fetcher = OriginFetcher::new(
-            CacheConfig::default(),
-            Box::new(StubBackend::failing()),
-        );
+        let fetcher = OriginFetcher::new(CacheConfig::default(), Box::new(StubBackend::failing()));
         let err = fetcher
             .fetch("https://example.com/fail.jpg")
             .expect_err("should fail");
@@ -498,7 +491,10 @@ mod tests {
 
     #[test]
     fn test_extract_host_with_port() {
-        assert_eq!(extract_host("https://example.com:443/img"), "example.com:443");
+        assert_eq!(
+            extract_host("https://example.com:443/img"),
+            "example.com:443"
+        );
     }
 
     // ── CacheConfig default ──

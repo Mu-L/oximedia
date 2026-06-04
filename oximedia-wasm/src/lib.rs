@@ -61,6 +61,8 @@ mod access_wasm;
 /// Media alignment for the browser.
 mod align_wasm;
 mod analysis;
+/// Session analytics for browser-side event tracking.
+mod analytics_wasm;
 /// Professional archive and preservation utilities for the browser.
 mod archivepro_wasm;
 mod audio_decoder;
@@ -71,6 +73,8 @@ mod auto_wasm;
 mod av1_decoder;
 /// Batch processing utilities for the browser.
 mod batch_wasm;
+/// In-memory LRU cache for browser-side use.
+mod cache_wasm;
 /// Color calibration for the browser.
 mod calibrate_wasm;
 /// Caption processing for the browser.
@@ -117,6 +121,10 @@ mod monitor_wasm;
 /// Multi-camera compositing for the browser.
 mod multicam_wasm;
 mod muxer;
+/// Neural network tensor operations for the browser.
+mod neural_wasm;
+/// Loudness normalization for the browser.
+mod normalize_wasm;
 /// Broadcast playout schedule management for the browser.
 mod playout_wasm;
 /// Plugin system information for the browser.
@@ -148,8 +156,12 @@ mod scaling_wasm;
 mod scene_wasm;
 /// Video scopes for the browser.
 mod scopes_wasm;
+/// Shot boundary (cut) detection for the browser.
+mod shots_wasm;
 /// Video stabilization for the browser.
 mod stabilize_wasm;
+/// Streaming manifest utilities for the browser.
+mod stream_wasm;
 mod streaming_demuxer;
 mod subtitle_wasm;
 /// Live production video switching for the browser.
@@ -180,6 +192,7 @@ pub use aaf_wasm::{wasm_aaf_track_list, wasm_parse_aaf_header, wasm_validate_aaf
 pub use access_wasm::{wasm_access_roles, wasm_check_permission, wasm_list_policies};
 pub use align_wasm::{wasm_align_audio, wasm_align_methods, wasm_detect_offset};
 pub use analysis::{wasm_analyze_loudness, wasm_detect_beats, wasm_spectral_features};
+pub use analytics_wasm::SessionTracker;
 pub use archivepro_wasm::{
     wasm_archive_formats, wasm_validate_archive_policy, wasm_verify_checksum,
 };
@@ -190,6 +203,7 @@ pub use audiopost_wasm::{
 pub use auto_wasm::{wasm_auto_templates, wasm_list_auto_tasks, wasm_validate_automation};
 pub use av1_decoder::WasmAv1Decoder;
 pub use batch_wasm::{wasm_estimate_batch_time, wasm_validate_batch_config, WasmBatchQueue};
+pub use cache_wasm::WasmLruCache;
 pub use calibrate_wasm::{
     wasm_analyze_pattern, wasm_calibration_targets, wasm_generate_test_pattern,
 };
@@ -246,6 +260,8 @@ pub use multicam_wasm::{
     wasm_composite_grid, wasm_composite_pip, wasm_list_layouts, WasmMultiCamCompositor,
 };
 pub use muxer::WasmMuxer;
+pub use neural_wasm::TensorWasm;
+pub use normalize_wasm::LoudnessNormalizer;
 pub use playout_wasm::{
     wasm_playout_formats, wasm_playout_status, wasm_validate_schedule, WasmPlayoutScheduler,
 };
@@ -282,7 +298,9 @@ pub use scaling_wasm::{
 };
 pub use scene_wasm::wasm_detect_scenes;
 pub use scopes_wasm::{wasm_analyze_exposure, wasm_false_color, wasm_scope_types, WasmVideoScopes};
+pub use shots_wasm::ShotDetector;
 pub use stabilize_wasm::{wasm_estimate_motion, wasm_stabilization_modes, WasmStabilizer};
+pub use stream_wasm::{parse_manifest_info, wasm_build_master_playlist, ManifestInfo};
 pub use streaming_demuxer::WasmStreamingDemuxer;
 pub use subtitle_wasm::{
     wasm_convert_subtitles, wasm_parse_ass, wasm_parse_srt, wasm_parse_vtt, wasm_shift_subtitles,

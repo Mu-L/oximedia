@@ -2,20 +2,20 @@
 //!
 //! # Overview
 //!
-//! [`CacheWarmer`] maintains a list of [`WarmingCandidate`] entries ranked by
+//! `CacheWarmer` maintains a list of `WarmingCandidate` entries ranked by
 //! their `priority_score`.  Callers add candidates, then retrieve the top-N
 //! (greedy budget selection, strategy filtering, etc.) to drive actual warming
 //! requests against edge PoPs.
 //!
 //! Five warming strategies are modelled:
 //!
-//! - [`WarmingStrategy::MostPopular`] — push the most-viewed assets.
-//! - [`WarmingStrategy::RecentlyPublished`] — warm fresh content before its
+//! - `WarmingStrategy::MostPopular` — push the most-viewed assets.
+//! - `WarmingStrategy::RecentlyPublished` — warm fresh content before its
 //!   first organic requests arrive.
-//! - [`WarmingStrategy::ScheduledRelease`] — coordinate warming for content
+//! - `WarmingStrategy::ScheduledRelease` — coordinate warming for content
 //!   that has a known release date/time.
-//! - [`WarmingStrategy::HighValueUsers`] — pre-warm for premium-tier subscribers.
-//! - [`WarmingStrategy::Geographic`] — warm a specific regional PoP cluster.
+//! - `WarmingStrategy::HighValueUsers` — pre-warm for premium-tier subscribers.
+//! - `WarmingStrategy::Geographic` — warm a specific regional PoP cluster.
 
 use std::collections::HashMap;
 
@@ -164,10 +164,7 @@ impl CacheWarmer {
 
     /// Sum of `estimated_size_bytes` across all queued candidates.
     pub fn total_bytes_to_warm(&self) -> u64 {
-        self.candidates
-            .iter()
-            .map(|c| c.estimated_size_bytes)
-            .sum()
+        self.candidates.iter().map(|c| c.estimated_size_bytes).sum()
     }
 
     /// Return references to candidates whose strategy **type** matches `strategy`.

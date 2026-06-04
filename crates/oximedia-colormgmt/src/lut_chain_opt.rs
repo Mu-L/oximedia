@@ -47,18 +47,14 @@ impl LutChainOptimizer {
     /// assert!((merged[0][0] - 2.0).abs() < 1e-6);
     /// ```
     #[must_use]
-    pub fn merge_matrix_pair(
-        m1: [[f32; 3]; 3],
-        m2: [[f32; 3]; 3],
-    ) -> [[f32; 3]; 3] {
+    pub fn merge_matrix_pair(m1: [[f32; 3]; 3], m2: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
         // To apply m1 first and then m2, the combined matrix is m2 × m1
         // (right-to-left composition for column-vector convention: v' = M*v).
         let mut out = [[0.0_f32; 3]; 3];
         for row in 0..3 {
             for col in 0..3 {
-                out[row][col] = m2[row][0] * m1[0][col]
-                    + m2[row][1] * m1[1][col]
-                    + m2[row][2] * m1[2][col];
+                out[row][col] =
+                    m2[row][0] * m1[0][col] + m2[row][1] * m1[1][col] + m2[row][2] * m1[2][col];
             }
         }
         out

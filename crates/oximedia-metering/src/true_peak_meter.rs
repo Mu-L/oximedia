@@ -154,10 +154,7 @@ mod tests {
         let mut samples = vec![0.0_f32; 64];
         samples[32] = 0.9;
         let peak = meter.measure(&samples);
-        assert!(
-            peak >= 0.9,
-            "Peak must capture the impulse, got {peak}"
-        );
+        assert!(peak >= 0.9, "Peak must capture the impulse, got {peak}");
     }
 
     #[test]

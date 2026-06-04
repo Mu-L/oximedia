@@ -13,13 +13,20 @@
 #![deny(unsafe_code)]
 #![allow(dead_code)]
 
+pub mod artifact_analysis;
+pub mod audio_forensics;
 pub mod authenticity;
+pub mod batch_forensics;
 pub mod blocking;
 pub mod chain_of_custody;
+pub mod chromatic_forensics;
 pub mod clone_detection;
 pub mod compression;
 pub mod compression_history;
 pub mod copy_detect;
+pub mod custody;
+pub mod deepfake_detect;
+pub mod double_compression;
 pub mod edit_history;
 pub mod ela;
 pub mod ela_analysis;
@@ -30,6 +37,7 @@ pub mod format_forensics;
 pub mod frame_forensics;
 pub mod frequency_forensics;
 pub mod geometric;
+pub mod gop_boundary;
 pub mod hash_registry;
 pub mod lighting;
 pub mod metadata;
@@ -37,14 +45,18 @@ pub mod metadata_forensics;
 pub mod noise;
 pub mod noise_analysis;
 pub mod pattern;
+pub mod phylogeny;
 pub mod provenance;
+pub mod quantization_table;
 pub mod report;
 pub mod shadow_analysis;
 pub mod source_camera;
 pub mod splicing;
 pub mod steganalysis;
+pub mod tamper_detect;
 pub mod tampering;
 pub mod time_forensics;
+pub mod video_forensics;
 pub mod watermark_detect;
 
 use rayon::prelude::*;
@@ -171,6 +183,12 @@ pub struct TamperingReport {
     pub summary: String,
     /// Recommended actions
     pub recommendations: Vec<String>,
+    /// Whether `analyze()` terminated early because the running weighted
+    /// confidence exceeded `ForensicsConfig::confidence_threshold`.
+    ///
+    /// When `true`, only a subset of the configured forensic tests were run.
+    /// When `false`, all enabled tests completed.
+    pub early_stop: bool,
 }
 
 impl TamperingReport {
@@ -182,6 +200,7 @@ impl TamperingReport {
             tests: HashMap::new(),
             summary: String::new(),
             recommendations: Vec::new(),
+            early_stop: false,
         }
     }
 
@@ -305,6 +324,16 @@ pub struct ForensicsConfig {
     pub enable_lighting_analysis: bool,
     /// Minimum confidence threshold for reporting
     pub min_confidence_threshold: f64,
+    /// Early-stop threshold for progressive analysis.
+    ///
+    /// When the accumulated reliability-weighted confidence across completed
+    /// tests reaches this value, `analyze()` terminates early and sets
+    /// `TamperingReport::early_stop = true` in the returned report.
+    ///
+    /// A value of `1.0` (the default) effectively disables early stopping —
+    /// the weighted running confidence can never exceed `1.0`.  Set to a value
+    /// in `(0.0, 1.0)` such as `0.85` to enable the optimisation.
+    pub confidence_threshold: f64,
 }
 
 impl Default for ForensicsConfig {
@@ -317,6 +346,9 @@ impl Default for ForensicsConfig {
             enable_geometric_analysis: true,
             enable_lighting_analysis: true,
             min_confidence_threshold: 0.5,
+            // Default 1.0 disables early stopping — callers opt in by setting
+            // a lower threshold.
+            confidence_threshold: 1.0,
         }
     }
 }
@@ -406,15 +438,35 @@ impl ForensicsAnalyzer {
 
     /// Analyze an image for tampering.
     ///
-    /// Independent forensic tests are executed concurrently via rayon, so
-    /// multi-core systems will see significant throughput improvements on
-    /// large images.  Metadata analysis runs on the raw image bytes and is
-    /// also dispatched in parallel with the pixel-level tests.
+    /// When `ForensicsConfig::confidence_threshold < 1.0`, tests are executed
+    /// **sequentially** in decreasing reliability order and the loop exits as
+    /// soon as the running reliability-weighted confidence reaches the
+    /// threshold.  The returned report will have `early_stop = true` in that
+    /// case.
+    ///
+    /// When `confidence_threshold == 1.0` (the default), all enabled tests run
+    /// concurrently via rayon for maximum throughput.
     pub fn analyze(&self, image_data: &[u8]) -> ForensicsResult<TamperingReport> {
         // Parse image once — shared across all pixel-level tests.
         let image = image::load_from_memory(image_data)?;
         let rgb_image = image.to_rgb8();
 
+        let threshold = self.config.confidence_threshold;
+        let early_stop_enabled = threshold < 1.0;
+
+        if early_stop_enabled {
+            self.analyze_progressive(image_data, &rgb_image, threshold)
+        } else {
+            self.analyze_parallel(image_data, &rgb_image)
+        }
+    }
+
+    /// Full parallel analysis — all enabled tests run concurrently.
+    fn analyze_parallel(
+        &self,
+        image_data: &[u8],
+        rgb_image: &image::RgbImage,
+    ) -> ForensicsResult<TamperingReport> {
         // Collect enabled pixel-level tasks as closures so rayon can run
         // them in parallel.  Each closure returns ForensicsResult<ForensicTest>.
         type TaskFn<'a> = Box<dyn Fn() -> ForensicsResult<ForensicTest> + Send + Sync + 'a>;
@@ -422,27 +474,26 @@ impl ForensicsAnalyzer {
         let mut tasks: Vec<TaskFn<'_>> = Vec::new();
 
         if self.config.enable_compression_analysis {
-            tasks.push(Box::new(|| compression::analyze_compression(&rgb_image)));
+            tasks.push(Box::new(|| compression::analyze_compression(rgb_image)));
         }
         if self.config.enable_ela {
-            tasks.push(Box::new(|| ela::perform_ela(&rgb_image)));
+            tasks.push(Box::new(|| ela::perform_ela(rgb_image)));
         }
         if self.config.enable_noise_analysis {
-            tasks.push(Box::new(|| noise::analyze_noise(&rgb_image)));
+            tasks.push(Box::new(|| noise::analyze_noise(rgb_image)));
         }
         if self.config.enable_geometric_analysis {
-            tasks.push(Box::new(|| geometric::detect_copy_move(&rgb_image)));
+            tasks.push(Box::new(|| geometric::detect_copy_move(rgb_image)));
         }
         if self.config.enable_lighting_analysis {
-            tasks.push(Box::new(|| lighting::analyze_lighting(&rgb_image)));
+            tasks.push(Box::new(|| lighting::analyze_lighting(rgb_image)));
         }
 
         // Run pixel-level tests in parallel.
         let pixel_results: Vec<ForensicsResult<ForensicTest>> =
             tasks.par_iter().map(|f| f()).collect();
 
-        // Metadata analysis operates on the raw bytes; run it concurrently
-        // with the pixel tests using a separate par_iter scope.
+        // Metadata analysis operates on the raw bytes.
         let metadata_result: Option<ForensicsResult<ForensicTest>> =
             if self.config.enable_metadata_analysis {
                 Some(metadata::analyze_metadata(image_data))
@@ -460,7 +511,105 @@ impl ForensicsAnalyzer {
             report.add_test(result?);
         }
 
-        // Calculate overall results.
+        report.calculate_overall_confidence();
+        report.generate_summary();
+
+        Ok(report)
+    }
+
+    /// Progressive sequential analysis — tests are ordered by reliability and
+    /// the loop breaks once accumulated weighted confidence reaches `threshold`.
+    fn analyze_progressive(
+        &self,
+        image_data: &[u8],
+        rgb_image: &image::RgbImage,
+        threshold: f64,
+    ) -> ForensicsResult<TamperingReport> {
+        // Build (test_name, weight, closure) triples in reliability order.
+        // We filter by config flags so disabled tests are skipped entirely.
+        type RunFn<'a> = Box<dyn Fn() -> ForensicsResult<ForensicTest> + 'a>;
+
+        struct OrderedTask<'a> {
+            weight: f64,
+            run: RunFn<'a>,
+        }
+
+        let mut ordered: Vec<OrderedTask<'_>> = Vec::new();
+
+        // Copy-move (geometric) — weight 1.5
+        if self.config.enable_geometric_analysis {
+            ordered.push(OrderedTask {
+                weight: 1.5,
+                run: Box::new(|| geometric::detect_copy_move(rgb_image)),
+            });
+        }
+        // ELA — weight 1.3
+        if self.config.enable_ela {
+            ordered.push(OrderedTask {
+                weight: 1.3,
+                run: Box::new(|| ela::perform_ela(rgb_image)),
+            });
+        }
+        // Compression — weight 1.2
+        if self.config.enable_compression_analysis {
+            ordered.push(OrderedTask {
+                weight: 1.2,
+                run: Box::new(|| compression::analyze_compression(rgb_image)),
+            });
+        }
+        // Noise — weight 1.0
+        if self.config.enable_noise_analysis {
+            ordered.push(OrderedTask {
+                weight: 1.0,
+                run: Box::new(|| noise::analyze_noise(rgb_image)),
+            });
+        }
+        // Lighting — weight 0.9
+        if self.config.enable_lighting_analysis {
+            ordered.push(OrderedTask {
+                weight: 0.9,
+                run: Box::new(|| lighting::analyze_lighting(rgb_image)),
+            });
+        }
+        // Metadata — weight 0.7
+        if self.config.enable_metadata_analysis {
+            ordered.push(OrderedTask {
+                weight: 0.7,
+                run: Box::new(|| metadata::analyze_metadata(image_data)),
+            });
+        }
+
+        let mut report = TamperingReport::new();
+        let mut weighted_confidence = 0.0_f64;
+        let mut weight_total = 0.0_f64;
+        let mut stopped_early = false;
+
+        for task in ordered {
+            let test = (task.run)()?;
+            let effective_weight = if test.tampering_detected {
+                task.weight * 1.2
+            } else {
+                task.weight
+            };
+
+            weighted_confidence += test.confidence * effective_weight;
+            weight_total += effective_weight;
+
+            let running_conf = if weight_total > 0.0 {
+                (weighted_confidence / weight_total).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+
+            report.add_test(test);
+
+            if running_conf >= threshold {
+                stopped_early = true;
+                break;
+            }
+        }
+
+        report.early_stop = stopped_early;
         report.calculate_overall_confidence();
         report.generate_summary();
 

@@ -1,7 +1,7 @@
 //! ATSC A/53 compliance checking.
 
-use super::{ComplianceViolation, ViolationSeverity};
-use crate::{MonitorError, MonitorResult};
+use super::ComplianceViolation;
+use crate::MonitorResult;
 
 /// ATSC compliance checker.
 pub struct AtscChecker {

@@ -383,13 +383,14 @@ impl AtmosObject {
         }
 
         // Find surrounding keyframes
-        let after_pos = self
-            .automation
-            .iter()
-            .position(|p| p.time_secs > time_secs);
+        let after_pos = self.automation.iter().position(|p| p.time_secs > time_secs);
 
         match after_pos {
-            None => self.automation.last().map(|p| p.position).unwrap_or(self.position),
+            None => self
+                .automation
+                .last()
+                .map(|p| p.position)
+                .unwrap_or(self.position),
             Some(0) => self.automation[0].position,
             Some(i) => {
                 let before = &self.automation[i - 1];
@@ -417,10 +418,7 @@ impl AtmosObject {
             return self.gain;
         }
 
-        let after_pos = self
-            .automation
-            .iter()
-            .position(|p| p.time_secs > time_secs);
+        let after_pos = self.automation.iter().position(|p| p.time_secs > time_secs);
 
         match after_pos {
             None => self.automation.last().map(|p| p.gain).unwrap_or(self.gain),
@@ -843,11 +841,11 @@ mod tests {
     #[test]
     fn test_parse_object_element_valid() {
         let data = [
-            5u8,  // object_id
-            2,    // channel_index
+            5u8, // object_id
+            2,   // channel_index
             128, 128, 0, // position: center-center-front
-            0, 0, 0, // size: point
-            128, // gain: unity
+            0, 0, 0,    // size: point
+            128,  // gain: unity
             0x80, // flags: enabled
         ];
 
@@ -949,7 +947,11 @@ mod tests {
 
         // At t=0.5, smooth step should give 0.5 (symmetry)
         let pos = obj.position_at(0.5);
-        assert!((pos.x - 0.5).abs() < 0.01, "smooth interp at t=0.5: {}", pos.x);
+        assert!(
+            (pos.x - 0.5).abs() < 0.01,
+            "smooth interp at t=0.5: {}",
+            pos.x
+        );
 
         // At t=0: should be 0
         let pos0 = obj.position_at(0.0);

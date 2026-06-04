@@ -547,11 +547,7 @@ mod tests {
 
     #[test]
     fn test_layout_with_strides_valid() {
-        let layout = BufferLayout::with_strides(
-            vec![10, 20],
-            vec![20, 1],
-            ElementType::U8,
-        );
+        let layout = BufferLayout::with_strides(vec![10, 20], vec![20, 1], ElementType::U8);
         assert!(layout.is_ok());
         let l = layout.expect("should be ok");
         assert!(l.c_contiguous);
@@ -559,11 +555,7 @@ mod tests {
 
     #[test]
     fn test_layout_with_strides_mismatch() {
-        let result = BufferLayout::with_strides(
-            vec![10, 20],
-            vec![20],
-            ElementType::U8,
-        );
+        let result = BufferLayout::with_strides(vec![10, 20], vec![20], ElementType::U8);
         assert!(matches!(result, Err(BufferError::ShapeMismatch { .. })));
     }
 

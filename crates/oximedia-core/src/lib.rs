@@ -242,6 +242,7 @@ pub mod type_registry;
 pub mod types;
 pub mod version;
 pub mod work_queue;
+pub mod work_queue_ws;
 pub mod work_steal;
 
 #[cfg(target_arch = "wasm32")]

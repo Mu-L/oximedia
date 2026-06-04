@@ -1004,4 +1004,191 @@ mod tests {
             "copy should apply to at least one stream codec"
         );
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Codec mapping completeness
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Verify all patent-free OxiMedia codecs have corresponding FFmpeg aliases.
+    ///
+    /// This test ensures the codec map covers every royalty-free codec that
+    /// OxiMedia supports: libaom-av1, libvpx-vp9, libvpx, libopus, libvorbis,
+    /// flac, and the raw PCM family.
+    #[test]
+    fn rw_61_codec_completeness_patent_free_video() {
+        use crate::codec_map::CodecMap;
+        let map = CodecMap::new();
+
+        // AV1 aliases
+        for alias in &["av1", "libaom-av1", "libsvtav1"] {
+            let entry = map
+                .lookup(alias)
+                .unwrap_or_else(|| panic!("{} should be in codec map", alias));
+            assert_eq!(entry.oxi_name, "av1", "{} should map to av1", alias);
+        }
+
+        // VP9 aliases
+        for alias in &["vp9", "libvpx-vp9"] {
+            let entry = map
+                .lookup(alias)
+                .unwrap_or_else(|| panic!("{} should be in codec map", alias));
+            assert_eq!(entry.oxi_name, "vp9", "{} should map to vp9", alias);
+        }
+
+        // VP8 aliases
+        for alias in &["vp8", "libvpx"] {
+            let entry = map
+                .lookup(alias)
+                .unwrap_or_else(|| panic!("{} should be in codec map", alias));
+            assert_eq!(entry.oxi_name, "vp8", "{} should map to vp8", alias);
+        }
+
+        // FFV1
+        let ffv1 = map.lookup("ffv1").expect("ffv1 should be in codec map");
+        assert_eq!(ffv1.oxi_name, "ffv1");
+    }
+
+    #[test]
+    fn rw_62_codec_completeness_patent_free_audio() {
+        use crate::codec_map::CodecMap;
+        let map = CodecMap::new();
+
+        // Opus aliases
+        for alias in &["opus", "libopus"] {
+            let entry = map
+                .lookup(alias)
+                .unwrap_or_else(|| panic!("{} should be in codec map", alias));
+            assert_eq!(entry.oxi_name, "opus", "{} should map to opus", alias);
+        }
+
+        // Vorbis aliases
+        for alias in &["vorbis", "libvorbis"] {
+            let entry = map
+                .lookup(alias)
+                .unwrap_or_else(|| panic!("{} should be in codec map", alias));
+            assert_eq!(entry.oxi_name, "vorbis", "{} should map to vorbis", alias);
+        }
+
+        // FLAC
+        let flac = map.lookup("flac").expect("flac should be in codec map");
+        assert_eq!(flac.oxi_name, "flac");
+
+        // PCM variants — the codec map maps these to "flac" (patent-free lossless substitute)
+        // or to a PCM-equivalent OxiMedia codec. Verify they exist and are present.
+        for alias in &["pcm_s16le", "pcm_s24le", "pcm_f32le"] {
+            let _entry = map
+                .lookup(alias)
+                .unwrap_or_else(|| panic!("{} should be in codec map", alias));
+            // PCM variants are present; OxiMedia may use flac as a lossless equivalent.
+        }
+    }
+
+    #[test]
+    fn rw_63_codec_completeness_patent_substitution() {
+        use crate::codec_map::{CodecCategory, CodecMap};
+        let map = CodecMap::new();
+
+        // Patent-encumbered video → AV1 substitutions (only check those known to be in the map)
+        for alias in &["libx264", "h264", "libx265", "hevc", "h265", "mpeg4"] {
+            let entry = map
+                .lookup(alias)
+                .unwrap_or_else(|| panic!("{} should be in codec map", alias));
+            assert_eq!(
+                entry.category,
+                CodecCategory::PatentSubstituted,
+                "{} should be patent-substituted",
+                alias
+            );
+            assert_eq!(entry.oxi_name, "av1", "{} should substitute to av1", alias);
+        }
+
+        // Patent-encumbered audio → Opus/FLAC substitutions
+        for alias in &["aac", "libfdk_aac", "mp3", "libmp3lame"] {
+            let entry = map
+                .lookup(alias)
+                .unwrap_or_else(|| panic!("{} should be in codec map", alias));
+            assert_eq!(
+                entry.category,
+                CodecCategory::PatentSubstituted,
+                "{} should be patent-substituted",
+                alias
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional real-world commands (Wave 12 — 3 more = 63+ total)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rw_64_zero_copy_filter_lexer_real_graph() {
+        use crate::filter_lex::{parse_filter_graph_zerocopy, FilterToken};
+        let input = "[0:v][1:v]overlay=10:10[out]";
+        let tokens = parse_filter_graph_zerocopy(input);
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(t, FilterToken::FilterName("overlay"))));
+        assert!(tokens.iter().any(|t| matches!(t, FilterToken::Arg("10"))));
+    }
+
+    #[test]
+    fn rw_65_translate_batch_command_integration() {
+        use crate::batch_mode::translate_batch_command;
+        let args = &[
+            "-i",
+            "video.mp4",
+            "-i",
+            "audio.flac",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "libopus",
+            "merged.mkv",
+        ];
+        let jobs = translate_batch_command(args).expect("should succeed");
+        assert_eq!(jobs[0].inputs.len(), 2);
+        assert_eq!(jobs[0].inputs[0].path, "video.mp4");
+        assert_eq!(jobs[0].inputs[1].path, "audio.flac");
+        assert_eq!(jobs[0].outputs[0].path, "merged.mkv");
+    }
+
+    #[test]
+    fn rw_66_translate_ffprobe_args_integration() {
+        use crate::ffprobe::{translate_ffprobe_args, PrintFormat};
+        let args = &[
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            "input.mkv",
+        ];
+        let q = translate_ffprobe_args(args).expect("should succeed");
+        assert_eq!(q.print_format, PrintFormat::Json);
+        assert!(q.show_format);
+        assert!(q.show_streams);
+        assert_eq!(q.input_path.as_deref(), Some("input.mkv"));
+    }
+
+    #[test]
+    fn rw_67_translate_metadata_args_integration() {
+        use crate::metadata_compat::translate_metadata_args;
+        let args = &[
+            "-i",
+            "in.mp4",
+            "-metadata",
+            "title=My Film",
+            "-metadata",
+            "artist=Director",
+            "-metadata",
+            "year=2026",
+            "out.mp4",
+        ];
+        let pairs = translate_metadata_args(args);
+        assert_eq!(pairs.len(), 3);
+        assert!(pairs.iter().any(|(k, v)| k == "title" && v == "My Film"));
+        assert!(pairs.iter().any(|(k, v)| k == "artist" && v == "Director"));
+        assert!(pairs.iter().any(|(k, v)| k == "year" && v == "2026"));
+    }
 }

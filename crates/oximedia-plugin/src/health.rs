@@ -308,10 +308,7 @@ impl HealthRegistry {
     /// Check if a plugin is currently disabled due to health failures.
     #[must_use]
     pub fn is_disabled(&self, name: &str) -> bool {
-        self.entries
-            .get(name)
-            .map(|e| e.disabled)
-            .unwrap_or(false)
+        self.entries.get(name).map(|e| e.disabled).unwrap_or(false)
     }
 
     /// Check if a plugin is usable (registered, not disabled, and status is usable).

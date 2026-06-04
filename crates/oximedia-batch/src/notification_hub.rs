@@ -339,11 +339,7 @@ pub trait Dispatcher: Send + Sync {
     ///
     /// Returns an error string describing why delivery failed.  The hub will
     /// record the failure but will not retry automatically.
-    fn dispatch(
-        &self,
-        event: &JobEvent,
-        target: &NotificationTarget,
-    ) -> Result<(), DispatchError>;
+    fn dispatch(&self, event: &JobEvent, target: &NotificationTarget) -> Result<(), DispatchError>;
 }
 
 /// Error returned by a [`Dispatcher`] implementation.
@@ -381,7 +377,11 @@ impl std::fmt::Display for DispatchError {
             f,
             "{} ({})",
             self.reason,
-            if self.retryable { "retryable" } else { "permanent" }
+            if self.retryable {
+                "retryable"
+            } else {
+                "permanent"
+            }
         )
     }
 }

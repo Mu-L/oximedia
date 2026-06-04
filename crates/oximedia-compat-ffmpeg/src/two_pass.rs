@@ -258,8 +258,7 @@ pub fn detect_passlogfile(args: &[String]) -> Option<&str> {
 ///
 /// Used internally and also useful when processing one pass at a time.
 pub fn translate_single_pass(args: &[String]) -> Result<PassSpec, TwoPassError> {
-    let pass_number = detect_pass_number(args)
-        .ok_or(TwoPassError::NoPassFlag)?;
+    let pass_number = detect_pass_number(args).ok_or(TwoPassError::NoPassFlag)?;
 
     if pass_number != 1 && pass_number != 2 {
         return Err(TwoPassError::InvalidPassValue(pass_number.to_string()));
@@ -317,7 +316,8 @@ pub fn translate_single_pass(args: &[String]) -> Result<PassSpec, TwoPassError> 
             match stream_opt.stream_type {
                 StreamType::Video | StreamType::All => {
                     if let Some(codec_name) = &stream_opt.codec {
-                        let resolved = resolve_codec_for_pass(&codec_map, codec_name, &mut diagnostics);
+                        let resolved =
+                            resolve_codec_for_pass(&codec_map, codec_name, &mut diagnostics);
                         video_codec = Some(resolved);
                     }
                     if let Some(br) = &stream_opt.bitrate {
@@ -364,7 +364,9 @@ pub fn translate_two_pass_args(
     let pass1 = translate_single_pass(pass1_args)?;
 
     if pass1.pass_number != 1 {
-        return Err(TwoPassError::InvalidPassValue(pass1.pass_number.to_string()));
+        return Err(TwoPassError::InvalidPassValue(
+            pass1.pass_number.to_string(),
+        ));
     }
 
     let pass2 = if let Some(p2_args) = pass2_args {
@@ -420,7 +422,10 @@ pub fn translate_two_pass_args(
 /// Return `true` if the given OxiMedia codec name supports single-pass encoding
 /// with quality equivalent to two-pass (e.g. CRF-based codecs like AV1, VP9).
 pub fn codec_supports_single_pass(codec: &str) -> bool {
-    matches!(codec, "av1" | "vp9" | "vp8" | "ffv1" | "opus" | "vorbis" | "flac")
+    matches!(
+        codec,
+        "av1" | "vp9" | "vp8" | "ffv1" | "opus" | "vorbis" | "flac"
+    )
 }
 
 /// Return a short description of the two-pass plan for dry-run output.
@@ -434,7 +439,9 @@ pub fn describe_two_pass_plan(plan: &TwoPassPlan) -> String {
         lines.push("  Pass 2: (not yet provided)".to_string());
     }
     if plan.can_combine {
-        lines.push("  NOTE: codec supports single-pass CRF; two-pass may be unnecessary".to_string());
+        lines.push(
+            "  NOTE: codec supports single-pass CRF; two-pass may be unnecessary".to_string(),
+        );
     }
     lines.join("\n")
 }
@@ -576,7 +583,10 @@ impl TwoPassPlanBuilder {
         plan: TwoPassPlan,
         output_path: impl Into<String>,
     ) -> Result<TwoPassPlan, TwoPassError> {
-        let input_path = self.input_path.clone().unwrap_or_else(|| plan.pass1.input_path.clone());
+        let input_path = self
+            .input_path
+            .clone()
+            .unwrap_or_else(|| plan.pass1.input_path.clone());
         let output_path_str = output_path.into();
 
         // Validate input consistency.
@@ -699,7 +709,15 @@ mod tests {
 
     #[test]
     fn test_detect_passlogfile_present() {
-        let a = args(&["-i", "in.mkv", "-passlogfile", "mylog", "-pass", "1", "/dev/null"]);
+        let a = args(&[
+            "-i",
+            "in.mkv",
+            "-passlogfile",
+            "mylog",
+            "-pass",
+            "1",
+            "/dev/null",
+        ]);
         assert_eq!(detect_passlogfile(&a), Some("mylog"));
     }
 
@@ -730,11 +748,16 @@ mod tests {
     #[test]
     fn test_translate_single_pass_pass1() {
         let a = args(&[
-            "-i", "input.mkv",
-            "-c:v", "libaom-av1",
-            "-b:v", "2M",
-            "-pass", "1",
-            "-f", "null",
+            "-i",
+            "input.mkv",
+            "-c:v",
+            "libaom-av1",
+            "-b:v",
+            "2M",
+            "-pass",
+            "1",
+            "-f",
+            "null",
             "/dev/null",
         ]);
         let spec = translate_single_pass(&a).expect("should succeed");
@@ -747,10 +770,14 @@ mod tests {
     #[test]
     fn test_translate_single_pass_pass2() {
         let a = args(&[
-            "-i", "input.mkv",
-            "-c:v", "libaom-av1",
-            "-b:v", "2M",
-            "-pass", "2",
+            "-i",
+            "input.mkv",
+            "-c:v",
+            "libaom-av1",
+            "-b:v",
+            "2M",
+            "-pass",
+            "2",
             "output.webm",
         ]);
         let spec = translate_single_pass(&a).expect("should succeed");
@@ -768,17 +795,25 @@ mod tests {
     #[test]
     fn test_translate_single_pass_patent_substitution() {
         let a = args(&[
-            "-i", "in.mp4",
-            "-c:v", "libx264",
-            "-b:v", "1M",
-            "-pass", "1",
-            "-f", "null",
+            "-i",
+            "in.mp4",
+            "-c:v",
+            "libx264",
+            "-b:v",
+            "1M",
+            "-pass",
+            "1",
+            "-f",
+            "null",
             "/dev/null",
         ]);
         let spec = translate_single_pass(&a).expect("should succeed");
         assert_eq!(spec.video_codec.as_deref(), Some("av1"));
         let has_patent = spec.diagnostics.iter().any(|d| {
-            matches!(&d.kind, crate::diagnostics::DiagnosticKind::PatentCodecSubstituted { .. })
+            matches!(
+                &d.kind,
+                crate::diagnostics::DiagnosticKind::PatentCodecSubstituted { .. }
+            )
         });
         assert!(has_patent, "should have patent diagnostic for libx264");
     }
@@ -788,18 +823,27 @@ mod tests {
     #[test]
     fn test_translate_two_pass_complete() {
         let p1 = args(&[
-            "-i", "input.mkv",
-            "-c:v", "libaom-av1",
-            "-b:v", "2M",
-            "-pass", "1",
-            "-f", "null",
+            "-i",
+            "input.mkv",
+            "-c:v",
+            "libaom-av1",
+            "-b:v",
+            "2M",
+            "-pass",
+            "1",
+            "-f",
+            "null",
             "/dev/null",
         ]);
         let p2 = args(&[
-            "-i", "input.mkv",
-            "-c:v", "libaom-av1",
-            "-b:v", "2M",
-            "-pass", "2",
+            "-i",
+            "input.mkv",
+            "-c:v",
+            "libaom-av1",
+            "-b:v",
+            "2M",
+            "-pass",
+            "2",
             "output.webm",
         ]);
 
@@ -813,33 +857,51 @@ mod tests {
     #[test]
     fn test_translate_two_pass_pass1_only() {
         let p1 = args(&[
-            "-i", "input.mkv",
-            "-c:v", "libaom-av1",
-            "-b:v", "2M",
-            "-pass", "1",
-            "-f", "null",
+            "-i",
+            "input.mkv",
+            "-c:v",
+            "libaom-av1",
+            "-b:v",
+            "2M",
+            "-pass",
+            "1",
+            "-f",
+            "null",
             "/dev/null",
         ]);
 
         let plan = translate_two_pass_args(&p1, None).expect("should succeed");
-        assert!(!plan.is_complete(), "single-pass plan should not be complete");
+        assert!(
+            !plan.is_complete(),
+            "single-pass plan should not be complete"
+        );
         assert!(plan.final_output().is_none());
     }
 
     #[test]
     fn test_translate_two_pass_codec_mismatch_error() {
         let p1 = args(&[
-            "-i", "in.mkv",
-            "-c:v", "libaom-av1",
-            "-b:v", "2M",
-            "-pass", "1",
-            "-f", "null", "/dev/null",
+            "-i",
+            "in.mkv",
+            "-c:v",
+            "libaom-av1",
+            "-b:v",
+            "2M",
+            "-pass",
+            "1",
+            "-f",
+            "null",
+            "/dev/null",
         ]);
         let p2 = args(&[
-            "-i", "in.mkv",
-            "-c:v", "libvpx-vp9",
-            "-b:v", "2M",
-            "-pass", "2",
+            "-i",
+            "in.mkv",
+            "-c:v",
+            "libvpx-vp9",
+            "-b:v",
+            "2M",
+            "-pass",
+            "2",
             "out.webm",
         ]);
 
@@ -850,11 +912,17 @@ mod tests {
     #[test]
     fn test_translate_two_pass_can_combine_av1() {
         let p1 = args(&[
-            "-i", "in.mkv",
-            "-c:v", "libaom-av1",
-            "-crf", "28",
-            "-pass", "1",
-            "-f", "null", "/dev/null",
+            "-i",
+            "in.mkv",
+            "-c:v",
+            "libaom-av1",
+            "-crf",
+            "28",
+            "-pass",
+            "1",
+            "-f",
+            "null",
+            "/dev/null",
         ]);
 
         let plan = translate_two_pass_args(&p1, None).expect("should succeed");
@@ -872,23 +940,36 @@ mod tests {
     #[test]
     fn test_describe_two_pass_plan() {
         let p1 = args(&[
-            "-i", "input.mkv",
-            "-c:v", "libaom-av1",
-            "-b:v", "2M",
-            "-pass", "1",
-            "-f", "null", "/dev/null",
+            "-i",
+            "input.mkv",
+            "-c:v",
+            "libaom-av1",
+            "-b:v",
+            "2M",
+            "-pass",
+            "1",
+            "-f",
+            "null",
+            "/dev/null",
         ]);
         let p2 = args(&[
-            "-i", "input.mkv",
-            "-c:v", "libaom-av1",
-            "-b:v", "2M",
-            "-pass", "2",
+            "-i",
+            "input.mkv",
+            "-c:v",
+            "libaom-av1",
+            "-b:v",
+            "2M",
+            "-pass",
+            "2",
             "output.webm",
         ]);
 
         let plan = translate_two_pass_args(&p1, Some(&p2)).expect("should succeed");
         let desc = describe_two_pass_plan(&plan);
-        assert!(desc.contains("Two-pass plan"), "description should have header");
+        assert!(
+            desc.contains("Two-pass plan"),
+            "description should have header"
+        );
         assert!(desc.contains("Pass 1"), "description should mention pass 1");
         assert!(desc.contains("Pass 2"), "description should mention pass 2");
     }
@@ -909,22 +990,35 @@ mod tests {
         };
         assert!(spec_null.is_null_output());
 
-        let spec_nul = PassSpec { output_path: "NUL".into(), ..spec_null.clone() };
+        let spec_nul = PassSpec {
+            output_path: "NUL".into(),
+            ..spec_null.clone()
+        };
         assert!(spec_nul.is_null_output());
 
-        let spec_real = PassSpec { output_path: "output.webm".into(), ..spec_null };
+        let spec_real = PassSpec {
+            output_path: "output.webm".into(),
+            ..spec_null
+        };
         assert!(!spec_real.is_null_output());
     }
 
     #[test]
     fn test_translate_two_pass_with_passlogfile() {
         let p1 = args(&[
-            "-i", "in.mkv",
-            "-c:v", "libaom-av1",
-            "-b:v", "2M",
-            "-passlogfile", "custom_log",
-            "-pass", "1",
-            "-f", "null", "/dev/null",
+            "-i",
+            "in.mkv",
+            "-c:v",
+            "libaom-av1",
+            "-b:v",
+            "2M",
+            "-passlogfile",
+            "custom_log",
+            "-pass",
+            "1",
+            "-f",
+            "null",
+            "/dev/null",
         ]);
 
         let plan = translate_two_pass_args(&p1, None).expect("should succeed");
@@ -1002,10 +1096,7 @@ mod tests {
 
         assert!(complete_plan.is_complete(), "plan should be complete");
         assert_eq!(complete_plan.final_output(), Some("output.webm"));
-        assert_eq!(
-            complete_plan.pass2.as_ref().map(|p| p.pass_number),
-            Some(2)
-        );
+        assert_eq!(complete_plan.pass2.as_ref().map(|p| p.pass_number), Some(2));
     }
 
     #[test]
@@ -1102,7 +1193,10 @@ mod tests {
             .expect("add_pass2 should succeed");
 
         assert_eq!(
-            complete.pass2.as_ref().and_then(|p| p.video_bitrate.as_deref()),
+            complete
+                .pass2
+                .as_ref()
+                .and_then(|p| p.video_bitrate.as_deref()),
             Some("4M"),
             "pass2 should inherit bitrate from pass1"
         );

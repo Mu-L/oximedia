@@ -184,7 +184,13 @@ pub struct GainEntry {
 }
 
 impl GainEntry {
-    fn new(item_id: usize, label: String, raw_gain_db: f64, measured_lufs: f64, config: &BatchNormalizerConfig) -> Self {
+    fn new(
+        item_id: usize,
+        label: String,
+        raw_gain_db: f64,
+        measured_lufs: f64,
+        config: &BatchNormalizerConfig,
+    ) -> Self {
         let clamped = raw_gain_db > config.max_gain_db || raw_gain_db < config.min_gain_db;
         let gain_db = raw_gain_db.clamp(config.min_gain_db, config.max_gain_db);
         let gain_linear = 10.0_f64.powf(gain_db / 20.0);
@@ -279,10 +285,7 @@ impl GainSchedule {
 ///
 /// Uses the maximum absolute value (no oversampling — conservative estimate).
 fn compute_true_peak_dbtp(samples: &[f32]) -> f64 {
-    let peak = samples
-        .iter()
-        .map(|s| s.abs())
-        .fold(0.0_f32, f32::max);
+    let peak = samples.iter().map(|s| s.abs()).fold(0.0_f32, f32::max);
     if peak < 1e-15 {
         -120.0
     } else {
@@ -508,7 +511,13 @@ impl BatchNormalizer {
                 raw_gain_db
             };
 
-            let entry = GainEntry::new(item_id, m.label.clone(), raw_gain_db, m.integrated_lufs, &self.config);
+            let entry = GainEntry::new(
+                item_id,
+                m.label.clone(),
+                raw_gain_db,
+                m.integrated_lufs,
+                &self.config,
+            );
             if entry.gain_clamped {
                 clamped_count += 1;
             }
@@ -595,7 +604,9 @@ mod tests {
     fn test_measure_registers_item() {
         let mut bn = default_normalizer();
         let samples = sine_samples(0.1, 48_000);
-        let id = bn.measure("track1", &samples, 48_000.0, 1).expect("measure");
+        let id = bn
+            .measure("track1", &samples, 48_000.0, 1)
+            .expect("measure");
         assert_eq!(id, 0);
         assert_eq!(bn.item_count(), 1);
         assert_eq!(bn.item_id("track1"), Some(0));
@@ -623,7 +634,11 @@ mod tests {
         let schedule = bn.schedule_gains().expect("schedule");
         let entry = schedule.entry(id).expect("entry");
         // Expected gain = -14 - (-20) = +6 dB
-        assert!((entry.gain_db - 6.0).abs() < 0.01, "expected 6 dB, got {}", entry.gain_db);
+        assert!(
+            (entry.gain_db - 6.0).abs() < 0.01,
+            "expected 6 dB, got {}",
+            entry.gain_db
+        );
     }
 
     #[test]
@@ -635,15 +650,25 @@ mod tests {
             ..Default::default()
         };
         let mut bn = BatchNormalizer::new(cfg).expect("create");
-        let id0 = bn.register_measurement("t0", -20.0, -6.0, 48_000.0, 2).expect("register");
-        let id1 = bn.register_measurement("t1", -16.0, -3.0, 48_000.0, 2).expect("register");
+        let id0 = bn
+            .register_measurement("t0", -20.0, -6.0, 48_000.0, 2)
+            .expect("register");
+        let id1 = bn
+            .register_measurement("t1", -16.0, -3.0, 48_000.0, 2)
+            .expect("register");
         let schedule = bn.schedule_gains().expect("schedule");
         let g0 = schedule.entry(id0).expect("entry").gain_db;
         let g1 = schedule.entry(id1).expect("entry").gain_db;
         // Both should receive the same gain in album mode.
-        assert!((g0 - g1).abs() < 0.01, "gains differ in album mode: {g0} vs {g1}");
+        assert!(
+            (g0 - g1).abs() < 0.01,
+            "gains differ in album mode: {g0} vs {g1}"
+        );
         // The loudest item (-16 LUFS) should be brought to -14 → gain = +2 dB.
-        assert!((g1 - 2.0).abs() < 0.01, "expected +2 dB for loudest item, got {g1}");
+        assert!(
+            (g1 - 2.0).abs() < 0.01,
+            "expected +2 dB for loudest item, got {g1}"
+        );
     }
 
     #[test]
@@ -657,11 +682,16 @@ mod tests {
         };
         let mut bn = BatchNormalizer::new(cfg).expect("create");
         // At -40 LUFS, raw gain would be +26 dB — above max of 5.
-        let id = bn.register_measurement("quiet", -40.0, -20.0, 48_000.0, 1).expect("register");
+        let id = bn
+            .register_measurement("quiet", -40.0, -20.0, 48_000.0, 1)
+            .expect("register");
         let schedule = bn.schedule_gains().expect("schedule");
         let entry = schedule.entry(id).expect("entry");
         assert!(entry.gain_clamped, "gain should be flagged as clamped");
-        assert!((entry.gain_db - 5.0).abs() < 0.01, "gain should be clamped to 5 dB");
+        assert!(
+            (entry.gain_db - 5.0).abs() < 0.01,
+            "gain should be clamped to 5 dB"
+        );
         assert_eq!(schedule.clamped_count, 1);
     }
 
@@ -675,11 +705,15 @@ mod tests {
         };
         let mut bn = BatchNormalizer::new(cfg).expect("create");
         // Register a measurement manually at 0 dB gain (measured = target).
-        let id = bn.register_measurement("unity", -14.0, -3.0, 48_000.0, 1).expect("register");
+        let id = bn
+            .register_measurement("unity", -14.0, -3.0, 48_000.0, 1)
+            .expect("register");
         let schedule = bn.schedule_gains().expect("schedule");
         let input = vec![0.5_f32; 10];
         let mut output = vec![0.0_f32; 10];
-        schedule.apply_to_item(id, &input, &mut output).expect("apply");
+        schedule
+            .apply_to_item(id, &input, &mut output)
+            .expect("apply");
         // gain = 0 dB → linear = 1.0 → output ≈ input
         for (&i, &o) in input.iter().zip(output.iter()) {
             assert!((o - i).abs() < 1e-5, "unity gain: out {o} != in {i}");
@@ -696,10 +730,14 @@ mod tests {
         };
         let mut bn = BatchNormalizer::new(cfg).expect("create");
         // +6 dB gain: measured -20 LUFS, target -14 LUFS.
-        let id = bn.register_measurement("t", -20.0, -6.0, 48_000.0, 1).expect("register");
+        let id = bn
+            .register_measurement("t", -20.0, -6.0, 48_000.0, 1)
+            .expect("register");
         let schedule = bn.schedule_gains().expect("schedule");
         let mut samples = vec![1.0_f64; 4];
-        schedule.apply_in_place_f64(id, &mut samples).expect("apply");
+        schedule
+            .apply_in_place_f64(id, &mut samples)
+            .expect("apply");
         let expected = 10.0_f64.powf(6.0 / 20.0);
         for &s in &samples {
             assert!((s - expected).abs() < 1e-9, "expected {expected}, got {s}");

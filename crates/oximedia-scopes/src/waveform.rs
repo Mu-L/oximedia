@@ -1274,4 +1274,337 @@ mod tests {
         let result = read_pixel_u16(&data, 0, 1023);
         assert_eq!(result, Some((1023, 1023, 1023)));
     }
+
+    // =========================================================================
+    // Known-pattern waveform tests (TODO item: "Add tests for `waveform` with
+    // known test patterns — color bars, ramp, flat field")
+    // =========================================================================
+
+    /// Build an 8-column SMPTE-style colour-bar frame (8-bit RGB24).
+    ///
+    /// Columns left→right:
+    ///   white, yellow, cyan, green, magenta, red, blue, black
+    /// Each column is `bar_width` pixels wide; frame height is `height`.
+    fn create_color_bars_frame(bar_width: u32, height: u32) -> Vec<u8> {
+        let bars: [(u8, u8, u8); 8] = [
+            (235, 235, 235), // white (broadcast-safe, not full 255)
+            (235, 235, 16),  // yellow
+            (16, 235, 235),  // cyan
+            (16, 235, 16),   // green
+            (235, 16, 235),  // magenta
+            (235, 16, 16),   // red
+            (16, 16, 235),   // blue
+            (16, 16, 16),    // black
+        ];
+        let width = bar_width * 8;
+        let mut frame = vec![0u8; (width * height * 3) as usize];
+        for y in 0..height {
+            for (col, &(r, g, b)) in bars.iter().enumerate() {
+                for x in 0..bar_width {
+                    let px = col as u32 * bar_width + x;
+                    let idx = ((y * width + px) * 3) as usize;
+                    frame[idx] = r;
+                    frame[idx + 1] = g;
+                    frame[idx + 2] = b;
+                }
+            }
+        }
+        frame
+    }
+
+    /// Build a luma ramp: pixel at column `x` has RGB = (x_norm, x_norm, x_norm)
+    /// where x_norm maps 0..width → 0..255.
+    fn create_luma_ramp_frame(width: u32, height: u32) -> Vec<u8> {
+        let mut frame = vec![0u8; (width * height * 3) as usize];
+        for y in 0..height {
+            for x in 0..width {
+                let v = ((x * 255) / width.max(1)) as u8;
+                let idx = ((y * width + x) * 3) as usize;
+                frame[idx] = v;
+                frame[idx + 1] = v;
+                frame[idx + 2] = v;
+            }
+        }
+        frame
+    }
+
+    /// Build a flat-field frame: every pixel is `(value, value, value)`.
+    fn create_flat_field_frame(width: u32, height: u32, value: u8) -> Vec<u8> {
+        vec![value; (width * height * 3) as usize]
+    }
+
+    // -------------------------------------------------------------------------
+    // Colour-bar waveform — shape and non-empty checks
+    // -------------------------------------------------------------------------
+
+    /// The luma waveform of an 8-column colour-bar frame must have the correct
+    /// output dimensions and contain at least one non-zero pixel.
+    #[test]
+    fn test_waveform_color_bars_dimensions_and_non_empty() {
+        let bar_width = 4u32;
+        let height = 8u32;
+        let frame = create_color_bars_frame(bar_width, height);
+        let width = bar_width * 8;
+
+        let config = ScopeConfig {
+            width: 128,
+            height: 128,
+            show_graticule: false,
+            show_labels: false,
+            ..ScopeConfig::default()
+        };
+
+        let result = generate_luma_waveform(&frame, width, height, &config);
+        assert!(
+            result.is_ok(),
+            "generate_luma_waveform on color bars must succeed"
+        );
+
+        let scope = result.expect("waveform ok");
+        assert_eq!(scope.width, 128, "scope width must match config");
+        assert_eq!(scope.height, 128, "scope height must match config");
+        assert_eq!(
+            scope.data.len(),
+            (128 * 128 * 4) as usize,
+            "RGBA output must be width*height*4 bytes"
+        );
+        // At least one pixel in the waveform must be lit (non-zero alpha or luma).
+        let any_lit = scope.data.chunks(4).any(|px| px[3] > 0 || px[0] > 0);
+        assert!(
+            any_lit,
+            "color-bar waveform must have at least one lit pixel"
+        );
+    }
+
+    /// The RGB parade of an 8-column colour-bar frame must produce three
+    /// distinct channel regions (R, G, B) — verify by sampling one pixel
+    /// per third of the scope width in the output RGBA buffer.
+    #[test]
+    fn test_waveform_color_bars_rgb_parade_has_data() {
+        let bar_width = 4u32;
+        let height = 8u32;
+        let frame = create_color_bars_frame(bar_width, height);
+        let width = bar_width * 8;
+
+        let config = ScopeConfig {
+            width: 192,
+            height: 64,
+            show_graticule: false,
+            show_labels: false,
+            ..ScopeConfig::default()
+        };
+
+        let result = generate_rgb_parade(&frame, width, height, &config);
+        assert!(
+            result.is_ok(),
+            "generate_rgb_parade on color bars must succeed"
+        );
+
+        let scope = result.expect("rgb parade ok");
+        assert_eq!(scope.width, 192);
+        assert_eq!(scope.height, 64);
+        assert!(!scope.data.is_empty(), "rgb parade data must be non-empty");
+    }
+
+    // -------------------------------------------------------------------------
+    // Luma ramp — correct shape
+    // -------------------------------------------------------------------------
+
+    /// A luma ramp (0→255 left→right) must produce a waveform with the correct
+    /// output dimensions; the ramp should map to a diagonal pattern in the scope.
+    #[test]
+    fn test_waveform_luma_ramp_shape() {
+        let width = 64u32;
+        let height = 16u32;
+        let frame = create_luma_ramp_frame(width, height);
+
+        let config = ScopeConfig {
+            width: 128,
+            height: 128,
+            show_graticule: false,
+            show_labels: false,
+            ..ScopeConfig::default()
+        };
+
+        let result = generate_luma_waveform(&frame, width, height, &config);
+        assert!(result.is_ok(), "luma ramp waveform must succeed");
+
+        let scope = result.expect("luma ramp ok");
+        assert_eq!(scope.width, 128);
+        assert_eq!(scope.height, 128);
+
+        // Verify stats: ramp has min≈0, max≈255, non-trivial std-dev.
+        let stats = compute_waveform_stats(&frame, width, height);
+        assert!(stats.max_luma > 200, "ramp max luma should be near 255");
+        assert!(stats.min_luma < 10, "ramp min luma should be near 0");
+        assert!(stats.std_dev > 50.0, "ramp must have significant variance");
+    }
+
+    // -------------------------------------------------------------------------
+    // Flat fields — black and white
+    // -------------------------------------------------------------------------
+
+    /// A flat-black frame must produce a waveform where all lit pixels are
+    /// near the bottom of the scope (low luma → low scope_y).
+    #[test]
+    fn test_waveform_flat_black_field_pixels_near_bottom() {
+        let width = 32u32;
+        let height = 32u32;
+        let frame = create_flat_field_frame(width, height, 0);
+
+        let config = ScopeConfig {
+            width: 64,
+            height: 64,
+            show_graticule: false,
+            show_labels: false,
+            ..ScopeConfig::default()
+        };
+
+        let result = generate_luma_waveform(&frame, width, height, &config);
+        assert!(result.is_ok(), "flat-black waveform must succeed");
+
+        let scope = result.expect("flat black ok");
+
+        // All black pixels → luma ≈ 16 (broadcast offset), scope_y near bottom.
+        // Check the waveform stats: avg_luma should be very low.
+        let stats = compute_waveform_stats(&frame, width, height);
+        assert!(
+            stats.avg_luma < 20.0,
+            "flat black avg_luma must be near 0 (got {})",
+            stats.avg_luma
+        );
+        assert_eq!(stats.min_luma, stats.max_luma, "flat field: min==max");
+
+        // In the RGBA scope, no pixels in the top quarter should be lit
+        // (top quarter = rows 0..scope_height/4).
+        let top_quarter_end = (scope.height / 4) as usize;
+        let top_lit = scope
+            .data
+            .chunks(4)
+            .take(top_quarter_end * scope.width as usize)
+            .any(|px| px[0] > 0 || px[3] > 0);
+        assert!(
+            !top_lit,
+            "flat-black waveform must not have lit pixels in the top quarter"
+        );
+    }
+
+    /// A flat-white frame must produce a waveform where all lit pixels are
+    /// near the top of the scope (high luma → high scope_y → low row index
+    /// because the y-axis is inverted in the waveform).
+    #[test]
+    fn test_waveform_flat_white_field_pixels_near_top() {
+        let width = 32u32;
+        let height = 32u32;
+        let frame = create_flat_field_frame(width, height, 235); // broadcast white
+
+        let config = ScopeConfig {
+            width: 64,
+            height: 64,
+            show_graticule: false,
+            show_labels: false,
+            ..ScopeConfig::default()
+        };
+
+        let result = generate_luma_waveform(&frame, width, height, &config);
+        assert!(result.is_ok(), "flat-white waveform must succeed");
+
+        let scope = result.expect("flat white ok");
+
+        let stats = compute_waveform_stats(&frame, width, height);
+        assert!(
+            stats.avg_luma > 200.0,
+            "flat white avg_luma must be near 235 (got {})",
+            stats.avg_luma
+        );
+        assert_eq!(stats.min_luma, stats.max_luma, "flat field: min==max");
+
+        // In the RGBA scope, no pixels in the bottom quarter should be lit
+        // (bottom quarter = rows 3*scope_height/4..scope_height).
+        let bottom_start = (scope.height * 3 / 4) as usize;
+        let bottom_lit = scope
+            .data
+            .chunks(4)
+            .skip(bottom_start * scope.width as usize)
+            .any(|px| px[0] > 0 || px[3] > 0);
+        assert!(
+            !bottom_lit,
+            "flat-white waveform must not have lit pixels in the bottom quarter"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // 10-bit ramp via generate_luma_waveform_hd
+    // -------------------------------------------------------------------------
+
+    /// A 10-bit luma ramp processed through `generate_luma_waveform_hd` must
+    /// produce valid output with correct dimensions and non-empty pixel data.
+    #[test]
+    fn test_waveform_10bit_ramp_via_hd_api() {
+        // Build a 10-bit ramp: each 6-byte triplet is (v_le, v_le, v_le) where
+        // v ∈ 0..1023 mapped across width pixels.
+        let width = 32u32;
+        let height = 8u32;
+        let max_val = 1023u16;
+
+        let mut frame = Vec::with_capacity((width * height * 6) as usize);
+        for _y in 0..height {
+            for x in 0..width {
+                let v = ((x * max_val as u32) / width.max(1)) as u16;
+                frame.extend_from_slice(&v.to_le_bytes()); // R
+                frame.extend_from_slice(&v.to_le_bytes()); // G
+                frame.extend_from_slice(&v.to_le_bytes()); // B
+            }
+        }
+
+        let config = ScopeConfig {
+            width: 64,
+            height: 64,
+            show_graticule: false,
+            show_labels: false,
+            ..ScopeConfig::default()
+        };
+
+        let result =
+            generate_luma_waveform_hd(&frame, width, height, &config, WaveformBitDepth::Bit10);
+        assert!(result.is_ok(), "10-bit luma ramp via HD API must succeed");
+
+        let scope = result.expect("10-bit ramp ok");
+        assert_eq!(scope.width, 64);
+        assert_eq!(scope.height, 64);
+        assert_eq!(
+            scope.data.len(),
+            (64 * 64 * 4) as usize,
+            "HD waveform RGBA output size"
+        );
+        let any_lit = scope.data.chunks(4).any(|px| px[0] > 0 || px[3] > 0);
+        assert!(
+            any_lit,
+            "10-bit ramp waveform must have at least one lit pixel"
+        );
+    }
+
+    /// A 10-bit flat-grey field at mid-range (512/1023) must have avg_luma ≈ 0.5.
+    #[test]
+    fn test_waveform_stats_10bit_flat_grey() {
+        let width = 16u32;
+        let height = 16u32;
+        let v: u16 = 512;
+
+        let mut frame = Vec::with_capacity((width * height * 6) as usize);
+        for _ in 0..width * height {
+            frame.extend_from_slice(&v.to_le_bytes());
+            frame.extend_from_slice(&v.to_le_bytes());
+            frame.extend_from_slice(&v.to_le_bytes());
+        }
+
+        let stats = compute_waveform_stats_hd(&frame, width, height, WaveformBitDepth::Bit10);
+        assert!(
+            (stats.avg_luma - 0.5).abs() < 0.05,
+            "10-bit flat grey at 512 must have avg_luma ≈ 0.5 (got {})",
+            stats.avg_luma
+        );
+        assert_eq!(stats.min_luma, stats.max_luma, "flat 10-bit grey: min==max");
+        assert_eq!(stats.bit_depth, WaveformBitDepth::Bit10);
+    }
 }

@@ -441,7 +441,10 @@ mod tests {
         let mut col = FavoriteCollection::new("Test".to_string());
         col.add(id(1));
         assert!(col.set_note(&id(1), "Great shot"));
-        assert_eq!(col.entry(&id(1)).and_then(|e| e.note.as_deref()), Some("Great shot"));
+        assert_eq!(
+            col.entry(&id(1)).and_then(|e| e.note.as_deref()),
+            Some("Great shot")
+        );
     }
 
     #[test]
@@ -540,7 +543,10 @@ mod tests {
         mgr.add_to_collection("highlights", id(1));
         mgr.record_access(id(1));
         assert_eq!(mgr.recent.most_recent(), Some(id(1)));
-        let col = mgr.collections.get("highlights").expect("collection exists");
+        let col = mgr
+            .collections
+            .get("highlights")
+            .expect("collection exists");
         assert!(col.contains(&id(1)));
     }
 }

@@ -21,10 +21,14 @@
 pub mod calibration;
 pub mod ecc;
 pub mod feature_based;
+pub mod gyro_fusion;
 pub mod optical_flow;
+pub mod panorama;
 pub mod phase_correlation;
 pub mod stabilization;
 pub mod warp;
+
+pub use gyro_fusion::{CameraIntrinsics, GyroFusionFilter, GyroSample};
 
 use crate::error::{CvError, CvResult};
 
@@ -189,7 +193,7 @@ impl TransformMatrix {
     pub fn inverse(&self) -> CvResult<Self> {
         let det = self.determinant();
         if det.abs() < f64::EPSILON {
-            return Err(CvError::computation("singular matrix, cannot invert"));
+            return Err(CvError::matrix_error("singular matrix, cannot invert"));
         }
 
         let inv_det = 1.0 / det;
@@ -357,30 +361,39 @@ impl VideoRegistration {
 
         let size = width as usize * height as usize;
         if reference.len() < size || target.len() < size {
-            return Err(CvError::insufficient_data(size, reference.len().min(target.len())));
+            return Err(CvError::insufficient_data(
+                size,
+                reference.len().min(target.len()),
+            ));
         }
 
         match self.method {
-            RegistrationMethod::FeatureBased => {
-                feature_based::register_feature_based(reference, target, width, height, transform_type)
-            }
+            RegistrationMethod::FeatureBased => feature_based::register_feature_based(
+                reference,
+                target,
+                width,
+                height,
+                transform_type,
+            ),
             RegistrationMethod::PhaseCorrelation => {
                 phase_correlation::register_phase_correlation(reference, target, width, height)
             }
-            RegistrationMethod::OpticalFlow => {
-                optical_flow::register_optical_flow(reference, target, width, height, transform_type)
-            }
-            RegistrationMethod::Ecc => {
-                ecc::register_ecc(
-                    reference,
-                    target,
-                    width,
-                    height,
-                    transform_type,
-                    self.max_iterations,
-                    self.convergence_threshold,
-                )
-            }
+            RegistrationMethod::OpticalFlow => optical_flow::register_optical_flow(
+                reference,
+                target,
+                width,
+                height,
+                transform_type,
+            ),
+            RegistrationMethod::Ecc => ecc::register_ecc(
+                reference,
+                target,
+                width,
+                height,
+                transform_type,
+                self.max_iterations,
+                self.convergence_threshold,
+            ),
             RegistrationMethod::Hybrid => {
                 self.register_hybrid(reference, target, width, height, transform_type)
             }

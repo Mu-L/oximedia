@@ -352,11 +352,13 @@ impl PipelineOptimizer {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Find the first `Scale → Crop` pair in the graph (linear chain only).
-fn find_scale_crop_pair(
-    g: &PipelineGraph,
-) -> Option<(NodeId, NodeId, FusedFilter)> {
+fn find_scale_crop_pair(g: &PipelineGraph) -> Option<(NodeId, NodeId, FusedFilter)> {
     for (id, spec) in &g.nodes {
-        if let NodeType::Filter(FilterConfig::Scale { width: sw, height: sh }) = &spec.node_type {
+        if let NodeType::Filter(FilterConfig::Scale {
+            width: sw,
+            height: sh,
+        }) = &spec.node_type
+        {
             let sw = *sw;
             let sh = *sh;
             // Find single downstream neighbour
@@ -385,7 +387,11 @@ fn find_scale_crop_pair(
 /// Find the first `Scale → Pad` pair in the graph (linear chain only).
 fn find_scale_pad_pair(g: &PipelineGraph) -> Option<(NodeId, NodeId, FusedFilter)> {
     for (id, spec) in &g.nodes {
-        if let NodeType::Filter(FilterConfig::Scale { width: sw, height: sh }) = &spec.node_type {
+        if let NodeType::Filter(FilterConfig::Scale {
+            width: sw,
+            height: sh,
+        }) = &spec.node_type
+        {
             let sw = *sw;
             let sh = *sh;
             if let Some(next_id) = single_downstream(g, *id) {
@@ -581,10 +587,7 @@ fn find_noop_filter(g: &PipelineGraph) -> Option<NodeId> {
 }
 
 /// Remove a no-op filter node, re-wiring its upstream to its downstream.
-fn remove_noop_node(
-    mut g: PipelineGraph,
-    noop_id: NodeId,
-) -> Result<PipelineGraph, PipelineError> {
+fn remove_noop_node(mut g: PipelineGraph, noop_id: NodeId) -> Result<PipelineGraph, PipelineError> {
     // Collect all upstream and downstream edges
     let in_edges: Vec<Edge> = g
         .edges
@@ -613,7 +616,8 @@ fn remove_noop_node(
     }
 
     // Rebuild edge list: remove edges touching noop_id, add bypass edges
-    g.edges.retain(|e| e.to_node != noop_id && e.from_node != noop_id);
+    g.edges
+        .retain(|e| e.to_node != noop_id && e.from_node != noop_id);
     g.edges.extend(bypass_edges);
     g.nodes.remove(&noop_id);
 
@@ -698,10 +702,7 @@ fn collect_linear_chains(g: &PipelineGraph) -> Vec<Vec<NodeId>> {
 
 /// Bubble-sort a linear chain in-place by swapping adjacent node types.
 /// Returns number of swaps performed.
-fn bubble_sort_chain(
-    g: &mut PipelineGraph,
-    chain: &[NodeId],
-) -> Result<u32, PipelineError> {
+fn bubble_sort_chain(g: &mut PipelineGraph, chain: &[NodeId]) -> Result<u32, PipelineError> {
     let n = chain.len();
     let mut swaps = 0u32;
 
@@ -740,11 +741,9 @@ fn bubble_sort_chain(
 
 /// Return the cost estimate for a node (0 for non-filter nodes).
 fn node_cost(g: &PipelineGraph, id: NodeId) -> u32 {
-    g.nodes.get(&id).map_or(0, |spec| {
-        match &spec.node_type {
-            NodeType::Filter(cfg) => cfg.cost_estimate(),
-            _ => 0,
-        }
+    g.nodes.get(&id).map_or(0, |spec| match &spec.node_type {
+        NodeType::Filter(cfg) => cfg.cost_estimate(),
+        _ => 0,
     })
 }
 
@@ -866,7 +865,8 @@ fn remove_noop_node_direct(
         }
     }
 
-    g.edges.retain(|e| e.to_node != node_id && e.from_node != node_id);
+    g.edges
+        .retain(|e| e.to_node != node_id && e.from_node != node_id);
     g.edges.extend(bypass_edges);
     g.nodes.remove(&node_id);
 
@@ -910,7 +910,10 @@ mod tests {
         let before = g.node_count();
         let opt = PipelineOptimizer::new();
         let (optimized, report) = opt.fuse_scale_crop(g).unwrap();
-        assert!(optimized.node_count() < before, "expected fewer nodes after fusion");
+        assert!(
+            optimized.node_count() < before,
+            "expected fewer nodes after fusion"
+        );
         assert_eq!(report.fusions_applied, 1);
         assert_eq!(report.nodes_removed, 1);
     }
@@ -984,7 +987,13 @@ mod tests {
         let g = PipelineBuilder::new()
             .source("in", SourceConfig::File("in.mp4".into()))
             .scale(1280, 720)
-            .filter("pad", FilterConfig::Pad { width: 1920, height: 1080 })
+            .filter(
+                "pad",
+                FilterConfig::Pad {
+                    width: 1920,
+                    height: 1080,
+                },
+            )
             .sink("out", SinkConfig::Null)
             .build()
             .unwrap();
@@ -1008,10 +1017,16 @@ mod tests {
             .sink("out", SinkConfig::Null)
             .build()
             .unwrap();
-        let opt = PipelineOptimizer { reorder_by_cost: true, ..PipelineOptimizer::none() };
+        let opt = PipelineOptimizer {
+            reorder_by_cost: true,
+            ..PipelineOptimizer::none()
+        };
         let (optimized, report) = opt.reorder_by_cost_pass(g).unwrap();
         // At least one swap should occur
-        assert!(report.reorders_applied > 0, "expected at least one reorder swap");
+        assert!(
+            report.reorders_applied > 0,
+            "expected at least one reorder swap"
+        );
         // After swap: the node with the LOWER cost_estimate should appear first in
         // topological order. We check filter types by walking the topo order.
         let topo_ids = topological_order_ids(&optimized);

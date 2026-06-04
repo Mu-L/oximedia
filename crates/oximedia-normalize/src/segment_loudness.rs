@@ -197,9 +197,7 @@ impl SegmentMeter {
             let x = frame[ch];
 
             // Stage 1 — high-shelf pre-filter
-            let y1 = S1_B0 * x
-                + S1_B1 * self.s1_x1[ch]
-                + S1_B2 * self.s1_x2[ch]
+            let y1 = S1_B0 * x + S1_B1 * self.s1_x1[ch] + S1_B2 * self.s1_x2[ch]
                 - S1_A1 * self.s1_y1[ch]
                 - S1_A2 * self.s1_y2[ch];
             self.s1_x2[ch] = self.s1_x1[ch];
@@ -208,9 +206,7 @@ impl SegmentMeter {
             self.s1_y1[ch] = y1;
 
             // Stage 2 — high-pass
-            let y2 = S2_B0 * y1
-                + S2_B1 * self.s2_x1[ch]
-                + S2_B2 * self.s2_x2[ch]
+            let y2 = S2_B0 * y1 + S2_B1 * self.s2_x1[ch] + S2_B2 * self.s2_x2[ch]
                 - S2_A1 * self.s2_y1[ch]
                 - S2_A2 * self.s2_y2[ch];
             self.s2_x2[ch] = self.s2_x1[ch];
@@ -684,10 +680,7 @@ fn compute_frame_rms(samples: &[f64], channels: usize, total_frames: usize) -> V
     let mut result = vec![0.0_f64; total_frames];
     for (frame_idx, rms) in result.iter_mut().enumerate() {
         let base = frame_idx * channels;
-        let sum_sq: f64 = samples[base..base + channels]
-            .iter()
-            .map(|&s| s * s)
-            .sum();
+        let sum_sq: f64 = samples[base..base + channels].iter().map(|&s| s * s).sum();
         *rms = (sum_sq / channels as f64).sqrt();
     }
     result
@@ -718,7 +711,9 @@ mod tests {
 
     fn sine_segment(freq_hz: f64, amplitude: f64, sample_rate: f64, frames: usize) -> Vec<f64> {
         (0..frames)
-            .map(|i| amplitude * (2.0 * std::f64::consts::PI * freq_hz * i as f64 / sample_rate).sin())
+            .map(|i| {
+                amplitude * (2.0 * std::f64::consts::PI * freq_hz * i as f64 / sample_rate).sin()
+            })
             .collect()
     }
 
@@ -814,7 +809,10 @@ mod tests {
         let mut buf = stereo.clone();
         assert!(schedule.apply_f64(&mut buf).is_ok());
         // Gain was applied — the output should differ from input for non-silence
-        let all_equal = buf.iter().zip(stereo.iter()).all(|(a, b)| (a - b).abs() < 1e-15);
+        let all_equal = buf
+            .iter()
+            .zip(stereo.iter())
+            .all(|(a, b)| (a - b).abs() < 1e-15);
         // If input is already at target, gain could be ~1 — just verify no error occurred
         // and lengths match
         assert_eq!(buf.len(), stereo.len());

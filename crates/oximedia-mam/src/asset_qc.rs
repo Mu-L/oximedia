@@ -79,11 +79,7 @@ pub struct QcCheckSpec {
 impl QcCheckSpec {
     /// Create a new spec with the minimum required fields.
     #[must_use]
-    pub fn new(
-        id: impl Into<String>,
-        title: impl Into<String>,
-        severity: QcSeverity,
-    ) -> Self {
+    pub fn new(id: impl Into<String>, title: impl Into<String>, severity: QcSeverity) -> Self {
         Self {
             id: id.into(),
             title: title.into(),
@@ -269,10 +265,7 @@ impl QcReport {
     /// Return only issues at or above the given severity.
     #[must_use]
     pub fn issues_at_or_above(&self, min: QcSeverity) -> Vec<&QcIssue> {
-        self.issues
-            .iter()
-            .filter(|i| i.severity >= min)
-            .collect()
+        self.issues.iter().filter(|i| i.severity >= min).collect()
     }
 
     /// Count issues by severity.
@@ -632,8 +625,12 @@ impl QcProfile {
                 .with_description("Integrated loudness must be -23 LUFS ±1 LU"),
         );
         profile.add_check(
-            QcCheckSpec::new("video.frame_rate", "Broadcast Frame Rate", QcSeverity::Warning)
-                .with_description("Frame rate must be a standard broadcast value"),
+            QcCheckSpec::new(
+                "video.frame_rate",
+                "Broadcast Frame Rate",
+                QcSeverity::Warning,
+            )
+            .with_description("Frame rate must be a standard broadcast value"),
         );
         profile
     }
@@ -642,8 +639,7 @@ impl QcProfile {
     #[must_use]
     pub fn web_streaming() -> Self {
         let mut profile = Self::new("web_streaming", "Web Streaming");
-        profile.description =
-            Some("Basic QC for web/OTT streaming (360p+, -16 LUFS).".to_string());
+        profile.description = Some("Basic QC for web/OTT streaming (360p+, -16 LUFS).".to_string());
         profile.add_check(QcCheckSpec::new(
             "file.min_size",
             "Minimum File Size",
@@ -686,7 +682,9 @@ impl QcEngine {
     #[must_use]
     pub fn broadcast_defaults() -> Self {
         let mut engine = Self::new();
-        engine.register(MinFileSizeChecker { min_bytes: 1_048_576 });
+        engine.register(MinFileSizeChecker {
+            min_bytes: 1_048_576,
+        });
         engine.register(MinResolutionChecker {
             min_width: 1920,
             min_height: 1080,

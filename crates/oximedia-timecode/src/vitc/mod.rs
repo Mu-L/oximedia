@@ -21,6 +21,9 @@
 
 pub mod decoder;
 pub mod encoder;
+pub mod smpte309m;
+
+pub use smpte309m::{decode_anc_timecode, encode_anc_timecode, Smpte309mPacket};
 
 use crate::{FrameRate, Timecode, TimecodeError, TimecodeReader, TimecodeWriter};
 

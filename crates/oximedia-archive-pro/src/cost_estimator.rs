@@ -28,9 +28,9 @@ impl StorageTier {
     #[must_use]
     pub const fn base_cost_usd_per_gb_year(&self) -> f64 {
         match self {
-            Self::Hot => 2.40,       // ~$0.20/GB/month
-            Self::Warm => 0.84,      // ~$0.07/GB/month
-            Self::Cold => 0.12,      // ~$0.01/GB/month
+            Self::Hot => 2.40,          // ~$0.20/GB/month
+            Self::Warm => 0.84,         // ~$0.07/GB/month
+            Self::Cold => 0.12,         // ~$0.01/GB/month
             Self::DeepArchive => 0.024, // ~$0.002/GB/month
         }
     }
@@ -132,8 +132,7 @@ impl FixityCostModel {
     /// Computes the annual fixity cost for a given collection.
     #[must_use]
     pub fn annual_cost(&self, total_gb: f64, total_objects: u32) -> f64 {
-        let compute =
-            total_gb * self.compute_cost_per_gb_check * f64::from(self.checks_per_year);
+        let compute = total_gb * self.compute_cost_per_gb_check * f64::from(self.checks_per_year);
         let staff = (f64::from(total_objects) / 1000.0)
             * self.staff_hours_per_1000_objects
             * self.staff_hourly_rate
@@ -277,7 +276,11 @@ impl CostProjection {
     pub fn peak_cost_year(&self) -> Option<u32> {
         self.yearly
             .iter()
-            .max_by(|a, b| a.total_cost.partial_cmp(&b.total_cost).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.total_cost
+                    .partial_cmp(&b.total_cost)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|y| y.year)
     }
 }
@@ -351,13 +354,12 @@ impl PreservationCostEstimator {
             let storage_cost = effective_gb * base_storage_rate * cost_decline_factor;
 
             // Migration cost (only in migration years)
-            let migration_cost =
-                if year % self.config.migration.migration_interval_years == 0 {
-                    let tb = projected_gb / 1024.0;
-                    tb * self.config.migration.cost_per_tb()
-                } else {
-                    0.0
-                };
+            let migration_cost = if year % self.config.migration.migration_interval_years == 0 {
+                let tb = projected_gb / 1024.0;
+                tb * self.config.migration.cost_per_tb()
+            } else {
+                0.0
+            };
 
             // Fixity cost
             let fixity_cost = self
@@ -525,7 +527,11 @@ mod tests {
         let estimator = PreservationCostEstimator::default();
         let projection = estimator.project(&default_collection());
         for year_cost in &projection.yearly {
-            assert!(year_cost.total_cost > 0.0, "year {} cost must be positive", year_cost.year);
+            assert!(
+                year_cost.total_cost > 0.0,
+                "year {} cost must be positive",
+                year_cost.year
+            );
         }
     }
 
@@ -536,7 +542,10 @@ mod tests {
         let mut prev = 0.0_f64;
         for year in 1..=25 {
             let cum = projection.cumulative_through(year);
-            assert!(cum >= prev, "cumulative should be non-decreasing at year {year}");
+            assert!(
+                cum >= prev,
+                "cumulative should be non-decreasing at year {year}"
+            );
             prev = cum;
         }
     }
@@ -549,10 +558,24 @@ mod tests {
         let estimator = PreservationCostEstimator::new(config);
         let projection = estimator.project(&default_collection());
 
-        let year5 = projection.yearly.iter().find(|y| y.year == 5).expect("year 5");
-        let year6 = projection.yearly.iter().find(|y| y.year == 6).expect("year 6");
-        assert!(year5.migration_cost > 0.0, "migration cost should be non-zero in year 5");
-        assert_eq!(year6.migration_cost, 0.0, "migration cost should be zero in year 6");
+        let year5 = projection
+            .yearly
+            .iter()
+            .find(|y| y.year == 5)
+            .expect("year 5");
+        let year6 = projection
+            .yearly
+            .iter()
+            .find(|y| y.year == 6)
+            .expect("year 6");
+        assert!(
+            year5.migration_cost > 0.0,
+            "migration cost should be non-zero in year 5"
+        );
+        assert_eq!(
+            year6.migration_cost, 0.0,
+            "migration cost should be zero in year 6"
+        );
     }
 
     #[test]
@@ -571,12 +594,20 @@ mod tests {
         let collection = default_collection();
         let comparison = estimator.compare_tiers(
             &collection,
-            &[StorageTier::Hot, StorageTier::Warm, StorageTier::Cold, StorageTier::DeepArchive],
+            &[
+                StorageTier::Hot,
+                StorageTier::Warm,
+                StorageTier::Cold,
+                StorageTier::DeepArchive,
+            ],
         );
         assert_eq!(comparison.len(), 4);
         let hot_cost = comparison["Hot"];
         let cold_cost = comparison["Cold"];
-        assert!(hot_cost > cold_cost, "hot storage should cost more than cold");
+        assert!(
+            hot_cost > cold_cost,
+            "hot storage should cost more than cold"
+        );
     }
 
     #[test]

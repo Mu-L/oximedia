@@ -759,7 +759,10 @@ mod tests {
     #[test]
     fn test_detect_from_metadata_mime_field() {
         let mut meta = Metadata::new(MetadataFormat::VorbisComments);
-        meta.insert("mime_type".to_string(), MetadataValue::Text("video/mp4".to_string()));
+        meta.insert(
+            "mime_type".to_string(),
+            MetadataValue::Text("video/mp4".to_string()),
+        );
         let hint = MimeDetector::from_metadata(&meta).expect("Should detect from mime_type field");
         assert_eq!(hint.mime_type, MimeType::VideoMp4);
     }
@@ -804,7 +807,10 @@ mod tests {
     fn test_missing_fields() {
         let mut meta = Metadata::new(MetadataFormat::VorbisComments);
         meta.insert("title".to_string(), MetadataValue::Text("Song".to_string()));
-        meta.insert("artist".to_string(), MetadataValue::Text("Alice".to_string()));
+        meta.insert(
+            "artist".to_string(),
+            MetadataValue::Text("Alice".to_string()),
+        );
 
         let missing = MimeMetadataMapper::missing_fields(MimeType::AudioMpeg, &meta);
         // "title" and "artist" are recommended; they're present, so should not be in missing.

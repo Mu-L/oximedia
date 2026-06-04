@@ -106,6 +106,139 @@ fn format_timestamp(ts: Timestamp) -> String {
     format!("{h:02}:{m:02}:{s:02},{ms:03}")
 }
 
+// ============================================================================
+// Zero-copy nom SRT parser (Wave 14 Slice H)
+// ============================================================================
+
+/// A parsed SRT cue that borrows from the input string — zero allocation per
+/// entry.  The `text` field is a direct slice of the original input.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SrtCueRef<'a> {
+    /// Sequence index (1-based as found in the file; 0 if not present)
+    pub index: u32,
+    /// Start time in milliseconds
+    pub start_ms: u64,
+    /// End time in milliseconds
+    pub end_ms: u64,
+    /// Cue body — a slice of the original `&str` input, no allocation
+    pub text: &'a str,
+}
+
+/// Parse an SRT timestamp (`HH:MM:SS,mmm`) into milliseconds.
+fn nom_srt_timestamp(input: &str) -> IResult<&str, u64> {
+    let (input, hours) = map_res(digit1, |s: &str| s.parse::<u64>()).parse(input)?;
+    let (input, _) = char(':').parse(input)?;
+    let (input, minutes) = map_res(digit1, |s: &str| s.parse::<u64>()).parse(input)?;
+    let (input, _) = char(':').parse(input)?;
+    let (input, seconds) = map_res(digit1, |s: &str| s.parse::<u64>()).parse(input)?;
+    let (input, _) = char(',').parse(input)?;
+    let (input, millis) = map_res(digit1, |s: &str| s.parse::<u64>()).parse(input)?;
+    Ok((
+        input,
+        hours * 3_600_000 + minutes * 60_000 + seconds * 1_000 + millis,
+    ))
+}
+
+/// Parse `HH:MM:SS,mmm --> HH:MM:SS,mmm` into `(start_ms, end_ms)`.
+fn nom_srt_timestamp_line(input: &str) -> IResult<&str, (u64, u64)> {
+    separated_pair(
+        nom_srt_timestamp,
+        (space0, tag("-->"), space0),
+        nom_srt_timestamp,
+    )
+    .parse(input)
+}
+
+/// Parse a single SRT block, returning a zero-copy [`SrtCueRef`].
+///
+/// Accepts the raw block text (text between two blank lines).  `original_input`
+/// is the full file string and is used only to compute the exact subslice for
+/// the cue body — no copying is performed.
+fn parse_srt_cue_ref(block: &str) -> Option<SrtCueRef<'_>> {
+    let mut lines = block.splitn(4, '\n');
+
+    // Line 0: sequence index (optional; we skip it on parse failure)
+    let index_line = lines.next()?.trim();
+    let index: u32 = index_line.parse().unwrap_or(0);
+
+    // Line 1: timestamp
+    let ts_line = lines.next()?.trim();
+    let (start_ms, end_ms) = match nom_srt_timestamp_line(ts_line) {
+        Ok((_, pair)) => pair,
+        Err(_) => return None,
+    };
+
+    // Lines 2+: cue body (the `splitn(4, '\n')` remainder is a single &str)
+    let text_start = lines.next()?;
+    // Collect any further lines that were not consumed by splitn (the 4th capture
+    // already includes everything after the 3rd newline as a single slice).
+    let rest = lines.next().unwrap_or("");
+    // Reconstruct the body slice from the block's interior; we want the portion
+    // starting at text_start up to the end of the block.
+    let text = if rest.is_empty() {
+        text_start.trim_end_matches('\r')
+    } else {
+        // The block contains more than 3 lines; take from text_start to end of block.
+        // Since splitn gives us overlapping borrows we need pointer arithmetic.
+        let block_start = block.as_ptr() as usize;
+        let text_ptr = text_start.as_ptr() as usize;
+        let offset = text_ptr - block_start;
+        block[offset..]
+            .trim_end_matches('\r')
+            .trim_end_matches('\n')
+            .trim_end_matches('\r')
+    };
+
+    Some(SrtCueRef {
+        index,
+        start_ms,
+        end_ms,
+        text,
+    })
+}
+
+/// Zero-copy SRT parse returning `Vec<SrtCueRef<'a>>` that borrow from
+/// `input`.  Avoids all intermediate `String` allocations for callers that
+/// only need to inspect the parsed data without retaining owned values.
+///
+/// For callers that need owned [`Caption`] values use [`fast_parse_srt`]
+/// instead.
+pub fn parse_srt_nom(input: &str) -> Result<Vec<SrtCueRef<'_>>> {
+    let mut cues = Vec::new();
+    for block in input.split("\n\n") {
+        let trimmed = block.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(cue) = parse_srt_cue_ref(trimmed) {
+            cues.push(cue);
+        }
+    }
+    Ok(cues)
+}
+
+/// Fast SRT parser that uses nom timestamp parsing internally but still
+/// produces an owned [`CaptionTrack`].  The intermediate
+/// `.lines().collect::<Vec<&str>>()` allocation present in the original
+/// [`parse_srt`] is replaced by a zero-alloc nom pass for the timestamp line,
+/// and block splitting avoids an extra owned-string copy.
+pub fn fast_parse_srt(text: &str) -> Result<CaptionTrack> {
+    let mut track = CaptionTrack::new(Language::english());
+    for block in text.split("\n\n") {
+        let trimmed = block.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(cue) = parse_srt_cue_ref(trimmed) {
+            let start = Timestamp::from_millis(cue.start_ms as i64);
+            let end = Timestamp::from_millis(cue.end_ms as i64);
+            let caption = Caption::new(start, end, cue.text.to_owned());
+            track.add_caption(caption)?;
+        }
+    }
+    Ok(track)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +317,90 @@ mod tests {
             assert_eq!(orig.end, rt.end, "end timestamp mismatch");
             assert_eq!(orig.text, rt.text, "text content mismatch");
         }
+    }
+
+    // Wave 14 Slice H — new tests
+
+    /// Build an SRT string with `n` cues starting at second `0` and spaced 5 s apart.
+    fn make_srt(n: usize) -> String {
+        let mut out = String::with_capacity(n * 60);
+        for i in 0..n {
+            let start_s = i * 5;
+            let end_s = start_s + 3;
+            let sh = start_s / 3600;
+            let sm = (start_s % 3600) / 60;
+            let ss = start_s % 60;
+            let eh = end_s / 3600;
+            let em = (end_s % 3600) / 60;
+            let es = end_s % 60;
+            out.push_str(&format!(
+                "{}\n{:02}:{:02}:{:02},000 --> {:02}:{:02}:{:02},000\nCaption text {}\n\n",
+                i + 1,
+                sh,
+                sm,
+                ss,
+                eh,
+                em,
+                es,
+                i + 1
+            ));
+        }
+        out
+    }
+
+    /// `fast_parse_srt` and the original `parse_srt` must agree on every cue.
+    #[test]
+    fn test_nom_srt_matches_original() {
+        let input = make_srt(50);
+        let original_track =
+            parse_srt(&input).expect("original parse_srt should succeed on 50-cue input");
+        let fast_track =
+            fast_parse_srt(&input).expect("fast_parse_srt should succeed on 50-cue input");
+
+        assert_eq!(
+            original_track.captions.len(),
+            fast_track.captions.len(),
+            "cue count must match"
+        );
+        for (i, (orig, fast)) in original_track
+            .captions
+            .iter()
+            .zip(fast_track.captions.iter())
+            .enumerate()
+        {
+            assert_eq!(orig.start, fast.start, "start_ms mismatch at cue {i}");
+            assert_eq!(orig.end, fast.end, "end_ms mismatch at cue {i}");
+            assert_eq!(orig.text, fast.text, "text mismatch at cue {i}");
+        }
+    }
+
+    /// The zero-copy `parse_srt_nom` must also agree with the original parser.
+    #[test]
+    fn test_parse_srt_nom_matches_original() {
+        let input = make_srt(20);
+        let original_track = parse_srt(&input).expect("original parse should succeed");
+        let cues = parse_srt_nom(&input).expect("nom parse should succeed");
+
+        assert_eq!(
+            original_track.captions.len(),
+            cues.len(),
+            "cue count must match between original and nom parsers"
+        );
+        for (i, (orig, cue)) in original_track.captions.iter().zip(cues.iter()).enumerate() {
+            let orig_start_ms = orig.start.as_millis() as u64;
+            let orig_end_ms = orig.end.as_millis() as u64;
+            assert_eq!(orig_start_ms, cue.start_ms, "start_ms mismatch at cue {i}");
+            assert_eq!(orig_end_ms, cue.end_ms, "end_ms mismatch at cue {i}");
+            assert_eq!(orig.text, cue.text.trim_end(), "text mismatch at cue {i}");
+        }
+    }
+
+    /// Parse a 10 000-cue SRT string via the nom zero-copy parser and assert
+    /// 10 000 cues are returned without allocation error.
+    #[test]
+    fn test_srt_large_file_parse() {
+        let input = make_srt(10_000);
+        let cues = parse_srt_nom(&input).expect("nom parse of 10 000-cue SRT should succeed");
+        assert_eq!(cues.len(), 10_000, "expected 10 000 cues from large SRT");
     }
 }

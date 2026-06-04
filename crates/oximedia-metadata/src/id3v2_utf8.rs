@@ -261,9 +261,7 @@ impl Utf8TextFrameReader {
     /// cannot be decoded.
     pub fn read_text_frame(&self, data: &[u8]) -> Result<String, Error> {
         if data.is_empty() {
-            return Err(Error::ParseError(
-                "Empty text frame data".to_string(),
-            ));
+            return Err(Error::ParseError("Empty text frame data".to_string()));
         }
 
         let encoding_byte = data[0];
@@ -500,8 +498,16 @@ pub struct Id3Frame {
 
 impl Id3Frame {
     /// Create a new ID3 text frame.
-    pub fn new(frame_id: impl Into<String>, encoding: Id3TextEncoding, content: impl Into<String>) -> Self {
-        Self { frame_id: frame_id.into(), encoding, content: content.into() }
+    pub fn new(
+        frame_id: impl Into<String>,
+        encoding: Id3TextEncoding,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            frame_id: frame_id.into(),
+            encoding,
+            content: content.into(),
+        }
     }
 }
 
@@ -523,7 +529,10 @@ pub struct Id3v2Tag {
 impl Id3v2Tag {
     /// Create a new empty tag for the given version.
     pub fn new(version: (u8, u8)) -> Self {
-        Self { version, frames: Vec::new() }
+        Self {
+            version,
+            frames: Vec::new(),
+        }
     }
 
     /// Get the preferred text encoding for this tag version.
@@ -543,7 +552,8 @@ impl Id3v2Tag {
     /// Remove any existing frame with the given ID and insert a new one.
     fn set_text_frame(&mut self, id: &str, text: &str) {
         self.frames.retain(|f| f.frame_id != id);
-        self.frames.push(Id3Frame::new(id, self.preferred_encoding(), text));
+        self.frames
+            .push(Id3Frame::new(id, self.preferred_encoding(), text));
     }
 
     /// Set the title (TIT2).
@@ -663,7 +673,11 @@ impl Id3Encoder {
     /// The tag size field in the header uses syncsafe integer encoding per spec.
     pub fn encode_tag(tag: &Id3v2Tag) -> Vec<u8> {
         // Encode all frames
-        let frames_bytes: Vec<u8> = tag.frames.iter().flat_map(|f| Self::encode_frame(f)).collect();
+        let frames_bytes: Vec<u8> = tag
+            .frames
+            .iter()
+            .flat_map(|f| Self::encode_frame(f))
+            .collect();
 
         let tag_size = frames_bytes.len() as u32;
         // ID3v2 header: 3 bytes magic + 2 bytes version + 1 byte flags + 4 bytes syncsafe size
@@ -726,7 +740,9 @@ impl Id3Decoder {
         while offset + 10 <= bytes.len() {
             let frame_id_bytes = &bytes[offset..offset + 4];
             // Stop at padding
-            if frame_id_bytes.iter().all(|&b| b == 0) { break; }
+            if frame_id_bytes.iter().all(|&b| b == 0) {
+                break;
+            }
 
             let frame_id = match std::str::from_utf8(frame_id_bytes) {
                 Ok(s) => s.trim_end().to_string(),
@@ -741,11 +757,15 @@ impl Id3Decoder {
             // Skip flags (2 bytes)
             offset += 10;
 
-            if offset + size > bytes.len() { break; }
+            if offset + size > bytes.len() {
+                break;
+            }
             let body = &bytes[offset..offset + size];
             offset += size;
 
-            if body.is_empty() { continue; }
+            if body.is_empty() {
+                continue;
+            }
             let encoding = match Id3TextEncoding::from_byte(body[0]) {
                 Ok(e) => e,
                 Err(_) => continue,
@@ -774,10 +794,7 @@ fn to_syncsafe(n: u32) -> [u8; 4] {
 
 /// Decode a 4-byte syncsafe integer.
 fn from_syncsafe(b: [u8; 4]) -> u32 {
-    (u32::from(b[0]) << 21)
-        | (u32::from(b[1]) << 14)
-        | (u32::from(b[2]) << 7)
-        | u32::from(b[3])
+    (u32::from(b[0]) << 21) | (u32::from(b[1]) << 14) | (u32::from(b[2]) << 7) | u32::from(b[3])
 }
 
 #[cfg(test)]
@@ -845,9 +862,7 @@ mod tests {
     fn test_utf8_round_trip_japanese() {
         let writer = Utf8TextFrameWriter::new(TextEncodingPreference::Utf8First);
         let japanese = "\u{3053}\u{3093}\u{306B}\u{3061}\u{306F}\u{4E16}\u{754C}"; // こんにちは世界
-        let frame = writer
-            .write_text_frame("TIT2", japanese, 4)
-            .expect("write");
+        let frame = writer.write_text_frame("TIT2", japanese, 4).expect("write");
 
         assert_eq!(frame[0], ENCODING_UTF8);
 
@@ -860,9 +875,7 @@ mod tests {
     fn test_utf8_round_trip_emoji() {
         let writer = Utf8TextFrameWriter::new(TextEncodingPreference::Utf8First);
         let emoji = "Music \u{1F3B5} is life \u{2764}\u{FE0F}";
-        let frame = writer
-            .write_text_frame("TIT2", emoji, 4)
-            .expect("write");
+        let frame = writer.write_text_frame("TIT2", emoji, 4).expect("write");
 
         assert_eq!(frame[0], ENCODING_UTF8);
 
@@ -874,9 +887,7 @@ mod tests {
     #[test]
     fn test_utf8_round_trip_empty_string() {
         let writer = Utf8TextFrameWriter::new(TextEncodingPreference::Utf8First);
-        let frame = writer
-            .write_text_frame("TIT2", "", 4)
-            .expect("write");
+        let frame = writer.write_text_frame("TIT2", "", 4).expect("write");
 
         assert_eq!(frame.len(), 1); // just the encoding byte
         assert_eq!(frame[0], ENCODING_UTF8);
@@ -908,9 +919,7 @@ mod tests {
     fn test_utf16_round_trip_japanese() {
         let writer = Utf8TextFrameWriter::new(TextEncodingPreference::Utf16First);
         let japanese = "\u{65E5}\u{672C}\u{8A9E}"; // 日本語
-        let frame = writer
-            .write_text_frame("TIT2", japanese, 4)
-            .expect("write");
+        let frame = writer.write_text_frame("TIT2", japanese, 4).expect("write");
 
         assert_eq!(frame[0], ENCODING_UTF16_BOM);
 
@@ -1000,9 +1009,7 @@ mod tests {
         // Korean + Arabic + Latin
         let mixed = "Hello \u{D55C}\u{AD6D}\u{C5B4} \u{0645}\u{0631}\u{062D}\u{0628}\u{0627}";
         let writer = Utf8TextFrameWriter::new(TextEncodingPreference::Utf8First);
-        let frame = writer
-            .write_text_frame("TIT2", mixed, 4)
-            .expect("write");
+        let frame = writer.write_text_frame("TIT2", mixed, 4).expect("write");
 
         let reader = Utf8TextFrameReader::new();
         let text = reader.read_text_frame(&frame).expect("read");

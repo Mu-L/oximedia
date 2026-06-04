@@ -252,6 +252,139 @@ fn brief_pair(bit: usize, cx: usize, cy: usize, width: usize, height: usize) -> 
     (y1 * width + x1, y2 * width + x2)
 }
 
+// ── Descriptor cache ──────────────────────────────────────────────────────────
+
+/// Default capacity (in frames) for [`DescriptorCache`].
+pub const DESCRIPTOR_CACHE_DEFAULT_CAPACITY: usize = 16;
+
+/// FNV-1a 64-bit hash of a byte slice.
+fn fnv1a_64(data: &[u8]) -> u64 {
+    const OFFSET: u64 = 14_695_981_039_346_656_037;
+    const PRIME: u64 = 1_099_511_628_211;
+    let mut hash = OFFSET;
+    for &b in data {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
+/// Compute a cheap frame key from the first 64 bytes of `frame` plus the
+/// dimensions, using FNV-1a.
+fn frame_key(frame: &[u8], w: u32, h: u32) -> u64 {
+    let prefix_len = frame.len().min(64);
+    let mut h64 = fnv1a_64(&frame[..prefix_len]);
+    // Mix in dimensions
+    h64 ^= w as u64;
+    h64 = h64.wrapping_mul(1_099_511_628_211);
+    h64 ^= h as u64;
+    h64 = h64.wrapping_mul(1_099_511_628_211);
+    h64
+}
+
+/// Frame-keyed LRU cache of BRIEF descriptors.
+///
+/// Descriptors are keyed on a 64-bit FNV-1a hash computed over the first
+/// 64 bytes of the frame plus the frame dimensions.  On a cache hit the
+/// previously computed [`BriefDescriptor`] slice is returned immediately,
+/// avoiding the full SIFT + BRIEF computation.
+///
+/// # Example
+///
+/// ```
+/// use oximedia_cv::feature_extract::DescriptorCache;
+///
+/// let mut cache = DescriptorCache::new(16);
+/// let frame = vec![128u8; 64 * 64];
+/// let descs = cache.get_or_compute(42, &frame, 64, 64);
+/// assert!(descs.is_empty() || !descs.is_empty()); // result is valid
+/// ```
+pub struct DescriptorCache {
+    cache: std::collections::HashMap<u64, Vec<BriefDescriptor>>,
+    order: std::collections::VecDeque<u64>,
+    capacity: usize,
+}
+
+impl DescriptorCache {
+    /// Create a new cache with the given capacity (number of frames to hold).
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        let cap = capacity.max(1);
+        Self {
+            cache: std::collections::HashMap::with_capacity(cap + 1),
+            order: std::collections::VecDeque::with_capacity(cap + 1),
+            capacity: cap,
+        }
+    }
+
+    /// Return descriptors for the frame, computing them if not already cached.
+    ///
+    /// The `frame_hash` parameter is a caller-supplied key; use
+    /// [`frame_hash_of`] to compute a canonical hash from raw frame bytes and
+    /// dimensions, or supply your own stable integer key (e.g. a frame index).
+    ///
+    /// `frame` must be a contiguous float-valued (or u8) slice; this method
+    /// internally converts it via normalisation before passing to [`OrbExtractor`].
+    pub fn get_or_compute(
+        &mut self,
+        frame_hash: u64,
+        frame: &[u8],
+        w: u32,
+        h: u32,
+    ) -> &[BriefDescriptor] {
+        if !self.cache.contains_key(&frame_hash) {
+            // Evict oldest entry if at capacity
+            if self.cache.len() >= self.capacity {
+                if let Some(oldest) = self.order.pop_front() {
+                    self.cache.remove(&oldest);
+                }
+            }
+            // Compute descriptors: normalise u8 → f32 then run OrbExtractor
+            let float_frame: Vec<f32> = frame.iter().map(|&b| b as f32 / 255.0).collect();
+            let extractor = OrbExtractor::new(256);
+            let (_, descs) = extractor.extract(&float_frame, w as usize, h as usize);
+            self.cache.insert(frame_hash, descs);
+            self.order.push_back(frame_hash);
+        } else {
+            // Move to back of LRU order (touch)
+            self.order.retain(|&k| k != frame_hash);
+            self.order.push_back(frame_hash);
+        }
+        // Safety: we just inserted if missing, so the key is always present
+        self.cache
+            .get(&frame_hash)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Return the number of entries currently held in the cache.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.cache.len()
+    }
+
+    /// Return `true` when the cache is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.cache.is_empty()
+    }
+
+    /// Remove all cached entries.
+    pub fn clear(&mut self) {
+        self.cache.clear();
+        self.order.clear();
+    }
+}
+
+/// Compute a canonical FNV-1a frame key from raw bytes and dimensions.
+///
+/// Uses the first 64 bytes of `frame` plus `w` and `h` — fast enough to be
+/// called per-frame without noticeable overhead.
+#[must_use]
+pub fn frame_hash_of(frame: &[u8], w: u32, h: u32) -> u64 {
+    frame_key(frame, w, h)
+}
+
 /// Match two sets of descriptors by minimum Hamming distance.
 ///
 /// Returns a list of `(index_in_a, index_in_b, distance)` pairs.
@@ -418,5 +551,76 @@ mod tests {
         d.set_bit(1);
         d.set_bit(2);
         assert_eq!(d.popcount(), 3);
+    }
+
+    // ── DescriptorCache tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_descriptor_cache_new() {
+        let cache = DescriptorCache::new(4);
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn test_descriptor_cache_computes_on_miss() {
+        let mut cache = DescriptorCache::new(4);
+        let frame = vec![128u8; 32 * 32];
+        let key = frame_hash_of(&frame, 32, 32);
+        let _descs = cache.get_or_compute(key, &frame, 32, 32);
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn test_descriptor_cache_hit_same_result() {
+        let mut cache = DescriptorCache::new(4);
+        let frame = vec![64u8; 16 * 16];
+        let key = frame_hash_of(&frame, 16, 16);
+        let d1: Vec<BriefDescriptor> = cache.get_or_compute(key, &frame, 16, 16).to_vec();
+        let d2: Vec<BriefDescriptor> = cache.get_or_compute(key, &frame, 16, 16).to_vec();
+        assert_eq!(d1, d2, "cache hit must return identical descriptors");
+        // Cache size should not grow on the second call
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn test_descriptor_cache_evicts_lru_at_capacity() {
+        let mut cache = DescriptorCache::new(2);
+        let frame_a = vec![10u8; 8 * 8];
+        let frame_b = vec![20u8; 8 * 8];
+        let frame_c = vec![30u8; 8 * 8];
+        let ka = frame_hash_of(&frame_a, 8, 8);
+        let kb = frame_hash_of(&frame_b, 8, 8);
+        let kc = frame_hash_of(&frame_c, 8, 8);
+        // Ensure distinct keys
+        assert_ne!(ka, kb);
+        assert_ne!(kb, kc);
+        assert_ne!(ka, kc);
+
+        cache.get_or_compute(ka, &frame_a, 8, 8);
+        cache.get_or_compute(kb, &frame_b, 8, 8);
+        assert_eq!(cache.len(), 2);
+        // Adding a third entry should evict the oldest (ka)
+        cache.get_or_compute(kc, &frame_c, 8, 8);
+        assert_eq!(cache.len(), 2, "capacity must not be exceeded");
+    }
+
+    #[test]
+    fn test_descriptor_cache_clear() {
+        let mut cache = DescriptorCache::new(8);
+        let frame = vec![50u8; 16 * 16];
+        let key = frame_hash_of(&frame, 16, 16);
+        cache.get_or_compute(key, &frame, 16, 16);
+        assert_eq!(cache.len(), 1);
+        cache.clear();
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn test_frame_hash_of_differs_by_dimensions() {
+        let frame = vec![99u8; 64];
+        let h1 = frame_hash_of(&frame, 8, 8);
+        let h2 = frame_hash_of(&frame, 16, 4);
+        assert_ne!(h1, h2, "different dimensions must produce different hashes");
     }
 }

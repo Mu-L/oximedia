@@ -75,10 +75,7 @@ impl OpBatch {
     /// Rough byte size estimate: 64 bytes overhead per op plus path length.
     #[must_use]
     pub fn estimated_bytes(&self) -> usize {
-        self.ops
-            .iter()
-            .map(|b| 64 + b.op.path.len())
-            .sum()
+        self.ops.iter().map(|b| 64 + b.op.path.len()).sum()
     }
 }
 
@@ -101,7 +98,7 @@ impl Default for BatcherConfig {
     fn default() -> Self {
         Self {
             max_ops: 64,
-            max_bytes: 16 * 1024,   // 16 KiB
+            max_bytes: 16 * 1024, // 16 KiB
             max_age: Duration::from_millis(50),
             coalesce_updates: true,
         }
@@ -492,7 +489,16 @@ mod tests {
     }
 
     fn make_insert_op(id: u64, path: &str) -> Operation {
-        Operation::new(id, 1, 0, path, OpType::Insert { index: 0, value: 0.0 })
+        Operation::new(
+            id,
+            1,
+            0,
+            path,
+            OpType::Insert {
+                index: 0,
+                value: 0.0,
+            },
+        )
     }
 
     fn bop(op: Operation) -> BatchedOp {
@@ -698,7 +704,11 @@ mod tests {
         engine.push_operation(make_op(1));
         engine.flush();
         let batches = engine.drain_outbox();
-        assert_eq!(batches.len(), 1, "After explicit flush, one batch in outbox");
+        assert_eq!(
+            batches.len(),
+            1,
+            "After explicit flush, one batch in outbox"
+        );
         assert_eq!(batches[0].ops.len(), 1);
         assert_eq!(batches[0].sender_id, "user-1");
     }
@@ -736,7 +746,10 @@ mod tests {
         }
         engine.flush();
         let batches = engine.drain_outbox();
-        let ids: Vec<u64> = batches.iter().flat_map(|b| b.ops.iter().map(|o| o.id)).collect();
+        let ids: Vec<u64> = batches
+            .iter()
+            .flat_map(|b| b.ops.iter().map(|o| o.id))
+            .collect();
         let mut sorted = ids.clone();
         sorted.sort_unstable();
         assert_eq!(ids, sorted, "Operation order should be preserved in batch");
@@ -777,6 +790,10 @@ mod tests {
     fn test_sync_engine_empty_flush_no_batch() {
         let mut engine = SyncEngine::new("sess", "user");
         engine.flush(); // nothing pending
-        assert_eq!(engine.outbox_count(), 0, "Empty flush should not create a batch");
+        assert_eq!(
+            engine.outbox_count(),
+            0,
+            "Empty flush should not create a batch"
+        );
     }
 }

@@ -333,9 +333,21 @@ mod tests {
     fn test_std_dev_formula() {
         // Three events: [100, 120, 140] → mean=120, variance = (400+0+400)/3
         let events: Vec<TempoEvent> = vec![
-            TempoEvent { frame: 0, bpm: 100.0, confidence: 1.0 },
-            TempoEvent { frame: 512, bpm: 120.0, confidence: 1.0 },
-            TempoEvent { frame: 1024, bpm: 140.0, confidence: 1.0 },
+            TempoEvent {
+                frame: 0,
+                bpm: 100.0,
+                confidence: 1.0,
+            },
+            TempoEvent {
+                frame: 512,
+                bpm: 120.0,
+                confidence: 1.0,
+            },
+            TempoEvent {
+                frame: 1024,
+                bpm: 140.0,
+                confidence: 1.0,
+            },
         ];
         let report = TempoStabilityAnalyzer::analyze(&events);
         let expected_std = ((800.0_f32 / 3.0_f32) as f32).sqrt();

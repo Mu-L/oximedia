@@ -101,6 +101,7 @@ pub mod eq;
 pub mod filter;
 pub mod filter_bank;
 pub mod flanger;
+pub mod fundsp_adapter;
 pub mod glitch;
 pub mod harmonic_exciter;
 pub mod keying;
@@ -190,6 +191,12 @@ pub type Result<T> = std::result::Result<T, EffectError>;
 /// their own wet/dry internally (e.g. `MonoDelay`) are encouraged to
 /// override these methods so callers can use a uniform API.
 pub trait AudioEffect {
+    /// Unique string identifier for this effect type (used for FunDSP adapter dispatch).
+    ///
+    /// Implementors should use a stable `snake_case` slug matching the struct name.
+    /// Example: `AnalogDelay` → `"analog_delay"`.
+    const EFFECT_ID: &'static str;
+
     /// Process a single mono sample.
     fn process_sample(&mut self, input: f32) -> f32;
 
@@ -333,6 +340,8 @@ impl<E: AudioEffect> WetDryWrapper<E> {
 }
 
 impl<E: AudioEffect> AudioEffect for WetDryWrapper<E> {
+    const EFFECT_ID: &'static str = E::EFFECT_ID;
+
     fn process_sample(&mut self, input: f32) -> f32 {
         let wet_out = self.inner.process_sample(input);
         wet_out * self.wet + input * self.dry

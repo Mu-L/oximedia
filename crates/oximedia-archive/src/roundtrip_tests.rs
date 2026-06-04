@@ -8,10 +8,12 @@
 
 #[cfg(test)]
 mod roundtrip {
-    use crate::archive_verify::{ArchiveManifest, ArchiveVerifier, ManifestEntry, VerificationLevel, VerificationError};
-    use crate::mmap_checksum::{compute_checksums_mmap, MmapChecksumConfig, verify_file_checksum};
-    use crate::parallel_checksum::{compute_parallel_file, ParallelChecksumConfig};
-    use crate::sidecar::{SidecarGenerator, SidecarManifest, SidecarConfig, SidecarFormat};
+    use crate::archive_verify::{
+        ArchiveManifest, ArchiveVerifier, ManifestEntry, VerificationLevel,
+    };
+    use crate::mmap_checksum::{compute_checksums_mmap, verify_file_checksum, MmapChecksumConfig};
+    use crate::parallel_checksum::ParallelChecksumConfig;
+    use crate::sidecar::{SidecarConfig, SidecarGenerator, SidecarManifest};
     use std::io::Write;
     use std::path::PathBuf;
 
@@ -39,9 +41,15 @@ mod roundtrip {
         let dir = temp_dir("oximedia_rt_roundtrip");
 
         let files = vec![
-            ("alpha.bin", b"alpha file content for round-trip test" as &[u8]),
+            (
+                "alpha.bin",
+                b"alpha file content for round-trip test" as &[u8],
+            ),
             ("beta.bin", b"beta  file content for round-trip test"),
-            ("gamma.bin", b"gamma file content for round-trip test with extra bytes"),
+            (
+                "gamma.bin",
+                b"gamma file content for round-trip test with extra bytes",
+            ),
         ];
 
         // 1. INGEST: write files to disk
@@ -80,7 +88,10 @@ mod roundtrip {
 
         let manifest = ArchiveManifest::build(entries);
         assert_eq!(manifest.entries.len(), 3);
-        assert_eq!(manifest.total_size_bytes, files.iter().map(|(_, c)| c.len() as u64).sum::<u64>());
+        assert_eq!(
+            manifest.total_size_bytes,
+            files.iter().map(|(_, c)| c.len() as u64).sum::<u64>()
+        );
 
         // 4. VERIFY using ArchiveVerifier (Checksum level)
         let verifier = ArchiveVerifier::new(VerificationLevel::Checksum);
@@ -88,8 +99,16 @@ mod roundtrip {
 
         // 5. CONFIRM: all files pass, no errors
         assert_eq!(report.total_entries, 3);
-        assert_eq!(report.verified_ok, 3, "all files should pass: {:?}", report.errors);
-        assert!(report.errors.is_empty(), "unexpected errors: {:?}", report.errors);
+        assert_eq!(
+            report.verified_ok, 3,
+            "all files should pass: {:?}",
+            report.errors
+        );
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -102,7 +121,10 @@ mod roundtrip {
         let files: Vec<(&str, Vec<u8>)> = (0..10)
             .map(|i| {
                 let content = format!("parallel test file content number {i}").into_bytes();
-                (Box::leak(format!("file_{i:02}.bin").into_boxed_str()) as &str, content)
+                (
+                    Box::leak(format!("file_{i:02}.bin").into_boxed_str()) as &str,
+                    content,
+                )
             })
             .collect();
 
@@ -234,13 +256,15 @@ mod roundtrip {
         entry.blake3 = cs.checksums.blake3.clone();
         manifest.add(entry);
 
-        let written = sidecar_gen.write_sidecars(&manifest, &dir).expect("write sidecars");
+        let written = sidecar_gen
+            .write_sidecars(&manifest, &dir)
+            .expect("write sidecars");
         assert!(!written.is_empty());
 
         // Reload JSON sidecar and verify it matches
-        let json_path = written.iter().find(|p| {
-            p.extension().map_or(false, |e| e == "json")
-        });
+        let json_path = written
+            .iter()
+            .find(|p| p.extension().map_or(false, |e| e == "json"));
         if let Some(json_path) = json_path {
             let json_content = std::fs::read_to_string(json_path).expect("read json");
             let loaded = SidecarManifest::from_json(&json_content).expect("parse json");
@@ -292,8 +316,14 @@ mod roundtrip {
         let json = original_manifest.to_json();
 
         let reloaded = ArchiveManifest::from_json(&json).expect("reload manifest");
-        assert_eq!(reloaded.total_size_bytes, original_manifest.total_size_bytes);
-        assert_eq!(reloaded.archive_checksum, original_manifest.archive_checksum);
+        assert_eq!(
+            reloaded.total_size_bytes,
+            original_manifest.total_size_bytes
+        );
+        assert_eq!(
+            reloaded.archive_checksum,
+            original_manifest.archive_checksum
+        );
 
         let verifier = ArchiveVerifier::new(VerificationLevel::Checksum);
         let report = verifier.verify_manifest(&reloaded, &dir);
@@ -311,12 +341,12 @@ mod roundtrip {
 #[cfg(test)]
 mod quarantine_workflow {
     use crate::archive_verify::{
-        ArchiveManifest, ArchiveVerifier, ManifestEntry, VerificationLevel, VerificationError,
+        ArchiveManifest, ArchiveVerifier, ManifestEntry, VerificationError, VerificationLevel,
     };
+    use crate::mmap_checksum::{compute_checksums_mmap, MmapChecksumConfig};
     use crate::quarantine_policy::{
         AdmissionDecision, EvictionStrategy, QuarantineInventory, QuarantinePolicy,
     };
-    use crate::mmap_checksum::{compute_checksums_mmap, MmapChecksumConfig};
     use std::io::Write;
     use std::path::PathBuf;
 
@@ -384,10 +414,16 @@ mod quarantine_workflow {
         // 3. Verify → should detect corruption (checksum mismatch)
         let verifier = ArchiveVerifier::new(VerificationLevel::Checksum);
         let report = verifier.verify_manifest(&manifest, &dir);
-        assert_eq!(report.verified_ok, 0, "corrupted file should fail verification");
+        assert_eq!(
+            report.verified_ok, 0,
+            "corrupted file should fail verification"
+        );
         assert!(!report.errors.is_empty(), "should have errors");
         assert!(
-            matches!(&report.errors[0], VerificationError::ChecksumMismatch { .. }),
+            matches!(
+                &report.errors[0],
+                VerificationError::ChecksumMismatch { .. }
+            ),
             "expected ChecksumMismatch, got: {:?}",
             report.errors[0]
         );
@@ -456,7 +492,11 @@ mod quarantine_workflow {
         };
         let mut candidates = inv.cleanup_candidates(&policy, now);
         candidates.sort();
-        assert_eq!(candidates, vec![1, 3], "should select files older than 30 days");
+        assert_eq!(
+            candidates,
+            vec![1, 3],
+            "should select files older than 30 days"
+        );
     }
 
     /// Simulate full quarantine workflow with inventory and eviction.
@@ -483,16 +523,14 @@ mod quarantine_workflow {
         for (i, (name, content)) in files.iter().enumerate() {
             let path = write_file(&dir, name, content);
             let age_secs = (i as u64 + 1) * 40 * 86400; // 40, 80, 120 days old
-            inv.add(
-                i as u64 + 1,
-                now - age_secs,
-                content.len() as u64,
-                path,
-            );
+            inv.add(i as u64 + 1, now - age_secs, content.len() as u64, path);
         }
 
         assert_eq!(inv.count(), 3);
-        assert_eq!(inv.total_bytes(), files.iter().map(|(_, c)| c.len() as u64).sum::<u64>());
+        assert_eq!(
+            inv.total_bytes(),
+            files.iter().map(|(_, c)| c.len() as u64).sum::<u64>()
+        );
 
         // Policy: cleanup after 30 days
         let policy = QuarantinePolicy {
@@ -519,7 +557,10 @@ mod quarantine_workflow {
         // ID 1 = 40 days, ID 2 = 80 days, ID 3 = 120 days
         // oldest timestamp = now - 120*86400 = ID 3
         // After sort by timestamp ascending: ID 3 (120d), ID 2 (80d), ID 1 (40d)
-        assert!(to_evict.contains(&3), "should evict oldest (ID 3 = 120 days old)");
+        assert!(
+            to_evict.contains(&3),
+            "should evict oldest (ID 3 = 120 days old)"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -561,7 +602,10 @@ mod quarantine_workflow {
 
         assert_eq!(report.verified_ok, 0);
         assert!(
-            matches!(&report.errors[0], VerificationError::ChecksumMismatch { .. }),
+            matches!(
+                &report.errors[0],
+                VerificationError::ChecksumMismatch { .. }
+            ),
             "expected ChecksumMismatch"
         );
 

@@ -181,7 +181,7 @@ mod tests {
     fn test_film_grain_alpha_preserved() {
         let grain = FilmGrain::new(1.0, 42);
         let mut img = vec![0u8; 4 * 4 * 4]; // 4×4 RGBA, all zeroes
-        // Set all alphas to 0xFF
+                                            // Set all alphas to 0xFF
         for p in 0..16 {
             img[p * 4 + 3] = 0xFF;
         }
@@ -226,20 +226,15 @@ mod tests {
         let grain = FilmGrain::new(1.0, 99);
         let mut img = vec![255u8; 4 * 4 * 4];
         grain.apply(&mut img, 4, 4);
-        for (i, &v) in img.iter().enumerate() {
-            if i % 4 != 3 {
-                // RGB must remain [0, 255]
-                assert!(v <= 255, "pixel out of range");
-            }
+        // All pixels should be in valid u8 range (always true by type)
+        for _ in img.iter().enumerate() {
+            // pixel bounds guaranteed by u8 type
         }
 
         // Start with min values
         let mut img2 = vec![0u8; 4 * 4 * 4];
         grain.apply(&mut img2, 4, 4);
-        for (i, &v) in img2.iter().enumerate() {
-            if i % 4 != 3 {
-                assert!(v <= 255);
-            }
-        }
+        // Verify pixel count unchanged
+        assert_eq!(img2.len(), 4 * 4 * 4);
     }
 }

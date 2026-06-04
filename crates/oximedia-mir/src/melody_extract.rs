@@ -41,7 +41,6 @@
 
 #![allow(dead_code)]
 
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
@@ -383,10 +382,7 @@ fn estimate_pitch_zcr(frame: &[f32], sample_rate: f32) -> Option<f32> {
     }
 
     // Mean period in samples = mean gap between consecutive positive crossings.
-    let gaps: Vec<f32> = crossings
-        .windows(2)
-        .map(|w| (w[1] - w[0]) as f32)
-        .collect();
+    let gaps: Vec<f32> = crossings.windows(2).map(|w| (w[1] - w[0]) as f32).collect();
 
     let mean_gap = gaps.iter().sum::<f32>() / gaps.len() as f32;
 

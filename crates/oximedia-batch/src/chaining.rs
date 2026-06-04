@@ -25,8 +25,6 @@
 //! assert_eq!(second.name, "qc-check");
 //! ```
 
-#![allow(dead_code)]
-
 use crate::job::BatchJob;
 use std::collections::HashSet;
 
@@ -147,7 +145,9 @@ mod tests {
     fn job(name: &str) -> BatchJob {
         BatchJob::new(
             name.to_string(),
-            BatchOperation::Transcode { preset: "default".to_string() },
+            BatchOperation::Transcode {
+                preset: "default".to_string(),
+            },
         )
     }
 

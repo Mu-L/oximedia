@@ -159,7 +159,8 @@ impl RecordingSegment {
     /// Duration of the recording (from start to close).  Returns `None` while
     /// still recording.
     pub fn duration(&self) -> Option<Duration> {
-        self.closed_at.and_then(|c| c.duration_since(self.started_at).ok())
+        self.closed_at
+            .and_then(|c| c.duration_since(self.started_at).ok())
     }
 
     /// Return `true` if this segment may be purged given the supplied
@@ -192,7 +193,9 @@ pub struct RecordingSchedule {
 impl RecordingSchedule {
     /// Always record (all 24 hours).
     pub fn always() -> Self {
-        Self { hour_mask: 0x00FF_FFFF }
+        Self {
+            hour_mask: 0x00FF_FFFF,
+        }
     }
 
     /// Never record (all hours disabled).
@@ -397,7 +400,10 @@ impl ComplianceRecorder {
     /// `data` is the encoded frame bytes (for checksum and byte-count
     /// accounting; not actually stored in memory beyond the CRC update).
     pub fn write_frame(&mut self, pts_ns: u64, data: &[u8]) -> ComplianceResult<()> {
-        let seg = self.current.as_mut().ok_or(ComplianceError::NoOpenSegment)?;
+        let seg = self
+            .current
+            .as_mut()
+            .ok_or(ComplianceError::NoOpenSegment)?;
         seg.frame_count += 1;
         seg.byte_count += data.len() as u64;
         seg.end_pts_ns = pts_ns;
@@ -631,7 +637,8 @@ mod tests {
     #[test]
     fn test_close_empty_segment_returns_error() {
         let mut rec = make_recorder();
-        rec.start_segment("s1", "Prog", 0, now_plus_secs(0)).unwrap();
+        rec.start_segment("s1", "Prog", 0, now_plus_secs(0))
+            .unwrap();
         let err = rec.close_segment(now_plus_secs(1));
         assert!(matches!(err, Err(ComplianceError::EmptySegment)));
         // Recorder should still be recording (segment restored).
@@ -707,8 +714,13 @@ mod tests {
         let mut rec = make_recorder();
         // Archive 2 segments.
         for i in 0u64..2 {
-            rec.start_segment(format!("s{i}"), "Prog", i * 3600_000_000_000, now_plus_secs(i * 3600))
-                .unwrap();
+            rec.start_segment(
+                format!("s{i}"),
+                "Prog",
+                i * 3600_000_000_000,
+                now_plus_secs(i * 3600),
+            )
+            .unwrap();
             rec.write_frame(i * 40_000_000, b"data").unwrap();
             rec.close_segment(now_plus_secs(i * 3600 + 3600)).unwrap();
         }
@@ -725,9 +737,12 @@ mod tests {
     #[test]
     fn test_force_close_empty_segment() {
         let mut rec = make_recorder();
-        rec.start_segment("s1", "Test", 0, now_plus_secs(0)).unwrap();
+        rec.start_segment("s1", "Test", 0, now_plus_secs(0))
+            .unwrap();
         // No frames written.
-        let seg = rec.force_close(now_plus_secs(10)).expect("force_close returns Some");
+        let seg = rec
+            .force_close(now_plus_secs(10))
+            .expect("force_close returns Some");
         assert_eq!(seg.frame_count, 0);
         assert_eq!(seg.status, SegmentStatus::Retained);
     }

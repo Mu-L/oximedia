@@ -9,6 +9,7 @@
 //! - [`subframe`] - Subframe decoding and encoding
 //! - [`rice`] - Rice coding for residuals
 //! - [`encoder`] - FLAC encoder implementation
+//! - [`decoder`] - FLAC decoder implementation
 //! - [`crc`] - CRC calculation
 //! - [`bitwriter`] - Bit-level writing
 
@@ -16,17 +17,18 @@
 
 pub mod bitwriter;
 pub mod crc;
+pub mod decoder;
 pub mod encoder;
 pub mod frame;
 pub mod rice;
 pub mod subframe;
 
-use crate::{AudioDecoder, AudioDecoderConfig, AudioError, AudioFrame, AudioResult, ChannelLayout};
-use oximedia_core::{CodecId, SampleFormat};
+use crate::AudioError;
 
 // Re-export submodule types
 pub use bitwriter::BitWriter;
 pub use crc::{crc16, crc8, Crc16, Crc8};
+pub use decoder::FlacDecoder;
 pub use encoder::{CompressionLevel, FlacEncoder};
 pub use frame::{BlockingStrategy, ChannelAssignment, FlacFrame, FrameHeader};
 pub use rice::{RiceDecoder, RicePartition};
@@ -113,128 +115,9 @@ impl StreamInfo {
     }
 }
 
-/// FLAC decoder.
-pub struct FlacDecoder {
-    #[allow(dead_code)]
-    config: AudioDecoderConfig,
-    sample_rate: u32,
-    channels: u8,
-    flushing: bool,
-    #[allow(dead_code)]
-    stream_info: Option<StreamInfo>,
-    #[allow(dead_code)]
-    current_frame: Option<FlacFrame>,
-}
-
-impl FlacDecoder {
-    /// Create new FLAC decoder.
-    ///
-    /// # Errors
-    ///
-    /// Returns error if configuration is invalid.
-    pub fn new(config: &AudioDecoderConfig) -> AudioResult<Self> {
-        if config.codec != CodecId::Flac {
-            return Err(AudioError::InvalidParameter("Expected FLAC codec".into()));
-        }
-        Ok(Self {
-            config: config.clone(),
-            sample_rate: config.sample_rate,
-            channels: config.channels,
-            flushing: false,
-            stream_info: None,
-            current_frame: None,
-        })
-    }
-
-    /// Parse STREAMINFO metadata.
-    ///
-    /// # Errors
-    ///
-    /// Returns error if data is invalid.
-    pub fn parse_stream_info(data: &[u8]) -> AudioResult<StreamInfo> {
-        StreamInfo::parse(data)
-    }
-
-    /// Parse a frame header.
-    ///
-    /// # Errors
-    ///
-    /// Returns error if header is invalid.
-    pub fn parse_frame_header(&self, data: &[u8]) -> AudioResult<(FrameHeader, usize)> {
-        let bps = self.stream_info.as_ref().map_or(16, |s| s.bits_per_sample);
-        FrameHeader::parse(data, bps)
-    }
-}
-
-impl AudioDecoder for FlacDecoder {
-    fn codec(&self) -> CodecId {
-        CodecId::Flac
-    }
-
-    fn send_packet(&mut self, _data: &[u8], _pts: i64) -> AudioResult<()> {
-        Ok(())
-    }
-
-    fn receive_frame(&mut self) -> AudioResult<Option<AudioFrame>> {
-        Ok(None)
-    }
-
-    fn flush(&mut self) -> AudioResult<()> {
-        self.flushing = true;
-        Ok(())
-    }
-
-    fn reset(&mut self) {
-        self.flushing = false;
-        self.current_frame = None;
-    }
-
-    fn output_format(&self) -> Option<SampleFormat> {
-        Some(SampleFormat::S16)
-    }
-
-    fn sample_rate(&self) -> Option<u32> {
-        Some(self.sample_rate)
-    }
-
-    fn channel_layout(&self) -> Option<ChannelLayout> {
-        Some(ChannelLayout::from_count(usize::from(self.channels)))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_flac_decoder() {
-        let config = AudioDecoderConfig {
-            codec: CodecId::Flac,
-            ..Default::default()
-        };
-        let decoder = FlacDecoder::new(&config).expect("should succeed");
-        assert_eq!(decoder.codec(), CodecId::Flac);
-    }
-
-    #[test]
-    fn test_flac_decoder_wrong_codec() {
-        let config = AudioDecoderConfig {
-            codec: CodecId::Opus,
-            ..Default::default()
-        };
-        assert!(FlacDecoder::new(&config).is_err());
-    }
-
-    #[test]
-    fn test_flac_decoder_reset() {
-        let config = AudioDecoderConfig {
-            codec: CodecId::Flac,
-            ..Default::default()
-        };
-        let mut decoder = FlacDecoder::new(&config).expect("should succeed");
-        decoder.reset();
-        assert!(!decoder.flushing);
-    }
 
     #[test]
     fn test_stream_info_parse() {

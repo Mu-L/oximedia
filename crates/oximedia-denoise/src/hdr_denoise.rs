@@ -256,15 +256,12 @@ fn encode(linear: f64, tf: HdrTransferFunction) -> f64 {
 /// - Dark regions: boost strength (noise is more visible)
 /// - Midtones: use base strength
 /// - Highlights: reduce strength (protect specular detail)
-fn hdr_local_strength(
-    linear_luminance: f64,
-    config: &HdrDenoiseConfig,
-) -> f32 {
+fn hdr_local_strength(linear_luminance: f64, config: &HdrDenoiseConfig) -> f32 {
     let base = config.strength;
 
     // Normalize to 0-1 range relative to peak
-    let normalized = (linear_luminance * 10000.0 / f64::from(config.peak_luminance))
-        .clamp(0.0, 1.0);
+    let normalized =
+        (linear_luminance * 10000.0 / f64::from(config.peak_luminance)).clamp(0.0, 1.0);
 
     // Shadow region: below 1% of peak
     let shadow_factor = if normalized < 0.01 {
@@ -302,10 +299,7 @@ fn hdr_local_strength(
 ///
 /// # Returns
 /// HDR-aware denoised frame
-pub fn hdr_denoise(
-    frame: &VideoFrame,
-    config: &HdrDenoiseConfig,
-) -> DenoiseResult<VideoFrame> {
+pub fn hdr_denoise(frame: &VideoFrame, config: &HdrDenoiseConfig) -> DenoiseResult<VideoFrame> {
     config.validate()?;
 
     if frame.planes.is_empty() {
@@ -488,8 +482,7 @@ pub fn estimate_hdr_noise(
     let code_noise_std = (perturbed - mid_code).abs();
 
     // Estimate SNR
-    let signal_power: f64 = residuals.iter().map(|&r| r * r).sum::<f64>()
-        / residuals.len() as f64;
+    let signal_power: f64 = residuals.iter().map(|&r| r * r).sum::<f64>() / residuals.len() as f64;
     let noise_power = linear_noise_std * linear_noise_std;
     let snr_db = if noise_power > 1e-15 {
         10.0 * (signal_power / noise_power).log10()

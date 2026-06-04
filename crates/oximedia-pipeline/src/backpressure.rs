@@ -231,10 +231,9 @@ impl BackpressureController {
         handle: QueueHandle,
         ratio: f32,
     ) -> Result<(), PipelineError> {
-        let q = self
-            .queues
-            .get_mut(handle.0)
-            .ok_or_else(|| PipelineError::ValidationError(format!("invalid queue handle {}", handle.0)))?;
+        let q = self.queues.get_mut(handle.0).ok_or_else(|| {
+            PipelineError::ValidationError(format!("invalid queue handle {}", handle.0))
+        })?;
         let clamped = ratio.clamp(0.0, 1.0);
         q.high_water_ratio = clamped;
         Ok(())
@@ -253,10 +252,9 @@ impl BackpressureController {
         handle: QueueHandle,
         item: T,
     ) -> Result<BackpressureSignal, PipelineError> {
-        let q = self
-            .queues
-            .get_mut(handle.0)
-            .ok_or_else(|| PipelineError::ValidationError(format!("invalid queue handle {}", handle.0)))?;
+        let q = self.queues.get_mut(handle.0).ok_or_else(|| {
+            PipelineError::ValidationError(format!("invalid queue handle {}", handle.0))
+        })?;
         Ok(q.push_erased(Box::new(item)))
     }
 
@@ -272,20 +270,16 @@ impl BackpressureController {
         &mut self,
         handle: QueueHandle,
     ) -> Result<Option<T>, PipelineError> {
-        let q = self
-            .queues
-            .get_mut(handle.0)
-            .ok_or_else(|| PipelineError::ValidationError(format!("invalid queue handle {}", handle.0)))?;
+        let q = self.queues.get_mut(handle.0).ok_or_else(|| {
+            PipelineError::ValidationError(format!("invalid queue handle {}", handle.0))
+        })?;
         match q.pop_erased() {
             None => Ok(None),
-            Some(boxed) => {
-                boxed
-                    .downcast::<T>()
-                    .map(|b| Some(*b))
-                    .map_err(|_| PipelineError::ValidationError(
-                        "type mismatch: pushed and popped types differ".to_string(),
-                    ))
-            }
+            Some(boxed) => boxed.downcast::<T>().map(|b| Some(*b)).map_err(|_| {
+                PipelineError::ValidationError(
+                    "type mismatch: pushed and popped types differ".to_string(),
+                )
+            }),
         }
     }
 
@@ -295,10 +289,9 @@ impl BackpressureController {
     ///
     /// Returns [`PipelineError::ValidationError`] when `handle` is invalid.
     pub fn depth(&self, handle: QueueHandle) -> Result<usize, PipelineError> {
-        self.queues
-            .get(handle.0)
-            .map(|q| q.len())
-            .ok_or_else(|| PipelineError::ValidationError(format!("invalid queue handle {}", handle.0)))
+        self.queues.get(handle.0).map(|q| q.len()).ok_or_else(|| {
+            PipelineError::ValidationError(format!("invalid queue handle {}", handle.0))
+        })
     }
 
     /// Returns `true` when the queue is empty.
@@ -310,7 +303,9 @@ impl BackpressureController {
         self.queues
             .get(handle.0)
             .map(|q| q.is_empty())
-            .ok_or_else(|| PipelineError::ValidationError(format!("invalid queue handle {}", handle.0)))
+            .ok_or_else(|| {
+                PipelineError::ValidationError(format!("invalid queue handle {}", handle.0))
+            })
     }
 
     /// Return a snapshot of statistics for the given queue.
@@ -322,7 +317,9 @@ impl BackpressureController {
         self.queues
             .get(handle.0)
             .map(|q| q.stats.clone())
-            .ok_or_else(|| PipelineError::ValidationError(format!("invalid queue handle {}", handle.0)))
+            .ok_or_else(|| {
+                PipelineError::ValidationError(format!("invalid queue handle {}", handle.0))
+            })
     }
 
     /// Return the [`QueueId`] for a given handle, if it exists.
@@ -344,7 +341,9 @@ impl BackpressureController {
         self.queues
             .get(handle.0)
             .map(|q| q.capacity)
-            .ok_or_else(|| PipelineError::ValidationError(format!("invalid queue handle {}", handle.0)))
+            .ok_or_else(|| {
+                PipelineError::ValidationError(format!("invalid queue handle {}", handle.0))
+            })
     }
 
     /// Total number of queues registered with this controller.
@@ -365,10 +364,9 @@ impl BackpressureController {
     ///
     /// Returns [`PipelineError::ValidationError`] when `handle` is invalid.
     pub fn flush(&mut self, handle: QueueHandle) -> Result<(), PipelineError> {
-        let q = self
-            .queues
-            .get_mut(handle.0)
-            .ok_or_else(|| PipelineError::ValidationError(format!("invalid queue handle {}", handle.0)))?;
+        let q = self.queues.get_mut(handle.0).ok_or_else(|| {
+            PipelineError::ValidationError(format!("invalid queue handle {}", handle.0))
+        })?;
         q.items.clear();
         Ok(())
     }
@@ -480,16 +478,22 @@ mod tests {
     #[test]
     fn push_pop_round_trip() {
         let (mut ctrl, h) = make_ctrl_with_queue(8);
-        let sig = ctrl.push(h, 99u32).expect("push to valid queue should succeed");
+        let sig = ctrl
+            .push(h, 99u32)
+            .expect("push to valid queue should succeed");
         assert_eq!(sig, BackpressureSignal::Ok);
-        let val = ctrl.pop::<u32>(h).expect("pop from valid queue should succeed");
+        let val = ctrl
+            .pop::<u32>(h)
+            .expect("pop from valid queue should succeed");
         assert_eq!(val, Some(99u32));
     }
 
     #[test]
     fn pop_empty_queue_returns_none() {
         let (mut ctrl, h) = make_ctrl_with_queue(4);
-        let val = ctrl.pop::<u8>(h).expect("pop from valid empty queue should succeed");
+        let val = ctrl
+            .pop::<u8>(h)
+            .expect("pop from valid empty queue should succeed");
         assert!(val.is_none());
     }
 
@@ -499,9 +503,13 @@ mod tests {
         ctrl.push(h, 1u8).expect("push 1 should succeed");
         ctrl.push(h, 2u8).expect("push 2 should succeed");
         // Queue is now at capacity
-        let sig = ctrl.push(h, 3u8).expect("push to full queue returns signal, not error");
+        let sig = ctrl
+            .push(h, 3u8)
+            .expect("push to full queue returns signal, not error");
         assert_eq!(sig, BackpressureSignal::QueueFull);
-        let stats = ctrl.stats(h).expect("stats should succeed for valid handle");
+        let stats = ctrl
+            .stats(h)
+            .expect("stats should succeed for valid handle");
         assert_eq!(stats.dropped_frames, 1);
         assert_eq!(stats.total_pushed, 2);
     }
@@ -512,9 +520,13 @@ mod tests {
         // Default high-water ratio = 0.75, so throttle fires at depth >= 3
         ctrl.push(h, 0u32).expect("push 0 should succeed");
         ctrl.push(h, 1u32).expect("push 1 should succeed");
-        let sig = ctrl.push(h, 2u32).expect("push 2 returns signal, not error");
+        let sig = ctrl
+            .push(h, 2u32)
+            .expect("push 2 returns signal, not error");
         assert_eq!(sig, BackpressureSignal::ShouldThrottle);
-        let stats = ctrl.stats(h).expect("stats should succeed for valid handle");
+        let stats = ctrl
+            .stats(h)
+            .expect("stats should succeed for valid handle");
         assert_eq!(stats.throttle_events, 1);
     }
 
@@ -538,9 +550,16 @@ mod tests {
         let (mut ctrl, h) = make_ctrl_with_queue(8);
         ctrl.push(h, 42u64).expect("push should succeed");
         ctrl.push(h, 43u64).expect("push should succeed");
-        assert_eq!(ctrl.depth(h).expect("depth should succeed for valid handle"), 2);
-        ctrl.flush(h).expect("flush should succeed for valid handle");
-        assert!(ctrl.is_empty(h).expect("is_empty should succeed for valid handle"));
+        assert_eq!(
+            ctrl.depth(h)
+                .expect("depth should succeed for valid handle"),
+            2
+        );
+        ctrl.flush(h)
+            .expect("flush should succeed for valid handle");
+        assert!(ctrl
+            .is_empty(h)
+            .expect("is_empty should succeed for valid handle"));
     }
 
     #[test]
@@ -556,16 +575,23 @@ mod tests {
     #[test]
     fn set_high_water_ratio_clamped() {
         let (mut ctrl, h) = make_ctrl_with_queue(10);
-        ctrl.set_high_water_ratio(h, 1.5).expect("set_high_water_ratio should succeed for valid handle"); // should clamp to 1.0
-        // With ratio=1.0 only a completely full queue triggers throttle;
-        // pushing 9 items (depth 1..9, ratio < 1.0) should all return Ok.
+        ctrl.set_high_water_ratio(h, 1.5)
+            .expect("set_high_water_ratio should succeed for valid handle"); // should clamp to 1.0
+                                                                             // With ratio=1.0 only a completely full queue triggers throttle;
+                                                                             // pushing 9 items (depth 1..9, ratio < 1.0) should all return Ok.
         for i in 0u32..9 {
             let sig = ctrl.push(h, i).expect("push should succeed for item {i}");
-            assert_eq!(sig, BackpressureSignal::Ok, "item {i} unexpectedly throttled");
+            assert_eq!(
+                sig,
+                BackpressureSignal::Ok,
+                "item {i} unexpectedly throttled"
+            );
         }
         // The 10th push fills the queue exactly (depth/capacity == 1.0 >= 1.0)
         // so it returns ShouldThrottle (not QueueFull — it was still enqueued)
-        let sig = ctrl.push(h, 9u32).expect("10th push should succeed and return signal");
+        let sig = ctrl
+            .push(h, 9u32)
+            .expect("10th push should succeed and return signal");
         assert_eq!(sig, BackpressureSignal::ShouldThrottle);
     }
 
@@ -598,7 +624,9 @@ mod tests {
         ctrl.pop::<u32>(h).expect("pop 1 should succeed");
         ctrl.pop::<u32>(h).expect("pop 2 should succeed");
         ctrl.pop::<u32>(h).expect("pop 3 should succeed");
-        let stats = ctrl.stats(h).expect("stats should succeed for valid handle");
+        let stats = ctrl
+            .stats(h)
+            .expect("stats should succeed for valid handle");
         assert_eq!(stats.peak_depth, 5);
         assert_eq!(stats.total_popped, 3);
     }

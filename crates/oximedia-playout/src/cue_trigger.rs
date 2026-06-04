@@ -270,7 +270,11 @@ mod tests {
     #[test]
     fn test_reset_all_allows_re_fire() {
         let mut t = make_trigger();
-        t.add_cue(CuePoint::new("c1", 10, CueAction::PlayClip("x".to_string())));
+        t.add_cue(CuePoint::new(
+            "c1",
+            10,
+            CueAction::PlayClip("x".to_string()),
+        ));
         let first = t.check_frame(10);
         assert_eq!(first.len(), 1);
 

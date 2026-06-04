@@ -104,9 +104,12 @@
 
 pub mod accel_profile;
 pub mod accel_stats;
+pub mod async_compute;
 pub mod bilateral_gpu;
 pub mod buffer;
+pub mod buffer_ring;
 pub mod cache;
+pub mod compute_backend;
 pub mod cpu_fallback;
 pub mod cpu_simd;
 pub mod device;
@@ -114,11 +117,16 @@ pub mod device_caps;
 pub mod dispatch;
 pub mod error;
 pub mod fence_timeline;
+pub mod gpu_ops;
 pub mod kernels;
+pub mod memory_access;
 pub mod memory_arena;
 pub mod memory_bandwidth;
+pub mod metal_backend;
+pub mod multi_gpu;
 pub mod ops;
 pub mod pipeline_accel;
+pub mod pipeline_cache;
 pub mod pool;
 pub mod prefetch;
 pub mod shaders;
@@ -128,8 +136,10 @@ pub mod task_graph;
 pub mod task_scheduler;
 pub mod temporal_nr;
 pub mod traits;
+pub mod vectorize;
 pub mod vulkan;
 pub mod webgpu_backend;
+pub mod work_item;
 pub mod workgroup;
 
 // Re-export commonly used items

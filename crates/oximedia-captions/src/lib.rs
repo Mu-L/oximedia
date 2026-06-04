@@ -89,7 +89,14 @@ pub mod speaker_diarization;
 /// Backward-compatibility alias: all items from the former `speaker_diarize`
 /// module now live in [`speaker_diarization`].
 pub use speaker_diarization as speaker_diarize;
+pub mod caption_localization;
+pub mod caption_versioning;
+pub mod karaoke_timing;
+pub mod ocr_subtitle;
+pub mod sdh_generator;
+pub mod smpte_2052;
 pub mod standards;
+pub mod teletext_page_editor;
 pub mod templates;
 pub mod translation;
 pub mod types;

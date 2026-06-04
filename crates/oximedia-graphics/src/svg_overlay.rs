@@ -1,3 +1,5 @@
+// orphan: TODO — update stale paths before registration: requires `resvg` and `usvg` crate
+// dependencies that are not yet listed in Cargo.toml.
 //! SVG overlay rendering for broadcast graphics.
 //!
 //! Provides [`SvgOverlay`] which loads a Scalable Vector Graphics document via the
@@ -235,8 +237,7 @@ impl SvgOverlay {
     /// Parse the stored SVG bytes into a `usvg::Tree`.
     fn parse_tree(&self) -> Result<usvg::Tree, SvgError> {
         let opt = usvg::Options::default();
-        usvg::Tree::from_data(&self.svg_data, &opt)
-            .map_err(|e| SvgError::ParseError(e.to_string()))
+        usvg::Tree::from_data(&self.svg_data, &opt).map_err(|e| SvgError::ParseError(e.to_string()))
     }
 }
 
@@ -389,9 +390,7 @@ pub fn svg_overlay_from_str(svg: &str) -> Result<SvgOverlay, SvgError> {
 ///
 /// Returns [`SvgError::ParseError`] if the SVG is malformed.
 pub fn svg_overlay_from_bytes(data: &[u8]) -> Result<SvgOverlay, SvgError> {
-    SvgOverlayBuilder::new()
-        .from_bytes(data)
-        .map(|b| b.build())
+    SvgOverlayBuilder::new().from_bytes(data).map(|b| b.build())
 }
 
 // ── Private pixel-level helpers ───────────────────────────────────────────────
@@ -501,10 +500,7 @@ mod tests {
         // The top-left 100×100 region should have been painted by the red SVG rect.
         // Pixel (0,0) should have a non-zero red channel.
         let r = frame[0];
-        assert!(
-            r > 0,
-            "expected red channel > 0 at pixel (0,0), got {r}"
-        );
+        assert!(r > 0, "expected red channel > 0 at pixel (0,0), got {r}");
     }
 
     // ── Test 4: composite at an offset position ───────────────────────────────
@@ -533,10 +529,7 @@ mod tests {
         // Pixel at the offset origin should be non-transparent (red rect covers it).
         let idx = (offset_y as u32 * frame_w + offset_x as u32) as usize * 4;
         let r = frame[idx];
-        assert!(
-            r > 0,
-            "expected red channel > 0 at offset pixel, got {r}"
-        );
+        assert!(r > 0, "expected red channel > 0 at offset pixel, got {r}");
 
         // Pixel (0,0) should still be black (zero alpha) because the SVG starts at offset.
         assert_eq!(
@@ -623,7 +616,10 @@ mod tests {
 
         // At least one pixel should be fully opaque (the solid red rect).
         let any_opaque = rgba.chunks_exact(4).any(|px| px[3] == 255);
-        assert!(any_opaque, "expected at least one fully opaque pixel with opacity 1.0");
+        assert!(
+            any_opaque,
+            "expected at least one fully opaque pixel with opacity 1.0"
+        );
     }
 
     // ── Test 9: builder from_bytes ────────────────────────────────────────────
@@ -645,7 +641,12 @@ mod tests {
     fn test_animated_frame_api() {
         let overlay = svg_overlay_from_str(simple_svg()).expect("parse");
         let normal = overlay.render_to_rgba(64, 64).expect("render");
-        let framed = overlay.render_frame_to_rgba(64, 64, 42).expect("render frame");
-        assert_eq!(normal, framed, "frame API should match regular render for static SVG");
+        let framed = overlay
+            .render_frame_to_rgba(64, 64, 42)
+            .expect("render frame");
+        assert_eq!(
+            normal, framed,
+            "frame API should match regular render for static SVG"
+        );
     }
 }

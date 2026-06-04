@@ -156,10 +156,7 @@ impl SmartPlaylistRule {
             Self::HasTag(tag) => item.tags.iter().any(|t| t == tag),
             Self::NotTag(tag) => !item.tags.iter().any(|t| t == tag),
 
-            Self::MinRating(min) => item
-                .rating
-                .map(|r| r >= *min)
-                .unwrap_or(false),
+            Self::MinRating(min) => item.rating.map(|r| r >= *min).unwrap_or(false),
 
             Self::ArtistContains(substr) => item
                 .artist
@@ -167,10 +164,9 @@ impl SmartPlaylistRule {
                 .map(|a| a.to_lowercase().contains(&substr.to_lowercase()))
                 .unwrap_or(false),
 
-            Self::TitleContains(substr) => item
-                .title
-                .to_lowercase()
-                .contains(&substr.to_lowercase()),
+            Self::TitleContains(substr) => {
+                item.title.to_lowercase().contains(&substr.to_lowercase())
+            }
 
             Self::All(rules) => rules.iter().all(|r| r.matches(item)),
             Self::Any(rules) => rules.iter().any(|r| r.matches(item)),
@@ -323,7 +319,9 @@ impl SmartPlaylist {
                 let n = items.len();
                 let mut seed: u64 = n as u64 ^ 0xABCD_EF01_2345_6789;
                 for i in (1..n).rev() {
-                    seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                    seed = seed
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
                     let j = (seed >> 33) as usize % (i + 1);
                     items.swap(i, j);
                 }
@@ -431,7 +429,9 @@ mod tests {
         let pl = SmartPlaylist::new().with_rule(SmartPlaylistRule::Genre("Rock".to_string()));
         let result = pl.generate(&lib);
         assert_eq!(result.len(), 2);
-        assert!(result.iter().all(|i| i.genres.contains(&"Rock".to_string())));
+        assert!(result
+            .iter()
+            .all(|i| i.genres.contains(&"Rock".to_string())));
     }
 
     #[test]

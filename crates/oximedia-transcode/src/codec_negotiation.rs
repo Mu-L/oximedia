@@ -156,11 +156,7 @@ impl FallbackChain {
     /// Preference order: AV1 → VP9 → VP8 → FFV1 (lossless fallback).
     #[must_use]
     pub fn patent_free_video() -> Self {
-        Self::new()
-            .then("av1")
-            .then("vp9")
-            .then("vp8")
-            .then("ffv1")
+        Self::new().then("av1").then("vp9").then("vp8").then("ffv1")
     }
 
     /// Returns the standard patent-free audio fallback chain.
@@ -292,7 +288,11 @@ impl CodecNegotiator {
             .values()
             .filter(|e| e.media_class == class)
             .collect();
-        entries.sort_by(|a, b| b.quality_score.partial_cmp(&a.quality_score).unwrap_or(std::cmp::Ordering::Equal));
+        entries.sort_by(|a, b| {
+            b.quality_score
+                .partial_cmp(&a.quality_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         entries
     }
 
@@ -463,7 +463,10 @@ impl CodecNegotiator {
                 display_name: "Vorbis".into(),
                 media_class: MediaClass::Audio,
                 containers: vec!["webm".into(), "mkv".into(), "ogg".into()],
-                capabilities: vec![CodecCapability::MultiChannel, CodecCapability::VariableBitrate],
+                capabilities: vec![
+                    CodecCapability::MultiChannel,
+                    CodecCapability::VariableBitrate,
+                ],
                 encoding_cost: 1.1,
                 quality_score: 0.85,
                 patent_free: true,
@@ -617,7 +620,9 @@ mod tests {
             patent_free_only: true,
             ..Default::default()
         };
-        let result = n.negotiate_default(&req).expect("should find lossless codec");
+        let result = n
+            .negotiate_default(&req)
+            .expect("should find lossless codec");
         assert!(result.codec.has_capability(CodecCapability::Lossless));
     }
 

@@ -523,10 +523,7 @@ impl ActionRecognizer {
             .map(|(a, s)| (a.clone(), *s))
             .collect();
 
-        let (best_action, best_score) = scores
-            .into_iter()
-            .next()
-            .map_or_else(|| (Action::Unknown, 0.0), |(a, s)| (a, s));
+        let (best_action, best_score) = scores.into_iter().next().unwrap_or((Action::Unknown, 0.0));
 
         Some(ActionPrediction {
             action: best_action,

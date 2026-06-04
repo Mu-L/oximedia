@@ -182,11 +182,7 @@ impl PlaylistArchive {
     }
 
     /// Take a snapshot with an explicit tag.
-    pub fn snapshot_tagged(
-        &mut self,
-        entries: Vec<ArchivedEntry>,
-        tag: impl Into<String>,
-    ) -> u64 {
+    pub fn snapshot_tagged(&mut self, entries: Vec<ArchivedEntry>, tag: impl Into<String>) -> u64 {
         let version = self.next_version;
         self.next_version += 1;
         let snap = PlaylistSnapshot::new(version, entries).with_tag(tag);

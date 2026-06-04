@@ -186,7 +186,9 @@ impl IoTimer {
     /// Start a new timer.
     #[must_use]
     pub fn start() -> Self {
-        Self { start: Instant::now() }
+        Self {
+            start: Instant::now(),
+        }
     }
 
     /// Return the elapsed time since construction.
@@ -248,7 +250,7 @@ mod tests {
     fn test_latency_bucket_observe() {
         let mut bucket = LatencyBucket::default();
         bucket.observe(Duration::from_nanos(500));
-        bucket.observe(Duration::from_nanos(5_000));
+        bucket.observe(Duration::from_micros(5));
         assert_eq!(bucket.sub_us, 1);
         assert_eq!(bucket.us_1_10, 1);
         assert_eq!(bucket.total(), 2);

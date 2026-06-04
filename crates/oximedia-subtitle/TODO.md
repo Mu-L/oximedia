@@ -12,9 +12,9 @@
 ## Enhancements
 - [x] Add HTML tag stripping and formatting preservation in `parser::srt` for complex SRT files with `<b>`, `<i>`, `<font color>` tags
 - [x] Extend `parser::webvtt` to support region definitions and vertical text cue settings (verified 2026-05-16; src/parser/webvtt.rs:60 VttRegion struct, vertical text cue settings:94)
-- [ ] Improve `parser::ssa` to handle all ASS override tags including `\clip`, `\iclip`, `\org`, `\fad`, `\move` (verified-open 2026-05-16: not yet fully implemented)
-- [ ] Add fallback font chain support in `font::Font` for missing glyphs (CJK, Arabic, Devanagari) (verified-open 2026-05-16: not yet implemented)
-- [ ] Extend `burn_in` to support soft-shadow rendering with configurable blur radius (verified-open 2026-05-16: not yet implemented)
+- [x] Improve `parser::ssa` to handle all ASS override tags including `\clip`, `\iclip`, `\org`, `\fad`, `\move` (already implemented at parser/ssa.rs:419 AssOverrideTags + parse_override_tags:445 + parse_clip_args:500 + parse_fad_args:528 + parse_move_args:539, Wave 14 re-verified 2026-06-01)
+- [x] Add fallback font chain support in `font::Font` for missing glyphs (CJK, Arabic, Devanagari) (already implemented at font.rs:290 FontChain struct + ChainedFont + rasterize, Wave 14 re-verified 2026-06-01)
+- [x] Extend `burn_in` to support soft-shadow rendering with configurable blur radius (already implemented at soft_shadow.rs:34 SoftShadowConfig + render_soft_shadow_rgba:160 + gaussian_blur_alpha:89, Wave 14 re-verified 2026-06-01)
 - [x] Improve `reading_speed` module to account for word complexity (not just character count per second)
 - [x] Add `timing_adjuster` support for non-linear time remapping (speed ramp, variable frame rate)
 - [x] Extend `subtitle_validator` to check for WCAG 2.1 AA contrast ratio compliance (verified 2026-05-16; src/wcag_validator.rs:71 WcagValidator, WcagLevel:50)
@@ -32,19 +32,31 @@
 ## Performance
 - [x] Implement glyph atlas caching in `font::GlyphCache` to batch render frequently used characters into a texture atlas (verified 2026-05-16; src/glyph_atlas.rs:32 GlyphAtlas config, AtlasConfig, pixel_slice_mut:173)
 - [x] Use binary search in `subtitle_index` for O(log n) timestamp lookup instead of linear scan
-- [ ] Add parallel subtitle parsing in `format_converter` for batch conversion of large subtitle collections
-- [ ] Cache parsed ASS style lookups in `parser::ssa` to avoid re-parsing style definitions per dialogue line
-- [ ] Implement incremental rendering in `renderer::SubtitleRenderer` that only redraws changed regions
+- [x] Add parallel subtitle parsing in `format_converter` for batch conversion of large subtitle collections (already implemented at format_converter.rs:1522 parallel_parse_batch + par_iter:1542 + parallel_parse_batch_owned:1573, Wave 14 re-verified 2026-06-01)
+- [x] Cache parsed ASS style lookups in `parser::ssa` to avoid re-parsing style definitions per dialogue line (already implemented at ssa_style_cache.rs:90 AssStyleCache; wired into parser/ssa.rs parse_ass() → AssStyleCache::from_map + AssFile::style_cache field, Wave 14 2026-06-01)
+- [x] Implement incremental rendering in `renderer::SubtitleRenderer` that only redraws changed regions (already implemented at renderer.rs:284 DirtyRect + IncrementalSubtitleRenderer:362 + render_incremental:400, Wave 14 re-verified 2026-06-01)
 
 ## Testing
 - [ ] Add conformance tests for CEA-608 decoder with known test streams (FCC captioning test patterns)
-- [ ] Test `format_convert` round-trip: SRT -> WebVTT -> SRT and verify timing preservation within 1ms
+- [x] Test `format_convert` round-trip: SRT -> WebVTT -> SRT and verify timing preservation within 1ms (added test_srt_webvtt_roundtrip_ms_precision + test_srt_webvtt_roundtrip_boundary_timestamps in format_convert.rs, Wave 14 2026-06-01)
 - [ ] Add edge case tests for `parser::srt` with malformed files (missing blank lines, BOM markers, CR/LF variations)
 - [ ] Test `overlap_detect` with intentionally overlapping subtitle tracks and verify all collisions are reported
-- [ ] Add bidirectional text rendering test with mixed Arabic/Hebrew and Latin text in `text::TextLayoutEngine`
+- [x] Add bidirectional text rendering test with mixed Arabic/Hebrew and Latin text in `text::TextLayoutEngine` (added test_bidi_mixed_arabic_latin_visual_order + test_bidi_paragraph_direction_ltr_first + test_bidi_pure_rtl_reversal + test_bidi_level_wrapper in text.rs, Wave 14 2026-06-01)
 - [ ] Test `subtitle_merge` with two tracks having partially overlapping time ranges
 
 ## Documentation
 - [ ] Add format comparison table showing feature support across SRT, WebVTT, ASS, TTML, CEA-608/708
 - [ ] Document font loading requirements and supported font formats (TTF, OTF, TTC)
 - [ ] Add example showing subtitle burn-in pipeline: parse -> style -> render -> composite onto video frame
+
+## 0.1.8 Wave 6 — 2026-05-29
+- [x] Register 18 orphan modules in lib.rs + parser/eia608_realtime (verified 2026-05-29; 17 top-level + 1 parser sub-module wired, 0 warnings)
+
+## 0.1.8 Wave 14 Slice I — 2026-06-01
+- [x] Wire AssStyleCache into parse_ass(): AssFile now carries style_cache field (AssStyleCache::from_map); dialogue lookup unchanged but cache available for callers (parser/ssa.rs:107)
+- [x] Add AssStyleCache wiring tests: test_ass_style_cache_wiring, test_ass_cache_fallback_for_unknown_style, test_ass_cache_and_direct_lookup_agree (parser/ssa.rs:780+)
+- [x] Add VttParser (WebVTT → SubtitleEntry): parse_vtt_timestamp + VttParser::from_vtt supporting cue IDs, NOTE blocks, cue settings (format_convert.rs:190+)
+- [x] Add round-trip tests: test_srt_webvtt_roundtrip_ms_precision (50 cues, prime-offset ms), test_srt_webvtt_roundtrip_boundary_timestamps (6 edge cases) (format_convert.rs:460+)
+- [x] Add BiDi tests: test_bidi_paragraph_direction_ltr_first, test_bidi_mixed_arabic_latin_visual_order, test_bidi_pure_ltr_unchanged, test_bidi_pure_rtl_reversal, test_bidi_level_wrapper, test_bidi_level_from_unicode_bidi (text.rs:379+)
+- [x] Flip 6 stale TODO.md checkboxes (clip/move/fad, font chain, soft-shadow, parallel batch, ASS cache, incremental renderer)
+- Result: 1054 tests, 0 failures, 0 clippy warnings

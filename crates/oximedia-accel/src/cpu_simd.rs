@@ -186,8 +186,8 @@ unsafe fn scale_bilinear_avx2(
                     .as_ptr()
                     .add(((y2 * src_w + next_x1) * channels) as usize);
                 // SAFETY: prefetch is a hint — even out-of-bounds is defined behavior
-                _mm_prefetch(next_row1_ptr as *const i8, _MM_HINT_T0);
-                _mm_prefetch(next_row2_ptr as *const i8, _MM_HINT_T0);
+                _mm_prefetch(next_row1_ptr.cast::<i8>(), _MM_HINT_T0);
+                _mm_prefetch(next_row2_ptr.cast::<i8>(), _MM_HINT_T0);
             }
 
             // Extract scalar x1 values from AVX2 register for gather
@@ -310,7 +310,7 @@ unsafe fn yuv_to_rgb_sse42(yuv: &[u8], rgb: &mut [u8], w: u32, h: u32) {
             if px + 8 < w {
                 let next_idx = ((py * w + px + 8) * 3) as usize;
                 if next_idx < rgb.len() {
-                    _mm_prefetch(rgb.as_ptr().add(next_idx) as *const i8, _MM_HINT_T0);
+                    _mm_prefetch(rgb.as_ptr().add(next_idx).cast::<i8>(), _MM_HINT_T0);
                 }
             }
 

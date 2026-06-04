@@ -14,6 +14,10 @@
 pub mod cea608_decoder;
 pub mod cea708_decoder;
 pub mod dvb;
+// Stateful real-time CEA-608 decoder for live streams (`RealtimeCea608Decoder`).
+// Note: crate::eia608_realtime (top-level) is a separate module with a different
+// API (`Eia608Decoder`).  No symbol collision — different module paths.
+pub mod eia608_realtime;
 pub mod pgs;
 pub mod srt;
 pub mod ssa;

@@ -152,8 +152,13 @@
 #![allow(clippy::missing_panics_doc)]
 #![allow(dead_code)]
 
+pub mod aces_calibration;
 pub mod aging_model;
+pub mod ambient_compensation;
+pub mod batch_calibrate;
 pub mod calibrate_report;
+pub mod calibration_extras;
+pub mod calibration_schedule;
 pub mod camera;
 pub mod chart_detection;
 pub mod chromatic;
@@ -166,6 +171,7 @@ pub mod flare_correction;
 pub mod gamut;
 pub mod gamut_checker;
 pub mod geometry;
+pub mod hdr_calibration;
 pub mod icc;
 pub mod icc_profile;
 pub mod lens_profile;
@@ -174,7 +180,9 @@ pub mod r#match;
 pub mod metamerism;
 pub mod monitor_calibration;
 pub mod patch_extract;
+pub mod printer_calibration;
 pub mod spectral;
+pub mod spectral_reconstruction;
 pub mod temp;
 pub mod temporal_uniformity;
 pub mod test_chart;
@@ -205,7 +213,7 @@ pub type Matrix3x3 = [[f64; 3]; 3];
 pub type Matrix3x4 = [[f64; 4]; 3];
 
 /// Standard illuminant types.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Illuminant {
     /// Standard Illuminant A (2856K, tungsten/incandescent).
     A,

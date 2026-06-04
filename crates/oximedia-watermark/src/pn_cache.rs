@@ -105,12 +105,7 @@ impl PnSequenceCache {
     /// manually looping outside the cache.
     ///
     /// Returns `None` when `samples.len() < length`.
-    pub fn correlate(
-        &mut self,
-        samples: &[f32],
-        length: usize,
-        seed: u64,
-    ) -> Option<f32> {
+    pub fn correlate(&mut self, samples: &[f32], length: usize, seed: u64) -> Option<f32> {
         if samples.len() < length {
             return None;
         }
@@ -145,7 +140,10 @@ mod tests {
         let seq_a = cache.get_or_generate(64, 1).to_vec();
         let seq_b = cache.get_or_generate(64, 2).to_vec();
         // With very high probability two distinct seeds produce different sequences.
-        assert_ne!(seq_a, seq_b, "different seeds should yield different sequences");
+        assert_ne!(
+            seq_a, seq_b,
+            "different seeds should yield different sequences"
+        );
     }
 
     #[test]
@@ -199,7 +197,9 @@ mod tests {
         // A PN sequence correlated with itself should give a positive value.
         let pn = cache.get_or_generate(128, 777).to_vec();
         let samples: Vec<f32> = pn.iter().map(|&x| f32::from(x)).collect();
-        let corr = cache.correlate(&samples, 128, 777).expect("correlation should succeed");
+        let corr = cache
+            .correlate(&samples, 128, 777)
+            .expect("correlation should succeed");
         assert!(corr > 0.0, "self-correlation must be positive: {corr}");
     }
 

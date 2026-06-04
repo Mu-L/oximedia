@@ -2,21 +2,21 @@
 //!
 //! This module provides wrappers around the oximedia-scopes crate for broadcast monitoring.
 
-pub mod waveform;
-pub mod vectorscope;
+pub mod focus;
 pub mod histogram;
 pub mod parade;
-pub mod focus;
+pub mod vectorscope;
+pub mod waveform;
 
 use crate::{MonitorError, MonitorResult};
-use oximedia_scopes::{VideoScopes, ScopeConfig, ScopeType, ScopeData};
+use oximedia_scopes::{ScopeConfig, ScopeData, ScopeType, VideoScopes};
 use serde::{Deserialize, Serialize};
 
-pub use waveform::WaveformMonitor;
-pub use vectorscope::VectorscopeMonitor;
+pub use focus::FocusAssist;
 pub use histogram::HistogramMonitor;
 pub use parade::ParadeMonitor;
-pub use focus::FocusAssist;
+pub use vectorscope::VectorscopeMonitor;
+pub use waveform::WaveformMonitor;
 
 /// Scope monitoring metrics.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -97,7 +97,12 @@ impl ScopeMonitor {
     /// # Errors
     ///
     /// Returns an error if scope generation fails.
-    pub fn generate_waveform(&self, frame: &[u8], width: u32, height: u32) -> MonitorResult<ScopeData> {
+    pub fn generate_waveform(
+        &self,
+        frame: &[u8],
+        width: u32,
+        height: u32,
+    ) -> MonitorResult<ScopeData> {
         self.scopes
             .analyze(frame, width, height, ScopeType::WaveformLuma)
             .map_err(|e| MonitorError::ScopeError(e.to_string()))
@@ -108,7 +113,12 @@ impl ScopeMonitor {
     /// # Errors
     ///
     /// Returns an error if scope generation fails.
-    pub fn generate_vectorscope(&self, frame: &[u8], width: u32, height: u32) -> MonitorResult<ScopeData> {
+    pub fn generate_vectorscope(
+        &self,
+        frame: &[u8],
+        width: u32,
+        height: u32,
+    ) -> MonitorResult<ScopeData> {
         self.scopes
             .analyze(frame, width, height, ScopeType::Vectorscope)
             .map_err(|e| MonitorError::ScopeError(e.to_string()))
@@ -119,7 +129,12 @@ impl ScopeMonitor {
     /// # Errors
     ///
     /// Returns an error if scope generation fails.
-    pub fn generate_histogram(&self, frame: &[u8], width: u32, height: u32) -> MonitorResult<ScopeData> {
+    pub fn generate_histogram(
+        &self,
+        frame: &[u8],
+        width: u32,
+        height: u32,
+    ) -> MonitorResult<ScopeData> {
         self.scopes
             .analyze(frame, width, height, ScopeType::HistogramLuma)
             .map_err(|e| MonitorError::ScopeError(e.to_string()))
@@ -130,7 +145,12 @@ impl ScopeMonitor {
     /// # Errors
     ///
     /// Returns an error if scope generation fails.
-    pub fn generate_parade(&self, frame: &[u8], width: u32, height: u32) -> MonitorResult<ScopeData> {
+    pub fn generate_parade(
+        &self,
+        frame: &[u8],
+        width: u32,
+        height: u32,
+    ) -> MonitorResult<ScopeData> {
         self.scopes
             .analyze(frame, width, height, ScopeType::ParadeRgb)
             .map_err(|e| MonitorError::ScopeError(e.to_string()))
@@ -193,7 +213,7 @@ impl ScopeMonitor {
 
                     // Rec.709 luma coefficients
                     #[allow(clippy::cast_possible_truncation)]
-                    let luma = (0.2126 * r + 0.7152 * g + 0.0722 * b);
+                    let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
 
                     min_luma = min_luma.min(luma);
                     max_luma = max_luma.max(luma);

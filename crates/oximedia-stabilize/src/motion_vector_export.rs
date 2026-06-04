@@ -80,9 +80,7 @@ impl PerFrameVector {
     /// Return true if this vector represents effectively no correction.
     #[must_use]
     pub fn is_identity(&self) -> bool {
-        self.displacement() < 1e-6
-            && self.rotation.abs() < 1e-6
-            && (self.scale - 1.0).abs() < 1e-6
+        self.displacement() < 1e-6 && self.rotation.abs() < 1e-6 && (self.scale - 1.0).abs() < 1e-6
     }
 }
 
@@ -151,10 +149,7 @@ impl MotionVectors {
     pub fn normalised_translation(&self) -> Vec<(f64, f64)> {
         let w = self.frame_width.max(1) as f64;
         let h = self.frame_height.max(1) as f64;
-        self.vectors
-            .iter()
-            .map(|v| (v.dx / w, v.dy / h))
-            .collect()
+        self.vectors.iter().map(|v| (v.dx / w, v.dy / h)).collect()
     }
 }
 
@@ -362,9 +357,9 @@ pub fn import_csv(
             )));
         }
         let parse = |s: &str| -> StabilizeResult<f64> {
-            s.trim().parse::<f64>().map_err(|e| {
-                StabilizeError::General(format!("CSV parse error: {e}"))
-            })
+            s.trim()
+                .parse::<f64>()
+                .map_err(|e| StabilizeError::General(format!("CSV parse error: {e}")))
         };
         let frame: usize = parts[0]
             .trim()
@@ -469,8 +464,7 @@ mod tests {
     #[test]
     fn test_export_after_effects_contains_header() {
         let mvs = sample_mvs();
-        let ae =
-            MotionVectorExporter::export(&mvs, MotionVectorFormat::AfterEffects).expect("ok");
+        let ae = MotionVectorExporter::export(&mvs, MotionVectorFormat::AfterEffects).expect("ok");
         assert!(ae.contains("Adobe After Effects"));
         assert!(ae.contains("Transform"));
         assert!(ae.contains("Position"));

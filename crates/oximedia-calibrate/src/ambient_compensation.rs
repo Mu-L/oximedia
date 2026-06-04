@@ -62,21 +62,14 @@ impl AmbientMeasurement {
     ///
     /// Returns `CalibrationError::InvalidMeasurement` if `white_point_xyz[1]`
     /// (Y) is zero or negative.
-    pub fn from_xyz(
-        white_point_xyz: Xyz,
-        illuminance_lux: f64,
-    ) -> CalibrationResult<Self> {
+    pub fn from_xyz(white_point_xyz: Xyz, illuminance_lux: f64) -> CalibrationResult<Self> {
         if white_point_xyz[1] <= 0.0 {
             return Err(CalibrationError::InvalidMeasurement(
                 "White point Y must be positive".to_string(),
             ));
         }
         let y = white_point_xyz[1];
-        let normalised = [
-            white_point_xyz[0] / y,
-            1.0,
-            white_point_xyz[2] / y,
-        ];
+        let normalised = [white_point_xyz[0] / y, 1.0, white_point_xyz[2] / y];
         // Estimate CCT via Robertson's method (approximate).
         let cct_kelvin = xyz_to_cct_robertson(normalised);
         Ok(Self {
@@ -311,9 +304,21 @@ fn von_kries_cat(src: Xyz, dst: Xyz) -> CalibrationResult<Matrix3x3> {
 
 /// Simple XYZ scaling (poorest adaptation quality, but always valid).
 fn xyz_scaling_cat(src: Xyz, dst: Xyz) -> Matrix3x3 {
-    let sx = if src[0].abs() > 1e-12 { dst[0] / src[0] } else { 1.0 };
-    let sy = if src[1].abs() > 1e-12 { dst[1] / src[1] } else { 1.0 };
-    let sz = if src[2].abs() > 1e-12 { dst[2] / src[2] } else { 1.0 };
+    let sx = if src[0].abs() > 1e-12 {
+        dst[0] / src[0]
+    } else {
+        1.0
+    };
+    let sy = if src[1].abs() > 1e-12 {
+        dst[1] / src[1]
+    } else {
+        1.0
+    };
+    let sz = if src[2].abs() > 1e-12 {
+        dst[2] / src[2]
+    } else {
+        1.0
+    };
     [[sx, 0.0, 0.0], [0.0, sy, 0.0], [0.0, 0.0, sz]]
 }
 
@@ -531,6 +536,9 @@ mod tests {
         let d65 = [0.950_47, 1.0, 1.088_83];
         let cct = xyz_to_cct_robertson(d65);
         // Should be approximately 6500 K
-        assert!((cct - 6500.0).abs() < 300.0, "CCT should be near 6500 K, got {cct}");
+        assert!(
+            (cct - 6500.0).abs() < 300.0,
+            "CCT should be near 6500 K, got {cct}"
+        );
     }
 }

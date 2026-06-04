@@ -378,7 +378,7 @@ mod tests {
     fn test_children_of() {
         let idx = linear_chain();
         assert_eq!(idx.children_of(1), vec![2]);
-        assert_eq!(idx.children_of(5), vec![]); // leaf
+        assert_eq!(idx.children_of(5), Vec::<u64>::new()); // leaf
     }
 
     // ── Ancestry ─────────────────────────────────────────────────────────────

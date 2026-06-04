@@ -1,7 +1,7 @@
 //! Parallel sync verification across all angle pairs using Rayon.
 //!
-//! Provides [`ParallelSyncVerifier`] which distributes the `O(n²)` pairwise
-//! offset-validation work across multiple threads via [`rayon::par_iter`].
+//! Provides `ParallelSyncVerifier` which distributes the `O(n²)` pairwise
+//! offset-validation work across multiple threads via `rayon::par_iter`.
 //! This is especially beneficial for multi-camera sessions with many angles
 //! (≥ 8) where the sequential verifier in [`crate::sync_verify`] becomes a
 //! throughput bottleneck.

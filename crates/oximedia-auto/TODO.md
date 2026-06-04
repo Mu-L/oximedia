@@ -28,10 +28,13 @@
 - [x] Add platform-specific export presets for YouTube Shorts, Instagram Reels, TikTok in `assembly` (verified 2026-05-16; src/assembly.rs:79 PlatformPreset enum, YouTubeShorts:81, InstagramReels:83, TikTok:85)
 
 ## Performance
-- [ ] Parallelize `highlights::detect_highlights()` across frame batches using rayon
-- [ ] Cache scene features in `scoring::SceneScorer` to avoid recomputation on config changes
-- [ ] Add early termination to `cuts::detect_cuts()` when sufficient cut points found for target duration
-- [ ] Use downscaled frames for initial `smart_crop` pass, refine on full resolution only for final crops
+- [x] Parallelize `highlights::detect_highlights()` across frame batches using rayon
+- [x] Cache scene features in `scoring::SceneScorer` to avoid recomputation on config changes (completed 2026-06-01)
+  - `SceneId`, `SceneComponentScores`, `feature_cache: HashMap<SceneId, SceneComponentScores>` added to `SceneScorer`; `score_scene` / `score_scene_with_context` take `&mut self`; `invalidate_cache` / `clear_scene` for manual invalidation; `batch_score_scenes` updated to `&mut SceneScorer`; bench file updated. 4 new tests.
+- [x] Add early termination to `cuts::detect_cuts()` when sufficient cut points found for target duration (completed 2026-06-01)
+  - `DetectCutsOptions { target_duration_ms, max_cuts }` added; `CutDetector::detect_cuts_with_options` selects prefix after full sort to guarantee consistency with full scan. 4 new tests.
+- [x] Use downscaled frames for initial `smart_crop` pass, refine on full resolution only for final crops (completed 2026-06-01)
+  - `SmartCropConfig.coarse_scale: f32` (default 0.25); `suggest_crop_from_frame(frame, w, h, ch)` with box-average downscale, variance-based synthetic saliency, ±10 % margin fine pass; `extract_saliency_regions` 4×4 luma-variance grid. 3 new tests.
 - [ ] Implement lazy evaluation for `AutoEditResult` fields that may not be needed by caller
 
 ## Testing

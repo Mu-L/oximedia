@@ -247,7 +247,9 @@ impl M3uPlaylist {
         // Simple LCG shuffle (no external deps required).
         let mut seed: u64 = n as u64 ^ 0xDEAD_BEEF_CAFE_1234;
         for i in (1..n).rev() {
-            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
             let j = (seed >> 33) as usize % (i + 1);
             self.entries.swap(i, j);
         }
@@ -373,7 +375,10 @@ impl Default for M3uPlaylist {
 fn derive_title(path: &str) -> String {
     // Take the last path component and strip the extension.
     let filename = path.rsplit('/').next().unwrap_or(path);
-    let stem = filename.rsplit_once('.').map(|(s, _)| s).unwrap_or(filename);
+    let stem = filename
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or(filename);
     stem.replace(['_', '-'], " ")
 }
 
@@ -395,7 +400,11 @@ fn parse_attributes(input: &str, tags: &mut HashMap<String, String>) {
             rest = &rest[1..];
             let end = rest.find('"').unwrap_or(rest.len());
             let v = rest[..end].to_string();
-            rest = if end + 1 < rest.len() { &rest[end + 1..] } else { "" };
+            rest = if end + 1 < rest.len() {
+                &rest[end + 1..]
+            } else {
+                ""
+            };
             v
         } else {
             // Unquoted value (until next space)
@@ -484,8 +493,16 @@ music/unknown.mp3
     #[test]
     fn test_sort_by_artist() {
         let mut pl = M3uPlaylist::new();
-        pl.add_entry(M3uEntry::new("b.mp3").with_artist("Zebra").with_title("Song"));
-        pl.add_entry(M3uEntry::new("a.mp3").with_artist("Alpha").with_title("Song"));
+        pl.add_entry(
+            M3uEntry::new("b.mp3")
+                .with_artist("Zebra")
+                .with_title("Song"),
+        );
+        pl.add_entry(
+            M3uEntry::new("a.mp3")
+                .with_artist("Alpha")
+                .with_title("Song"),
+        );
         pl.sort_by_artist();
         assert_eq!(pl.entries[0].artist.as_deref(), Some("Alpha"));
         assert_eq!(pl.entries[1].artist.as_deref(), Some("Zebra"));
@@ -522,7 +539,10 @@ music/unknown.mp3
         let pl = M3uPlaylist::parse(content).expect("should succeed in test");
         let entry = &pl.entries[0];
         assert_eq!(entry.tags.get("tvg-id").map(String::as_str), Some("ch1"));
-        assert_eq!(entry.tags.get("group-title").map(String::as_str), Some("News"));
+        assert_eq!(
+            entry.tags.get("group-title").map(String::as_str),
+            Some("News")
+        );
     }
 
     #[test]
@@ -548,7 +568,8 @@ music/unknown.mp3
 
     #[test]
     fn test_derive_title_from_path() {
-        let pl = M3uPlaylist::parse("some/path/my_great_track.flac\n").expect("should succeed in test");
+        let pl =
+            M3uPlaylist::parse("some/path/my_great_track.flac\n").expect("should succeed in test");
         assert_eq!(pl.entries[0].title, "my great track");
     }
 

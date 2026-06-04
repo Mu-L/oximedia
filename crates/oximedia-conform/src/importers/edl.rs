@@ -333,6 +333,207 @@ mod tests {
         assert!(!EdlVariant::File128.supports_extended_audio());
     }
 
+    /// CMX 340 fixture round-trip: build an EDL, detect it as CMX 340 when the
+    /// header is present, verify that clip names are truncated to 8 characters
+    /// and reel names to 8 characters per the variant's column-width rules.
+    #[test]
+    fn test_cmx340_parse_fixture_round_trip() {
+        use crate::types::Timecode as ConformTimecode;
+        use oximedia_edl::{Edl, EdlFormat, EdlGenerator};
+
+        // Construct an EDL with a long reel name and a long clip name to verify
+        // that the CMX 340 name-truncation logic fires correctly.
+        let mut edl = Edl::new(EdlFormat::Cmx3600);
+        edl.set_title("CMX340RoundTrip".to_string());
+        edl.set_frame_rate(EdlFrameRate::Fps25);
+
+        let src_in = EdlTimecode::new(1, 0, 0, 0, EdlFrameRate::Fps25).expect("tc must be valid");
+        let src_out = EdlTimecode::new(1, 0, 5, 0, EdlFrameRate::Fps25).expect("tc must be valid");
+        let rec_in = EdlTimecode::new(1, 0, 0, 0, EdlFrameRate::Fps25).expect("tc must be valid");
+        let rec_out = EdlTimecode::new(1, 0, 5, 0, EdlFrameRate::Fps25).expect("tc must be valid");
+
+        let mut event = EdlEvent::new(
+            1,
+            // 16-char reel name — CMX 340 allows max 8 chars → expect truncation
+            "LONGREELAB123456".to_string(),
+            EdlTrackType::Video,
+            EditType::Cut,
+            src_in,
+            src_out,
+            rec_in,
+            rec_out,
+        );
+        // 20-char clip name — CMX 340 max 8 → expect truncation
+        event.clip_name = Some("very_long_clip_name!".to_string());
+        edl.add_event(event).expect("add_event must succeed");
+
+        // Generate EDL string and prepend a CMX 340 FORMAT header so
+        // detection returns CMX340.
+        let generator = EdlGenerator::new();
+        let raw_edl = generator.generate(&edl).expect("generate must succeed");
+        let edl_string = format!("FORMAT: CMX 340\n{raw_edl}");
+
+        // Verify variant detection
+        let variant = EdlVariant::detect(&edl_string);
+        assert_eq!(
+            variant,
+            EdlVariant::Cmx340,
+            "CMX 340 FORMAT header must be detected correctly"
+        );
+
+        // Re-parse the EDL and import clips
+        let parsed = oximedia_edl::parse_edl(&raw_edl)
+            .expect("parse_edl must succeed for the base EDL content");
+        let clips = EdlImporter::import_from_edl(&parsed).expect("import_from_edl must succeed");
+        assert_eq!(clips.len(), 1, "fixture must produce exactly one clip");
+
+        // Apply CMX 340 name truncation the same way the importer does
+        let clip = &clips[0];
+        let truncated_reel = EdlImporter::truncate_name(
+            clip.metadata.get("reel").map(String::as_str).unwrap_or(""),
+            EdlVariant::Cmx340,
+        );
+        let truncated_clip = EdlImporter::truncate_name(
+            clip.metadata
+                .get("clip_name")
+                .map(String::as_str)
+                .unwrap_or(""),
+            EdlVariant::Cmx340,
+        );
+
+        // Reel and clip names must be ≤ 8 chars after truncation
+        assert!(
+            truncated_reel.len() <= 8,
+            "CMX 340 reel name must be ≤ 8 chars, got {}: '{truncated_reel}'",
+            truncated_reel.len()
+        );
+        assert!(
+            truncated_clip.len() <= 8,
+            "CMX 340 clip name must be ≤ 8 chars, got {}: '{truncated_clip}'",
+            truncated_clip.len()
+        );
+
+        // Timecodes must round-trip correctly
+        assert_eq!(
+            clip.source_in,
+            ConformTimecode::new(1, 0, 0, 0),
+            "source_in must round-trip"
+        );
+        assert_eq!(
+            clip.source_out,
+            ConformTimecode::new(1, 0, 5, 0),
+            "source_out must round-trip"
+        );
+    }
+
+    /// File128 fixture: the variant is detected correctly from a FORMAT: FILE128
+    /// header and the `max_name_length` is 128.  Names within the 128-char limit
+    /// must not be truncated by `truncate_name`.  A standard-width reel/clip name
+    /// is used so that the underlying oximedia_edl generator + parser round-trip
+    /// succeeds (the generator targets CMX 3600 column widths internally).
+    #[test]
+    fn test_file128_parse_fixture() {
+        use crate::types::Timecode as ConformTimecode;
+        use oximedia_edl::{Edl, EdlFormat, EdlGenerator};
+
+        // ── Part 1: variant detection ─────────────────────────────────────────
+        let header_content = "FORMAT: FILE128\nTITLE: File128Test\n";
+        let variant = EdlVariant::detect(header_content);
+        assert_eq!(
+            variant,
+            EdlVariant::File128,
+            "FILE128 FORMAT header must be detected as File128"
+        );
+        assert_eq!(
+            EdlVariant::File128.max_name_length(),
+            128,
+            "File128 max_name_length must be 128"
+        );
+
+        // ── Part 2: truncation leaves ≤128-char names untouched ───────────────
+        // A 100-char name is within the 128-char limit and must not be truncated.
+        let name_100 = "A".repeat(100);
+        let after_trunc = EdlImporter::truncate_name(&name_100, EdlVariant::File128);
+        assert_eq!(
+            after_trunc.len(),
+            100,
+            "File128: 100-char name must not be truncated"
+        );
+
+        // A 128-char name is at the boundary and must not be truncated.
+        let name_128 = "B".repeat(128);
+        let after_trunc_128 = EdlImporter::truncate_name(&name_128, EdlVariant::File128);
+        assert_eq!(
+            after_trunc_128.len(),
+            128,
+            "File128: 128-char name must not be truncated"
+        );
+
+        // A 200-char name exceeds the limit and must be truncated to 128.
+        let name_200 = "C".repeat(200);
+        let after_trunc_200 = EdlImporter::truncate_name(&name_200, EdlVariant::File128);
+        assert_eq!(
+            after_trunc_200.len(),
+            128,
+            "File128: 200-char name must be truncated to 128"
+        );
+
+        // ── Part 3: EDL round-trip with a standard-length reel name ──────────
+        let mut edl = Edl::new(EdlFormat::Cmx3600);
+        edl.set_title("File128RoundTrip".to_string());
+        edl.set_frame_rate(EdlFrameRate::Fps25);
+
+        let src_in = EdlTimecode::new(1, 0, 0, 0, EdlFrameRate::Fps25).expect("tc must be valid");
+        let src_out = EdlTimecode::new(1, 0, 10, 0, EdlFrameRate::Fps25).expect("tc must be valid");
+        let rec_in = EdlTimecode::new(1, 0, 0, 0, EdlFrameRate::Fps25).expect("tc must be valid");
+        let rec_out = EdlTimecode::new(1, 0, 10, 0, EdlFrameRate::Fps25).expect("tc must be valid");
+
+        // Use a standard short reel name so the CMX 3600 generator + parser
+        // round-trip succeeds.  File128 extends the *allowable* length but
+        // the generator and parser target the CMX 3600 fixed-field columns.
+        let mut event = EdlEvent::new(
+            1,
+            "FILE128R".to_string(),
+            EdlTrackType::Video,
+            EditType::Cut,
+            src_in,
+            src_out,
+            rec_in,
+            rec_out,
+        );
+        event.clip_name = Some("shot_f128.mov".to_string());
+        edl.add_event(event).expect("add_event must succeed");
+
+        let generator = EdlGenerator::new();
+        let raw_edl = generator.generate(&edl).expect("generate must succeed");
+
+        // Parse and import clips
+        let parsed = oximedia_edl::parse_edl(&raw_edl).expect("parse_edl must succeed");
+        let clips = EdlImporter::import_from_edl(&parsed).expect("import_from_edl must succeed");
+        assert_eq!(clips.len(), 1, "fixture must produce exactly one clip");
+
+        let clip = &clips[0];
+
+        // Timecodes must round-trip correctly
+        assert_eq!(
+            clip.source_in,
+            ConformTimecode::new(1, 0, 0, 0),
+            "source_in must round-trip"
+        );
+        assert_eq!(
+            clip.source_out,
+            ConformTimecode::new(1, 0, 10, 0),
+            "source_out must round-trip"
+        );
+
+        // The reel name must survive without truncation (it's within 128 chars)
+        let reel = clip.metadata.get("reel").map(String::as_str).unwrap_or("");
+        assert!(
+            reel.len() <= EdlVariant::File128.max_name_length(),
+            "reel name must be within File128 max_name_length"
+        );
+    }
+
     /// Round-trip test: build an EDL in memory → generate EDL string → parse
     /// the string back → import clips → verify clip count and timecodes.
     #[test]

@@ -6,7 +6,7 @@ Comprehensive media analysis and quality assessment tools for OxiMedia.
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.7 — 2026-05-16 — 575 tests
+Version: 0.1.8 — 2026-05-29 — 575 tests
 
 ## Overview
 
@@ -45,7 +45,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-analysis = "0.1.7"
+oximedia-analysis = "0.1.8"
 ```
 
 ### Quick Start

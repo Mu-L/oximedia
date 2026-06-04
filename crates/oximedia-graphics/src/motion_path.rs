@@ -463,13 +463,7 @@ impl MotionPath {
     }
 
     /// Add a non-uniform scale keyframe.
-    pub fn add_scale_xy_keyframe(
-        &mut self,
-        time: f32,
-        sx: f32,
-        sy: f32,
-        easing: EasingKind,
-    ) {
+    pub fn add_scale_xy_keyframe(&mut self, time: f32, sx: f32, sy: f32, easing: EasingKind) {
         self.track_scale_x
             .push(MotionKeyframe::new(time, sx, easing));
         self.track_scale_y
@@ -748,7 +742,10 @@ mod tests {
     fn easing_ease_in_out_cubic_symmetric() {
         let a = EasingKind::EaseInOutCubic.apply(0.25);
         let b = 1.0 - EasingKind::EaseInOutCubic.apply(0.75);
-        assert!((a - b).abs() < 1e-5, "EaseInOutCubic not symmetric: {a} vs {b}");
+        assert!(
+            (a - b).abs() < 1e-5,
+            "EaseInOutCubic not symmetric: {a} vs {b}"
+        );
     }
 
     #[test]
@@ -795,8 +792,16 @@ mod tests {
         path.add_position_keyframe(0.0, 0.0, 0.0, EasingKind::Linear);
         path.add_position_keyframe(4.0, 400.0, 200.0, EasingKind::Linear);
         let pose = path.evaluate(2.0);
-        assert!((pose.x - 200.0).abs() < 1e-3, "Expected x=200, got {}", pose.x);
-        assert!((pose.y - 100.0).abs() < 1e-3, "Expected y=100, got {}", pose.y);
+        assert!(
+            (pose.x - 200.0).abs() < 1e-3,
+            "Expected x=200, got {}",
+            pose.x
+        );
+        assert!(
+            (pose.y - 100.0).abs() < 1e-3,
+            "Expected y=100, got {}",
+            pose.y
+        );
     }
 
     #[test]
@@ -819,7 +824,10 @@ mod tests {
 
     #[test]
     fn spline_follower_two_point_corners() {
-        let pts = vec![SplinePoint::corner(0.0, 0.0), SplinePoint::corner(100.0, 0.0)];
+        let pts = vec![
+            SplinePoint::corner(0.0, 0.0),
+            SplinePoint::corner(100.0, 0.0),
+        ];
         let follower = SplinePathFollower::new(pts, false).expect("valid spline");
         let mid = follower.evaluate(0.5);
         assert!((mid.x - 50.0).abs() < 1e-4, "Expected x=50, got {}", mid.x);

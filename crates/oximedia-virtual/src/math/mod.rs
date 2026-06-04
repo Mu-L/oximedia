@@ -5,8 +5,10 @@
 
 pub mod matrix;
 pub mod quaternion;
+pub mod simd_matrix;
 pub mod vector;
 
 pub use matrix::{Matrix3, Matrix3x6, Matrix4, Matrix6};
 pub use quaternion::{Quaternion, Unit, UnitQuaternion};
+pub use simd_matrix::Matrix4x4f;
 pub use vector::{Point2, Point3, Vector3, Vector6};

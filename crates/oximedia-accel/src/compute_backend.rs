@@ -325,7 +325,10 @@ impl KernelRegistry {
     /// Panics if the internal `RwLock` is poisoned.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.kernels.read().unwrap_or_else(|e| e.into_inner()).is_empty()
+        self.kernels
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
     }
 
     /// List all registered kernel names.
@@ -517,8 +520,13 @@ impl VulkanComputeBackend {
     fn track_alloc(&self, id: u64, size: u64) {
         let mut allocs = self.allocations.write().unwrap_or_else(|e| e.into_inner());
         allocs.insert(id, size);
-        let current = self.total_allocated.fetch_add(size, std::sync::atomic::Ordering::Relaxed) + size;
-        let mut peak = self.peak_allocated.load(std::sync::atomic::Ordering::Relaxed);
+        let current = self
+            .total_allocated
+            .fetch_add(size, std::sync::atomic::Ordering::Relaxed)
+            + size;
+        let mut peak = self
+            .peak_allocated
+            .load(std::sync::atomic::Ordering::Relaxed);
         while current > peak {
             match self.peak_allocated.compare_exchange_weak(
                 peak,
@@ -535,7 +543,8 @@ impl VulkanComputeBackend {
     fn track_free(&self, id: u64) {
         let mut allocs = self.allocations.write().unwrap_or_else(|e| e.into_inner());
         if let Some(size) = allocs.remove(&id) {
-            self.total_allocated.fetch_sub(size, std::sync::atomic::Ordering::Relaxed);
+            self.total_allocated
+                .fetch_sub(size, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
@@ -548,7 +557,9 @@ impl Default for VulkanComputeBackend {
 
 impl ComputeBackend for VulkanComputeBackend {
     fn allocate_buffer(&self, size: u64) -> AccelResult<BufferHandle> {
-        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.track_alloc(id, size);
         // Store a zeroed host-side shadow buffer.
         let mut bufs = self.buffers.write().unwrap_or_else(|e| e.into_inner());
@@ -567,26 +578,28 @@ impl ComputeBackend for VulkanComputeBackend {
                 expected: buf.len(),
                 actual: data.len(),
             }),
-            None => Err(AccelError::BufferAllocation(
-                format!("Invalid buffer handle: {}", handle.0),
-            )),
+            None => Err(AccelError::BufferAllocation(format!(
+                "Invalid buffer handle: {}",
+                handle.0
+            ))),
         }
     }
 
     fn download_buffer(&self, handle: &BufferHandle) -> AccelResult<Vec<u8>> {
         let bufs = self.buffers.read().unwrap_or_else(|e| e.into_inner());
-        bufs.get(&handle.0)
-            .map(Clone::clone)
-            .ok_or_else(|| AccelError::BufferAllocation(format!("Invalid buffer handle: {}", handle.0)))
+        bufs.get(&handle.0).cloned().ok_or_else(|| {
+            AccelError::BufferAllocation(format!("Invalid buffer handle: {}", handle.0))
+        })
     }
 
     fn free_buffer(&self, handle: BufferHandle) -> AccelResult<()> {
         self.track_free(handle.0);
         let mut bufs = self.buffers.write().unwrap_or_else(|e| e.into_inner());
         if bufs.remove(&handle.0).is_none() {
-            return Err(AccelError::BufferAllocation(
-                format!("Double-free of buffer handle: {}", handle.0),
-            ));
+            return Err(AccelError::BufferAllocation(format!(
+                "Double-free of buffer handle: {}",
+                handle.0
+            )));
         }
         Ok(())
     }
@@ -621,8 +634,12 @@ impl ComputeBackend for VulkanComputeBackend {
     fn memory_stats(&self) -> GpuMemoryStats {
         let allocs = self.allocations.read().unwrap_or_else(|e| e.into_inner());
         GpuMemoryStats {
-            allocated_bytes: self.total_allocated.load(std::sync::atomic::Ordering::Relaxed),
-            peak_bytes: self.peak_allocated.load(std::sync::atomic::Ordering::Relaxed),
+            allocated_bytes: self
+                .total_allocated
+                .load(std::sync::atomic::Ordering::Relaxed),
+            peak_bytes: self
+                .peak_allocated
+                .load(std::sync::atomic::Ordering::Relaxed),
             allocation_count: allocs.len() as u64,
         }
     }
@@ -687,12 +704,17 @@ impl Default for CpuFallbackBackend {
 
 impl ComputeBackend for CpuFallbackBackend {
     fn allocate_buffer(&self, size: u64) -> AccelResult<BufferHandle> {
-        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         {
             let mut allocs = self.allocations.write().unwrap_or_else(|e| e.into_inner());
             allocs.insert(id, size);
         }
-        let current = self.current_bytes.fetch_add(size, std::sync::atomic::Ordering::Relaxed) + size;
+        let current = self
+            .current_bytes
+            .fetch_add(size, std::sync::atomic::Ordering::Relaxed)
+            + size;
         self.update_peak(current);
         let mut bufs = self.buffers.write().unwrap_or_else(|e| e.into_inner());
         bufs.insert(id, vec![0u8; size as usize]);
@@ -710,17 +732,18 @@ impl ComputeBackend for CpuFallbackBackend {
                 expected: buf.len(),
                 actual: data.len(),
             }),
-            None => Err(AccelError::BufferAllocation(
-                format!("Invalid buffer handle: {}", handle.0),
-            )),
+            None => Err(AccelError::BufferAllocation(format!(
+                "Invalid buffer handle: {}",
+                handle.0
+            ))),
         }
     }
 
     fn download_buffer(&self, handle: &BufferHandle) -> AccelResult<Vec<u8>> {
         let bufs = self.buffers.read().unwrap_or_else(|e| e.into_inner());
-        bufs.get(&handle.0)
-            .map(Clone::clone)
-            .ok_or_else(|| AccelError::BufferAllocation(format!("Invalid buffer handle: {}", handle.0)))
+        bufs.get(&handle.0).cloned().ok_or_else(|| {
+            AccelError::BufferAllocation(format!("Invalid buffer handle: {}", handle.0))
+        })
     }
 
     fn free_buffer(&self, handle: BufferHandle) -> AccelResult<()> {
@@ -730,14 +753,16 @@ impl ComputeBackend for CpuFallbackBackend {
         };
         match size {
             Some(s) => {
-                self.current_bytes.fetch_sub(s, std::sync::atomic::Ordering::Relaxed);
+                self.current_bytes
+                    .fetch_sub(s, std::sync::atomic::Ordering::Relaxed);
                 let mut bufs = self.buffers.write().unwrap_or_else(|e| e.into_inner());
                 bufs.remove(&handle.0);
                 Ok(())
             }
-            None => Err(AccelError::BufferAllocation(
-                format!("Double-free of buffer handle: {}", handle.0),
-            )),
+            None => Err(AccelError::BufferAllocation(format!(
+                "Double-free of buffer handle: {}",
+                handle.0
+            ))),
         }
     }
 
@@ -770,7 +795,9 @@ impl ComputeBackend for CpuFallbackBackend {
     fn memory_stats(&self) -> GpuMemoryStats {
         let allocs = self.allocations.read().unwrap_or_else(|e| e.into_inner());
         GpuMemoryStats {
-            allocated_bytes: self.current_bytes.load(std::sync::atomic::Ordering::Relaxed),
+            allocated_bytes: self
+                .current_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
             peak_bytes: self.peak_bytes.load(std::sync::atomic::Ordering::Relaxed),
             allocation_count: allocs.len() as u64,
         }
@@ -814,9 +841,12 @@ mod tests {
         let b = make_cpu_backend();
 
         let data = vec![1u8, 2, 3, 4, 5, 6];
-        let h = b.allocate_buffer(data.len() as u64).expect("h should be valid");
+        let h = b
+            .allocate_buffer(data.len() as u64)
+            .expect("h should be valid");
 
-        b.upload_buffer(&h, &data).expect("upload_buffer should succeed");
+        b.upload_buffer(&h, &data)
+            .expect("upload_buffer should succeed");
         let out = b.download_buffer(&h).expect("out should be valid");
         assert_eq!(out, data);
 
@@ -845,7 +875,8 @@ mod tests {
     fn test_cpu_backend_dispatch_noop() {
         let b = make_cpu_backend();
         let dispatch = DispatchParams::new_2d(8, 8);
-        b.dispatch_kernel("my_kernel", &[], dispatch).expect("dispatch_kernel should succeed");
+        b.dispatch_kernel("my_kernel", &[], dispatch)
+            .expect("dispatch_kernel should succeed");
     }
 
     #[test]
@@ -906,7 +937,7 @@ mod tests {
     fn test_dispatch_params() {
         let p = DispatchParams::for_image(1920, 1080, 16, 16);
         assert_eq!(p.groups_x, 120); // 1920/16 = 120
-        assert_eq!(p.groups_y, 68);  // ceil(1080/16) = 68
+        assert_eq!(p.groups_y, 68); // ceil(1080/16) = 68
     }
 
     #[test]
@@ -921,7 +952,8 @@ mod tests {
         let b = VulkanComputeBackend::new();
         let data = vec![42u8; 16];
         let h = b.allocate_buffer(16).expect("h should be valid");
-        b.upload_buffer(&h, &data).expect("upload_buffer should succeed");
+        b.upload_buffer(&h, &data)
+            .expect("upload_buffer should succeed");
         let out = b.download_buffer(&h).expect("out should be valid");
         assert_eq!(out, data);
         b.free_buffer(h).expect("free_buffer should succeed");

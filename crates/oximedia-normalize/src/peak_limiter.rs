@@ -337,8 +337,8 @@ impl LookAheadPeakLimiter {
                 self.current_gain = required_gain;
             } else {
                 // Exponential release.
-                self.current_gain =
-                    self.current_gain * self.release_coeff + required_gain * (1.0 - self.release_coeff);
+                self.current_gain = self.current_gain * self.release_coeff
+                    + required_gain * (1.0 - self.release_coeff);
                 if self.current_gain > 1.0 {
                     self.current_gain = 1.0;
                 }
@@ -482,7 +482,10 @@ mod tests {
         ring.push_and_read(2.0, 3);
         ring.push_and_read(3.0, 3);
         let out = ring.push_and_read(4.0, 3);
-        assert!((out - 1.0).abs() < 1e-10, "expected delayed sample 1.0, got {out}");
+        assert!(
+            (out - 1.0).abs() < 1e-10,
+            "expected delayed sample 1.0, got {out}"
+        );
     }
 
     #[test]
@@ -512,7 +515,11 @@ mod tests {
             max_out <= ceiling + 1e-6,
             "max output {max_out:.6} exceeded ceiling {ceiling:.6}"
         );
-        assert_eq!(lim.stats().samples_limited, 0, "should not have been limited");
+        assert_eq!(
+            lim.stats().samples_limited,
+            0,
+            "should not have been limited"
+        );
     }
 
     #[test]

@@ -60,30 +60,40 @@
 #![warn(missing_docs)]
 
 pub mod adaptive_denoise;
+pub mod adaptive_temporal_window;
 pub mod audio;
 pub mod audio_denoise;
 pub mod bilateral;
 pub mod bm3d;
 pub mod chroma_denoise;
 pub mod deblock;
+pub mod deep_prior;
 pub mod denoise_config;
 pub mod denoise_metrics;
 pub mod estimator;
 pub mod frame2d;
 pub mod grain;
+pub mod hdr_denoise;
 pub mod hybrid;
 pub mod motion;
 pub mod multiscale;
 pub mod noise_estimate;
 pub mod noise_model;
+pub mod noise_monitor;
+pub mod perceptual_shaping;
+pub mod pipeline_mode;
 pub mod profile;
 pub mod region_denoise;
 pub mod spatial;
 pub mod spectral_gate;
 pub mod spectral_subtraction;
+pub mod streaming;
 pub mod temporal;
 pub mod video;
 pub mod video_denoise;
+
+#[cfg(test)]
+mod regression_tests;
 
 use noise_model::NoiseType;
 use oximedia_codec::VideoFrame;

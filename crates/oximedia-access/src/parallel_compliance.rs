@@ -286,7 +286,11 @@ impl BatchComplianceReport {
 
     /// Filter results by tag.
     #[must_use]
-    pub fn results_with_tag<'a>(&'a self, tag: &str, assets: &'a [MediaAssetInfo]) -> Vec<&'a AssetComplianceResult> {
+    pub fn results_with_tag<'a>(
+        &'a self,
+        tag: &str,
+        assets: &'a [MediaAssetInfo],
+    ) -> Vec<&'a AssetComplianceResult> {
         self.results
             .iter()
             .filter(|r| {
@@ -492,9 +496,7 @@ impl ParallelComplianceChecker {
             for issue in &result.issues {
                 let sev_key = format!("{:?}", issue.severity);
                 *severity_histogram.entry(sev_key).or_insert(0) += 1;
-                *criterion_counts
-                    .entry(issue.criterion.clone())
-                    .or_insert(0) += 1;
+                *criterion_counts.entry(issue.criterion.clone()).or_insert(0) += 1;
             }
         }
 
@@ -688,8 +690,15 @@ mod tests {
             !report.severity_histogram.is_empty(),
             "severity histogram should be populated"
         );
-        let critical = report.severity_histogram.get("Critical").copied().unwrap_or(0);
-        assert!(critical >= 2, "should have at least 2 critical issues across 2 failing assets");
+        let critical = report
+            .severity_histogram
+            .get("Critical")
+            .copied()
+            .unwrap_or(0);
+        assert!(
+            critical >= 2,
+            "should have at least 2 critical issues across 2 failing assets"
+        );
     }
 
     #[test]

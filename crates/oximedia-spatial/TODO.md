@@ -28,18 +28,18 @@
 - [x] Add `zone_control` module for multi-zone spatial audio rendering in installations (verified 2026-05-16; src/zone_control.rs:573 lines)
 
 ## Performance
-- [ ] Use SIMD-accelerated spherical harmonic coefficient computation in `ambisonics` encoding
-- [ ] Implement partitioned convolution in `binaural` HRTF rendering for lower latency (overlap-save with FFT)
-- [ ] Cache VBAP gain matrices for static speaker layouts to avoid per-frame triangulation lookups
-- [ ] Use parallel ray casting in `room_simulation` for independent reflection path computation
-- [ ] Pre-compute and cache head-tracking rotation matrices for common angle quantization steps
+- [x] Use SIMD-accelerated spherical harmonic coefficient computation in `ambisonics` encoding (sh_dot_product added; AVX2+scalar; 2026-05-30)
+- [x] Implement partitioned convolution in `binaural` HRTF rendering for lower latency (overlap-save with FFT) (partitioned_convolution.rs; oxifft overlap-save; 2026-05-30)
+- [x] Cache VBAP gain matrices for static speaker layouts to avoid per-frame triangulation lookups (pre-computed at construction, tests added; 2026-05-30)
+- [x] Use parallel ray casting in `room_simulation` for independent reflection path computation (rayon par_iter; 2026-05-30)
+- [x] Pre-compute and cache head-tracking rotation matrices for common angle quantization steps (cached_rotation_matrix done)
 
 ## Testing
-- [ ] Add energy preservation tests for `AmbisonicsEncoder` (total energy in equals total energy out)
+- [x] Add energy preservation tests for `AmbisonicsEncoder` (total energy in equals total energy out) (test_ambisonics_energy_preservation done)
 - [ ] Test `binaural` rendering with known HRTF datasets (MIT KEMAR, CIPIC) and verify ITD/ILD values
-- [ ] Add convergence tests for `head_tracking` complementary filter with synthetic IMU data
-- [ ] Test `vbap` panning law correctness for source positions at exact speaker locations (gain should be 1.0 at that speaker)
-- [ ] Add round-trip test: encode mono source to Ambisonics then decode back, verify spectral similarity
+- [x] Add convergence tests for `head_tracking` complementary filter with synthetic IMU data (verified: head_tracking.rs:1023:test_low_pass_filter_converges, :1099:test_head_tracker_accel_correction_at_low_alpha)
+- [x] Test `vbap` panning law correctness for source positions at exact speaker locations (gain should be 1.0 at that speaker) (verified: vbap.rs:888:test_pan_exact_speaker_direction_full_gain, max_gain > 0.9)
+- [x] Add round-trip test: encode mono source to Ambisonics then decode back, verify spectral similarity (test_ambisonics_encode_decode_roundtrip done)
 
 ## Documentation
 - [ ] Add spatial coordinate convention diagram (azimuth, elevation, distance) used throughout the crate

@@ -265,8 +265,7 @@ mod tests {
 
     #[test]
     fn test_suggest_top_limits_results() {
-        let s =
-            QuerySuggester::new(&idx(&["alpha", "also", "altitude", "always", "algorithm"]));
+        let s = QuerySuggester::new(&idx(&["alpha", "also", "altitude", "always", "algorithm"]));
         let top = s.suggest_top("al", 3);
         assert_eq!(top.len(), 3);
     }
@@ -276,7 +275,11 @@ mod tests {
         // Two entries that are the same when lowercased.
         let s = QuerySuggester::new(&idx(&["Audio", "audio"]));
         let suggestions = s.suggest("aud");
-        assert_eq!(suggestions.len(), 1, "duplicate entries should be deduplicated");
+        assert_eq!(
+            suggestions.len(),
+            1,
+            "duplicate entries should be deduplicated"
+        );
     }
 
     #[test]

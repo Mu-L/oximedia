@@ -208,8 +208,6 @@ mod metal_impl {
         Buffer as MetalBuffer, CommandQueue, CompileOptions, ComputeCommandEncoderRef,
         ComputePipelineState, Device, MTLResourceOptions, MTLSize,
     };
-    use std::ffi::c_void;
-
     /// Wrapper around an MTLBuffer that tracks its byte length.
     pub(super) struct MtlBuf {
         pub buf: MetalBuffer,
@@ -223,7 +221,7 @@ mod metal_impl {
         }
 
         pub(super) fn write(&self, data: &[u8]) {
-            let ptr = self.buf.contents() as *mut u8;
+            let ptr = self.buf.contents().cast::<u8>();
             // SAFETY: Metal guarantees the buffer pointer is valid and
             //         the length matches the allocation we requested.
             unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len()) };
@@ -249,7 +247,7 @@ mod metal_impl {
         let options = CompileOptions::new();
         let library = device
             .new_library_with_source(super::METAL_COLOR_MSL, &options)
-            .map_err(|e| AccelError::ShaderCompilation(e.to_string()))?;
+            .map_err(|e| AccelError::ShaderCompilation(e.clone()))?;
 
         let make_pipeline = |name: &str| -> AccelResult<ComputePipelineState> {
             let func = library
@@ -257,7 +255,7 @@ mod metal_impl {
                 .map_err(|e| AccelError::ShaderCompilation(format!("{name}: {e}")))?;
             device
                 .new_compute_pipeline_state_with_function(&func)
-                .map_err(|e| AccelError::PipelineCreation(e.to_string()))
+                .map_err(|e| AccelError::PipelineCreation(e.clone()))
         };
 
         Ok(MtlKernels {
@@ -302,7 +300,7 @@ mod metal_impl {
             height: u64::from(height),
             depth: 1,
         };
-        encoder.dispatch_thread_groups_indirect(grid, threadgroup);
+        encoder.dispatch_thread_groups(grid, threadgroup);
         encoder.end_encoding();
         cmd_buf.commit();
         cmd_buf.wait_until_completed();
@@ -497,8 +495,9 @@ impl HardwareAccel for MetalAccel {
         }
 
         // CPU fallback.
-        self.cpu_fallback
-            .scale_image(input, src_width, src_height, dst_width, dst_height, format, filter)
+        self.cpu_fallback.scale_image(
+            input, src_width, src_height, dst_width, dst_height, format, filter,
+        )
     }
 
     fn convert_color(
@@ -584,7 +583,8 @@ impl MetalAccel {
 
         let input_buf = metal_impl::upload_buf(&ctx.device, input_bytes);
         let output_buf = metal_impl::output_buf(&ctx.device, output_byte_len);
-        let params_raw = metal_impl::make_scale_params(src_width, src_height, dst_width, dst_height);
+        let params_raw =
+            metal_impl::make_scale_params(src_width, src_height, dst_width, dst_height);
         let params_buf = metal_impl::upload_buf(&ctx.device, &params_raw);
 
         metal_impl::dispatch_1d(
@@ -606,10 +606,10 @@ impl MetalAccel {
         let result_u32: &[u32] = bytemuck::cast_slice(&raw);
         let mut out = vec![0u8; output_byte_len];
         for (i, &packed) in result_u32.iter().enumerate() {
-            out[i * 4]     = ((packed >> 24) & 0xFF) as u8;
+            out[i * 4] = ((packed >> 24) & 0xFF) as u8;
             out[i * 4 + 1] = ((packed >> 16) & 0xFF) as u8;
-            out[i * 4 + 2] = ((packed >>  8) & 0xFF) as u8;
-            out[i * 4 + 3] = ( packed        & 0xFF) as u8;
+            out[i * 4 + 2] = ((packed >> 8) & 0xFF) as u8;
+            out[i * 4 + 3] = (packed & 0xFF) as u8;
         }
         Ok(out)
     }
@@ -625,10 +625,8 @@ impl MetalAccel {
         dst_format: PixelFormat,
     ) -> AccelResult<Vec<u8>> {
         // Metal kernels only handle Rgba32 ↔ Yuv444p (packed YUVA) for now.
-        let is_rgb_to_yuv =
-            src_format == PixelFormat::Rgba32 && dst_format == PixelFormat::Yuv444p;
-        let is_yuv_to_rgb =
-            src_format == PixelFormat::Yuv444p && dst_format == PixelFormat::Rgba32;
+        let is_rgb_to_yuv = src_format == PixelFormat::Rgba32 && dst_format == PixelFormat::Yuv444p;
+        let is_yuv_to_rgb = src_format == PixelFormat::Yuv444p && dst_format == PixelFormat::Rgba32;
 
         if !is_rgb_to_yuv && !is_yuv_to_rgb {
             return self
@@ -679,10 +677,10 @@ impl MetalAccel {
         let result_u32: &[u32] = bytemuck::cast_slice(&raw);
         let mut out = vec![0u8; output_byte_len];
         for (i, &packed) in result_u32.iter().enumerate() {
-            out[i * 4]     = ((packed >> 24) & 0xFF) as u8;
+            out[i * 4] = ((packed >> 24) & 0xFF) as u8;
             out[i * 4 + 1] = ((packed >> 16) & 0xFF) as u8;
-            out[i * 4 + 2] = ((packed >>  8) & 0xFF) as u8;
-            out[i * 4 + 3] = ( packed        & 0xFF) as u8;
+            out[i * 4 + 2] = ((packed >> 8) & 0xFF) as u8;
+            out[i * 4 + 3] = (packed & 0xFF) as u8;
         }
         Ok(out)
     }
@@ -735,16 +733,23 @@ mod tests {
         let result =
             accel.scale_image(&input, 4, 4, 2, 2, PixelFormat::Rgb24, ScaleFilter::Nearest);
         // When unavailable, falls back to CPU which succeeds.
-        assert!(result.is_ok(), "fallback should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "fallback should succeed: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_metal_convert_color_fallback() {
         let accel = MetalAccel::new();
         let input = vec![128u8; 4 * 4 * 3];
-        let result =
-            accel.convert_color(&input, 4, 4, PixelFormat::Rgb24, PixelFormat::Yuv420p);
-        assert!(result.is_ok(), "fallback should succeed: {:?}", result.err());
+        let result = accel.convert_color(&input, 4, 4, PixelFormat::Rgb24, PixelFormat::Yuv420p);
+        assert!(
+            result.is_ok(),
+            "fallback should succeed: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -796,7 +801,7 @@ mod tests {
         for chunk in out.chunks_exact(4) {
             assert!((chunk[0] as i32 - 255).abs() < 2, "R channel mismatch");
             assert!((chunk[1] as i32 - 128).abs() < 2, "G channel mismatch");
-            assert!((chunk[2] as i32 -   0).abs() < 2, "B channel mismatch");
+            assert!((chunk[2] as i32 - 0).abs() < 2, "B channel mismatch");
         }
     }
 

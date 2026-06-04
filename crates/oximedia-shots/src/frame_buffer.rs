@@ -101,6 +101,11 @@ impl FrameBuffer {
         &self.data
     }
 
+    /// Get a mutable reference to the raw data.
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+
     /// Check if the buffer is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -205,6 +210,82 @@ impl FloatImage {
     #[must_use]
     pub fn dim(&self) -> (usize, usize) {
         (self.height, self.width)
+    }
+}
+
+/// A fixed-capacity pool of [`FrameBuffer`] allocations.
+///
+/// Reuses previously-allocated buffers whose dimensions match the requested
+/// size, reducing heap pressure in long shot-detection pipelines.
+///
+/// # Example
+///
+/// ```rust
+/// use oximedia_shots::frame_buffer::FrameBufferPool;
+///
+/// let mut pool = FrameBufferPool::new(4);
+/// let buf = pool.acquire(1920, 1080, 3);
+/// pool.release(buf);
+/// assert_eq!(pool.len(), 1);
+/// ```
+pub struct FrameBufferPool {
+    free: Vec<FrameBuffer>,
+    capacity: usize,
+}
+
+impl FrameBufferPool {
+    /// Create a new pool with the given maximum number of free buffers.
+    ///
+    /// Setting `capacity` to 0 disables pooling (every `acquire` allocates and
+    /// every `release` drops immediately).
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            free: Vec::with_capacity(capacity.min(64)),
+            capacity,
+        }
+    }
+
+    /// Acquire a [`FrameBuffer`] with the given dimensions.
+    ///
+    /// If the pool contains a buffer whose dimensions exactly match
+    /// `(height, width, channels)`, it is removed from the free list and
+    /// returned (its contents are **not** zeroed).  Otherwise a fresh
+    /// zero-filled buffer is allocated.
+    pub fn acquire(&mut self, height: usize, width: usize, channels: usize) -> FrameBuffer {
+        // Search for a matching buffer (reverse scan so we check the most-recently
+        // released candidate first, improving cache locality).
+        if let Some(pos) = self
+            .free
+            .iter()
+            .rposition(|b| b.dim() == (height, width, channels))
+        {
+            return self.free.swap_remove(pos);
+        }
+        FrameBuffer::zeros(height, width, channels)
+    }
+
+    /// Return a [`FrameBuffer`] to the pool.
+    ///
+    /// The buffer is accepted when the free list has not yet reached `capacity`;
+    /// otherwise it is dropped immediately to bound memory usage.
+    pub fn release(&mut self, buf: FrameBuffer) {
+        if self.free.len() < self.capacity {
+            self.free.push(buf);
+        }
+        // If at capacity, `buf` is dropped here.
+    }
+
+    /// Number of buffers currently in the free list.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.free.len()
+    }
+
+    /// Returns `true` when the free list is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.free.is_empty()
     }
 }
 
@@ -323,5 +404,69 @@ mod tests {
         fb.fill(255);
         assert_eq!(fb.get(0, 0, 0), 255);
         assert_eq!(fb.get(4, 4, 2), 255);
+    }
+
+    // ── FrameBufferPool tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_framebuffer_pool_new() {
+        let pool = FrameBufferPool::new(4);
+        assert_eq!(pool.len(), 0);
+        assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn test_framebuffer_pool_reuse() {
+        // Create pool(2), acquire 2 buffers, release both, acquire 2 again.
+        // Free list: 0 → acquire×2 → 0 → release×2 → 2 → acquire×2 → 0.
+        let mut pool = FrameBufferPool::new(2);
+
+        assert_eq!(pool.len(), 0);
+
+        let buf1 = pool.acquire(180, 320, 3);
+        let buf2 = pool.acquire(180, 320, 3);
+
+        // Just acquired — pool still empty (nothing released yet).
+        assert_eq!(pool.len(), 0, "pool should be empty after two acquires");
+
+        pool.release(buf1);
+        assert_eq!(pool.len(), 1);
+        pool.release(buf2);
+        assert_eq!(pool.len(), 2, "pool should hold 2 released buffers");
+
+        // Acquire them again — should come from pool, not fresh allocations.
+        let _r1 = pool.acquire(180, 320, 3);
+        assert_eq!(pool.len(), 1);
+        let _r2 = pool.acquire(180, 320, 3);
+        assert_eq!(
+            pool.len(),
+            0,
+            "pool should be empty after re-acquiring both buffers"
+        );
+    }
+
+    #[test]
+    fn test_framebuffer_pool_capacity_enforced() {
+        // Pool capacity 1: releasing a second buffer should drop it.
+        let mut pool = FrameBufferPool::new(1);
+        let b1 = pool.acquire(64, 64, 3);
+        let b2 = pool.acquire(64, 64, 3);
+        pool.release(b1);
+        pool.release(b2); // Should be dropped — pool is full.
+        assert_eq!(pool.len(), 1, "pool should enforce capacity limit");
+    }
+
+    #[test]
+    fn test_framebuffer_pool_dim_mismatch_allocates_fresh() {
+        let mut pool = FrameBufferPool::new(4);
+        // Release a 64×64 buffer.
+        let b = pool.acquire(64, 64, 3);
+        pool.release(b);
+
+        // Acquire with different dimensions — should allocate fresh.
+        let b2 = pool.acquire(128, 128, 3);
+        assert_eq!(b2.dim(), (128, 128, 3));
+        // Pool still has the 64×64 buffer.
+        assert_eq!(pool.len(), 1);
     }
 }

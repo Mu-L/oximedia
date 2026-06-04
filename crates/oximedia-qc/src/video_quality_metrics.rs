@@ -488,6 +488,10 @@ fn simd_range_check_inner(pixels: &[u8], legal_min: u8, legal_max: u8) -> PixelR
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "sse4.1")]
 #[allow(unsafe_code)]
+// `_mm_loadu_si128` / `_mm_storeu_si128` are the *unaligned* SSE2 variants and
+// explicitly handle any pointer alignment in hardware; the cast_ptr_alignment lint
+// is a false positive here.
+#[allow(clippy::cast_ptr_alignment)]
 unsafe fn simd_range_check_sse41(pixels: &[u8], legal_min: u8, legal_max: u8) -> PixelRangeStats {
     #[cfg(target_arch = "x86")]
     use std::arch::x86::*;

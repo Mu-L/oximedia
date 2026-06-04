@@ -176,7 +176,9 @@ impl RotationPool {
             .max_by(|(_, a), (_, b)| {
                 let score_a = a.weight as f64 / (a.play_count as f64 + 1.0);
                 let score_b = b.weight as f64 / (b.play_count as f64 + 1.0);
-                score_a.partial_cmp(&score_b).unwrap_or(std::cmp::Ordering::Equal)
+                score_a
+                    .partial_cmp(&score_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|(i, _)| i)
             .unwrap_or(0);
@@ -301,11 +303,31 @@ mod tests {
         pool.add_item(RotationItem::new("b"));
         pool.add_item(RotationItem::new("c"));
 
-        assert_eq!(pool.next_round_robin().expect("should succeed in test").asset_id, "a");
-        assert_eq!(pool.next_round_robin().expect("should succeed in test").asset_id, "b");
-        assert_eq!(pool.next_round_robin().expect("should succeed in test").asset_id, "c");
+        assert_eq!(
+            pool.next_round_robin()
+                .expect("should succeed in test")
+                .asset_id,
+            "a"
+        );
+        assert_eq!(
+            pool.next_round_robin()
+                .expect("should succeed in test")
+                .asset_id,
+            "b"
+        );
+        assert_eq!(
+            pool.next_round_robin()
+                .expect("should succeed in test")
+                .asset_id,
+            "c"
+        );
         // Wraps around
-        assert_eq!(pool.next_round_robin().expect("should succeed in test").asset_id, "a");
+        assert_eq!(
+            pool.next_round_robin()
+                .expect("should succeed in test")
+                .asset_id,
+            "a"
+        );
     }
 
     #[test]
@@ -331,7 +353,12 @@ mod tests {
         pool.add_item(RotationItem::new("high").with_weight(10));
 
         // First pick should be "high" (higher score)
-        assert_eq!(pool.next_weighted().expect("should succeed in test").asset_id, "high");
+        assert_eq!(
+            pool.next_weighted()
+                .expect("should succeed in test")
+                .asset_id,
+            "high"
+        );
     }
 
     #[test]
@@ -397,7 +424,12 @@ mod tests {
         let summary = pool.play_count_summary();
         assert_eq!(summary["a"], 0);
         // After reset, cursor rewinds
-        assert_eq!(pool.next_round_robin().expect("should succeed in test").asset_id, "a");
+        assert_eq!(
+            pool.next_round_robin()
+                .expect("should succeed in test")
+                .asset_id,
+            "a"
+        );
     }
 
     #[test]
@@ -429,10 +461,25 @@ mod tests {
         let mut p = RotationPool::new("a", RotationStrategy::RoundRobin);
         p.add_item(RotationItem::new("x"));
         sched.add_pool(p);
-        sched.pool_mut("a").expect("should succeed in test").next_round_robin();
-        assert_eq!(sched.pool("a").expect("should succeed in test").play_count_summary()["x"], 1);
+        sched
+            .pool_mut("a")
+            .expect("should succeed in test")
+            .next_round_robin();
+        assert_eq!(
+            sched
+                .pool("a")
+                .expect("should succeed in test")
+                .play_count_summary()["x"],
+            1
+        );
         sched.reset_all();
-        assert_eq!(sched.pool("a").expect("should succeed in test").play_count_summary()["x"], 0);
+        assert_eq!(
+            sched
+                .pool("a")
+                .expect("should succeed in test")
+                .play_count_summary()["x"],
+            0
+        );
     }
 
     #[test]

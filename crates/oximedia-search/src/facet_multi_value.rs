@@ -215,15 +215,13 @@ impl MultiValueFacetIndex {
             None => return Vec::new(),
         };
 
-        let intersection: HashSet<String> = values[1..]
-            .iter()
-            .fold(first_set, |acc, &val| {
-                if let Some(s) = field_map.get(val) {
-                    acc.intersection(s).cloned().collect()
-                } else {
-                    HashSet::new()
-                }
-            });
+        let intersection: HashSet<String> = values[1..].iter().fold(first_set, |acc, &val| {
+            if let Some(s) = field_map.get(val) {
+                acc.intersection(s).cloned().collect()
+            } else {
+                HashSet::new()
+            }
+        });
 
         let mut ids: Vec<String> = intersection.into_iter().collect();
         ids.sort();
@@ -496,7 +494,10 @@ mod tests {
     fn test_custom_facet_field() {
         let mut idx = MultiValueFacetIndex::new();
         idx.add_document("doc-x", FacetField::Custom("ratings"), &["PG-13", "R"]);
-        assert_eq!(idx.count_for_value(FacetField::Custom("ratings"), "PG-13"), 1);
+        assert_eq!(
+            idx.count_for_value(FacetField::Custom("ratings"), "PG-13"),
+            1
+        );
         let values = idx.values_for_field(FacetField::Custom("ratings"));
         assert_eq!(values.len(), 2);
     }

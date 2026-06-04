@@ -221,6 +221,8 @@ impl PlateReverb {
 }
 
 impl AudioEffect for PlateReverb {
+    const EFFECT_ID: &'static str = "plate_reverb";
+
     fn process_sample(&mut self, input: f32) -> f32 {
         let (left, _right) = self.process_sample_internal(input, input);
         left
@@ -291,5 +293,45 @@ mod tests {
 
         let (out_l, out_r) = reverb.process_sample_stereo(1.0, 0.0);
         assert!(out_l != 0.0 || out_r != 0.0);
+    }
+
+    #[test]
+    fn test_plate_energy_conservation() {
+        // Verify plate reverb stability: total output energy (direct + decaying tail)
+        // must not exceed input energy * 50, catching any unstable feedback.
+        let config = ReverbConfig::default()
+            .with_room_size(0.5)
+            .with_wet(0.3)
+            .with_dry(0.7);
+        let mut reverb = PlateReverb::new(config, 48000.0);
+
+        let mut input_energy = 0.0f32;
+        let mut output_energy = 0.0f32;
+
+        // Feed 8000 samples of a sine burst (~170 ms at 48 kHz).
+        for i in 0..8000 {
+            #[allow(clippy::cast_precision_loss)]
+            let input = (i as f32 * 0.1).sin() * 0.5;
+            input_energy += input * input;
+            let (l, r) = reverb.process_sample_stereo(input, input);
+            output_energy += (l * l + r * r) * 0.5;
+        }
+
+        // Drain the reverb tail (~1 s of silence).
+        for _ in 0..48000 {
+            let (l, r) = reverb.process_sample_stereo(0.0, 0.0);
+            output_energy += (l * l + r * r) * 0.5;
+        }
+
+        assert!(
+            output_energy.is_finite(),
+            "Plate reverb output energy must be finite"
+        );
+        // Allow 50× headroom: reverb recirculates energy during the 1 s drain window;
+        // this bound detects unbounded growth while permitting normal decay tails.
+        assert!(
+            output_energy <= input_energy * 50.0,
+            "plate reverb energy {output_energy} exceeded input energy {input_energy} * 50 (unstable)"
+        );
     }
 }

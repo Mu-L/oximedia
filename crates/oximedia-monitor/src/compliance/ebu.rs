@@ -1,7 +1,7 @@
 //! EBU R128 compliance checking.
 
-use super::{ComplianceViolation, ViolationSeverity};
-use crate::{MonitorError, MonitorResult};
+use super::ComplianceViolation;
+use crate::MonitorResult;
 
 /// EBU compliance checker.
 pub struct EbuChecker {

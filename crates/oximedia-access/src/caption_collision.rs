@@ -182,9 +182,7 @@ impl CollisionResolver {
 
     fn resolve_vertical_shift(&self, captions: &mut Vec<CaptionBox>) {
         // Sort: higher priority first, then by original y (top first)
-        captions.sort_by(|a, b| {
-            b.priority.cmp(&a.priority).then(a.y.cmp(&b.y))
-        });
+        captions.sort_by(|a, b| b.priority.cmp(&a.priority).then(a.y.cmp(&b.y)));
 
         let n = captions.len();
         for i in 0..n {
@@ -253,7 +251,16 @@ fn overlap_1d_u64(a0: u64, a1: u64, b0: u64, b1: u64) -> u64 {
 mod tests {
     use super::*;
 
-    fn make_box(id: &str, x: u32, y: u32, w: u32, h: u32, t0: u64, t1: u64, prio: u8) -> CaptionBox {
+    fn make_box(
+        id: &str,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        t0: u64,
+        t1: u64,
+        prio: u8,
+    ) -> CaptionBox {
         CaptionBox {
             id: id.to_string(),
             x,
@@ -347,7 +354,10 @@ mod tests {
         ];
         resolver.resolve(&mut captions, ResolveStrategy::VerticalShift);
         let pairs = resolver.detect_collisions(&captions);
-        assert!(pairs.is_empty(), "Collisions should be resolved after vertical shift");
+        assert!(
+            pairs.is_empty(),
+            "Collisions should be resolved after vertical shift"
+        );
     }
 
     // 8. Shrink-to-fit reduces or eliminates overlapping box
@@ -360,7 +370,10 @@ mod tests {
         ];
         resolver.resolve(&mut captions, ResolveStrategy::ShrinkToFit);
         let pairs = resolver.detect_collisions(&captions);
-        assert!(pairs.is_empty(), "Collisions should be resolved after shrink-to-fit");
+        assert!(
+            pairs.is_empty(),
+            "Collisions should be resolved after shrink-to-fit"
+        );
     }
 
     // 9. Overlap area computation

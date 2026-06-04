@@ -55,6 +55,8 @@ impl Gate {
 }
 
 impl AudioEffect for Gate {
+    const EFFECT_ID: &'static str = "gate";
+
     fn process_sample(&mut self, input: f32) -> f32 {
         // Detect envelope
         let envelope = self.envelope.process(input);

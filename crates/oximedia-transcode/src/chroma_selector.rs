@@ -463,18 +463,16 @@ mod tests {
 
     #[test]
     fn test_broadcast_preferred_vp9_gives_422() {
-        let mode =
-            ChromaSelector::select(ChromaCodec::Vp9, ChromaPolicy::BroadcastPreferred)
-                .expect("VP9 supports 4:2:2");
+        let mode = ChromaSelector::select(ChromaCodec::Vp9, ChromaPolicy::BroadcastPreferred)
+            .expect("VP9 supports 4:2:2");
         assert_eq!(mode, ChromaSubsampling::Yuv422);
     }
 
     #[test]
     fn test_broadcast_preferred_vp8_fallback_to_420() {
         // VP8 doesn't have 4:2:2, so fallback to best available = 4:2:0.
-        let mode =
-            ChromaSelector::select(ChromaCodec::Vp8, ChromaPolicy::BroadcastPreferred)
-                .expect("VP8 falls back to 4:2:0");
+        let mode = ChromaSelector::select(ChromaCodec::Vp8, ChromaPolicy::BroadcastPreferred)
+            .expect("VP8 falls back to 4:2:0");
         assert_eq!(mode, ChromaSubsampling::Yuv420);
     }
 
@@ -500,8 +498,8 @@ mod tests {
 
     #[test]
     fn test_select_by_name_valid() {
-        let mode = ChromaSelector::select_by_name("av1", ChromaPolicy::MaxQuality)
-            .expect("AV1 is known");
+        let mode =
+            ChromaSelector::select_by_name("av1", ChromaPolicy::MaxQuality).expect("AV1 is known");
         assert_eq!(mode, ChromaSubsampling::Yuv444);
     }
 

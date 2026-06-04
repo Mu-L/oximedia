@@ -6,7 +6,7 @@ Professional archive and digital preservation system for OxiMedia. Provides comp
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.7 — 2026-05-16 — 551 tests
+Version: 0.1.8 — 2026-05-29 — 551 tests
 
 ## Features
 
@@ -30,7 +30,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-archive-pro = "0.1.7"
+oximedia-archive-pro = "0.1.8"
 ```
 
 ```rust

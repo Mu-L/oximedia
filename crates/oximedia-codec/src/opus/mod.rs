@@ -50,7 +50,13 @@ pub mod range_decoder;
 pub mod range_encoder;
 pub mod silk;
 pub mod silk_decoder;
+pub mod silk_encoder;
+pub mod silk_excitation;
+pub mod silk_lpc;
+pub mod silk_ltp;
+pub mod silk_nsq;
 pub mod silk_range;
+pub mod silk_range_encoder;
 pub mod silk_tables;
 pub mod vad;
 

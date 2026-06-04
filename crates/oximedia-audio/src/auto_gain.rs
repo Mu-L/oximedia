@@ -178,8 +178,7 @@ impl AutoGainController {
         let target_linear = db_to_linear(config.target_dbfs);
         let min_gain_linear = db_to_linear(config.min_gain_db);
         let max_gain_linear = db_to_linear(config.max_gain_db);
-        let hold_samples_total =
-            (config.hold_ms * 1e-3 * f64::from(sample_rate)).round() as u64;
+        let hold_samples_total = (config.hold_ms * 1e-3 * f64::from(sample_rate)).round() as u64;
 
         Ok(Self {
             config,
@@ -217,8 +216,7 @@ impl AutoGainController {
             let desired_gain = if rms < 1e-7 {
                 self.max_gain_linear
             } else {
-                (self.target_linear / rms)
-                    .clamp(self.min_gain_linear, self.max_gain_linear)
+                (self.target_linear / rms).clamp(self.min_gain_linear, self.max_gain_linear)
             };
 
             // Hold logic: prevent gain from rising immediately after a loud transient.
@@ -237,8 +235,8 @@ impl AutoGainController {
             self.prev_desired_gain = effective_desired;
 
             // Smooth the gain change.
-            self.smooth_gain = self.gain_coeff * self.smooth_gain
-                + (1.0 - self.gain_coeff) * effective_desired;
+            self.smooth_gain =
+                self.gain_coeff * self.smooth_gain + (1.0 - self.gain_coeff) * effective_desired;
 
             *s = (x * self.smooth_gain) as f32;
         }
@@ -335,7 +333,10 @@ impl BatchAutoGain {
     /// Create with explicit targets.
     #[must_use]
     pub fn new(target_rms_dbfs: f64, peak_ceiling_dbfs: f64) -> Self {
-        Self { target_rms_dbfs, peak_ceiling_dbfs }
+        Self {
+            target_rms_dbfs,
+            peak_ceiling_dbfs,
+        }
     }
 
     /// Normalize `buffer` in-place and return measurement results.
@@ -351,10 +352,7 @@ impl BatchAutoGain {
         // Pass 1 — measure.
         let sum_sq: f64 = buffer.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
         let rms = (sum_sq / buffer.len() as f64).sqrt();
-        let peak = buffer
-            .iter()
-            .map(|s| s.abs())
-            .fold(0.0_f32, f32::max);
+        let peak = buffer.iter().map(|s| s.abs()).fold(0.0_f32, f32::max);
 
         let peak_linear = f64::from(peak);
         let measured_rms_dbfs = linear_to_db(rms);
@@ -412,8 +410,7 @@ mod tests {
     use super::*;
 
     fn make_agc() -> AutoGainController {
-        AutoGainController::new(AutoGainConfig::default(), 48_000)
-            .expect("valid config")
+        AutoGainController::new(AutoGainConfig::default(), 48_000).expect("valid config")
     }
 
     #[test]

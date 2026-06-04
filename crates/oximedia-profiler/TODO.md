@@ -10,7 +10,7 @@
 - [x] Add hierarchical span tracking in `Profiler` for nested function timing (enter/exit scope) (verified 2026-05-16; src/span.rs:33 SpanId, Span:49, SpanTracker with nested enter/exit, 476 lines)
 - [x] Implement adaptive sampling rate in `sampling_profiler` — increase rate during detected hotspots (verified 2026-05-16; src/sampling_profiler.rs:52 SamplingConfig, high_frequency:77, low_overhead:88, 862 lines)
 - [x] Extend `memory_profiler` with allocation site tracking (caller stack capture) (verified 2026-05-16; src/allocation_tracker.rs:33 AllocRecord with call-site tag:38, AllocationTracker:71)
-- [ ] Add real-time profiling data streaming via `report` module (live metrics push) (verified-open 2026-05-16: report/json.rs:8 JsonReporter generates to file/string; no live streaming/push mechanism)
+- [x] Add real-time profiling data streaming via `report` module (live metrics push) (verified 2026-06-01: report/streaming.rs StreamingReporter+ProfilingEvent+ProfilingEventType; mpsc channel; span_start/span_end/record/drain_to_json; 8 tests)
 - [x] Implement `bottleneck` detection with automated classification (CPU-bound, I/O-bound, memory-bound) (verified 2026-05-16; src/bottleneck/classify.rs:91 BottleneckClassifier, classify:95, classify_with_suggestions:127)
 - [x] Extend `codec_profiler` with per-codec frame encode/decode timing histograms (verified 2026-05-16; src/codec_profiler.rs — per-codec frame timing, histograms)
 - [x] Add `pipeline_profiler` integration with `oximedia-pipeline` for automatic node instrumentation (verified 2026-05-16; src/pipeline_profiler.rs — pipeline node instrumentation)

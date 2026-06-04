@@ -358,15 +358,10 @@ impl HierarchicalDedup {
                 if cidx == idx {
                     continue;
                 }
-                let (lo, hi) = if idx < cidx {
-                    (idx, cidx)
-                } else {
-                    (cidx, idx)
-                };
+                let (lo, hi) = if idx < cidx { (idx, cidx) } else { (cidx, idx) };
                 if seen_pairs.insert((lo, hi)) {
                     candidate_count += 1;
-                    let dist =
-                        (self.items[idx].perceptual_hash ^ chash).count_ones();
+                    let dist = (self.items[idx].perceptual_hash ^ chash).count_ones();
                     if dist <= self.config.perceptual_max_distance {
                         let similarity = 1.0 - f64::from(dist) / 64.0;
                         edges.push((lo, hi, similarity));
@@ -493,10 +488,7 @@ impl HierarchicalDedup {
             .into_iter()
             .filter(|(_, members)| members.len() >= 2)
             .map(|(root, members)| DedupGroup {
-                item_ids: members
-                    .iter()
-                    .map(|&i| self.items[i].id.clone())
-                    .collect(),
+                item_ids: members.iter().map(|&i| self.items[i].id.clone()).collect(),
                 pass: DetectionPass::MediumPerceptual,
                 similarity: group_best_sim.get(&root).copied().unwrap_or(0.0),
             })
@@ -548,7 +540,12 @@ mod tests {
     #[test]
     fn test_single_item() {
         let mut dedup = HierarchicalDedup::new(HierarchicalConfig::default());
-        dedup.add_item("only.mp4", &make_hash(0xAB), 0xDEAD, &make_thumbnail(128, 16));
+        dedup.add_item(
+            "only.mp4",
+            &make_hash(0xAB),
+            0xDEAD,
+            &make_thumbnail(128, 16),
+        );
         let result = dedup.run();
         assert_eq!(result.total_items, 1);
         assert_eq!(result.total_groups(), 0);
@@ -561,7 +558,12 @@ mod tests {
         let thumb = make_thumbnail(128, 16);
         dedup.add_item("a.mp4", &hash, 0xDEAD_BEEF, &thumb);
         dedup.add_item("b.mp4", &hash, 0xDEAD_BEEF, &thumb);
-        dedup.add_item("c.mp4", &make_hash(0xCD), 0x1234_5678, &make_thumbnail(64, 16));
+        dedup.add_item(
+            "c.mp4",
+            &make_hash(0xCD),
+            0x1234_5678,
+            &make_thumbnail(64, 16),
+        );
 
         let result = dedup.run();
         assert_eq!(result.exact_groups.len(), 1);
@@ -581,14 +583,27 @@ mod tests {
         let base_hash = 0xFFFF_FFFF_FFFF_FFFFu64;
         let similar_hash = base_hash ^ 0b111; // 3 bits different
 
-        dedup.add_item("a.mp4", &make_hash(0xAA), base_hash, &make_thumbnail(128, 16));
-        dedup.add_item("b.mp4", &make_hash(0xBB), similar_hash, &make_thumbnail(130, 16));
+        dedup.add_item(
+            "a.mp4",
+            &make_hash(0xAA),
+            base_hash,
+            &make_thumbnail(128, 16),
+        );
+        dedup.add_item(
+            "b.mp4",
+            &make_hash(0xBB),
+            similar_hash,
+            &make_thumbnail(130, 16),
+        );
 
         let result = dedup.run();
         assert!(result.exact_groups.is_empty(), "Different hashes");
         // Should find perceptual near-duplicates
         if !result.perceptual_groups.is_empty() {
-            assert_eq!(result.perceptual_groups[0].pass, DetectionPass::MediumPerceptual);
+            assert_eq!(
+                result.perceptual_groups[0].pass,
+                DetectionPass::MediumPerceptual
+            );
             assert!(result.perceptual_groups[0].similarity > 0.9);
         }
     }
@@ -685,8 +700,18 @@ mod tests {
 
         let mut dedup = HierarchicalDedup::new(cfg);
         // Hashes with high Hamming distance
-        dedup.add_item("a.mp4", &make_hash(0xAA), 0x0000_0000_0000_0000, &make_thumbnail(128, 16));
-        dedup.add_item("b.mp4", &make_hash(0xBB), 0xFFFF_FFFF_FFFF_FFFF, &make_thumbnail(200, 16));
+        dedup.add_item(
+            "a.mp4",
+            &make_hash(0xAA),
+            0x0000_0000_0000_0000,
+            &make_thumbnail(128, 16),
+        );
+        dedup.add_item(
+            "b.mp4",
+            &make_hash(0xBB),
+            0xFFFF_FFFF_FFFF_FFFF,
+            &make_thumbnail(200, 16),
+        );
 
         let result = dedup.run();
         assert!(result.exact_groups.is_empty());
@@ -709,8 +734,18 @@ mod tests {
         // Near-duplicate pair (different content hash, similar perceptual hash)
         let base = 0xFFFF_FFFF_FFFF_FFFFu64;
         let near = base ^ 0b11;
-        dedup.add_item("near1.mp4", &make_hash(0xBB), base, &make_thumbnail(200, 16));
-        dedup.add_item("near2.mp4", &make_hash(0xCC), near, &make_thumbnail(202, 16));
+        dedup.add_item(
+            "near1.mp4",
+            &make_hash(0xBB),
+            base,
+            &make_thumbnail(200, 16),
+        );
+        dedup.add_item(
+            "near2.mp4",
+            &make_hash(0xCC),
+            near,
+            &make_thumbnail(202, 16),
+        );
 
         let result = dedup.run();
         assert_eq!(result.exact_groups.len(), 1);

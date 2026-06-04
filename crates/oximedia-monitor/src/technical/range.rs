@@ -1,6 +1,6 @@
 //! Luma and chroma range checking.
 
-use crate::{MonitorError, MonitorResult};
+use crate::MonitorResult;
 use serde::{Deserialize, Serialize};
 
 /// Range checking metrics.

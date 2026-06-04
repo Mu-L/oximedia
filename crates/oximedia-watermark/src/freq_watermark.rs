@@ -238,8 +238,7 @@ impl FreqWatermark {
                 let mut block = [0f32; 64];
                 for r in 0..8usize {
                     for c in 0..8usize {
-                        block[r * 8 + c] =
-                            f32::from(out[(by * 8 + r) * w + (bx * 8 + c)]);
+                        block[r * 8 + c] = f32::from(out[(by * 8 + r) * w + (bx * 8 + c)]);
                     }
                 }
 
@@ -321,8 +320,7 @@ impl FreqWatermark {
                 let mut block = [0f32; 64];
                 for r in 0..8usize {
                     for c in 0..8usize {
-                        block[r * 8 + c] =
-                            f32::from(img[(by * 8 + r) * w + (bx * 8 + c)]);
+                        block[r * 8 + c] = f32::from(img[(by * 8 + r) * w + (bx * 8 + c)]);
                     }
                 }
 
@@ -377,8 +375,8 @@ mod tests {
         let payload: u64 = 0xDEAD_BEEF_CAFE_1234;
         let watermarked =
             FreqWatermark::embed(&img, w as u32, h as u32, payload).expect("embed should succeed");
-        let extracted =
-            FreqWatermark::extract(&watermarked, w as u32, h as u32).expect("extract should succeed");
+        let extracted = FreqWatermark::extract(&watermarked, w as u32, h as u32)
+            .expect("extract should succeed");
         assert_eq!(extracted, payload, "round-trip failed");
     }
 
@@ -387,14 +385,12 @@ mod tests {
         // Simulate a natural image with varying pixel values.
         let w = 128usize;
         let h = 64usize;
-        let img: Vec<u8> = (0..w * h)
-            .map(|i| ((i * 37 + 13) % 256) as u8)
-            .collect();
+        let img: Vec<u8> = (0..w * h).map(|i| ((i * 37 + 13) % 256) as u8).collect();
         let payload: u64 = 0x0102_0304_0506_0708;
         let watermarked =
             FreqWatermark::embed(&img, w as u32, h as u32, payload).expect("embed should succeed");
-        let extracted =
-            FreqWatermark::extract(&watermarked, w as u32, h as u32).expect("extract should succeed");
+        let extracted = FreqWatermark::extract(&watermarked, w as u32, h as u32)
+            .expect("extract should succeed");
         assert_eq!(extracted, payload);
     }
 

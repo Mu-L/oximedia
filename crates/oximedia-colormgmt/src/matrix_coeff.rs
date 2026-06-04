@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Color matrix coefficients for `YCbCr`/RGB conversions.
 //!
 //! Implements the standard color matrix definitions from ITU-R BT.601, BT.709,
@@ -160,16 +159,8 @@ impl MatrixCoefficients {
         let kg = 1.0 - kr - kb;
         ColorMatrix3x3::new([
             [kr, kg, kb],
-            [
-                -kr / (2.0 * (1.0 - kb)),
-                -kg / (2.0 * (1.0 - kb)),
-                0.5,
-            ],
-            [
-                0.5,
-                -kg / (2.0 * (1.0 - kr)),
-                -kb / (2.0 * (1.0 - kr)),
-            ],
+            [-kr / (2.0 * (1.0 - kb)), -kg / (2.0 * (1.0 - kb)), 0.5],
+            [0.5, -kg / (2.0 * (1.0 - kr)), -kb / (2.0 * (1.0 - kr))],
         ])
     }
 

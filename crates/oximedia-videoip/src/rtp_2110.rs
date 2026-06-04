@@ -130,7 +130,7 @@ impl Rtp2110Packetizer {
     ///
     /// # Errors
     ///
-    /// Returns [`VideoIpError::InvalidConfig`] when either dimension is zero.
+    /// Returns `VideoIpError::InvalidVideoConfig` when either dimension is zero.
     pub fn new(line_w: u32, line_h: u32) -> VideoIpResult<Self> {
         if line_w == 0 || line_h == 0 {
             return Err(VideoIpError::InvalidVideoConfig(
@@ -184,7 +184,11 @@ impl Rtp2110Packetizer {
                 let chunk_bytes = remaining.min(MAX_PAYLOAD_BYTES);
                 // Align chunk to 4-byte (2-pixel) boundary for YCbCr 4:2:2.
                 let chunk_bytes = (chunk_bytes / YUV422_8_BYTES_PER_2PIX) * YUV422_8_BYTES_PER_2PIX;
-                let chunk_bytes = if chunk_bytes == 0 { remaining } else { chunk_bytes };
+                let chunk_bytes = if chunk_bytes == 0 {
+                    remaining
+                } else {
+                    chunk_bytes
+                };
 
                 let is_last_chunk = byte_offset + chunk_bytes >= line_data.len();
                 let continuation = !is_last_chunk;
@@ -211,7 +215,7 @@ impl Rtp2110Packetizer {
         Ok(packets)
     }
 
-    /// Returns the current RTP timestamp (before the next call to [`packetize`]).
+    /// Returns the current RTP timestamp (before the next call to `packetize`).
     #[must_use]
     pub fn current_timestamp(&self) -> u32 {
         self.timestamp

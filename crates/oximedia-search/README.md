@@ -6,7 +6,7 @@ Advanced media search and indexing engine for OxiMedia.
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.7 | Tests: 735 — 2026-05-16
+Version: 0.1.8 | Tests: 735 — 2026-05-29
 
 ## Overview
 

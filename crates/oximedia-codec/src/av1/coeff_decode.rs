@@ -138,20 +138,46 @@ impl CoeffDecoder {
     }
 
     /// Decode EOB (End of Block) position.
+    ///
+    /// The EOB-multi CDF emits a *symbol index* (the index of the EOB point
+    /// class, 0..=11), not the EOB position itself. The symbol then dictates
+    /// how many extra bits the decoder must consume to recover the precise
+    /// position within the class. Confusing these two values desynchronizes
+    /// the bitstream — see [`EobPt::from_symbol`] for the relationship.
     fn decode_eob(&mut self, tx_size: TxSize, plane: u8) -> CodecResult<u16> {
         let _eob_ctx = EobContext::new(tx_size);
 
         // Read EOB multi-symbol
         let ctx = (tx_size as usize * 3) + (plane as usize);
         let eob_multi_cdf = self.cdf_context.get_eob_multi_cdf_mut(ctx);
-        let eob_multi = self.reader.read_symbol(eob_multi_cdf) as u8;
+        let eob_multi_symbol = self.reader.read_symbol(eob_multi_cdf);
 
-        if eob_multi == 0 {
+        self.finalize_eob_from_symbol(eob_multi_symbol)
+    }
+
+    /// Compute the final EOB position from a previously-read EOB-multi
+    /// *symbol* (CDF index in `0..=11`).
+    ///
+    /// This is split out from [`Self::decode_eob`] so that regression tests
+    /// can inject a known symbol and observe the precise number of extra
+    /// bits consumed plus the final EOB position — the two outputs that
+    /// diverge between the correct (`from_symbol`) and the historically
+    /// buggy (`from_eob`) implementations of this step.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::CodecError::InvalidBitstream`] if `symbol`
+    /// is outside the legal range 0..=11.
+    fn finalize_eob_from_symbol(&mut self, symbol: usize) -> CodecResult<u16> {
+        if symbol == 0 {
             return Ok(0); // No coefficients
         }
 
-        // Read EOB extra bits
-        let eob_pt = EobPt::from_eob(eob_multi.into());
+        // Convert the EOB-multi *symbol* (CDF index) into its EobPt class.
+        // NOTE: do not call `EobPt::from_eob` here — that helper takes an
+        // actual EOB position, not a symbol index. See the unit tests for
+        // a demonstration of how the two formulations diverge.
+        let eob_pt = EobPt::from_symbol(symbol)?;
         let extra_bits = eob_pt.extra_bits();
 
         let eob_extra = if extra_bits > 0 {
@@ -160,6 +186,7 @@ impl CoeffDecoder {
             0
         };
 
+        let eob_multi = symbol as u8;
         let eob = EobContext::compute_eob(eob_multi, eob_extra as u16);
         Ok(eob)
     }
@@ -404,8 +431,7 @@ impl CoeffEncoder {
 
     /// Convert position to row/col.
     fn pos_to_rowcol(&self, pos: usize, buffer: &CoeffBuffer) -> (usize, usize) {
-        let slice = buffer.as_slice();
-        let width = (slice.len() as f64).sqrt() as usize;
+        let width = buffer.width();
         (pos / width, pos % width)
     }
 
@@ -777,5 +803,197 @@ mod tests {
         let quant = create_test_quant_params();
         let decoder = CoeffDecoder::new(data, quant, 8);
         assert!(decoder.position() <= 128);
+    }
+
+    /// Regression for the symbol-vs-position bug at the original line 154 of
+    /// this file.
+    ///
+    /// `finalize_eob_from_symbol` performs the exact computation that
+    /// `decode_eob` carries out once it has obtained the EOB-multi symbol.
+    /// By calling it directly with a known symbol we can observe the precise
+    /// EOB position produced and confirm that:
+    ///
+    ///   * for symbols 0..=3 the result is fully determined by
+    ///     `EOB_GROUP_START` (the buggy and fixed paths coincide here);
+    ///   * for symbols 4..=11 the result corresponds to the *correct* extra-
+    ///     bits count (`from_symbol(s).extra_bits()`), proving the fix; the
+    ///     buggy `from_eob(s).extra_bits()` would have read fewer bits and
+    ///     yielded a smaller EOB.
+    ///
+    /// The reader is fed all-ones bytes so `read_literal(k)` deterministically
+    /// returns `(1 << k) - 1`. This makes the fixed-vs-buggy divergence
+    /// observable in the EOB *value* itself, not just in subsequent bit
+    /// consumption.
+    #[test]
+    fn test_finalize_eob_from_symbol_reads_correct_extra_bits() {
+        use super::super::coefficients::{EobPt, EOB_GROUP_START};
+
+        // For each legal symbol s ∈ 1..=11, the fixed decoder should produce:
+        //     eob = EOB_GROUP_START[s] + ((1 << extra_bits) - 1)
+        // where extra_bits = EobPt::from_symbol(s).extra_bits().
+        //
+        // The historically buggy decoder used EobPt::from_eob(s as u16)
+        // instead, which yields a *smaller* extra_bits count for s >= 4
+        // (e.g. s=4 → buggy extra=1 vs fixed extra=2), so on all-ones input
+        // the EOB value diverges. We assert the FIXED value and additionally
+        // assert it is strictly larger than what the bug would have produced.
+        for symbol in 1..=11usize {
+            // 64 bytes of 0xFF is enough for the largest extra_bits (9).
+            let data = vec![0xFFu8; 64];
+            let quant = create_test_quant_params();
+            let mut decoder = CoeffDecoder::new(data, quant, 8);
+
+            let eob = decoder
+                .finalize_eob_from_symbol(symbol)
+                .expect("legal symbol must succeed");
+
+            let fixed_extra_bits = EobPt::from_symbol(symbol)
+                .expect("legal symbol")
+                .extra_bits();
+            let expected_extra: u16 = if fixed_extra_bits == 0 {
+                0
+            } else {
+                (1u16 << fixed_extra_bits) - 1
+            };
+            let expected_eob = EOB_GROUP_START[symbol] + expected_extra;
+            assert_eq!(
+                eob, expected_eob,
+                "symbol {symbol}: fixed decoder must read {fixed_extra_bits} \
+                 extra bits (all 1s → {expected_extra}) and produce \
+                 EOB_GROUP_START[{symbol}]+{expected_extra}={expected_eob}",
+            );
+
+            // Divergence check vs. the original bug.
+            let buggy_extra_bits = EobPt::from_eob(symbol as u16).extra_bits();
+            if symbol >= 4 {
+                // For s>=4 the buggy decoder reads fewer extra bits, so the
+                // EOB it would compute is strictly smaller.
+                let buggy_extra: u16 = if buggy_extra_bits == 0 {
+                    0
+                } else {
+                    (1u16 << buggy_extra_bits) - 1
+                };
+                let buggy_eob = EOB_GROUP_START[symbol] + buggy_extra;
+                assert!(
+                    eob > buggy_eob,
+                    "symbol {symbol}: fixed eob {eob} must exceed buggy eob \
+                     {buggy_eob} (proves the regression test discriminates)",
+                );
+            } else {
+                // For s<=3 the two paths produce identical EobPt classes.
+                assert_eq!(
+                    fixed_extra_bits, buggy_extra_bits,
+                    "symbol {symbol} (<=3): fixed and buggy extra_bits must \
+                     coincide",
+                );
+            }
+        }
+    }
+
+    /// Regression: symbol 0 means "no coefficients" and must return EOB = 0
+    /// without consuming any extra bits from the bit window.
+    #[test]
+    fn test_finalize_eob_from_symbol_zero_returns_zero() {
+        let data = vec![0xFFu8; 16];
+        let quant = create_test_quant_params();
+        let mut decoder = CoeffDecoder::new(data, quant, 8);
+
+        let eob = decoder
+            .finalize_eob_from_symbol(0)
+            .expect("symbol 0 always succeeds");
+        assert_eq!(eob, 0, "symbol 0 must short-circuit to EOB = 0");
+    }
+
+    /// Regression: the 16-symbol EOB-multi CDF can in principle emit symbols
+    /// 12..15 on a malformed bitstream. Those must surface as decoder errors,
+    /// not silent saturation that would corrupt subsequent reads.
+    #[test]
+    fn test_finalize_eob_from_symbol_rejects_out_of_range() {
+        let data = vec![0xFFu8; 16];
+        let quant = create_test_quant_params();
+        let mut decoder = CoeffDecoder::new(data, quant, 8);
+
+        for bad_symbol in 12..=15usize {
+            let err = decoder
+                .finalize_eob_from_symbol(bad_symbol)
+                .expect_err("symbols >=12 must be rejected");
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("EOB-multi"),
+                "error message should mention EOB-multi: {msg}",
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Regression tests: CoeffEncoder::pos_to_rowcol non-square TX blocks
+    // -------------------------------------------------------------------------
+    //
+    // Before the fix, width was derived as `(slice.len() as f64).sqrt() as
+    // usize`, which is only correct for square TX sizes.  For any non-square
+    // TX size the sqrt of the total coefficient count does not equal the block
+    // width, producing wrong (row, col) pairs.  These tests verify that the
+    // fix (using `CoeffBuffer::width()`) gives correct results for several
+    // representative non-square sizes.
+
+    #[test]
+    fn test_pos_to_rowcol_tx4x8() {
+        // Tx4x8: width=4, height=8, 32 coefficients total.
+        // sqrt(32) ≈ 5 (wrong); correct width = 4.
+        let encoder = CoeffEncoder::new();
+        let buf = CoeffBuffer::from_tx_size(TxSize::Tx4x8);
+        assert_eq!(buf.width(), 4);
+        assert_eq!(buf.height(), 8);
+
+        assert_eq!(encoder.pos_to_rowcol(0, &buf), (0, 0), "pos 0 -> (0,0)");
+        assert_eq!(encoder.pos_to_rowcol(3, &buf), (0, 3), "pos 3 -> (0,3)");
+        assert_eq!(encoder.pos_to_rowcol(4, &buf), (1, 0), "pos 4 -> (1,0)");
+        assert_eq!(encoder.pos_to_rowcol(7, &buf), (1, 3), "pos 7 -> (1,3)");
+    }
+
+    #[test]
+    fn test_pos_to_rowcol_tx8x4() {
+        // Tx8x4: width=8, height=4, 32 coefficients total.
+        // sqrt(32) ≈ 5 (wrong); correct width = 8.
+        let encoder = CoeffEncoder::new();
+        let buf = CoeffBuffer::from_tx_size(TxSize::Tx8x4);
+        assert_eq!(buf.width(), 8);
+        assert_eq!(buf.height(), 4);
+
+        assert_eq!(encoder.pos_to_rowcol(9, &buf), (1, 1), "pos 9 -> (1,1)");
+        assert_eq!(encoder.pos_to_rowcol(0, &buf), (0, 0), "pos 0 -> (0,0)");
+        assert_eq!(encoder.pos_to_rowcol(7, &buf), (0, 7), "pos 7 -> (0,7)");
+        assert_eq!(encoder.pos_to_rowcol(8, &buf), (1, 0), "pos 8 -> (1,0)");
+    }
+
+    #[test]
+    fn test_pos_to_rowcol_tx4x16() {
+        // Tx4x16: width=4, height=16, 64 coefficients total.
+        // sqrt(64) = 8 (wrong); correct width = 4.
+        let encoder = CoeffEncoder::new();
+        let buf = CoeffBuffer::from_tx_size(TxSize::Tx4x16);
+        assert_eq!(buf.width(), 4);
+        assert_eq!(buf.height(), 16);
+
+        assert_eq!(encoder.pos_to_rowcol(17, &buf), (4, 1), "pos 17 -> (4,1)");
+        assert_eq!(encoder.pos_to_rowcol(0, &buf), (0, 0), "pos 0 -> (0,0)");
+        assert_eq!(encoder.pos_to_rowcol(3, &buf), (0, 3), "pos 3 -> (0,3)");
+        assert_eq!(encoder.pos_to_rowcol(4, &buf), (1, 0), "pos 4 -> (1,0)");
+    }
+
+    #[test]
+    fn test_pos_to_rowcol_square_unchanged() {
+        // Tx4x4: width=4, height=4. Both old and new logic agree, confirming no
+        // regression for square sizes.
+        let encoder = CoeffEncoder::new();
+        let buf = CoeffBuffer::from_tx_size(TxSize::Tx4x4);
+        assert_eq!(buf.width(), 4);
+        assert_eq!(buf.height(), 4);
+
+        for pos in 0..16usize {
+            let (row, col) = encoder.pos_to_rowcol(pos, &buf);
+            assert_eq!(row, pos / 4, "Tx4x4 pos {pos}: row mismatch");
+            assert_eq!(col, pos % 4, "Tx4x4 pos {pos}: col mismatch");
+        }
     }
 }

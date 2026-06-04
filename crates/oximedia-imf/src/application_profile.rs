@@ -2,12 +2,141 @@
 //!
 //! Application profiles constrain the IMF package to a specific set of
 //! allowed essence types and parameters for a given delivery platform.
+//!
+//! This module provides two levels of application profile:
+//! - [`ApplicationProfile`]: SMPTE standard application profiles (App2, App4, App7, etc.)
+//! - [`ImfApplicationProfile`]: Vendor/platform-specific delivery profiles (Netflix App 2.1,
+//!   Disney DECE, etc.) which impose additional constraints on top of the SMPTE baseline.
 
 use std::collections::HashMap;
 
+/// Vendor-specific IMF delivery profiles with platform constraints.
+///
+/// These profiles represent delivery requirements imposed by major platforms on
+/// top of the underlying SMPTE App2/App7 baseline. Each platform defines
+/// allowed codecs, maximum resolutions, audio channel limits, and HDR metadata
+/// requirements.
+///
+/// # Specifications
+/// - Netflix App 2 / App 2E: <https://partnerhelp.netflixstudios.com/hc/en-us/articles/360000579368>
+/// - Netflix App 2.1: adds JPEG XL and 8K support (internal spec rev 2024-Q3)
+/// - Disney DECE: DECE (Digital Entertainment Content Ecosystem) SD/HD profile
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ImfApplicationProfile {
+    /// Netflix IMF Application #2 — JPEG 2000 up to 4K, 16-ch audio.
+    NetflixApp2,
+    /// Netflix IMF Application #2 Extended — extended bit-depth constraints.
+    NetflixApp2E,
+    /// Netflix IMF Application #2.1 — adds JPEG XL, 8K (7680×4320), Dolby Vision RPU.
+    NetflixApp2_1,
+    /// Disney DECE (Digital Entertainment Content Ecosystem) — HD/SD profile.
+    DisneyDece,
+    /// Sony IMF Application profile.
+    SonyApp,
+    /// Warner Bros. IMF Application profile.
+    WbApp,
+    /// Custom vendor profile identified by a URN string.
+    Custom(String),
+}
+
+impl ImfApplicationProfile {
+    /// Returns the maximum allowed picture resolution `(width, height)`.
+    ///
+    /// # Examples
+    /// ```
+    /// use oximedia_imf::application_profile::ImfApplicationProfile;
+    /// assert_eq!(ImfApplicationProfile::NetflixApp2_1.max_resolution(), (7680, 4320));
+    /// ```
+    #[must_use]
+    pub fn max_resolution(&self) -> (u32, u32) {
+        match self {
+            Self::NetflixApp2_1 => (7680, 4320),
+            Self::NetflixApp2 | Self::NetflixApp2E => (3840, 2160),
+            Self::DisneyDece => (1920, 1080),
+            Self::SonyApp => (3840, 2160),
+            Self::WbApp => (3840, 2160),
+            Self::Custom(_) => (u32::MAX, u32::MAX),
+        }
+    }
+
+    /// Returns `true` if this profile permits JPEG XL (ISO 18181) as the picture codec.
+    ///
+    /// Netflix App 2.1 is the first major delivery profile to allow JPEG XL alongside
+    /// the traditional JPEG 2000. Earlier profiles (App 2, App 2E) require JPEG 2000.
+    ///
+    /// # Examples
+    /// ```
+    /// use oximedia_imf::application_profile::ImfApplicationProfile;
+    /// assert!(ImfApplicationProfile::NetflixApp2_1.allows_jpeg_xl());
+    /// assert!(!ImfApplicationProfile::NetflixApp2.allows_jpeg_xl());
+    /// ```
+    #[must_use]
+    pub fn allows_jpeg_xl(&self) -> bool {
+        matches!(self, Self::NetflixApp2_1)
+    }
+
+    /// Returns `true` if HDR content in this profile requires a Dolby Vision RPU track.
+    ///
+    /// Netflix App 2.1 mandates that any HDR deliverable must carry a Dolby Vision
+    /// Reference Processing Unit (RPU) metadata track in addition to the base HDR10
+    /// static metadata.
+    ///
+    /// # Examples
+    /// ```
+    /// use oximedia_imf::application_profile::ImfApplicationProfile;
+    /// assert!(ImfApplicationProfile::NetflixApp2_1.requires_dolby_vision_rpu_for_hdr());
+    /// assert!(!ImfApplicationProfile::DisneyDece.requires_dolby_vision_rpu_for_hdr());
+    /// ```
+    #[must_use]
+    pub fn requires_dolby_vision_rpu_for_hdr(&self) -> bool {
+        matches!(self, Self::NetflixApp2_1)
+    }
+
+    /// Returns the maximum number of discrete audio channels permitted.
+    ///
+    /// # Examples
+    /// ```
+    /// use oximedia_imf::application_profile::ImfApplicationProfile;
+    /// assert_eq!(ImfApplicationProfile::NetflixApp2.max_audio_channels(), 16);
+    /// assert_eq!(ImfApplicationProfile::DisneyDece.max_audio_channels(), 8);
+    /// ```
+    #[must_use]
+    pub fn max_audio_channels(&self) -> u32 {
+        match self {
+            Self::NetflixApp2 | Self::NetflixApp2E | Self::NetflixApp2_1 => 16,
+            Self::DisneyDece => 8,
+            Self::SonyApp => 16,
+            Self::WbApp => 16,
+            Self::Custom(_) => u32::MAX,
+        }
+    }
+
+    /// Returns a human-readable label for this profile.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        match self {
+            Self::NetflixApp2 => "Netflix IMF App 2",
+            Self::NetflixApp2E => "Netflix IMF App 2E",
+            Self::NetflixApp2_1 => "Netflix IMF App 2.1",
+            Self::DisneyDece => "Disney DECE",
+            Self::SonyApp => "Sony IMF App",
+            Self::WbApp => "Warner Bros. IMF App",
+            Self::Custom(s) => s.as_str(),
+        }
+    }
+
+    /// Returns `true` if this profile supports 16-bit picture bit depth.
+    ///
+    /// Netflix App 2.1 explicitly adds support for 16-bit depth in addition
+    /// to the standard 8- and 12-bit depths of App 2.
+    #[must_use]
+    pub fn supports_16bit_depth(&self) -> bool {
+        matches!(self, Self::NetflixApp2_1)
+    }
+}
+
 /// IMF Application Profile identifiers per SMPTE ST 2067-x
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[allow(dead_code)]
 pub enum ApplicationProfile {
     /// App #2 - IMF Application #2 (JPEG 2000, SMPTE ST 2067-21)
     App2,
@@ -43,7 +172,6 @@ impl ApplicationProfile {
 
 /// Constraints for IMF Application #2 per SMPTE ST 2067-21
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct App2Constraints {
     /// Maximum allowed resolution (width, height)
     pub max_resolution: (u32, u32),
@@ -67,7 +195,6 @@ impl App2Constraints {
 
 /// Essence types allowed in IMF packages
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum EssenceType {
     /// MXF-wrapped JPEG 2000
     MxfJpeg2000,
@@ -109,7 +236,6 @@ impl EssenceType {
 
 /// Validates CPL essence types against an application profile
 #[derive(Debug, Default)]
-#[allow(dead_code)]
 pub struct ProfileValidator;
 
 impl ProfileValidator {
@@ -160,7 +286,6 @@ fn parse_essence_type(s: &str) -> Option<EssenceType> {
 
 /// Metadata describing an IMF application profile instance
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ApplicationMetadata {
     /// The application profile
     pub profile: ApplicationProfile,
@@ -302,5 +427,128 @@ mod tests {
             Some(EssenceType::MxfJpeg2000)
         );
         assert_eq!(parse_essence_type("unknown_type"), None);
+    }
+
+    // ---- ImfApplicationProfile tests ----
+
+    #[test]
+    fn test_netflix_app_2_1_allows_jpeg_xl() {
+        assert!(
+            ImfApplicationProfile::NetflixApp2_1.allows_jpeg_xl(),
+            "Netflix App 2.1 must allow JPEG XL"
+        );
+    }
+
+    #[test]
+    fn test_netflix_app_2_jpeg_xl() {
+        assert!(
+            !ImfApplicationProfile::NetflixApp2.allows_jpeg_xl(),
+            "Netflix App 2 must NOT allow JPEG XL (JPEG 2000 only)"
+        );
+        assert!(
+            !ImfApplicationProfile::NetflixApp2E.allows_jpeg_xl(),
+            "Netflix App 2E must NOT allow JPEG XL"
+        );
+    }
+
+    #[test]
+    fn test_disney_dece_max_resolution() {
+        // DECE HD/SD profile caps at 1920×1080
+        assert_eq!(
+            ImfApplicationProfile::DisneyDece.max_resolution(),
+            (1920, 1080),
+            "Disney DECE max resolution must be 1920×1080"
+        );
+    }
+
+    #[test]
+    fn test_profile_hdr_requirement() {
+        assert!(
+            ImfApplicationProfile::NetflixApp2_1.requires_dolby_vision_rpu_for_hdr(),
+            "Netflix App 2.1 must require Dolby Vision RPU for HDR"
+        );
+        assert!(
+            !ImfApplicationProfile::NetflixApp2.requires_dolby_vision_rpu_for_hdr(),
+            "Netflix App 2 does not require DV RPU"
+        );
+        assert!(
+            !ImfApplicationProfile::DisneyDece.requires_dolby_vision_rpu_for_hdr(),
+            "Disney DECE does not require DV RPU"
+        );
+    }
+
+    #[test]
+    fn test_netflix_app_2_1_max_resolution() {
+        assert_eq!(
+            ImfApplicationProfile::NetflixApp2_1.max_resolution(),
+            (7680, 4320),
+            "Netflix App 2.1 must support 8K resolution"
+        );
+    }
+
+    #[test]
+    fn test_netflix_app_2_max_resolution() {
+        assert_eq!(
+            ImfApplicationProfile::NetflixApp2.max_resolution(),
+            (3840, 2160),
+            "Netflix App 2 max resolution must be 4K"
+        );
+    }
+
+    #[test]
+    fn test_audio_channels() {
+        assert_eq!(ImfApplicationProfile::NetflixApp2.max_audio_channels(), 16);
+        assert_eq!(
+            ImfApplicationProfile::NetflixApp2_1.max_audio_channels(),
+            16
+        );
+        assert_eq!(ImfApplicationProfile::DisneyDece.max_audio_channels(), 8);
+    }
+
+    #[test]
+    fn test_netflix_app_2_1_supports_16bit() {
+        assert!(
+            ImfApplicationProfile::NetflixApp2_1.supports_16bit_depth(),
+            "Netflix App 2.1 must support 16-bit depth"
+        );
+        assert!(
+            !ImfApplicationProfile::NetflixApp2.supports_16bit_depth(),
+            "Netflix App 2 does not support 16-bit depth"
+        );
+    }
+
+    #[test]
+    fn test_custom_profile() {
+        let custom = ImfApplicationProfile::Custom("urn:example:custom-app".to_string());
+        // Custom profiles have no hard limits
+        assert_eq!(custom.max_resolution(), (u32::MAX, u32::MAX));
+        assert_eq!(custom.max_audio_channels(), u32::MAX);
+        assert!(!custom.allows_jpeg_xl());
+        assert!(!custom.requires_dolby_vision_rpu_for_hdr());
+        assert_eq!(custom.label(), "urn:example:custom-app");
+    }
+
+    #[test]
+    fn test_imf_profile_label() {
+        assert_eq!(
+            ImfApplicationProfile::NetflixApp2.label(),
+            "Netflix IMF App 2"
+        );
+        assert_eq!(
+            ImfApplicationProfile::NetflixApp2_1.label(),
+            "Netflix IMF App 2.1"
+        );
+        assert_eq!(ImfApplicationProfile::DisneyDece.label(), "Disney DECE");
+    }
+
+    #[test]
+    fn test_profile_equality_and_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(ImfApplicationProfile::NetflixApp2);
+        set.insert(ImfApplicationProfile::NetflixApp2_1);
+        set.insert(ImfApplicationProfile::DisneyDece);
+        set.insert(ImfApplicationProfile::NetflixApp2); // duplicate
+        assert_eq!(set.len(), 3, "HashSet should deduplicate equal profiles");
     }
 }

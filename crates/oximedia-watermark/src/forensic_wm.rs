@@ -185,8 +185,8 @@ mod tests {
     fn test_embed_correlation_positive() {
         let img = vec![128u8; 256 * 64];
         let user_id: u64 = 0xCAFE_BABE_0000_0001;
-        let watermarked = ForensicWatermark::embed_user_id(&img, 256, 64, user_id)
-            .expect("embed should succeed");
+        let watermarked =
+            ForensicWatermark::embed_user_id(&img, 256, 64, user_id).expect("embed should succeed");
         let score = ForensicWatermark::correlate(&watermarked, 256, 64, user_id)
             .expect("correlate should succeed");
         let threshold = ForensicWatermark::detection_threshold();
@@ -203,8 +203,7 @@ mod tests {
         let attacker: u64 = 0xAAAA_BBBB_CCCC_DDDD;
         let watermarked =
             ForensicWatermark::embed_user_id(&img, 128, 128, owner).expect("embed should succeed");
-        let owner_score =
-            ForensicWatermark::correlate(&watermarked, 128, 128, owner).expect("ok");
+        let owner_score = ForensicWatermark::correlate(&watermarked, 128, 128, owner).expect("ok");
         let attacker_score =
             ForensicWatermark::correlate(&watermarked, 128, 128, attacker).expect("ok");
         assert!(
@@ -223,8 +222,8 @@ mod tests {
     #[test]
     fn test_pixel_values_clamped() {
         let img = vec![255u8; 64 * 64];
-        let result = ForensicWatermark::embed_user_id(&img, 64, 64, u64::MAX)
-            .expect("should succeed");
+        let result =
+            ForensicWatermark::embed_user_id(&img, 64, 64, u64::MAX).expect("should succeed");
         // All pixels should be valid u8 values (clamped during embedding).
         assert!(!result.is_empty(), "result should not be empty");
     }

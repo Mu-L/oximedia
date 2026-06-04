@@ -32,17 +32,24 @@
 - [x] Add lock-free ring buffer in `utils::ring_buffer` for audio/video frame handoff between network and processing threads (implemented 2026-05-15; src/spsc_ring.rs: SpscRing<T: Copy+Send> backed by crossbeam::ArrayQueue; SPSC concurrent test passes; 205 lines)
 - [x] Optimize `color_space_conv` with SIMD for v210-to-planar and UYVY-to-planar conversion hot paths (implemented 2026-05-15; src/color_space_simd.rs: uyvy_to_planar_simd with SSSE3 dispatch, v210_to_planar scalar; all tests pass; 435 lines)
 - [x] Implement scatter/gather I/O (sendmmsg/recvmmsg) in UDP transport for reduced syscall overhead (implemented 2026-05-15; src/udp_scatter_gather.rs: UdpScatterGather::send_many with Linux sendmmsg and fallback loop; cfg-gated; tests pass; 299 lines)
-- [ ] Profile and optimize `frame_pacing` to use precise timer (mach_absolute_time on macOS) instead of sleep-based pacing
+- [x] Profile and optimize `frame_pacing` to use precise timer (mach_absolute_time on macOS) instead of sleep-based pacing (implemented 2026-06-01; src/frame_pacing.rs: PreciseClock struct with now_ns()+sleep_until_ns(); macOS mach_absolute_time via cfg-gated extern "C" + #[allow(unsafe_code)]; FramePacer::wait_for_next_frame() + next_deadline_ns field; 560 lines)
 
 ## Testing
-- [ ] Add network simulation tests for `congestion` control under varying latency/loss conditions
-- [ ] Test `fec` recovery with configurable packet loss patterns (burst, random, periodic)
+- [x] Add network simulation tests for `congestion` control under varying latency/loss conditions (implemented 2026-06-01; tests/network_sim.rs: test_congestion_cwnd_responds_to_rtt_spike, test_congestion_backs_off_on_loss; 13 tests total, all pass)
+- [x] Test `fec` recovery with configurable packet loss patterns (burst, random, periodic) (implemented 2026-06-01; tests/network_sim.rs: test_fec_recovery_burst_drop, test_fec_recovery_random_drop, test_fec_parity_count_matches_config)
 - [ ] Add integration test for full source->receiver round-trip with loopback UDP
 - [ ] Test `discovery` mDNS announcement and resolution with multiple concurrent sources
-- [ ] Benchmark `jitter` buffer at various network jitter levels (1ms, 5ms, 20ms, 50ms)
-- [ ] Test `stream_sync` lip-sync accuracy between audio and video streams under packet reordering
+- [x] Benchmark `jitter` buffer at various network jitter levels (1ms, 5ms, 20ms, 50ms) (implemented 2026-06-01; tests/network_sim.rs: test_jitter_buffer_adapts_to_higher_jitter, test_jitter_buffer_shrinks_after_stable_phase)
+- [x] Test `stream_sync` lip-sync accuracy between audio and video streams under packet reordering (implemented 2026-06-01; tests/network_sim.rs: test_stream_sync_gap_measurement, test_stream_sync_detects_excessive_av_gap, test_stream_sync_sequence_reorder_detection)
 
 ## Documentation
 - [ ] Document protocol wire format specification (packet header layout, control message types)
 - [ ] Add network configuration guide (firewall ports, multicast setup, bandwidth requirements per resolution)
 - [ ] Document SMPTE 2110 compatibility mapping between VideoIP types and ST 2110-20/30/40
+
+## 0.1.8 Wave 18 Slice F — 2026-06-01
+- [x] PreciseClock abstraction in frame_pacing: now_ns() via mach_absolute_time on macOS (cfg-gated extern "C" + #[allow(unsafe_code)]), SystemTime fallback on other platforms; sleep_until_ns() coarse-sleep + 200µs busy-wait tail; FramePacer::wait_for_next_frame() real-time blocking method; all 1066 tests pass, 0 warnings
+- [x] tests/network_sim.rs: 13 deterministic network simulation tests (PreciseClock monotonicity, FramePacer cadence+delay, CongestionController RTT spike + loss reaction, FEC burst/random drop recovery, JitterBuffer jitter adaptation, StreamSyncMonitor gap measurement + reorder detection)
+
+## 0.1.8 Wave 6 — 2026-05-29
+- [x] Register 22 orphan modules in lib.rs (verified 2026-05-29; 22 orphans wired, 22 smoke tests, 0 warnings)

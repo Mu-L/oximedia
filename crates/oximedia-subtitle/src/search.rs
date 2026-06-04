@@ -61,10 +61,7 @@ impl SubtitleSearcher {
     ///
     /// Useful when callers need both the position and the data.
     #[must_use]
-    pub fn find_with_context<'a>(
-        cues: &'a [CueEntry],
-        query: &str,
-    ) -> Vec<(usize, &'a CueEntry)> {
+    pub fn find_with_context<'a>(cues: &'a [CueEntry], query: &str) -> Vec<(usize, &'a CueEntry)> {
         if query.is_empty() {
             return Vec::new();
         }
@@ -116,7 +113,11 @@ mod tests {
     fn test_find_containing_case_insensitive() {
         let cues = sample_cues();
         let indices = SubtitleSearcher::find_containing(&cues, "hello");
-        assert_eq!(indices, vec![0, 2], "should find 'Hello world' and 'HELLO again'");
+        assert_eq!(
+            indices,
+            vec![0, 2],
+            "should find 'Hello world' and 'HELLO again'"
+        );
     }
 
     #[test]
@@ -168,6 +169,10 @@ mod tests {
     fn test_partial_word_match() {
         let cues = vec![make_cue("International Space Station")];
         let indices = SubtitleSearcher::find_containing(&cues, "nat");
-        assert_eq!(indices, vec![0], "should match partial word 'nat' in 'International'");
+        assert_eq!(
+            indices,
+            vec![0],
+            "should match partial word 'nat' in 'International'"
+        );
     }
 }

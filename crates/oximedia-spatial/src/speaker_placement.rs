@@ -716,7 +716,10 @@ mod tests {
         let (right_delay, right_gain) = result[1];
         assert!(left_delay > 0, "Closer speaker should be delayed");
         assert_eq!(right_delay, 0, "Farther speaker should have zero delay");
-        assert!(left_gain < right_gain, "Closer speaker should be attenuated");
+        assert!(
+            left_gain < right_gain,
+            "Closer speaker should be attenuated"
+        );
         Ok(())
     }
 
@@ -751,7 +754,10 @@ mod tests {
     #[test]
     fn test_great_circle_angle_same_point() {
         let angle = great_circle_angle(30.0, 0.0, 30.0, 0.0);
-        assert!(angle < 1e-4, "Same point should have zero angular deviation");
+        assert!(
+            angle < 1e-4,
+            "Same point should have zero angular deviation"
+        );
     }
 
     #[test]

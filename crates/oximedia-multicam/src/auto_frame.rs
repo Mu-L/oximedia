@@ -177,11 +177,7 @@ pub struct AutoFramer {
 
 impl AutoFramer {
     /// Create a new auto-framer for the given source dimensions.
-    pub fn new(
-        config: AutoFrameConfig,
-        source_width: u32,
-        source_height: u32,
-    ) -> Result<Self> {
+    pub fn new(config: AutoFrameConfig, source_width: u32, source_height: u32) -> Result<Self> {
         config.validate()?;
         if source_width == 0 || source_height == 0 {
             return Err(MultiCamError::ConfigError(
@@ -518,18 +514,12 @@ mod tests {
             format!("{}", FramingRule::CenterOnSubject),
             "CenterOnSubject"
         );
-        assert_eq!(
-            format!("{}", FramingRule::RuleOfThirds),
-            "RuleOfThirds"
-        );
+        assert_eq!(format!("{}", FramingRule::RuleOfThirds), "RuleOfThirds");
         assert_eq!(
             format!("{}", FramingRule::HeadroomPreserve),
             "HeadroomPreserve"
         );
-        assert_eq!(
-            format!("{}", FramingRule::FollowMotion),
-            "FollowMotion"
-        );
+        assert_eq!(format!("{}", FramingRule::FollowMotion), "FollowMotion");
     }
 
     #[test]

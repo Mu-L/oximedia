@@ -368,10 +368,9 @@ impl SenderReport {
     pub fn encode(&self) -> Vec<u8> {
         let rc = self.report_blocks.len() as u8;
         // payload = ssrc(4) + ntp(8) + rtp_ts(4) + pkt_cnt(4) + oct_cnt(4) + rc*24
-        let payload_words =
-            (Self::SENDER_INFO_SIZE + rc as usize * ReportBlock::WIRE_SIZE) / 4 + 1; // +1 for SSRC word before ntp
-        // Actually the length field counts 32-bit words MINUS ONE.
-        // Payload after common header: ssrc(1w) + sender info(5w) + rc*6w
+        let payload_words = (Self::SENDER_INFO_SIZE + rc as usize * ReportBlock::WIRE_SIZE) / 4 + 1; // +1 for SSRC word before ntp
+                                                                                                     // Actually the length field counts 32-bit words MINUS ONE.
+                                                                                                     // Payload after common header: ssrc(1w) + sender info(5w) + rc*6w
         let length_field = (1 + 5 + rc as usize * 6) as u16;
 
         let mut buf = Vec::with_capacity(4 + payload_words * 4);
@@ -668,15 +667,14 @@ mod tests {
         let mut buf = Vec::new();
         ts.write_to(&mut buf);
         assert_eq!(buf.len(), 8);
-        let ts2 = NtpTimestamp::read_from(&buf)
-            .expect("buffer is 8 bytes, exactly NTP size");
+        let ts2 = NtpTimestamp::read_from(&buf).expect("buffer is 8 bytes, exactly NTP size");
         assert_eq!(ts, ts2);
     }
 
     #[test]
     fn test_ntp_read_too_short() {
-        let err = NtpTimestamp::read_from(&[0u8; 4])
-            .expect_err("4 bytes is shorter than NTP 8 bytes");
+        let err =
+            NtpTimestamp::read_from(&[0u8; 4]).expect_err("4 bytes is shorter than NTP 8 bytes");
         assert!(matches!(err, VideoIpError::InvalidPacket(_)));
     }
 
@@ -689,8 +687,8 @@ mod tests {
             fraction: 0,
         };
         // delta = 0 ⟹ same timestamp
-        let result = rtp_to_ntp(1000, 1000, anchor_ntp, 90_000)
-            .expect("valid clock rate and timestamps");
+        let result =
+            rtp_to_ntp(1000, 1000, anchor_ntp, 90_000).expect("valid clock rate and timestamps");
         assert_eq!(result, anchor_ntp);
     }
 
@@ -710,8 +708,7 @@ mod tests {
     #[test]
     fn test_rtp_to_ntp_zero_clock_rate_error() {
         let anchor = NtpTimestamp::default();
-        let err = rtp_to_ntp(0, 0, anchor, 0)
-            .expect_err("zero clock rate must fail");
+        let err = rtp_to_ntp(0, 0, anchor, 0).expect_err("zero clock rate must fail");
         assert!(matches!(err, VideoIpError::InvalidState(_)));
     }
 
@@ -748,8 +745,7 @@ mod tests {
         let mut buf = Vec::new();
         block.write_to(&mut buf);
         assert_eq!(buf.len(), ReportBlock::WIRE_SIZE);
-        let block2 = ReportBlock::read_from(&buf)
-            .expect("buffer holds a valid ReportBlock");
+        let block2 = ReportBlock::read_from(&buf).expect("buffer holds a valid ReportBlock");
         assert_eq!(block, block2);
     }
 
@@ -764,8 +760,7 @@ mod tests {
         let sr = SenderReport::new(0x1234_5678, ntp, 90000, 600, 1_200_000, vec![])
             .expect("valid SR with no report blocks");
         let encoded = sr.encode();
-        let decoded = SenderReport::decode(&encoded)
-            .expect("encoded SR is valid");
+        let decoded = SenderReport::decode(&encoded).expect("encoded SR is valid");
         assert_eq!(decoded.ssrc, sr.ssrc);
         assert_eq!(decoded.ntp_timestamp, sr.ntp_timestamp);
         assert_eq!(decoded.rtp_timestamp, sr.rtp_timestamp);
@@ -789,11 +784,16 @@ mod tests {
             last_sr: 0x0000_1234,
             delay_since_last_sr: 1024,
         };
-        let sr =
-            SenderReport::new(0xABCD_EF01, ntp, 180000, 1200, 2_400_000, vec![block.clone()])
-                .expect("valid SR with one report block");
-        let decoded = SenderReport::decode(&sr.encode())
-            .expect("encoded SR is valid");
+        let sr = SenderReport::new(
+            0xABCD_EF01,
+            ntp,
+            180000,
+            1200,
+            2_400_000,
+            vec![block.clone()],
+        )
+        .expect("valid SR with one report block");
+        let decoded = SenderReport::decode(&sr.encode()).expect("encoded SR is valid");
         assert_eq!(decoded.report_blocks.len(), 1);
         assert_eq!(decoded.report_blocks[0], block);
     }
@@ -831,8 +831,7 @@ mod tests {
         let rr = ReceiverReport::new(0x5555_6666, vec![block.clone()])
             .expect("valid RR with one report block");
         let encoded = rr.encode();
-        let decoded = ReceiverReport::decode(&encoded)
-            .expect("encoded RR is valid");
+        let decoded = ReceiverReport::decode(&encoded).expect("encoded RR is valid");
         assert_eq!(decoded.ssrc, rr.ssrc);
         assert_eq!(decoded.report_blocks.len(), 1);
         assert_eq!(decoded.report_blocks[0], block);
@@ -846,14 +845,12 @@ mod tests {
             seconds: 3_900_000_002,
             fraction: 0,
         };
-        let sr = SenderReport::new(0xAAAA_AAAA, ntp, 0, 0, 0, vec![])
-            .expect("valid SR with no blocks");
-        let rr = ReceiverReport::new(0xBBBB_BBBB, vec![])
-            .expect("valid RR with no blocks");
+        let sr =
+            SenderReport::new(0xAAAA_AAAA, ntp, 0, 0, 0, vec![]).expect("valid SR with no blocks");
+        let rr = ReceiverReport::new(0xBBBB_BBBB, vec![]).expect("valid RR with no blocks");
         let mut compound = sr.encode();
         compound.extend_from_slice(&rr.encode());
-        let packets = parse_compound_rtcp(&compound)
-            .expect("compound RTCP is valid");
+        let packets = parse_compound_rtcp(&compound).expect("compound RTCP is valid");
         assert_eq!(packets.len(), 2);
         assert!(matches!(packets[0], RtcpPacket::Sr(_)));
         assert!(matches!(packets[1], RtcpPacket::Rr(_)));
@@ -865,7 +862,7 @@ mod tests {
         let mut buf = vec![0u8; 28];
         buf[0] = (1u8 << 6) | 0; // V=1, P=0, RC=0
         buf[1] = 200; // PT=SR
-        // length = 6 (28 bytes total = 7 words, length field = 7 - 1 = 6)
+                      // length = 6 (28 bytes total = 7 words, length field = 7 - 1 = 6)
         buf[2] = 0;
         buf[3] = 6;
         assert!(SenderReport::decode(&buf).is_err());

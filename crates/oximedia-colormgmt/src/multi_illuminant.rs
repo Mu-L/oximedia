@@ -66,16 +66,16 @@ pub enum Illuminant {
 #[must_use]
 pub fn illuminant_xyz(illuminant: Illuminant) -> [f64; 3] {
     match illuminant {
-        Illuminant::A   => [1.09850, 1.00000, 0.35585],
-        Illuminant::B   => [0.99072, 1.00000, 0.85223],
-        Illuminant::C   => [0.98074, 1.00000, 1.18232],
+        Illuminant::A => [1.09850, 1.00000, 0.35585],
+        Illuminant::B => [0.99072, 1.00000, 0.85223],
+        Illuminant::C => [0.98074, 1.00000, 1.18232],
         Illuminant::D50 => [0.96422, 1.00000, 0.82521],
         Illuminant::D55 => [0.95682, 1.00000, 0.92149],
         Illuminant::D65 => [0.95047, 1.00000, 1.08883],
         Illuminant::D75 => [0.94972, 1.00000, 1.22638],
-        Illuminant::E   => [1.00000, 1.00000, 1.00000],
-        Illuminant::F2  => [0.99186, 1.00000, 0.67393],
-        Illuminant::F7  => [0.95041, 1.00000, 1.08747],
+        Illuminant::E => [1.00000, 1.00000, 1.00000],
+        Illuminant::F2 => [0.99186, 1.00000, 0.67393],
+        Illuminant::F7 => [0.95041, 1.00000, 1.08747],
         Illuminant::F11 => [1.00962, 1.00000, 0.64350],
         Illuminant::D60 => [0.95265, 1.00000, 1.00883],
     }
@@ -85,16 +85,16 @@ pub fn illuminant_xyz(illuminant: Illuminant) -> [f64; 3] {
 #[must_use]
 pub fn illuminant_cct(illuminant: Illuminant) -> f64 {
     match illuminant {
-        Illuminant::A   => 2856.0,
-        Illuminant::B   => 4874.0,
-        Illuminant::C   => 6774.0,
+        Illuminant::A => 2856.0,
+        Illuminant::B => 4874.0,
+        Illuminant::C => 6774.0,
         Illuminant::D50 => 5003.0,
         Illuminant::D55 => 5503.0,
         Illuminant::D65 => 6504.0,
         Illuminant::D75 => 7504.0,
-        Illuminant::E   => 5455.0,
-        Illuminant::F2  => 4230.0,
-        Illuminant::F7  => 6500.0,
+        Illuminant::E => 5455.0,
+        Illuminant::F2 => 4230.0,
+        Illuminant::F7 => 6500.0,
         Illuminant::F11 => 4000.0,
         Illuminant::D60 => 6004.0,
     }
@@ -116,7 +116,9 @@ impl IlluminantBlend {
     /// Creates an empty blend.
     #[must_use]
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     /// Adds an illuminant with the given weight (clamped to [0, 1]).
@@ -302,29 +304,29 @@ pub enum CatMethod {
 fn cat_forward_matrix(method: CatMethod) -> [[f64; 3]; 3] {
     match method {
         CatMethod::Bradford => [
-            [ 0.8951,  0.2664, -0.1614],
-            [-0.7502,  1.7135,  0.0367],
-            [ 0.0389, -0.0685,  1.0296],
+            [0.8951, 0.2664, -0.1614],
+            [-0.7502, 1.7135, 0.0367],
+            [0.0389, -0.0685, 1.0296],
         ],
         CatMethod::VonKries => [
-            [0.40024,  0.70760, -0.08081],
-            [-0.22630, 1.16532,  0.04570],
-            [0.00000,  0.00000,  0.91822],
+            [0.40024, 0.70760, -0.08081],
+            [-0.22630, 1.16532, 0.04570],
+            [0.00000, 0.00000, 0.91822],
         ],
         CatMethod::Cat02 => [
-            [ 0.7328,  0.4296, -0.1624],
-            [-0.7036,  1.6975,  0.0061],
-            [ 0.0030,  0.0136,  0.9834],
+            [0.7328, 0.4296, -0.1624],
+            [-0.7036, 1.6975, 0.0061],
+            [0.0030, 0.0136, 0.9834],
         ],
         CatMethod::Sharp => [
-            [ 1.2694, -0.0988, -0.1706],
-            [-0.8364,  1.8006,  0.0357],
-            [ 0.0297, -0.0315,  1.0018],
+            [1.2694, -0.0988, -0.1706],
+            [-0.8364, 1.8006, 0.0357],
+            [0.0297, -0.0315, 1.0018],
         ],
         CatMethod::CmcCat2000 => [
-            [ 0.7982,  0.3389, -0.1371],
-            [-0.5918,  1.5512,  0.0406],
-            [ 0.0008,  0.0239,  0.9753],
+            [0.7982, 0.3389, -0.1371],
+            [-0.5918, 1.5512, 0.0406],
+            [0.0008, 0.0239, 0.9753],
         ],
     }
 }
@@ -358,9 +360,7 @@ fn mat3_inv(m: &[[f64; 3]; 3]) -> Result<[[f64; 3]; 3]> {
         + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
 
     if det.abs() < 1e-15 {
-        return Err(ColorError::Matrix(
-            "mat3_inv: matrix is singular".into(),
-        ));
+        return Err(ColorError::Matrix("mat3_inv: matrix is singular".into()));
     }
     let d = 1.0 / det;
     Ok([
@@ -407,11 +407,7 @@ impl MultiIlluminantCat {
     ///
     /// Returns [`ColorError::Matrix`] if the cone-space matrix or its inverse
     /// is singular (pathological inputs only).
-    pub fn from_xyz(
-        src_xyz: [f64; 3],
-        dst_xyz: [f64; 3],
-        method: CatMethod,
-    ) -> Result<Self> {
+    pub fn from_xyz(src_xyz: [f64; 3], dst_xyz: [f64; 3], method: CatMethod) -> Result<Self> {
         let fwd = cat_forward_matrix(method);
         let inv = mat3_inv(&fwd)?;
 
@@ -420,17 +416,18 @@ impl MultiIlluminantCat {
         let dst_lms = mat3_mul_vec(&fwd, dst_xyz);
 
         // Build diagonal gain matrix
-        let diag = if src_lms[0].abs() < 1e-12 || src_lms[1].abs() < 1e-12 || src_lms[2].abs() < 1e-12 {
-            return Err(ColorError::Matrix(
-                "MultiIlluminantCat: source LMS has near-zero component".into(),
-            ));
-        } else {
-            [
-                [dst_lms[0] / src_lms[0], 0.0, 0.0],
-                [0.0, dst_lms[1] / src_lms[1], 0.0],
-                [0.0, 0.0, dst_lms[2] / src_lms[2]],
-            ]
-        };
+        let diag =
+            if src_lms[0].abs() < 1e-12 || src_lms[1].abs() < 1e-12 || src_lms[2].abs() < 1e-12 {
+                return Err(ColorError::Matrix(
+                    "MultiIlluminantCat: source LMS has near-zero component".into(),
+                ));
+            } else {
+                [
+                    [dst_lms[0] / src_lms[0], 0.0, 0.0],
+                    [0.0, dst_lms[1] / src_lms[1], 0.0],
+                    [0.0, 0.0, dst_lms[2] / src_lms[2]],
+                ]
+            };
 
         // Full matrix: M_inv * D * M
         let dm = mat3_mul(&diag, &fwd);
@@ -444,11 +441,7 @@ impl MultiIlluminantCat {
     /// # Errors
     ///
     /// Propagates errors from [`Self::from_xyz`].
-    pub fn from_illuminants(
-        src: Illuminant,
-        dst: Illuminant,
-        method: CatMethod,
-    ) -> Result<Self> {
+    pub fn from_illuminants(src: Illuminant, dst: Illuminant, method: CatMethod) -> Result<Self> {
         Self::from_xyz(illuminant_xyz(src), illuminant_xyz(dst), method)
     }
 
@@ -703,7 +696,7 @@ mod tests {
     #[test]
     fn blend_composite_cct_between_extremes() {
         let mut blend = IlluminantBlend::new();
-        blend.add(Illuminant::A, 1.0);   // ~2856 K
+        blend.add(Illuminant::A, 1.0); // ~2856 K
         blend.add(Illuminant::D75, 1.0); // ~7504 K
         let cct = blend.composite_cct().unwrap();
         assert!(cct > 2856.0 && cct < 7504.0, "cct={cct}");
@@ -737,12 +730,9 @@ mod tests {
     #[test]
     fn cat_identity_when_src_eq_dst() {
         for method in [CatMethod::Bradford, CatMethod::Cat02, CatMethod::Sharp] {
-            let cat = MultiIlluminantCat::from_illuminants(
-                Illuminant::D65,
-                Illuminant::D65,
-                method,
-            )
-            .unwrap();
+            let cat =
+                MultiIlluminantCat::from_illuminants(Illuminant::D65, Illuminant::D65, method)
+                    .unwrap();
 
             let xyz = [0.5, 0.6, 0.7];
             let adapted = cat.adapt(xyz);
@@ -761,8 +751,8 @@ mod tests {
     fn cat_from_blend_d50_d65_adapts_white() {
         let mut blend = IlluminantBlend::new();
         blend.add(Illuminant::D50, 1.0);
-        let cat = MultiIlluminantCat::from_blend(&blend, Illuminant::D65, CatMethod::Bradford)
-            .unwrap();
+        let cat =
+            MultiIlluminantCat::from_blend(&blend, Illuminant::D65, CatMethod::Bradford).unwrap();
 
         // D50 white adapted to D65 should be close to D65 white
         let d50_xyz = illuminant_xyz(Illuminant::D50);
@@ -783,8 +773,7 @@ mod tests {
 
     #[test]
     fn sequence_alpha1_is_no_smoothing() {
-        let mut seq =
-            IlluminantSequence::new(illuminant_xyz(Illuminant::D50), 1.0).unwrap();
+        let mut seq = IlluminantSequence::new(illuminant_xyz(Illuminant::D50), 1.0).unwrap();
         let new_xyz = illuminant_xyz(Illuminant::D65);
         let result = seq.update(new_xyz);
         for i in 0..3 {

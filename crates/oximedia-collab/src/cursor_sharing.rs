@@ -779,9 +779,21 @@ mod tests {
         map.register("b", "B", "#2", ms(0));
         map.register("c", "C", "#3", ms(0));
 
-        map.apply_event(CursorEvent::moved("a", CursorPosition::new(100.0, 0.0), ms(1)));
-        map.apply_event(CursorEvent::moved("b", CursorPosition::new(110.0, 0.0), ms(1)));
-        map.apply_event(CursorEvent::moved("c", CursorPosition::new(500.0, 0.0), ms(1)));
+        map.apply_event(CursorEvent::moved(
+            "a",
+            CursorPosition::new(100.0, 0.0),
+            ms(1),
+        ));
+        map.apply_event(CursorEvent::moved(
+            "b",
+            CursorPosition::new(110.0, 0.0),
+            ms(1),
+        ));
+        map.apply_event(CursorEvent::moved(
+            "c",
+            CursorPosition::new(500.0, 0.0),
+            ms(1),
+        ));
 
         let near = map.users_near_frame(105.0, 20.0);
         assert_eq!(near.len(), 2);

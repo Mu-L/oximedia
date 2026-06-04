@@ -81,14 +81,14 @@ impl MetadataFingerprint {
         for (key, value) in pairs {
             // Hash the pair as "key\x00value" to avoid key="a", value="bcd"
             // colliding with key="ab", value="cd".
-            let pair_hash = fnv1a_64(
-                &[key.as_bytes(), &[0u8], value.as_bytes()].concat(),
-            );
+            let pair_hash = fnv1a_64(&[key.as_bytes(), &[0u8], value.as_bytes()].concat());
             // XOR accumulation → order-independent
             combined ^= pair_hash;
         }
         // Final mixing
-        Self { raw: mix64(combined) }
+        Self {
+            raw: mix64(combined),
+        }
     }
 
     /// Create a fingerprint from a `HashMap<String, String>`.
@@ -108,7 +108,9 @@ impl MetadataFingerprint {
 
     /// Combine two fingerprints using XOR + mixing (for hierarchical fingerprinting).
     pub fn combine(&self, other: &Self) -> Self {
-        Self { raw: mix64(self.raw ^ other.raw) }
+        Self {
+            raw: mix64(self.raw ^ other.raw),
+        }
     }
 }
 
@@ -135,16 +137,16 @@ impl FingerprintBuilder {
 
     /// Add a single `(key, value)` pair to the fingerprint.
     pub fn add(&mut self, key: &str, value: &str) -> &mut Self {
-        let pair_hash = fnv1a_64(
-            &[key.as_bytes(), &[0u8], value.as_bytes()].concat(),
-        );
+        let pair_hash = fnv1a_64(&[key.as_bytes(), &[0u8], value.as_bytes()].concat());
         self.accumulated ^= pair_hash;
         self
     }
 
     /// Finalise and return the `MetadataFingerprint`.
     pub fn finish(&self) -> MetadataFingerprint {
-        MetadataFingerprint { raw: mix64(self.accumulated) }
+        MetadataFingerprint {
+            raw: mix64(self.accumulated),
+        }
     }
 }
 
@@ -201,7 +203,11 @@ pub fn diff_fields(
     added.sort();
     modified.sort();
 
-    FingerprintDiff::Changed { removed, added, modified }
+    FingerprintDiff::Changed {
+        removed,
+        added,
+        modified,
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -280,10 +286,8 @@ mod tests {
         builder.add("artist", "My Artist");
         let fp_builder = builder.finish();
 
-        let fp_direct = MetadataFingerprint::from_pairs([
-            ("artist", "My Artist"),
-            ("title", "My Song"),
-        ]);
+        let fp_direct =
+            MetadataFingerprint::from_pairs([("artist", "My Artist"), ("title", "My Song")]);
         assert_eq!(fp_builder, fp_direct);
     }
 
@@ -310,7 +314,11 @@ mod tests {
         let before = fields(&[("title", "T")]);
         let after = fields(&[("title", "T"), ("artist", "A")]);
         match diff_fields(&before, &after) {
-            FingerprintDiff::Changed { added, removed, modified } => {
+            FingerprintDiff::Changed {
+                added,
+                removed,
+                modified,
+            } => {
                 assert_eq!(added, vec!["artist"]);
                 assert!(removed.is_empty());
                 assert!(modified.is_empty());
@@ -324,7 +332,11 @@ mod tests {
         let before = fields(&[("title", "T"), ("artist", "A")]);
         let after = fields(&[("title", "T")]);
         match diff_fields(&before, &after) {
-            FingerprintDiff::Changed { removed, added, modified } => {
+            FingerprintDiff::Changed {
+                removed,
+                added,
+                modified,
+            } => {
                 assert_eq!(removed, vec!["artist"]);
                 assert!(added.is_empty());
                 assert!(modified.is_empty());
@@ -338,7 +350,11 @@ mod tests {
         let before = fields(&[("title", "Old Title")]);
         let after = fields(&[("title", "New Title")]);
         match diff_fields(&before, &after) {
-            FingerprintDiff::Changed { modified, added, removed } => {
+            FingerprintDiff::Changed {
+                modified,
+                added,
+                removed,
+            } => {
                 assert_eq!(modified, vec!["title"]);
                 assert!(added.is_empty());
                 assert!(removed.is_empty());

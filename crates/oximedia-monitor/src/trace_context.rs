@@ -41,11 +41,7 @@ fn nibble(b: u8) -> Result<u8, String> {
 /// Decode a hex string of exactly `N` bytes into a byte array.
 fn decode_hex<const N: usize>(s: &str) -> Result<[u8; N], String> {
     if s.len() != N * 2 {
-        return Err(format!(
-            "expected {} hex chars, got {}",
-            N * 2,
-            s.len()
-        ));
+        return Err(format!("expected {} hex chars, got {}", N * 2, s.len()));
     }
     let mut out = [0u8; N];
     for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
@@ -143,10 +139,7 @@ impl TraceParent {
         let parent_id = decode_hex::<8>(parts[2])?;
 
         if parts[3].len() != 2 {
-            return Err(format!(
-                "flags must be 2 hex chars, got {}",
-                parts[3].len()
-            ));
+            return Err(format!("flags must be 2 hex chars, got {}", parts[3].len()));
         }
         let fh = nibble(parts[3].as_bytes()[0])?;
         let fl = nibble(parts[3].as_bytes()[1])?;
@@ -493,11 +486,13 @@ mod tests {
 
     #[test]
     fn test_trace_span_to_json_contains_operation() {
-        let mut span = TraceSpan::start("transcode", 22, 500)
-            .with_attribute("codec", "av1");
+        let mut span = TraceSpan::start("transcode", 22, 500).with_attribute("codec", "av1");
         span.finish(900);
         let json = span.to_json();
-        assert!(json.contains("transcode"), "JSON should contain operation name");
+        assert!(
+            json.contains("transcode"),
+            "JSON should contain operation name"
+        );
         assert!(json.contains("av1"), "JSON should contain attribute value");
         assert!(json.contains("duration_ms"), "JSON should contain duration");
     }

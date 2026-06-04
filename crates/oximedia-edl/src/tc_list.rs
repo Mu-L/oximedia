@@ -109,12 +109,7 @@ impl TcListExporter {
         for ev in events {
             let line = format!(
                 "{:03},{},{},{},{},{}\n",
-                ev.number,
-                ev.reel,
-                ev.source_in,
-                ev.source_out,
-                ev.record_in,
-                ev.record_out,
+                ev.number, ev.reel, ev.source_in, ev.source_out, ev.record_in, ev.record_out,
             );
             out.push_str(&line);
         }
@@ -169,7 +164,10 @@ impl TcListExporter {
         out.push('\n');
 
         for ev in events {
-            let record_duration = ev.record_out.to_frames().saturating_sub(ev.record_in.to_frames());
+            let record_duration = ev
+                .record_out
+                .to_frames()
+                .saturating_sub(ev.record_in.to_frames());
             let cells: Vec<String> = columns
                 .iter()
                 .map(|col| match col {
@@ -179,11 +177,7 @@ impl TcListExporter {
                     TcColumn::SourceOut => ev.source_out.to_string(),
                     TcColumn::RecordIn => ev.record_in.to_string(),
                     TcColumn::RecordOut => ev.record_out.to_string(),
-                    TcColumn::ClipName => ev
-                        .clip_name
-                        .as_deref()
-                        .unwrap_or("")
-                        .to_string(),
+                    TcColumn::ClipName => ev.clip_name.as_deref().unwrap_or("").to_string(),
                     TcColumn::DurationFrames => record_duration.to_string(),
                 })
                 .collect();
@@ -269,7 +263,10 @@ mod tests {
     fn test_to_csv_event_number_zero_padded() {
         let csv = TcListExporter::to_csv(&[ev(7, "R7", 0)]);
         let data = csv.lines().nth(1).expect("data row");
-        assert!(data.starts_with("007,"), "number should be zero-padded to 3 digits");
+        assert!(
+            data.starts_with("007,"),
+            "number should be zero-padded to 3 digits"
+        );
     }
 
     #[test]
@@ -299,7 +296,10 @@ mod tests {
     fn test_to_csv_timecodes_present() {
         let csv = TcListExporter::to_csv(&[ev(1, "AX", 10)]);
         // source_in timecode should appear — 01:00:10:00
-        assert!(csv.contains("01:00:10:00"), "source_in should be 01:00:10:00; csv = {csv}");
+        assert!(
+            csv.contains("01:00:10:00"),
+            "source_in should be 01:00:10:00; csv = {csv}"
+        );
     }
 
     #[test]
@@ -417,7 +417,10 @@ mod tests {
         ];
         let csv = TcListExporter::to_csv_columns(&[ev(1, "AX", 0)], &columns);
         let header = csv.lines().next().expect("header");
-        assert_eq!(header, "event_number,reel,source_in,source_out,record_in,record_out");
+        assert_eq!(
+            header,
+            "event_number,reel,source_in,source_out,record_in,record_out"
+        );
         let lines: Vec<&str> = csv.lines().collect();
         assert_eq!(lines.len(), 2);
     }

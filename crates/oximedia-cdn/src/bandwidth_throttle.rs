@@ -2,10 +2,10 @@
 //!
 //! # Overview
 //!
-//! [`BandwidthThrottle`] tracks byte-level rate-limiting for individual
+//! `BandwidthThrottle` tracks byte-level rate-limiting for individual
 //! clients or origins using a **token-bucket** algorithm.  Each bucket
 //! refills at a configurable rate and has a configurable burst capacity.
-//! A central [`ThrottleRegistry`] manages named buckets and provides a
+//! A central `ThrottleRegistry` manages named buckets and provides a
 //! high-level API for recording traffic and checking whether a sender
 //! should be throttled.
 //!
@@ -20,7 +20,7 @@
 //!
 //! # Thread safety
 //!
-//! Each [`TokenBucket`] is wrapped in an `Arc<Mutex<…>>` inside the registry
+//! Each `TokenBucket` is wrapped in an `Arc<Mutex<…>>` inside the registry
 //! so that concurrent writers contend per-bucket rather than globally.
 
 use std::collections::HashMap;

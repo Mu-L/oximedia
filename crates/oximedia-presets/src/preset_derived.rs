@@ -262,10 +262,7 @@ impl DerivedPresetRegistry {
     ///
     /// * [`DerivedPresetError::ChainedInheritanceNotSupported`] — if
     ///   `derived.base_name` itself names a *derived* preset (depth > 1).
-    pub fn register_derived(
-        &mut self,
-        derived: DerivedPreset,
-    ) -> Result<(), DerivedPresetError> {
+    pub fn register_derived(&mut self, derived: DerivedPreset) -> Result<(), DerivedPresetError> {
         // Enforce single-level: base_name must NOT be a derived preset.
         if self.derived.contains_key(&derived.base_name) {
             return Err(DerivedPresetError::ChainedInheritanceNotSupported(
@@ -407,7 +404,8 @@ mod tests {
             base_name: "base-720p".to_string(),
             overrides,
         };
-        reg.register_derived(derived).expect("registration should succeed");
+        reg.register_derived(derived)
+            .expect("registration should succeed");
 
         let resolved = reg
             .resolve("derived-1080p")
@@ -420,14 +418,8 @@ mod tests {
         assert_eq!(resolved.get_integer("height"), Some(1080));
         assert_eq!(resolved.get_integer("video_bitrate"), Some(8_000_000));
         // Inherited values
-        assert_eq!(
-            resolved.get_text("video_codec").as_deref(),
-            Some("vp9")
-        );
-        assert_eq!(
-            resolved.get_text("audio_codec").as_deref(),
-            Some("opus")
-        );
+        assert_eq!(resolved.get_text("video_codec").as_deref(), Some("vp9"));
+        assert_eq!(resolved.get_text("audio_codec").as_deref(), Some("opus"));
         assert_eq!(resolved.get_integer("audio_bitrate"), Some(128_000));
     }
 
@@ -449,7 +441,8 @@ mod tests {
             base_name: "base-720p".to_string(),
             overrides,
         };
-        reg.register_derived(derived).expect("registration should succeed");
+        reg.register_derived(derived)
+            .expect("registration should succeed");
 
         let resolved = reg.resolve("high-bitrate").expect("resolve should succeed");
 
@@ -458,10 +451,7 @@ mod tests {
         // Everything else is inherited from base
         assert_eq!(resolved.get_integer("width"), Some(1280));
         assert_eq!(resolved.get_integer("height"), Some(720));
-        assert_eq!(
-            resolved.get_text("video_codec").as_deref(),
-            Some("vp9")
-        );
+        assert_eq!(resolved.get_text("video_codec").as_deref(), Some("vp9"));
     }
 
     // ── Test 3: Override multiple params ─────────────────────────────────
@@ -486,7 +476,8 @@ mod tests {
             base_name: "base-720p".to_string(),
             overrides,
         };
-        reg.register_derived(derived).expect("registration should succeed");
+        reg.register_derived(derived)
+            .expect("registration should succeed");
 
         let resolved = reg.resolve("derived-4k").expect("resolve should succeed");
 
@@ -496,10 +487,7 @@ mod tests {
         assert_eq!(resolved.get_bool("two_pass"), Some(true));
         assert_eq!(resolved.get_float("crf"), Some(24.0));
         // Inherited
-        assert_eq!(
-            resolved.get_text("video_codec").as_deref(),
-            Some("vp9")
-        );
+        assert_eq!(resolved.get_text("video_codec").as_deref(), Some("vp9"));
     }
 
     // ── Test 4: Unknown base → error ─────────────────────────────────────
@@ -515,7 +503,8 @@ mod tests {
             base_name: "nonexistent-base".to_string(),
             overrides: HashMap::new(),
         };
-        reg.register_derived(derived).expect("register step should succeed");
+        reg.register_derived(derived)
+            .expect("register step should succeed");
 
         // Resolution must fail because the base does not exist
         let result = reg.resolve("orphan");
@@ -539,7 +528,8 @@ mod tests {
             base_name: "base-720p".to_string(),
             overrides: HashMap::new(),
         };
-        reg.register_derived(derived1).expect("first derived should succeed");
+        reg.register_derived(derived1)
+            .expect("first derived should succeed");
 
         // Attempt to register a second derived that references the first derived
         let derived2 = DerivedPreset {
@@ -571,7 +561,8 @@ mod tests {
             base_name: "base-720p".to_string(),
             overrides: HashMap::new(), // empty
         };
-        reg.register_derived(derived).expect("registration should succeed");
+        reg.register_derived(derived)
+            .expect("registration should succeed");
 
         let base_params = base_video_params();
         let resolved = reg
@@ -604,10 +595,7 @@ mod tests {
         // Wrong variant
         assert_eq!(PresetParamValue::Integer(1).as_float(), None);
         assert_eq!(PresetParamValue::Float(1.0).as_bool(), None);
-        assert_eq!(
-            PresetParamValue::Text("x".to_string()).as_integer(),
-            None
-        );
+        assert_eq!(PresetParamValue::Text("x".to_string()).as_integer(), None);
     }
 
     // ── Additional: has_base / has_derived / counts ───────────────────────

@@ -1,7 +1,108 @@
 //! Explanation generation.
 
 use crate::error::RecommendResult;
-use crate::Recommendation;
+use crate::{Recommendation, RecommendationReason};
+
+/// Direction of a feature's contribution to the recommendation score.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImportanceDirection {
+    /// Feature boosted the recommendation score.
+    Positive,
+    /// Feature reduced the recommendation score.
+    Negative,
+    /// Feature had no directional effect (neutral signal).
+    Neutral,
+}
+
+/// A single feature's measured contribution to a recommendation score.
+///
+/// Used to power per-feature bar charts and visual explanations of why
+/// an item was recommended.
+#[derive(Debug, Clone)]
+pub struct FeatureImportance {
+    /// Human-readable name of the feature (e.g. "content_similarity", "trending").
+    pub feature_name: String,
+    /// Absolute contribution magnitude (always >= 0).
+    pub contribution_score: f32,
+    /// Whether this feature pushed the score up, down, or had no effect.
+    pub direction: ImportanceDirection,
+}
+
+/// Decompose a [`Recommendation`]'s reasons into a list of [`FeatureImportance`].
+///
+/// Each [`RecommendationReason`] variant maps to one feature entry whose
+/// `contribution_score` is drawn from the variant's own numeric sub-field.
+/// The sum of contributions is not guaranteed to equal `rec.score` exactly
+/// because multiple reasons can co-exist and the final score is the engine's
+/// own blend; the values are still proportional and meaningful for charting.
+fn decompose_reasons(rec: &Recommendation) -> Vec<FeatureImportance> {
+    let mut importances: Vec<FeatureImportance> = rec
+        .reasons
+        .iter()
+        .map(|reason| match reason {
+            RecommendationReason::SimilarToLiked { similarity, .. } => FeatureImportance {
+                feature_name: String::from("content_similarity"),
+                contribution_score: *similarity,
+                direction: ImportanceDirection::Positive,
+            },
+            RecommendationReason::CollaborativeFiltering { confidence } => FeatureImportance {
+                feature_name: String::from("collaborative_filtering"),
+                contribution_score: *confidence,
+                direction: ImportanceDirection::Positive,
+            },
+            RecommendationReason::Trending { trending_score } => FeatureImportance {
+                feature_name: String::from("trending_boost"),
+                contribution_score: *trending_score,
+                direction: ImportanceDirection::Positive,
+            },
+            RecommendationReason::MatchesProfile { categories } => FeatureImportance {
+                feature_name: String::from("profile_match"),
+                // Each matching category contributes equally; clamp to [0,1].
+                contribution_score: (categories.len() as f32 * 0.1_f32).min(1.0_f32),
+                direction: ImportanceDirection::Positive,
+            },
+            RecommendationReason::FreshContent { published_days_ago } => {
+                // Newer content gets a stronger recency boost.
+                let recency = 1.0_f32 / (1.0_f32 + *published_days_ago as f32 * 0.1_f32);
+                FeatureImportance {
+                    feature_name: String::from("recency_boost"),
+                    contribution_score: recency,
+                    direction: ImportanceDirection::Positive,
+                }
+            }
+            RecommendationReason::Popular { view_count } => {
+                // Log-scale popularity score capped at 1.0.
+                let pop = ((*view_count as f32).ln_1p() / 20.0_f32).min(1.0_f32);
+                FeatureImportance {
+                    feature_name: String::from("popularity_boost"),
+                    contribution_score: pop,
+                    direction: ImportanceDirection::Positive,
+                }
+            }
+            RecommendationReason::ContinueWatching { progress } => FeatureImportance {
+                feature_name: String::from("continue_watching"),
+                contribution_score: *progress,
+                direction: ImportanceDirection::Positive,
+            },
+        })
+        .collect();
+
+    // Add a metadata-derived rating feature when available.
+    if let Some(rating) = rec.metadata.avg_rating {
+        let normalised = (rating / 5.0_f32).clamp(0.0_f32, 1.0_f32);
+        importances.push(FeatureImportance {
+            feature_name: String::from("avg_rating"),
+            contribution_score: normalised,
+            direction: if normalised >= 0.5 {
+                ImportanceDirection::Positive
+            } else {
+                ImportanceDirection::Negative
+            },
+        });
+    }
+
+    importances
+}
 
 /// Generate explanation for a recommendation
 ///
@@ -56,6 +157,20 @@ impl DetailedExplanationGenerator {
         }
 
         explanation
+    }
+
+    /// Generate a detailed explanation alongside per-feature importance scores.
+    ///
+    /// Returns `(explanation_text, importances)` where `importances` contains one
+    /// entry per detected signal (content similarity, trending, rating, …).
+    #[must_use]
+    pub fn generate_with_importance(
+        &self,
+        recommendation: &Recommendation,
+    ) -> (String, Vec<FeatureImportance>) {
+        let explanation = self.generate(recommendation);
+        let importances = decompose_reasons(recommendation);
+        (explanation, importances)
     }
 
     /// Generate concise explanation
@@ -167,6 +282,82 @@ mod tests {
             },
             explanation: None,
         }
+    }
+
+    // ---- Feature importance tests ----
+
+    #[test]
+    fn test_feature_importance_non_empty() {
+        let rec = create_test_recommendation();
+        let generator = DetailedExplanationGenerator::new(false);
+        let (_explanation, importances) = generator.generate_with_importance(&rec);
+        // We have 2 reasons + avg_rating → at least 1 entry
+        assert!(
+            !importances.is_empty(),
+            "expected non-empty importance list"
+        );
+    }
+
+    #[test]
+    fn test_feature_importance_scores_positive() {
+        let rec = create_test_recommendation();
+        let generator = DetailedExplanationGenerator::new(false);
+        let (_explanation, importances) = generator.generate_with_importance(&rec);
+        for imp in &importances {
+            assert!(
+                imp.contribution_score >= 0.0,
+                "contribution_score must be non-negative, got {} for {}",
+                imp.contribution_score,
+                imp.feature_name
+            );
+        }
+    }
+
+    #[test]
+    fn test_explanation_still_generated() {
+        let rec = create_test_recommendation();
+        let generator = DetailedExplanationGenerator::new(false);
+        let (explanation, importances) = generator.generate_with_importance(&rec);
+        assert!(
+            !explanation.is_empty(),
+            "explanation text must not be empty"
+        );
+        assert!(
+            !importances.is_empty(),
+            "importances must not be empty alongside explanation"
+        );
+    }
+
+    #[test]
+    fn test_feature_importance_direction_positive_for_similarity() {
+        let rec = Recommendation {
+            content_id: Uuid::new_v4(),
+            score: 0.9,
+            rank: 1,
+            reasons: vec![RecommendationReason::SimilarToLiked {
+                content_id: Uuid::new_v4(),
+                similarity: 0.95,
+            }],
+            metadata: ContentMetadata {
+                title: String::from("High Sim"),
+                description: None,
+                categories: vec![],
+                duration_ms: None,
+                thumbnail_url: None,
+                created_at: 0,
+                avg_rating: None,
+                view_count: 0,
+            },
+            explanation: None,
+        };
+        let generator = DetailedExplanationGenerator::new(false);
+        let (_exp, importances) = generator.generate_with_importance(&rec);
+        let sim_imp = importances
+            .iter()
+            .find(|i| i.feature_name == "content_similarity")
+            .expect("content_similarity entry must exist");
+        assert_eq!(sim_imp.direction, ImportanceDirection::Positive);
+        assert!((sim_imp.contribution_score - 0.95).abs() < 1e-5);
     }
 
     #[test]

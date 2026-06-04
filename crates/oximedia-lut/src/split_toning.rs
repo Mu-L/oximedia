@@ -110,9 +110,9 @@ impl Default for SplitToningParams {
     /// moderate strength.
     fn default() -> Self {
         Self {
-            shadow_hue: 210.0,    // blue-ish shadows
+            shadow_hue: 210.0, // blue-ish shadows
             shadow_saturation: 0.3,
-            highlight_hue: 42.0,  // golden highlights
+            highlight_hue: 42.0, // golden highlights
             highlight_saturation: 0.25,
             balance: 0.0,
             strength: 0.5,
@@ -230,10 +230,7 @@ pub fn apply_split_toning(rgb: &Rgb, params: &SplitToningParams) -> Rgb {
 /// # Errors
 ///
 /// Returns [`LutError::InvalidData`] if `size < 2`.
-pub fn generate_split_toning_lut(
-    size: usize,
-    params: &SplitToningParams,
-) -> LutResult<Vec<Rgb>> {
+pub fn generate_split_toning_lut(size: usize, params: &SplitToningParams) -> LutResult<Vec<Rgb>> {
     if size < 2 {
         return Err(LutError::InvalidData(format!(
             "LUT size must be >= 2, got {size}"
@@ -369,8 +366,7 @@ impl SplitToningDiff {
         let mut max = 0.0_f64;
 
         for (a, b) in original.iter().zip(toned.iter()) {
-            let d = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2))
-                .sqrt();
+            let d = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
             per_pixel.push(d);
             sum_sq += d * d;
             sum += d;
@@ -379,7 +375,11 @@ impl SplitToningDiff {
             }
         }
 
-        let rms = if n > 0 { (sum_sq / n as f64).sqrt() } else { 0.0 };
+        let rms = if n > 0 {
+            (sum_sq / n as f64).sqrt()
+        } else {
+            0.0
+        };
         let mean = if n > 0 { sum / n as f64 } else { 0.0 };
 
         Ok(Self {
@@ -495,12 +495,22 @@ mod tests {
         // (warm orange ~35°) is applied.  R should exceed B after toning.
         let dark_grey = [0.15_f64, 0.15_f64, 0.15_f64];
         let out = apply_split_toning(&dark_grey, &params);
-        assert!(out[0] > out[2], "sepia shadow should be warm: R={} B={}", out[0], out[2]);
+        assert!(
+            out[0] > out[2],
+            "sepia shadow should be warm: R={} B={}",
+            out[0],
+            out[2]
+        );
 
         // Also verify a bright pixel (highlight zone: lum > 0.66) shifts warm.
         let bright_grey = [0.85_f64, 0.85_f64, 0.85_f64];
         let out_h = apply_split_toning(&bright_grey, &params);
-        assert!(out_h[0] > out_h[2], "sepia highlight should be warm: R={} B={}", out_h[0], out_h[2]);
+        assert!(
+            out_h[0] > out_h[2],
+            "sepia highlight should be warm: R={} B={}",
+            out_h[0],
+            out_h[2]
+        );
     }
 
     #[test]

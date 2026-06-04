@@ -111,7 +111,10 @@ impl FieldChange {
     /// Create a field change record.
     #[must_use]
     pub fn new(path: impl Into<String>, new_value: StateValue) -> Self {
-        Self { path: path.into(), new_value }
+        Self {
+            path: path.into(),
+            new_value,
+        }
     }
 
     /// Shorthand for a deletion.
@@ -245,11 +248,7 @@ impl IncrementalStateStore {
     /// If `from == to` an empty delta is returned. If `to < from` the versions
     /// are swapped (always returns forward delta).
     #[must_use]
-    pub fn delta_between(
-        &self,
-        from: StateVersion,
-        to: StateVersion,
-    ) -> Option<StateDelta> {
+    pub fn delta_between(&self, from: StateVersion, to: StateVersion) -> Option<StateDelta> {
         let (lo, hi) = if from <= to { (from, to) } else { (to, from) };
 
         if hi > self.head {
@@ -338,7 +337,9 @@ impl PeerSyncTracker {
 
     /// Register a new peer.  They start at version 0 (need the full history).
     pub fn register(&mut self, peer_id: impl Into<String>) {
-        self.acked.entry(peer_id.into()).or_insert(StateVersion::ZERO);
+        self.acked
+            .entry(peer_id.into())
+            .or_insert(StateVersion::ZERO);
     }
 
     /// Record that `peer_id` has successfully processed up to `version`.
@@ -367,7 +368,11 @@ impl PeerSyncTracker {
     /// can be discarded without losing the ability to sync any current peer.
     #[must_use]
     pub fn min_acked_version(&self) -> StateVersion {
-        self.acked.values().copied().min().unwrap_or(StateVersion::ZERO)
+        self.acked
+            .values()
+            .copied()
+            .min()
+            .unwrap_or(StateVersion::ZERO)
     }
 
     /// All peer identifiers.
@@ -463,7 +468,8 @@ mod tests {
     #[test]
     fn test_delta_estimated_bytes_grows_with_text() {
         let mut d = StateDelta::new(StateVersion(0), StateVersion(1));
-        d.changes.push(FieldChange::new("x", StateValue::Text("hello".to_string())));
+        d.changes
+            .push(FieldChange::new("x", StateValue::Text("hello".to_string())));
         assert!(d.estimated_bytes() >= 5);
     }
 
@@ -496,7 +502,9 @@ mod tests {
     #[test]
     fn test_delta_between_full_range() {
         let store = populated_store();
-        let delta = store.delta_between(StateVersion(0), StateVersion(3)).expect("ok");
+        let delta = store
+            .delta_between(StateVersion(0), StateVersion(3))
+            .expect("ok");
         // Latest for 'a' is 10, 'b' is tombstone, 'c' is 3.
         assert_eq!(delta.change_count(), 3);
         let a = delta.changes.iter().find(|c| c.path == "a").expect("a");
@@ -511,7 +519,9 @@ mod tests {
     fn test_delta_between_partial_range() {
         let store = populated_store();
         // v1→v2: only a changes to 10
-        let delta = store.delta_between(StateVersion(1), StateVersion(2)).expect("ok");
+        let delta = store
+            .delta_between(StateVersion(1), StateVersion(2))
+            .expect("ok");
         assert_eq!(delta.change_count(), 1);
         let a = delta.changes.iter().find(|c| c.path == "a").expect("a");
         assert_eq!(a.new_value, StateValue::Int(10));
@@ -520,14 +530,18 @@ mod tests {
     #[test]
     fn test_delta_between_same_version_is_empty() {
         let store = populated_store();
-        let delta = store.delta_between(StateVersion(2), StateVersion(2)).expect("ok");
+        let delta = store
+            .delta_between(StateVersion(2), StateVersion(2))
+            .expect("ok");
         assert!(delta.is_empty());
     }
 
     #[test]
     fn test_delta_between_out_of_range_returns_none() {
         let store = populated_store();
-        assert!(store.delta_between(StateVersion(0), StateVersion(99)).is_none());
+        assert!(store
+            .delta_between(StateVersion(0), StateVersion(99))
+            .is_none());
     }
 
     #[test]

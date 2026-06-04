@@ -92,8 +92,6 @@ impl SceneLuminanceStats {
 
         let min_nits = pq_to_nits_approx(min_pq);
         let max_nits = pq_to_nits_approx(max_pq);
-        let avg_nits = avg_pq as f32;
-
         Some(Self {
             scene_index,
             start_frame,

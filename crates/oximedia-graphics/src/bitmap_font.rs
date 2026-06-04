@@ -16,6 +16,12 @@
 
 use std::collections::HashMap;
 
+use crate::font_metrics::SubPixelMode;
+use crate::glyph_cache::{GlyphCache, GlyphKey, RasterizedGlyph};
+
+/// Font family name tag used as the `GlyphKey::font_family` for the embedded 8×8 bitmap font.
+const BITMAP_FONT_FAMILY: &str = "bitmap8x8";
+
 /// A monospace bitmap font backed by a per-character glyph bitmap.
 pub struct BitmapFont {
     /// Width of a single glyph in pixels at scale 1.
@@ -25,6 +31,8 @@ pub struct BitmapFont {
     /// Map from character to packed bitmap rows.
     /// Each `Vec<u8>` has `glyph_height` bytes; bit 7 of each byte is the leftmost pixel.
     glyphs: HashMap<char, Vec<u8>>,
+    /// LRU cache of scaled RGBA glyph bitmaps, keyed by `(char, scale)`.
+    glyph_cache: GlyphCache,
 }
 
 impl BitmapFont {
@@ -46,6 +54,8 @@ impl BitmapFont {
             glyph_width: 8,
             glyph_height: 8,
             glyphs,
+            // 512 entries covers all printable ASCII at up to ~5 scale factors.
+            glyph_cache: GlyphCache::new(512),
         }
     }
 
@@ -63,6 +73,9 @@ impl BitmapFont {
 
     /// Render a string of text into an RGBA8 buffer.
     ///
+    /// Scaled glyph bitmaps are cached via an internal [`GlyphCache`] so that the
+    /// same `(char, scale)` pair is only rasterized once per font instance.
+    ///
     /// # Parameters
     /// - `text`          – The string to render.
     /// - `color`         – RGBA foreground color `[r, g, b, a]`.
@@ -75,7 +88,7 @@ impl BitmapFont {
     /// `(rendered_width, rendered_height)` – The bounding box of the rendered text
     /// at the requested scale (independent of clipping).
     pub fn render_text(
-        &self,
+        &mut self,
         text: &str,
         color: [u8; 4],
         scale: u32,
@@ -94,66 +107,126 @@ impl BitmapFont {
             (output.len() as u32) / (output_width * 4)
         };
 
-        for (char_idx, ch) in text.chars().enumerate() {
+        // Rasterize and cache all unique (char, scale) pairs in this string first.
+        let chars: Vec<char> = text.chars().collect();
+        for &ch in &chars {
+            let key = GlyphKey::new(ch, BITMAP_FONT_FAMILY, scale as u16, SubPixelMode::None);
+            if self.glyph_cache.get(&key).is_none() {
+                // Rasterize the glyph into an RGBA bitmap.
+                let bitmap = self.rasterize_glyph(ch, color, scale);
+                if let Some(rg) = RasterizedGlyph::new(cell_w, cell_h, bitmap, 0, 0, cell_w as f32)
+                {
+                    self.glyph_cache.insert(key, rg);
+                }
+            }
+        }
+
+        // Blit each character from the cache into the output buffer.
+        for (char_idx, &ch) in chars.iter().enumerate() {
             let char_x = x + (char_idx as i32) * (cell_w as i32);
-            let glyph = self
-                .glyphs
-                .get(&ch)
-                .or_else(|| self.glyphs.get(&'?'))
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
+            let key = GlyphKey::new(ch, BITMAP_FONT_FAMILY, scale as u16, SubPixelMode::None);
 
-            for row in 0..self.glyph_height {
-                let row_bits = if (row as usize) < glyph.len() {
-                    glyph[row as usize]
-                } else {
-                    0
-                };
+            // Retrieve cached bitmap (guaranteed present after the loop above).
+            let glyph_data: Vec<u8> = self
+                .glyph_cache
+                .get(&key)
+                .map(|g| g.data.clone())
+                .unwrap_or_default();
 
-                for scaled_row in 0..scale {
-                    let py = y + (row * scale + scaled_row) as i32;
-                    if py < 0 || py >= output_height as i32 {
+            for row in 0..cell_h {
+                let py = y + row as i32;
+                if py < 0 || py >= output_height as i32 {
+                    continue;
+                }
+                for col in 0..cell_w {
+                    let px = char_x + col as i32;
+                    if px < 0 || px >= output_width as i32 {
                         continue;
                     }
+                    let src_idx = (row * cell_w + col) as usize * 4;
+                    let dst_idx = (py as u32 * output_width + px as u32) as usize * 4;
+                    if src_idx + 3 >= glyph_data.len() || dst_idx + 3 >= output.len() {
+                        continue;
+                    }
+                    // Alpha-blend cached glyph pixel over existing output pixel.
+                    let fg_a = glyph_data[src_idx + 3] as f32 / 255.0;
+                    if fg_a < f32::EPSILON {
+                        continue;
+                    }
+                    let inv_a = 1.0 - fg_a;
+                    output[dst_idx] =
+                        (glyph_data[src_idx] as f32 * fg_a + output[dst_idx] as f32 * inv_a) as u8;
+                    output[dst_idx + 1] = (glyph_data[src_idx + 1] as f32 * fg_a
+                        + output[dst_idx + 1] as f32 * inv_a)
+                        as u8;
+                    output[dst_idx + 2] = (glyph_data[src_idx + 2] as f32 * fg_a
+                        + output[dst_idx + 2] as f32 * inv_a)
+                        as u8;
+                    let out_a =
+                        (fg_a + (output[dst_idx + 3] as f32 / 255.0) * inv_a).clamp(0.0, 1.0);
+                    output[dst_idx + 3] = (out_a * 255.0) as u8;
+                }
+            }
+        }
 
-                    for col in 0..self.glyph_width {
-                        // bit 7 = leftmost column
-                        let pixel_set = (row_bits >> (7 - col)) & 1 != 0;
-                        if !pixel_set {
-                            continue;
-                        }
+        let total_w = chars.len() as u32 * cell_w;
+        (total_w, cell_h)
+    }
 
-                        for scaled_col in 0..scale {
-                            let px = char_x + (col * scale + scaled_col) as i32;
-                            if px < 0 || px >= output_width as i32 {
-                                continue;
-                            }
+    /// Rasterize a single character into a flat RGBA8 bitmap at the given scale.
+    ///
+    /// The resulting vec has `glyph_width * scale * glyph_height * scale * 4` bytes.
+    fn rasterize_glyph(&self, ch: char, color: [u8; 4], scale: u32) -> Vec<u8> {
+        let cell_w = self.glyph_width * scale;
+        let cell_h = self.glyph_height * scale;
+        let mut bitmap = vec![0u8; (cell_w * cell_h * 4) as usize];
 
-                            let idx = (py as u32 * output_width + px as u32) as usize * 4;
-                            if idx + 3 >= output.len() {
-                                continue;
-                            }
+        let glyph = self
+            .glyphs
+            .get(&ch)
+            .or_else(|| self.glyphs.get(&'?'))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
 
-                            // Alpha-blend foreground over existing pixel
-                            let fg_a = color[3] as f32 / 255.0;
-                            let inv_a = 1.0 - fg_a;
-                            output[idx] =
-                                (color[0] as f32 * fg_a + output[idx] as f32 * inv_a) as u8;
-                            output[idx + 1] =
-                                (color[1] as f32 * fg_a + output[idx + 1] as f32 * inv_a) as u8;
-                            output[idx + 2] =
-                                (color[2] as f32 * fg_a + output[idx + 2] as f32 * inv_a) as u8;
-                            let out_a =
-                                (fg_a + (output[idx + 3] as f32 / 255.0) * inv_a).clamp(0.0, 1.0);
-                            output[idx + 3] = (out_a * 255.0) as u8;
+        for row in 0..self.glyph_height {
+            let row_bits = if (row as usize) < glyph.len() {
+                glyph[row as usize]
+            } else {
+                0
+            };
+            for scaled_row in 0..scale {
+                let py = row * scale + scaled_row;
+                for col in 0..self.glyph_width {
+                    let pixel_set = (row_bits >> (7 - col)) & 1 != 0;
+                    if !pixel_set {
+                        continue;
+                    }
+                    for scaled_col in 0..scale {
+                        let px = col * scale + scaled_col;
+                        let idx = (py * cell_w + px) as usize * 4;
+                        if idx + 3 < bitmap.len() {
+                            bitmap[idx] = color[0];
+                            bitmap[idx + 1] = color[1];
+                            bitmap[idx + 2] = color[2];
+                            bitmap[idx + 3] = color[3];
                         }
                     }
                 }
             }
         }
+        bitmap
+    }
 
-        let total_w = (text.chars().count() as u32) * cell_w;
-        (total_w, cell_h)
+    /// Return the number of cache hits (for testing / diagnostics).
+    #[must_use]
+    pub fn cache_hits(&self) -> u64 {
+        self.glyph_cache.hits()
+    }
+
+    /// Return the number of cache misses (for testing / diagnostics).
+    #[must_use]
+    pub fn cache_misses(&self) -> u64 {
+        self.glyph_cache.misses()
     }
 
     /// Measure text width and height in pixels at the given scale without rendering.
@@ -303,7 +376,7 @@ mod tests {
 
     #[test]
     fn test_render_text_writes_pixels() {
-        let font = BitmapFont::basic_8x8();
+        let mut font = BitmapFont::basic_8x8();
         let w: u32 = 80;
         let h: u32 = 16;
         let mut buf = vec![0u8; (w * h * 4) as usize];
@@ -317,7 +390,7 @@ mod tests {
     #[test]
     fn test_render_text_clipping() {
         // Render at negative x; should not panic and should still produce output
-        let font = BitmapFont::basic_8x8();
+        let mut font = BitmapFont::basic_8x8();
         let w: u32 = 32;
         let h: u32 = 16;
         let mut buf = vec![0u8; (w * h * 4) as usize];
@@ -327,7 +400,7 @@ mod tests {
 
     #[test]
     fn test_render_scaled() {
-        let font = BitmapFont::basic_8x8();
+        let mut font = BitmapFont::basic_8x8();
         let scale = 3;
         let w: u32 = 200;
         let h: u32 = 32;
@@ -340,11 +413,60 @@ mod tests {
 
     #[test]
     fn test_render_empty_string() {
-        let font = BitmapFont::basic_8x8();
+        let mut font = BitmapFont::basic_8x8();
         let mut buf = vec![0u8; 64 * 64 * 4];
         let (w, h) = font.render_text("", [255, 0, 0, 255], 1, &mut buf, 64, 0, 0);
         assert_eq!(w, 0);
         assert_eq!(h, 8);
         assert!(buf.iter().all(|&b| b == 0));
+    }
+
+    /// Render the same character twice at the same scale — the second call should
+    /// be a cache hit and produce byte-identical output.
+    #[test]
+    fn test_glyph_cache_hit_identical() {
+        let mut font = BitmapFont::basic_8x8();
+        let w: u32 = 32;
+        let h: u32 = 16;
+
+        let mut buf1 = vec![0u8; (w * h * 4) as usize];
+        font.render_text("A", [255, 0, 0, 255], 1, &mut buf1, w, 0, 0);
+
+        // The cache should now have 'A' at scale 1; a second render should be a hit.
+        let misses_before = font.cache_misses();
+        let mut buf2 = vec![0u8; (w * h * 4) as usize];
+        font.render_text("A", [255, 0, 0, 255], 1, &mut buf2, w, 0, 0);
+
+        // No new misses — 'A' was cached on the first call.
+        assert_eq!(
+            font.cache_misses(),
+            misses_before,
+            "second render of 'A' should be a cache hit"
+        );
+        assert_eq!(
+            buf1, buf2,
+            "cached render must be byte-identical to first render"
+        );
+    }
+
+    /// Render a multi-character string; all characters must be present in the
+    /// cache afterwards.
+    #[test]
+    fn test_glyph_cache_multi_char() {
+        let mut font = BitmapFont::basic_8x8();
+        let text = "Hello";
+        let w: u32 = 80;
+        let h: u32 = 16;
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        font.render_text(text, [200, 200, 200, 255], 1, &mut buf, w, 0, 0);
+
+        // Every unique character should now be in the cache.
+        for ch in text.chars().collect::<std::collections::HashSet<char>>() {
+            let key = GlyphKey::new(ch, BITMAP_FONT_FAMILY, 1u16, SubPixelMode::None);
+            assert!(
+                font.glyph_cache.peek(&key).is_some(),
+                "char '{ch}' should be in the glyph cache after render"
+            );
+        }
     }
 }

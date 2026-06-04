@@ -54,19 +54,28 @@ impl Rational {
     // Common frame rates ─────────────────────────────────────────────────────
 
     /// 24000/1001 ≈ 23.976 fps.
-    pub const FPS_23_976: Self = Self { num: 24000, den: 1001 };
+    pub const FPS_23_976: Self = Self {
+        num: 24000,
+        den: 1001,
+    };
     /// 24/1 fps.
     pub const FPS_24: Self = Self { num: 24, den: 1 };
     /// 25/1 fps.
     pub const FPS_25: Self = Self { num: 25, den: 1 };
     /// 30000/1001 ≈ 29.97 fps.
-    pub const FPS_29_97: Self = Self { num: 30000, den: 1001 };
+    pub const FPS_29_97: Self = Self {
+        num: 30000,
+        den: 1001,
+    };
     /// 30/1 fps.
     pub const FPS_30: Self = Self { num: 30, den: 1 };
     /// 50/1 fps.
     pub const FPS_50: Self = Self { num: 50, den: 1 };
     /// 60000/1001 ≈ 59.94 fps.
-    pub const FPS_59_94: Self = Self { num: 60000, den: 1001 };
+    pub const FPS_59_94: Self = Self {
+        num: 60000,
+        den: 1001,
+    };
     /// 60/1 fps.
     pub const FPS_60: Self = Self { num: 60, den: 1 };
 }
@@ -519,13 +528,25 @@ impl AncDataId {
     // ── Commonly used ANC types ──────────────────────────────────────────────
 
     /// SMPTE ST 291M ANC packet (generic).
-    pub const ST291: Self = Self { did: 0x41, sdid: 0x01 };
+    pub const ST291: Self = Self {
+        did: 0x41,
+        sdid: 0x01,
+    };
     /// CEA-708 captions (CDP carrier, SMPTE RP 207).
-    pub const CEA708_CDP: Self = Self { did: 0x61, sdid: 0x01 };
+    pub const CEA708_CDP: Self = Self {
+        did: 0x61,
+        sdid: 0x01,
+    };
     /// AFD/Bar data (SMPTE ST 2016-3).
-    pub const AFD_BAR: Self = Self { did: 0x41, sdid: 0x05 };
+    pub const AFD_BAR: Self = Self {
+        did: 0x41,
+        sdid: 0x05,
+    };
     /// Time code (RP 188/SMPTE ST 12-2).
-    pub const TIMECODE: Self = Self { did: 0x60, sdid: 0x60 };
+    pub const TIMECODE: Self = Self {
+        did: 0x60,
+        sdid: 0x60,
+    };
 }
 
 impl fmt::Display for AncDataId {
@@ -592,11 +613,11 @@ impl St211040Params {
             .iter()
             .map(|s| {
                 let space = if s.is_hanc { "HANC" } else { "VANC" };
-                let line = s
-                    .line
-                    .map(|l| format!(" line={l}"))
-                    .unwrap_or_default();
-                format!("DID_SDID={{0x{:02X},0x{:02X}}} {}{}", s.id.did, s.id.sdid, space, line)
+                let line = s.line.map(|l| format!(" line={l}")).unwrap_or_default();
+                format!(
+                    "DID_SDID={{0x{:02X},0x{:02X}}} {}{}",
+                    s.id.did, s.id.sdid, space, line
+                )
             })
             .collect();
         format!(
@@ -758,7 +779,7 @@ mod tests {
     #[test]
     fn test_st2110_20_line_size_bytes_1080p_yuv422_10b() {
         let p = St211020Params::hd_1080p59_94(); // 1920×1080 YCbCr 4:2:2 10-bit
-        // 1920 pixels × 20 bits/pixel = 38400 bits → 4800 bytes
+                                                 // 1920 pixels × 20 bits/pixel = 38400 bits → 4800 bytes
         assert_eq!(p.line_size_bytes(), Some(4800));
     }
 

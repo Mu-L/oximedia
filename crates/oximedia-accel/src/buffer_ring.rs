@@ -73,7 +73,9 @@ impl FrameBufferRing {
     #[must_use]
     pub fn new(mode: BufferingMode, slot_capacity: usize) -> Self {
         let count = mode.slot_count();
-        let slots = (0..count).map(|_| Vec::with_capacity(slot_capacity)).collect();
+        let slots = (0..count)
+            .map(|_| Vec::with_capacity(slot_capacity))
+            .collect();
         Self {
             slots,
             write_cursor: 0,
@@ -254,9 +256,7 @@ impl StagingRing {
                 .map_err(|e| AccelError::Synchronization(format!("staging ring cvar: {e}")))?;
         }
 
-        let mut slot = guard.free.pop_front().ok_or_else(|| {
-            AccelError::OutOfMemory // should not reach here due to wait loop
-        })?;
+        let mut slot = guard.free.pop_front().ok_or(AccelError::OutOfMemory)?; // should not reach here due to wait loop
 
         slot.data.clear();
         guard.in_flight += 1;
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn test_frame_ring_double_buffering_basic() {
-        let mut ring = FrameBufferRing::new(BufferingMode::Double, 1024);
+        let ring = FrameBufferRing::new(BufferingMode::Double, 1024);
         assert_eq!(ring.slot_count(), 2);
         assert!(!ring.is_full());
         assert!(ring.is_empty());
@@ -438,7 +438,10 @@ mod tests {
         slot.data.push(0xFF);
         ring.return_slot(slot).expect("return");
         let slot2 = ring.checkout().expect("checkout again");
-        assert!(slot2.data.is_empty(), "slot data should be cleared on return");
+        assert!(
+            slot2.data.is_empty(),
+            "slot data should be cleared on return"
+        );
         ring.return_slot(slot2).expect("return again");
     }
 

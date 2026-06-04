@@ -60,15 +60,15 @@ impl HeaderRecovery {
     #[must_use]
     pub fn scan_known_containers(data: &[u8]) -> Option<(usize, &'static [u8])> {
         const KNOWN: &[&[u8]] = &[
-            b"ftyp",        // MP4/MOV/M4V
-            b"moov",        // MP4 movie box
+            b"ftyp",             // MP4/MOV/M4V
+            b"moov",             // MP4 movie box
             b"\x1a\x45\xdf\xa3", // Matroska/WebM EBML
-            b"RIFF",        // AVI/WAV
-            b"OggS",        // Ogg container
-            b"\xff\xfb",    // MP3 sync word
-            b"\xff\xf3",    // MP3 sync word (alternative)
-            b"fLaC",        // FLAC stream marker
-            b"ID3",         // ID3 tag (MP3)
+            b"RIFF",             // AVI/WAV
+            b"OggS",             // Ogg container
+            b"\xff\xfb",         // MP3 sync word
+            b"\xff\xf3",         // MP3 sync word (alternative)
+            b"fLaC",             // FLAC stream marker
+            b"ID3",              // ID3 tag (MP3)
             b"\x00\x00\x01\xba", // MPEG Program Stream
             b"\x00\x00\x01\xb3", // MPEG Video Sequence Header
         ];

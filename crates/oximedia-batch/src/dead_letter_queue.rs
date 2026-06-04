@@ -4,8 +4,6 @@
 //! instead of being silently discarded.  The DLQ supports configurable
 //! retention policies, inspection, replay, and purging of old entries.
 
-#![allow(dead_code)]
-
 use std::collections::VecDeque;
 
 use parking_lot::RwLock;
@@ -267,7 +265,12 @@ impl DeadLetterQueue {
         F: Fn(&DeadLetterEntry) -> bool,
     {
         let entries = self.entries.read();
-        entries.iter().rev().filter(|e| predicate(e)).cloned().collect()
+        entries
+            .iter()
+            .rev()
+            .filter(|e| predicate(e))
+            .cloned()
+            .collect()
     }
 
     /// Remove and return an entry by its DLQ entry ID (for replay).
@@ -436,7 +439,10 @@ mod tests {
     fn test_dlq_push_and_len() {
         let dlq = DeadLetterQueue::new(RetentionPolicy::Indefinite);
         assert!(dlq.is_empty());
-        dlq.push(make_entry("a", DeadLetterReason::RetriesExhausted { attempts: 3 }));
+        dlq.push(make_entry(
+            "a",
+            DeadLetterReason::RetriesExhausted { attempts: 3 },
+        ));
         assert_eq!(dlq.len(), 1);
         assert!(!dlq.is_empty());
     }
@@ -484,8 +490,18 @@ mod tests {
     #[test]
     fn test_dlq_list_newest_first() {
         let dlq = DeadLetterQueue::new(RetentionPolicy::Indefinite);
-        dlq.push(make_entry("first", DeadLetterReason::Other { details: "a".into() }));
-        dlq.push(make_entry("second", DeadLetterReason::Other { details: "b".into() }));
+        dlq.push(make_entry(
+            "first",
+            DeadLetterReason::Other {
+                details: "a".into(),
+            },
+        ));
+        dlq.push(make_entry(
+            "second",
+            DeadLetterReason::Other {
+                details: "b".into(),
+            },
+        ));
         let list = dlq.list();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].job_name, "second");
@@ -495,9 +511,18 @@ mod tests {
     #[test]
     fn test_dlq_list_filtered() {
         let dlq = DeadLetterQueue::new(RetentionPolicy::Indefinite);
-        dlq.push(make_entry("a", DeadLetterReason::Timeout { timeout_secs: 30 }));
-        dlq.push(make_entry("b", DeadLetterReason::RetriesExhausted { attempts: 5 }));
-        dlq.push(make_entry("c", DeadLetterReason::Timeout { timeout_secs: 60 }));
+        dlq.push(make_entry(
+            "a",
+            DeadLetterReason::Timeout { timeout_secs: 30 },
+        ));
+        dlq.push(make_entry(
+            "b",
+            DeadLetterReason::RetriesExhausted { attempts: 5 },
+        ));
+        dlq.push(make_entry(
+            "c",
+            DeadLetterReason::Timeout { timeout_secs: 60 },
+        ));
         let timeouts = dlq.list_filtered(|e| matches!(&e.reason, DeadLetterReason::Timeout { .. }));
         assert_eq!(timeouts.len(), 2);
     }
@@ -522,7 +547,12 @@ mod tests {
     #[test]
     fn test_dlq_delete() {
         let dlq = DeadLetterQueue::new(RetentionPolicy::Indefinite);
-        let entry = make_entry("d", DeadLetterReason::Other { details: "x".into() });
+        let entry = make_entry(
+            "d",
+            DeadLetterReason::Other {
+                details: "x".into(),
+            },
+        );
         let eid = entry.entry_id.clone();
         dlq.push(entry);
         assert!(dlq.delete(&eid));
@@ -565,26 +595,41 @@ mod tests {
     #[test]
     fn test_dlq_stats() {
         let dlq = DeadLetterQueue::new(RetentionPolicy::Indefinite);
-        dlq.push(make_entry("a", DeadLetterReason::RetriesExhausted { attempts: 3 }));
-        dlq.push(make_entry("b", DeadLetterReason::Timeout { timeout_secs: 60 }));
-        dlq.push(make_entry("c", DeadLetterReason::RetriesExhausted { attempts: 5 }));
+        dlq.push(make_entry(
+            "a",
+            DeadLetterReason::RetriesExhausted { attempts: 3 },
+        ));
+        dlq.push(make_entry(
+            "b",
+            DeadLetterReason::Timeout { timeout_secs: 60 },
+        ));
+        dlq.push(make_entry(
+            "c",
+            DeadLetterReason::RetriesExhausted { attempts: 5 },
+        ));
         let stats = dlq.stats();
         assert_eq!(stats.total_entries, 3);
         assert_eq!(
-            stats.by_reason.get("retries_exhausted").copied().unwrap_or(0),
+            stats
+                .by_reason
+                .get("retries_exhausted")
+                .copied()
+                .unwrap_or(0),
             2
         );
-        assert_eq!(
-            stats.by_reason.get("timeout").copied().unwrap_or(0),
-            1
-        );
+        assert_eq!(stats.by_reason.get("timeout").copied().unwrap_or(0), 1);
     }
 
     #[test]
     fn test_dead_letter_entry_with_meta() {
-        let entry = make_entry("m", DeadLetterReason::Other { details: "x".into() })
-            .with_meta("project", "test-project")
-            .with_meta("user", "admin");
+        let entry = make_entry(
+            "m",
+            DeadLetterReason::Other {
+                details: "x".into(),
+            },
+        )
+        .with_meta("project", "test-project")
+        .with_meta("user", "admin");
         assert_eq!(
             entry.metadata.get("project").map(|s| s.as_str()),
             Some("test-project")
@@ -609,7 +654,12 @@ mod tests {
 
     #[test]
     fn test_dead_letter_entry_age() {
-        let entry = make_entry("age", DeadLetterReason::Other { details: "x".into() });
+        let entry = make_entry(
+            "age",
+            DeadLetterReason::Other {
+                details: "x".into(),
+            },
+        );
         // Just created, age should be very small.
         assert!(entry.age_secs() < 5);
     }
@@ -639,10 +689,20 @@ mod tests {
     fn test_dlq_purge_older_than() {
         let dlq = DeadLetterQueue::new(RetentionPolicy::Indefinite);
         // Push an entry with an old timestamp.
-        let mut old_entry = make_entry("old", DeadLetterReason::Other { details: "x".into() });
+        let mut old_entry = make_entry(
+            "old",
+            DeadLetterReason::Other {
+                details: "x".into(),
+            },
+        );
         old_entry.created_at_secs = current_timestamp().saturating_sub(1000);
         dlq.push(old_entry);
-        dlq.push(make_entry("new", DeadLetterReason::Other { details: "y".into() }));
+        dlq.push(make_entry(
+            "new",
+            DeadLetterReason::Other {
+                details: "y".into(),
+            },
+        ));
 
         let purged = dlq.purge_older_than(500);
         assert_eq!(purged, 1);
@@ -653,7 +713,12 @@ mod tests {
 
     #[test]
     fn test_dead_letter_entry_mark_replayed() {
-        let mut entry = make_entry("rp", DeadLetterReason::Other { details: "x".into() });
+        let mut entry = make_entry(
+            "rp",
+            DeadLetterReason::Other {
+                details: "x".into(),
+            },
+        );
         assert_eq!(entry.replay_count, 0);
         entry.mark_replayed();
         assert_eq!(entry.replay_count, 1);

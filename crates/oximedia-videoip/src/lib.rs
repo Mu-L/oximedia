@@ -77,13 +77,17 @@
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::too_many_arguments)]
 
+pub mod adaptive_jitter_buffer;
 pub mod bandwidth_est;
+pub mod bandwidth_shaping;
 pub mod bbr;
+pub mod bbr_congestion;
 pub mod bonding;
 pub mod codec;
 pub mod color_space_conv;
 pub mod color_space_simd;
 pub mod congestion;
+pub mod diagnostic_overlay;
 pub mod discovery;
 pub mod dtls_srtp;
 pub mod encryption;
@@ -97,12 +101,16 @@ pub mod jitter;
 pub mod metadata;
 pub mod multicast;
 pub mod multicast_group;
+pub mod multiview;
 pub mod ndi_bridge;
+pub mod network_sim;
 pub mod nmos;
 pub mod packet;
 pub mod packet_loss;
+pub mod precise_timer;
 pub mod ptp;
 pub mod ptp_boundary;
+pub mod ptp_clock;
 pub mod ptz;
 pub mod quic_transport;
 /// Real QUIC transport backed by `quinn` (enabled by the `quic-quinn` feature).
@@ -111,24 +119,37 @@ pub mod quic_transport_quinn;
 pub mod receiver;
 pub mod redundancy;
 pub mod rist;
+pub mod rtcp_sender_report;
+pub mod rtp_2110;
+pub mod rtp_jitter_buffer;
+pub mod rtsp_server;
 pub mod scatter_gather_io;
 pub mod sdp;
+pub mod sdp_gen;
+pub mod sdp_negotiation;
 pub mod sfp_monitor;
 pub mod smpte2110;
 pub mod source;
 pub mod spsc_ring;
 pub mod srt_config;
+pub mod srt_handshake;
+pub mod srt_transport;
 pub mod st2110_20;
+pub mod st2110_metadata;
 pub mod stats;
 pub mod stream_descriptor;
 pub mod stream_health;
 pub mod stream_recorder;
+pub mod stream_recording_mux;
+pub mod stream_relay;
 pub mod stream_sync;
 pub mod tally;
 pub mod transport;
 pub mod types;
 pub mod udp_scatter_gather;
 pub mod utils;
+pub mod videoip_ext;
+pub mod whip_whep;
 pub mod zero_copy_packet;
 
 // Re-export main types

@@ -9,9 +9,9 @@
 - [x] Extend `motion_compensation` with sub-pixel motion estimation (half-pel and quarter-pel refinement) (L9: `refine_subpel` in `motion_compensation_ext` — half-pel bilinear + quarter-pel Catmull-Rom bicubic; 2026-05-15)
 - [x] Add adaptive block size selection in motion estimation (variable block sizes from 4x4 to 64x64) (L10: `adaptive_block_size_search` + `BlockSize` enum in `motion_compensation_ext`; 2026-05-15)
 - [x] Implement bidirectional motion estimation in `motion_compensation` for B-frame-style interpolation (L11: `bidir_motion_estimate` + `BidirMotionVector` in `motion_compensation_ext`; 2026-05-15)
-- [ ] Add multiple deinterlace algorithms to `deinterlace` (bob, weave, Yadif-style adaptive, EEDI-style edge-directed) (verified-open 2026-05-16: not yet implemented)
+- [x] Add multiple deinterlace algorithms to `deinterlace` (bob, weave, Yadif-style adaptive, EEDI-style edge-directed) (verified-open 2026-05-16: not yet implemented)
 - [x] Extend `scene_detection` with adaptive threshold based on content complexity histogram
-- [ ] Improve `temporal_denoise` with motion-compensated temporal filtering (MCTF) using motion vectors (verified-open 2026-05-16: not yet implemented)
+- [x] Improve `temporal_denoise` with motion-compensated temporal filtering (MCTF) using motion vectors (verified-open 2026-05-16: not yet implemented)
 - [x] Add confidence scoring to `pulldown_detect` cadence detection with frame-level accuracy reporting
 - [x] Extend `video_fingerprint` with rotation/scale invariance for robust content matching
 
@@ -29,9 +29,9 @@
 - [x] Parallelize motion search in `motion_compensation` across blocks using rayon (L29: `estimate_frame_motion_parallel` in `motion_compensation_ext` — rayon par_iter over macroblocks; 2026-05-15)
 - [x] Implement diamond/hexagonal search patterns in motion estimation instead of full search (L30: `motion_search_with_pattern` + `SearchPattern` enum in `motion_compensation_ext` — LDSP/SDSP diamond, 6-point hexagonal, three-step, full; 2026-05-15)
 - [x] Add SIMD-optimized SAD (Sum of Absolute Differences) and SSD computation for block matching (L31: `sad_simd` in `motion_compensation_ext` — AVX2 32B/iter, SSE4.1 16B/iter, scalar fallback; 2026-05-15)
-- [ ] Use integral images for fast variance computation in `scene_detection` (verified-open 2026-05-16: not yet implemented)
+- [x] Use integral images for fast variance computation in `scene_detection` (IntegralImage Crow 1984 SAT, O(1) rect_variance, integral_image.rs 350L; 2026-05-30)
 - [x] Implement hierarchical (coarse-to-fine) motion estimation for large search ranges (L33: `hierarchical_motion_estimate` in `motion_compensation_ext` — Gaussian pyramid, coarse-to-fine propagation; 2026-05-15)
-- [ ] Add frame-level parallelism in `temporal_denoise` for processing independent pixel columns (verified-open 2026-05-16: not yet implemented)
+- [x] Add frame-level parallelism in `temporal_denoise` for processing independent pixel columns (existing rayon pinned; parallel tests added 2026-05-30)
 
 ## Testing
 - [x] Add round-trip tests for deinterlace (interlace synthetic content, deinterlace, measure PSNR) (verified 2026-05-15; tests/it_deinterlace.rs:5 tests)

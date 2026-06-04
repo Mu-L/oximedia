@@ -1,5 +1,9 @@
 //! Simple room acoustics simulation using the image source method.
 //!
+//! The `ImageSourceModel::compute_reflections` method iterates over all
+//! independent image-source triplets (nx, ny, nz) in parallel using Rayon,
+//! giving near-linear speedup on multi-core systems for large reflection orders.
+//!
 //! Features:
 //! - 1st-order early reflections (6 walls) via image source placement
 //! - Late reverberation tail using exponentially decaying noise
@@ -635,6 +639,10 @@ pub struct ImageReflection {
 /// image-to-listener distance and the product of the reflection factors of
 /// all walls involved.
 ///
+/// **Parallel execution:** `compute_reflections` uses Rayon to process all
+/// independent image-source triplets in parallel, giving near-linear speedup
+/// for high reflection orders.
+///
 /// # Example
 ///
 /// ```rust
@@ -682,52 +690,61 @@ impl ImageSourceModel {
         source_pos: (f32, f32, f32),
         listener_pos: (f32, f32, f32),
     ) -> Vec<ImageReflection> {
-        let mut reflections = Vec::new();
+        use rayon::prelude::*;
+
         let order = self.max_order as i32;
+        let speed = self.speed_of_sound;
+        let max_order = self.max_order;
 
-        // Iterate over all integer triplets (nx, ny, nz) within [-order, order].
-        // Each triplet identifies a periodic image of the source in the
-        // infinite tiling of the shoebox room.
-        for nx in -order..=order {
-            for ny in -order..=order {
-                for nz in -order..=order {
-                    let total_order = nx.unsigned_abs() + ny.unsigned_abs() + nz.unsigned_abs();
-                    if total_order == 0 || total_order > self.max_order {
-                        continue;
-                    }
+        // Build the full list of triplets (nx, ny, nz) whose total order is in
+        // [1, max_order].  This is the same set as the serial version but
+        // stored as a flat Vec so Rayon can split it across threads.
+        let triplets: Vec<(i32, i32, i32)> = (-order..=order)
+            .flat_map(|nx| {
+                (-order..=order).flat_map(move |ny| (-order..=order).map(move |nz| (nx, ny, nz)))
+            })
+            .filter(|&(nx, ny, nz)| {
+                let total = nx.unsigned_abs() + ny.unsigned_abs() + nz.unsigned_abs();
+                total >= 1 && total <= max_order
+            })
+            .collect();
 
-                    // Image source position in the extended (tiled) space.
-                    let (ix, iy, iz) = image_source_pos(source_pos, room, nx, ny, nz);
+        // Process each triplet independently in parallel.
+        let mut reflections: Vec<ImageReflection> = triplets
+            .par_iter()
+            .filter_map(|&(nx, ny, nz)| {
+                let total_order = nx.unsigned_abs() + ny.unsigned_abs() + nz.unsigned_abs();
 
-                    // Distance from image source to listener.
-                    let dx = ix - listener_pos.0;
-                    let dy = iy - listener_pos.1;
-                    let dz = iz - listener_pos.2;
-                    let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                // Image source position in the extended (tiled) space.
+                let (ix, iy, iz) = image_source_pos(source_pos, room, nx, ny, nz);
 
-                    if dist < 1e-6 {
-                        continue;
-                    }
+                // Distance from image source to listener.
+                let dx = ix - listener_pos.0;
+                let dy = iy - listener_pos.1;
+                let dz = iz - listener_pos.2;
+                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
 
-                    // Delay expressed in seconds (converted to samples later).
-                    let delay_s = dist / self.speed_of_sound;
-
-                    // Gain: 1/r inverse-distance × product of wall reflection factors.
-                    let wall_gain =
-                        compute_image_wall_gain(&room.absorption_coefficients, nx, ny, nz);
-                    let dist_gain = 1.0 / dist.max(0.01);
-                    let gain = wall_gain * dist_gain;
-
-                    reflections.push(ImageReflection {
-                        delay_samples: delay_s,
-                        gain,
-                        wall_bounces: total_order,
-                    });
+                if dist < 1e-6 {
+                    return None;
                 }
-            }
-        }
 
-        // Sort by ascending delay.
+                // Delay expressed in seconds (converted to samples later).
+                let delay_s = dist / speed;
+
+                // Gain: 1/r inverse-distance × product of wall reflection factors.
+                let wall_gain = compute_image_wall_gain(&room.absorption_coefficients, nx, ny, nz);
+                let dist_gain = 1.0 / dist.max(0.01);
+                let gain = wall_gain * dist_gain;
+
+                Some(ImageReflection {
+                    delay_samples: delay_s,
+                    gain,
+                    wall_bounces: total_order,
+                })
+            })
+            .collect();
+
+        // Sort by ascending delay (deterministic output order regardless of thread scheduling).
         reflections.sort_by(|a, b| {
             a.delay_samples
                 .partial_cmp(&b.delay_samples)

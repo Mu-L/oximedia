@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use crate::operation_log::{Operation, OpType};
+use crate::operation_log::Operation;
 use std::collections::VecDeque;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -19,13 +19,23 @@ pub enum RecordedEventKind {
     /// A document operation was applied.
     Operation(Operation),
     /// A user joined the session.
-    UserJoined { user_id: String, display_name: String },
+    UserJoined {
+        user_id: String,
+        display_name: String,
+    },
     /// A user left the session.
     UserLeft { user_id: String },
     /// A cursor moved to a new timeline position.
-    CursorMoved { user_id: String, frame: u64, track: u32 },
+    CursorMoved {
+        user_id: String,
+        frame: u64,
+        track: u32,
+    },
     /// A snapshot was committed.
-    SnapshotCommitted { snapshot_id: u64, description: String },
+    SnapshotCommitted {
+        snapshot_id: u64,
+        description: String,
+    },
     /// A lock was acquired on a resource.
     LockAcquired { user_id: String, resource: String },
     /// A lock was released.
@@ -47,7 +57,11 @@ pub struct RecordedEvent {
 
 impl RecordedEvent {
     fn new(seq: u64, timestamp_ms: u64, kind: RecordedEventKind) -> Self {
-        Self { seq, timestamp_ms, kind }
+        Self {
+            seq,
+            timestamp_ms,
+            kind,
+        }
     }
 }
 
@@ -102,7 +116,8 @@ impl SessionRecorder {
         }
         let seq = self.next_seq;
         self.next_seq += 1;
-        self.events.push(RecordedEvent::new(seq, timestamp_ms, kind));
+        self.events
+            .push(RecordedEvent::new(seq, timestamp_ms, kind));
         Some(seq)
     }
 
@@ -240,11 +255,7 @@ impl<'r> PlaybackSession<'r> {
     /// Create a playback session from a recorder.
     #[must_use]
     pub fn new(recorder: &'r SessionRecorder, speed: PlaybackSpeed) -> Self {
-        let start = recorder
-            .events
-            .first()
-            .map(|e| e.timestamp_ms)
-            .unwrap_or(0);
+        let start = recorder.events.first().map(|e| e.timestamp_ms).unwrap_or(0);
         Self {
             recorder,
             cursor: 0,
@@ -257,9 +268,9 @@ impl<'r> PlaybackSession<'r> {
     /// and return all events that fall within the newly elapsed range.
     pub fn advance(&mut self, real_elapsed_ms: u64) -> Vec<&'r RecordedEvent> {
         let delta = self.speed.scale_ms(real_elapsed_ms);
-        let new_virtual_time = self.virtual_time_ms.saturating_add(
-            (real_elapsed_ms as f64 * self.speed.factor()) as u64,
-        );
+        let new_virtual_time = self
+            .virtual_time_ms
+            .saturating_add((real_elapsed_ms as f64 * self.speed.factor()) as u64);
         let prev_vt = self.virtual_time_ms;
         self.virtual_time_ms = new_virtual_time;
         let _ = delta; // used above
@@ -267,13 +278,29 @@ impl<'r> PlaybackSession<'r> {
         let mut emitted = Vec::new();
         while self.cursor < self.recorder.events.len() {
             let ev = &self.recorder.events[self.cursor];
-            if ev.timestamp_ms >= self.recorder.started_at_ms + prev_vt.saturating_sub(
-                self.recorder.events.first().map(|e| e.timestamp_ms).unwrap_or(0)
-            ) && ev.timestamp_ms
-                <= self.recorder.events.first().map(|e| e.timestamp_ms).unwrap_or(0)
-                    + self.virtual_time_ms.saturating_sub(
-                        self.recorder.events.first().map(|e| e.timestamp_ms).unwrap_or(0),
+            if ev.timestamp_ms
+                >= self.recorder.started_at_ms
+                    + prev_vt.saturating_sub(
+                        self.recorder
+                            .events
+                            .first()
+                            .map(|e| e.timestamp_ms)
+                            .unwrap_or(0),
                     )
+                && ev.timestamp_ms
+                    <= self
+                        .recorder
+                        .events
+                        .first()
+                        .map(|e| e.timestamp_ms)
+                        .unwrap_or(0)
+                        + self.virtual_time_ms.saturating_sub(
+                            self.recorder
+                                .events
+                                .first()
+                                .map(|e| e.timestamp_ms)
+                                .unwrap_or(0),
+                        )
             {
                 emitted.push(ev);
                 self.cursor += 1;
@@ -389,7 +416,12 @@ mod tests {
     fn test_recorder_record_while_stopped_returns_none() {
         let mut rec = SessionRecorder::new("s1");
         // not started
-        let result = rec.record(1_000, RecordedEventKind::UserLeft { user_id: "u1".to_string() });
+        let result = rec.record(
+            1_000,
+            RecordedEventKind::UserLeft {
+                user_id: "u1".to_string(),
+            },
+        );
         assert!(result.is_none());
         assert_eq!(rec.event_count(), 0);
     }
@@ -398,8 +430,12 @@ mod tests {
     fn test_recorder_record_sequence_numbers() {
         let mut rec = SessionRecorder::new("s1");
         rec.start(0);
-        let s1 = rec.record_user_joined("u1", "Alice", 100).expect("should record");
-        let s2 = rec.record_user_joined("u2", "Bob", 200).expect("should record");
+        let s1 = rec
+            .record_user_joined("u1", "Alice", 100)
+            .expect("should record");
+        let s2 = rec
+            .record_user_joined("u2", "Bob", 200)
+            .expect("should record");
         assert_eq!(s1, 0);
         assert_eq!(s2, 1);
         assert_eq!(rec.event_count(), 2);
@@ -499,11 +535,29 @@ mod tests {
         let mut rec = SessionRecorder::new("s1");
         rec.start(0);
         rec.record_operation(
-            Operation::new(1, 1, 0, "t", OpType::Insert { index: 0, value: 10.0 }),
+            Operation::new(
+                1,
+                1,
+                0,
+                "t",
+                OpType::Insert {
+                    index: 0,
+                    value: 10.0,
+                },
+            ),
             1_000,
         );
         rec.record_operation(
-            Operation::new(2, 1, 0, "t", OpType::Insert { index: 1, value: 20.0 }),
+            Operation::new(
+                2,
+                1,
+                0,
+                "t",
+                OpType::Insert {
+                    index: 1,
+                    value: 20.0,
+                },
+            ),
             2_000,
         );
 

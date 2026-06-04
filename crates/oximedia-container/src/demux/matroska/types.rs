@@ -5,7 +5,7 @@
 
 use oximedia_core::CodecId;
 
-use super::matroska_v4::BlockAdditionMapping;
+use super::matroska_v4::{BlockAdditionMapping, BlockMore};
 
 // ============================================================================
 // Document Type
@@ -661,6 +661,12 @@ pub struct Block {
     pub references: Vec<i64>,
     /// Discard padding in nanoseconds.
     pub discard_padding: Option<i64>,
+    /// Block-level additional data from `BlockAdditions` → `BlockMore` children.
+    ///
+    /// Each entry corresponds to one `BlockMore` (0xA6) element inside the
+    /// `BlockAdditions` (0x75A1) master container.  Empty for `SimpleBlock`s
+    /// and for `BlockGroup`s that have no `BlockAdditions` child.
+    pub block_additions: Vec<BlockMore>,
 }
 
 impl Block {

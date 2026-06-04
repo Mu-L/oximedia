@@ -64,6 +64,8 @@ pub mod archivepro_py;
 pub mod async_pipeline;
 mod audio;
 pub mod audio_analysis;
+/// Audio processing graph builder (DAG) for Python bindings.
+pub mod audio_graph;
 /// Audio loudness normalization and dynamics processing.
 pub mod audio_normalize;
 /// Audio post-production bindings (ADR, stems, delivery, restoration).
@@ -72,12 +74,16 @@ pub mod audiopost_py;
 pub mod auto_py;
 pub mod batch;
 pub mod batch_bindings;
+/// Batch media processing with GIL release for parallel Rust execution.
+pub mod batch_parallel;
 /// Batch processing bindings (job queuing, scheduling, execution).
 pub mod batch_py;
 /// `oximedia.benchmark` submodule — Python-accessible performance profiling.
 pub mod benchmark_py;
 /// Broadcast automation: PlayoutScheduler and BroadcastValidator.
 pub mod broadcast;
+/// Numpy-compatible buffer protocol support for zero-copy frame access.
+pub mod buffer_protocol;
 /// Color calibration and matching bindings.
 pub mod calibrate_py;
 /// Caption processing bindings (parse, convert, validate).
@@ -121,6 +127,8 @@ pub mod effects;
 mod error;
 /// Structured error types with categories, severity, and batch collection.
 pub mod error_types;
+/// Python exception types for oximedia errors.
+pub mod exceptions;
 /// Render farm management bindings.
 pub mod farm_py;
 /// Filter graph node descriptions for Python-side graph building.
@@ -132,6 +140,10 @@ mod filters;
 pub mod forensics_py;
 /// Media format information, container capabilities, and codec queries.
 pub mod format_info;
+/// Frame format conversion utilities for Python bindings.
+pub mod frame_converter;
+/// Python iterator wrapper for frame-by-frame access.
+pub mod frame_iterator;
 /// Memory pool for frame allocation to reduce Python GC pressure.
 pub mod frame_pool;
 /// Gaming capture, highlight detection, and clip creation bindings.
@@ -173,6 +185,10 @@ pub mod ndi_py;
 pub mod optimize_py;
 /// `oximedia.io` submodule — file open, probe, transcode operations.
 pub mod oximedia_io_py;
+/// Parallel processing utilities for Python bindings.
+pub mod parallel;
+/// Pickle serialization support for oximedia Python objects.
+pub mod pickle_support;
 pub mod pipeline_bindings;
 pub mod pipeline_builder;
 /// Broadcast playout server bindings (schedule, control, status).
@@ -184,6 +200,10 @@ pub mod presets_py;
 mod probe;
 /// Performance profiling bindings.
 pub mod profiler_py;
+/// Callback-based progress reporting for Python callers.
+pub mod progress_callback;
+/// Streaming progress reporting for async Python usage.
+pub mod progress_reporting;
 /// Progress tracking for long-running Python operations.
 pub mod progress_tracker;
 /// Proxy media generation and management bindings.
@@ -202,8 +222,12 @@ pub mod qc_py;
 pub mod quality;
 /// Content recommendation engine bindings.
 pub mod recommend_py;
+/// Render queue management for Python bindings.
+pub mod render_queue;
 /// Render farm cluster management bindings.
 pub mod renderfarm_py;
+/// Python `__repr__` support for oximedia objects.
+pub mod repr_support;
 /// Audio restoration bindings (declip, decrackle, dehum, denoise).
 pub mod restore_py;
 /// Review and approval workflow bindings.

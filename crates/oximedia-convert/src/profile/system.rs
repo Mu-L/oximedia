@@ -129,7 +129,7 @@ impl Profile {
             audio_codec: Some("aac".to_string()),
             video_bitrate: Some(4_000_000),
             audio_bitrate: Some(128_000),
-            resolution: source.width.and_then(|w| source.height.map(|h| (w, h))),
+            resolution: source.width.zip(source.height),
             frame_rate: source.frame_rate,
             parameters: vec![
                 ("hls_time".to_string(), "6".to_string()),
@@ -149,7 +149,7 @@ impl Profile {
             audio_codec: Some("flac".to_string()),
             video_bitrate: None,
             audio_bitrate: None,
-            resolution: source.width.and_then(|w| source.height.map(|h| (w, h))),
+            resolution: source.width.zip(source.height),
             frame_rate: source.frame_rate,
             parameters: vec![
                 ("level".to_string(), "3".to_string()),
@@ -275,7 +275,7 @@ impl Profile {
             audio_codec: Some("pcm".to_string()),
             video_bitrate: Some(50_000_000),
             audio_bitrate: None,
-            resolution: source.width.and_then(|w| source.height.map(|h| (w, h))),
+            resolution: source.width.zip(source.height),
             frame_rate: Some(25.0),
             parameters: vec![
                 ("g".to_string(), "1".to_string()),

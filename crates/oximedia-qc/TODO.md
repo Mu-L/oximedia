@@ -12,8 +12,8 @@
 - [x] Implement severity levels in `rules::CheckResult` (error, warning, info) with configurable thresholds (verified 2026-05-16; src/rules.rs:10 Severity enum Info/Warning/Error:16-20, configurable thresholds)
 - [x] Extend `broadcast_safe` with region-specific broadcast standards (NTSC/PAL/SECAM color space checks)
 - [x] Add `batch` module parallel processing with per-file progress reporting callbacks (verified 2026-05-16; src/batch.rs:60 BatchProcessor, with_parallel_jobs:86, process_files:96, progress tracking:4)
-- [ ] Implement `qc_template` inheritance — derive custom templates from built-in presets (verified-open 2026-05-16: qc_template.rs:93 QcTemplate has add_check but no parent/inherit/derive_from mechanism)
-- [ ] Extend `dolby_vision_qc` with RPU metadata validation (profile, level, compatibility) (verified-open 2026-05-16: dolby_vision_qc.rs checks light levels and plausibility but no RPU profile/level/compatibility validation)
+- [x] Implement `qc_template` inheritance — derive custom templates from built-in presets (resolve_template done)
+- [x] Extend `dolby_vision_qc` with RPU metadata validation (profile, level, compatibility) (validate_rpu_metadata done)
 - [x] Add `bitrate_qc` VBR quality analysis — detect quality dips during high-motion scenes (verified 2026-05-16; src/bitrate_qc.rs:507 check_vbr fn, BitrateMode::Vbr:25, extreme ratio detection:516, 720 lines)
 - [x] Implement `sync_qc` lip-sync offset detection with sub-frame accuracy (verified 2026-05-16; src/sync_qc.rs:34 offset_ms:f64 (sub-frame), SyncPoint:32, abs_offset_ms:61, 612 lines)
 
@@ -28,15 +28,35 @@
 - [ ] Implement PDF report generation in `report` module (feature-gated) (verified-open 2026-05-16: report.rs exists; pdf feature gate listed in Cargo.toml but no PDF generation implemented)
 
 ## Performance
-- [ ] Use SIMD for pixel-level analysis in `video_quality_metrics` (black frame, freeze frame detection)
-- [ ] Implement early termination in `batch` — skip remaining checks after critical failure (configurable)
-- [ ] Cache decoded frames across multiple video checks to avoid redundant decoding
-- [ ] Parallelize independent QC rules using rayon task parallelism within single-file validation
+- [x] Use SIMD for pixel-level analysis in video_quality_metrics (black frame, freeze frame detection) (done 2026-06-01)
+  - **Goal:** Route black/freeze detection through the existing SIMD luma-range-check infrastructure.
+  - **Design:** SIMD infra already exists: `src/video_quality_metrics.rs:387` `simd_luma_range_check` / `simd_chroma_range_check` / `simd_range_check_inner` with SSE4.1+scalar. `src/black_silence.rs:282` `detect_black_frames` is scalar — route it through `simd_luma_range_check` (checks all luma values within [0, threshold], perfect for black detection). Similarly route freeze-frame detection.
+  - **Files:** `src/black_silence.rs`, `TODO.md`.
+  - **Tests:** SIMD black-frame detection output == scalar output on reference data; freeze detection SIMD matches scalar; scalar fallback tested via cfg flag.
+  - **Risk:** SSE4.1 feature detection already in place; only connect the existing path — do not add new unsafe blocks.
+- [x] Implement early termination in batch — skip remaining checks after critical failure (configurable) (done 2026-06-01)
+  - **Goal:** Stop running further rules on a file once a critical error is found (when configured).
+  - **Design:** `src/batch.rs:60` `BatchProcessor`, :96 `process_files` — no abort-on-critical. Add `abort_on_critical: bool` to `BatchProcessor`; in the per-file rule loop, if any `CheckResult` has `Severity::Error` and `abort_on_critical`, break the rule loop for that file.
+  - **Files:** `src/batch.rs`, `TODO.md`.
+  - **Tests:** early-term stops on first Error when flag is true; normal mode continues past errors; zero-error file processes all rules regardless.
+  - **Risk:** error detection depends on `Severity` enum — read `src/rules.rs:10` for exact variant names.
+- [x] Cache decoded frames across multiple video checks to avoid redundant decoding (done 2026-06-01)
+  - **Goal:** Decode each frame once per validation run, shared across all rules that access it.
+  - **Design:** No FrameCache exists in src/ (verified). Introduce `FrameCache` struct (`HashMap<(file_id, frame_idx), Arc<Frame>>`) with LRU eviction bound; share across rules within one `QualityControl::run()` call. Scope to single run (not global).
+  - **Files:** `src/frame_cache.rs` (new), `src/lib.rs`, `TODO.md`.
+  - **Tests:** cache hit count increases on repeated same-frame access; different frames get different cache entries; LRU eviction stays within bound.
+  - **Risk:** FrameCache must be scoped to one run() — not a static/global; LRU bound must be finite.
+- [x] Parallelize independent QC rules using rayon task parallelism within single-file validation (verified 2026-06-01; src/lib.rs:245 par_iter() over applicable rules)
 
 ## Testing
 - [ ] Add QC validation tests with known-good and known-bad reference media files
 - [ ] Test `compliance` module against all supported broadcast standards (ATSC, DVB, ISDB)
-- [ ] Add round-trip tests for `qc_report` JSON/XML serialization
+- [x] Add round-trip tests for qc_report JSON/XML serialization (done 2026-06-01)
+  - **Goal:** Verify QcReport serialization is lossless across JSON and XML formats.
+  - **Design:** Add to existing test module: `QcReport → serde_json::to_string → serde_json::from_str → assert_eq`; same for XML if the `xml` feature is present. Use a fixture QcReport with known fields.
+  - **Files:** `src/qc_report.rs` (tests), `TODO.md`.
+  - **Tests:** JSON round-trip preserves all fields; XML round-trip (feature-gated) preserves structure.
+  - **Risk:** serde derives must be present on QcReport and all nested types.
 - [ ] Test `qc_scheduler` with concurrent QC jobs and verify no resource contention
 - [ ] Verify `black_silence` detection thresholds match industry-standard definitions
 

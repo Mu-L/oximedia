@@ -466,10 +466,7 @@ impl CueSheet {
                         out.push_str(&base);
                     } else {
                         // continuation line: repeat cue identifier cells blank
-                        out.push_str(&format!(
-                            "{}\t\t\t\t\t\t\t\t",
-                            cue.cue_number
-                        ));
+                        out.push_str(&format!("{}\t\t\t\t\t\t\t\t", cue.cue_number));
                     }
                     out.push_str(&format!(
                         "{}\t{}\t{}\t{:.2}\n",
@@ -739,12 +736,11 @@ mod tests {
     #[test]
     fn test_generate_cue_sheet_from_timeline_sorted() {
         let mut events = Vec::new();
-        let mut e1 = TimelineEvent::new(120.0, 45.0, "Late Cue", UsageType::BackgroundInstrumental)
-            .unwrap();
+        let mut e1 =
+            TimelineEvent::new(120.0, 45.0, "Late Cue", UsageType::BackgroundInstrumental).unwrap();
         e1.contributors
             .push(Contributor::new("Composer A", "Composer", 100.0).unwrap());
-        let mut e2 =
-            TimelineEvent::new(10.0, 30.0, "Early Cue", UsageType::Theme).unwrap();
+        let mut e2 = TimelineEvent::new(10.0, 30.0, "Early Cue", UsageType::Theme).unwrap();
         e2.contributors
             .push(Contributor::new("Composer B", "Composer", 100.0).unwrap());
         events.push(e1);
@@ -769,10 +765,7 @@ mod tests {
 
     #[test]
     fn test_timecode_conversion() {
-        assert_eq!(
-            TimelineEvent::seconds_to_timecode(3661.0),
-            "01:01:01:00"
-        );
+        assert_eq!(TimelineEvent::seconds_to_timecode(3661.0), "01:01:01:00");
         assert_eq!(TimelineEvent::seconds_to_timecode(0.0), "00:00:00:00");
     }
 }

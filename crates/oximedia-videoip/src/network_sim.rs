@@ -130,9 +130,7 @@ impl NetworkProfile {
         Self {
             latency_us: 20_000,
             jitter_us: 5_000,
-            loss_model: LossModel::Random {
-                probability: 0.01,
-            },
+            loss_model: LossModel::Random { probability: 0.01 },
             bandwidth_bps: 100_000_000, // 100 Mbps
             reorder_probability: 0.005,
             duplicate_probability: 0.0,
@@ -383,15 +381,22 @@ impl NetworkSimulator {
         } else {
             0
         };
-        let latency = base_latency.saturating_add(jitter).saturating_sub(self.profile.jitter_us);
+        let latency = base_latency
+            .saturating_add(jitter)
+            .saturating_sub(self.profile.jitter_us);
 
         // --- bandwidth delay ---
         let bw_delay = {
             let bits = (data.len() as u64) * 8;
-            (bits * 1_000_000).checked_div(self.profile.bandwidth_bps).unwrap_or(0)
+            (bits * 1_000_000)
+                .checked_div(self.profile.bandwidth_bps)
+                .unwrap_or(0)
         };
 
-        let delivery = self.clock_us.saturating_add(latency).saturating_add(bw_delay);
+        let delivery = self
+            .clock_us
+            .saturating_add(latency)
+            .saturating_add(bw_delay);
 
         let seq = self.next_seq;
         self.next_seq += 1;
@@ -411,10 +416,7 @@ impl NetworkSimulator {
                 let mut new_pkt = pkt;
                 let mut old_pkt = held;
                 if new_pkt.delivery_time_us > old_pkt.delivery_time_us {
-                    std::mem::swap(
-                        &mut new_pkt.delivery_time_us,
-                        &mut old_pkt.delivery_time_us,
-                    );
+                    std::mem::swap(&mut new_pkt.delivery_time_us, &mut old_pkt.delivery_time_us);
                 }
                 self.insert_sorted(old_pkt);
                 self.insert_sorted(new_pkt);
@@ -432,9 +434,8 @@ impl NetworkSimulator {
         // --- duplicate ---
         if self.rng.next_f64() < self.profile.duplicate_probability {
             self.stats.total_duplicated += 1;
-            let dup_delivery = delivery.saturating_add(
-                self.rng.next_range(0, self.profile.latency_us.max(100)),
-            );
+            let dup_delivery =
+                delivery.saturating_add(self.rng.next_range(0, self.profile.latency_us.max(100)));
             let dup = SimPacket {
                 seq,
                 data,

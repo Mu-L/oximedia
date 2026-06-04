@@ -569,8 +569,10 @@ mod tests {
         // Requeue for retry
         queue.requeue(task).await.expect("should succeed in test");
 
-        // Wait for requeue delay
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Wait for requeue delay — use a generous timeout so this test is
+        // robust under concurrent workspace-level test load (initial_delay is
+        // 10 ms; 500 ms gives 50× headroom for a loaded scheduler).
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Task should be back in queue
         assert!(queue.pending_count().await > 0 || queue.running_count() > 0);

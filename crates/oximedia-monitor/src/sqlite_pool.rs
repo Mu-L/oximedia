@@ -58,9 +58,7 @@
 
 // The entire module is only meaningful when rusqlite is available.
 #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
-pub use impl_sqlite::{
-    PoolConfig, PoolConfigBuilder, PoolStats, PooledConnection, SqlitePool,
-};
+pub use impl_sqlite::{PoolConfig, PoolConfigBuilder, PoolStats, PooledConnection, SqlitePool};
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
 mod impl_sqlite {
@@ -243,9 +241,9 @@ mod impl_sqlite {
 
             for _ in 0..config.pool_size {
                 let conn = Self::open_connection(&config)?;
-                idle_tx
-                    .send(conn)
-                    .map_err(|_| MonitorError::Storage("pool channel closed unexpectedly".into()))?;
+                idle_tx.send(conn).map_err(|_| {
+                    MonitorError::Storage("pool channel closed unexpectedly".into())
+                })?;
             }
 
             Ok(Self {
@@ -302,9 +300,8 @@ mod impl_sqlite {
                     Ok(PooledConnection {
                         conn: Some(conn),
                         return_tx: self.inner.idle_tx.clone(),
-                        returned: Arc::clone(&self.inner)
-                            .total_returned
-                            .as_ptr() as *const AtomicU64,
+                        returned: Arc::clone(&self.inner).total_returned.as_ptr()
+                            as *const AtomicU64,
                     })
                 }
                 Err(_) => {

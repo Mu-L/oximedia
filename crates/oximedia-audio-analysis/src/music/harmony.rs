@@ -5,6 +5,7 @@
 
 use crate::{generate_window, AnalysisConfig, AnalysisError, Result, WindowType};
 use oxifft::Complex;
+use rayon::prelude::*;
 
 /// Names of the 12 pitch classes, starting from C.
 const PITCH_CLASS_NAMES: [&str; 12] = [
@@ -140,6 +141,9 @@ impl HarmonyAnalyzer {
     }
 
     /// Extract per-frame 12-bin chroma vectors from audio.
+    ///
+    /// Frame computation is parallelized with rayon — each frame's FFT and
+    /// pitch-class folding are fully independent.
     fn extract_chroma_frames(&self, samples: &[f32], sample_rate: f32) -> Result<Vec<[f32; 12]>> {
         let fft_size = self.config.fft_size;
         let hop_size = self.config.hop_size;
@@ -152,51 +156,47 @@ impl HarmonyAnalyzer {
             0
         };
 
-        let mut chroma_frames = Vec::with_capacity(num_frames);
+        // Collect valid frame start positions.
+        let frame_starts: Vec<usize> = (0..num_frames)
+            .map(|fi| fi * hop_size)
+            .take_while(|&start| start + fft_size <= samples.len())
+            .collect();
 
-        for frame_idx in 0..num_frames {
-            let start = frame_idx * hop_size;
-            let end = start + fft_size;
-            if end > samples.len() {
-                break;
-            }
+        // Parallel: each frame's windowed FFT + chroma folding is independent.
+        let chroma_frames: Vec<[f32; 12]> = frame_starts
+            .par_iter()
+            .map(|&start| {
+                let end = start + fft_size;
+                let complex_input: Vec<Complex<f64>> = samples[start..end]
+                    .iter()
+                    .zip(&window)
+                    .map(|(&s, &w)| Complex::new(f64::from(s * w), 0.0))
+                    .collect();
 
-            // Window and FFT
-            let complex_input: Vec<Complex<f64>> = samples[start..end]
-                .iter()
-                .zip(&window)
-                .map(|(&s, &w)| Complex::new(f64::from(s * w), 0.0))
-                .collect();
+                let fft_output = oxifft::fft(&complex_input);
 
-            let fft_output = oxifft::fft(&complex_input);
+                let magnitude: Vec<f32> = fft_output[..num_bins]
+                    .iter()
+                    .map(|c| c.norm() as f32)
+                    .collect();
 
-            // Magnitude spectrum
-            let magnitude: Vec<f32> = fft_output[..num_bins]
-                .iter()
-                .map(|c| c.norm() as f32)
-                .collect();
-
-            // Fold into 12 pitch classes
-            let chroma = fold_to_chroma(&magnitude, sample_rate, fft_size);
-            chroma_frames.push(chroma);
-        }
+                fold_to_chroma(&magnitude, sample_rate, fft_size)
+            })
+            .collect();
 
         Ok(chroma_frames)
     }
 
     /// Detect chords in each chroma frame using template matching.
-    #[allow(clippy::unused_self)]
+    ///
+    /// Template matching is embarrassingly parallel across frames.
     fn detect_chords(&self, chroma_frames: &[[f32; 12]]) -> (Vec<String>, Vec<f32>) {
-        let mut chords = Vec::with_capacity(chroma_frames.len());
-        let mut confidences = Vec::with_capacity(chroma_frames.len());
+        let pairs: Vec<(String, f32)> = chroma_frames
+            .par_iter()
+            .map(|chroma| match_chord(chroma))
+            .collect();
 
-        for chroma in chroma_frames {
-            let (chord, confidence) = match_chord(chroma);
-            chords.push(chord);
-            confidences.push(confidence);
-        }
-
-        (chords, confidences)
+        pairs.into_iter().unzip()
     }
 }
 

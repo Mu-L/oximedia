@@ -15,6 +15,12 @@
 - [ ] Extend `auth_middleware` with OAuth2/OIDC provider integration for SSO (verified-open 2026-05-16: not yet implemented)
 - [x] Add `response_cache` ETags and conditional GET (If-None-Match) for media metadata endpoints (verified 2026-05-16; src/etag_cache.rs:652 lines, src/response_cache.rs)
 - [x] Implement `health_monitor` deep health checks (database connectivity, storage availability, transcode worker status)
+- [x] Wire S3 multipart upload in `cdn/s3.rs` via `oximedia-storage::S3Backend` (completed 2026-05-29)
+  - **Goal:** Uploads ≥ 8 MiB automatically use S3 multipart API (up to 4 parallel parts). Smaller uploads use the existing single-PUT path. Handles abort on failure.
+  - **Design:** `MultipartConfig { part_size: 8 MiB, max_parallel_parts: 4, retry_attempts: 3, retry_backoff_ms: [500,1000,2000] }`. Initiate `create_multipart_upload` → upload parts in parallel tokio tasks → collect ETags into `Vec<CompletedPart>` → `complete_multipart_upload`. On failure: `abort_multipart_upload`. 10000-part limit (= 80 GiB max object) documented.
+  - **Files:** `src/cdn/s3.rs` (or equivalent path), `src/cdn/mod.rs` if needed
+  - **Tests:** Mock S3 backend: upload 32 MiB synthetic payload → assert 4 parts × 8 MiB; assert assembled object byte-identical. Failure on part 3 → retry succeeds. Completion failure → abort called.
+  - **Risk:** Retry-with-backoff must not loop forever — cap at `retry_attempts`.
 
 ## New Features
 - [x] Add `graphql` module with GraphQL API alongside REST for flexible media queries

@@ -17,8 +17,6 @@
 //! The optional [`DiscoveryAnnouncement`] type encodes the UDP datagram
 //! payload used for zero-config peer discovery via LAN multicast.
 
-#![allow(dead_code)]
-
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -432,7 +430,10 @@ impl ClusterRegistry {
         let mut nodes = self.nodes.write();
         let before = nodes.len();
         nodes.retain(|_, n| {
-            !matches!(n.status, WorkerStatus::Deregistered | WorkerStatus::Unreachable)
+            !matches!(
+                n.status,
+                WorkerStatus::Deregistered | WorkerStatus::Unreachable
+            )
         });
         before - nodes.len()
     }
@@ -516,10 +517,7 @@ impl ClusterRegistry {
         self.nodes
             .read()
             .values()
-            .filter(|n| {
-                n.has_capacity()
-                    && job_type.map_or(true, |jt| n.supports_job_type(jt))
-            })
+            .filter(|n| n.has_capacity() && job_type.map_or(true, |jt| n.supports_job_type(jt)))
             .min_by_key(|n| n.active_jobs)
             .cloned()
     }
@@ -529,7 +527,10 @@ impl ClusterRegistry {
     pub fn stats(&self) -> ClusterStats {
         let nodes = self.nodes.read();
         let total = nodes.len();
-        let healthy = nodes.values().filter(|n| n.status == WorkerStatus::Healthy).count();
+        let healthy = nodes
+            .values()
+            .filter(|n| n.status == WorkerStatus::Healthy)
+            .count();
         let total_cpu: u32 = nodes
             .values()
             .filter(|n| n.status == WorkerStatus::Healthy)

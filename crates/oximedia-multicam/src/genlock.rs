@@ -224,10 +224,8 @@ impl GenlockMonitor {
     pub fn add_camera(&mut self, name: &str) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
-        self.cameras.insert(
-            id,
-            CameraState::new(name, self.config.averaging_window),
-        );
+        self.cameras
+            .insert(id, CameraState::new(name, self.config.averaging_window));
         id
     }
 
@@ -303,7 +301,11 @@ impl GenlockMonitor {
                     0.0
                 };
                 let desc = if drift > 0.0 {
-                    format!("Drop {:.1} frame(s) to compensate +{:.1}us drift", frames.abs(), drift)
+                    format!(
+                        "Drop {:.1} frame(s) to compensate +{:.1}us drift",
+                        frames.abs(),
+                        drift
+                    )
                 } else {
                     format!(
                         "Duplicate {:.1} frame(s) to compensate {:.1}us drift",

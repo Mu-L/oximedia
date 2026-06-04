@@ -57,9 +57,7 @@ impl ParadeChannel {
             Self::Green => g,
             Self::Blue => b,
             Self::Luma => {
-                let luma = 0.2126 * f32::from(r)
-                    + 0.7152 * f32::from(g)
-                    + 0.0722 * f32::from(b);
+                let luma = 0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b);
                 luma.round().clamp(0.0, 255.0) as u8
             }
         }
@@ -86,7 +84,11 @@ impl Default for LumaParadeConfig {
         Self {
             width: 512,
             height: 256,
-            channels: vec![ParadeChannel::Red, ParadeChannel::Green, ParadeChannel::Blue],
+            channels: vec![
+                ParadeChannel::Red,
+                ParadeChannel::Green,
+                ParadeChannel::Blue,
+            ],
             show_grid: true,
         }
     }
@@ -203,7 +205,11 @@ impl LumaParade {
 
         // Total gutter pixels between channels
         const GUTTER: usize = 2;
-        let total_gutters = if num_channels > 1 { (num_channels - 1) * GUTTER } else { 0 };
+        let total_gutters = if num_channels > 1 {
+            (num_channels - 1) * GUTTER
+        } else {
+            0
+        };
         let channel_w = if w > total_gutters {
             (w - total_gutters) / num_channels
         } else {
@@ -236,8 +242,7 @@ impl LumaParade {
                 }
 
                 // Height of this bar (normalised, minimum 1 pixel)
-                let bar_h = ((count as f64 / max_count as f64) * (h as f64 - 1.0))
-                    .round() as usize;
+                let bar_h = ((count as f64 / max_count as f64) * (h as f64 - 1.0)).round() as usize;
                 let bar_h = bar_h.clamp(1, h);
 
                 // Draw from the bottom up
@@ -263,8 +268,7 @@ impl LumaParade {
                 if abs_x >= w {
                     continue;
                 }
-                let bar_h = ((count as f64 / max_count as f64) * (h as f64 - 1.0))
-                    .round() as usize;
+                let bar_h = ((count as f64 / max_count as f64) * (h as f64 - 1.0)).round() as usize;
                 let bar_h = bar_h.clamp(1, h);
                 let top_row = h - bar_h;
                 let px = (top_row * w + abs_x) * 4;
@@ -321,9 +325,7 @@ impl LumaParade {
             .find(|h| h.channel == channel)
             .map(|h| {
                 // Any bin at or above `threshold` with at least one pixel
-                h.bins[threshold as usize..]
-                    .iter()
-                    .any(|&count| count > 0)
+                h.bins[threshold as usize..].iter().any(|&count| count > 0)
             })
             .unwrap_or(false)
     }
@@ -416,7 +418,11 @@ mod tests {
         // All pixels at 255 — should be clipping at threshold 240
         let pixels = solid_rgb(4, 4, 255, 255, 255);
         let config = LumaParadeConfig {
-            channels: vec![ParadeChannel::Red, ParadeChannel::Green, ParadeChannel::Blue],
+            channels: vec![
+                ParadeChannel::Red,
+                ParadeChannel::Green,
+                ParadeChannel::Blue,
+            ],
             ..Default::default()
         };
         let parade = LumaParade::generate(&pixels, 4, 4, &config);
@@ -463,7 +469,11 @@ mod tests {
         // Red channel only → green and blue histograms not generated
         let pixels = solid_rgb(4, 4, 200, 100, 50);
         let config = LumaParadeConfig {
-            channels: vec![ParadeChannel::Red, ParadeChannel::Green, ParadeChannel::Blue],
+            channels: vec![
+                ParadeChannel::Red,
+                ParadeChannel::Green,
+                ParadeChannel::Blue,
+            ],
             ..Default::default()
         };
         let parade = LumaParade::generate(&pixels, 4, 4, &config);
@@ -483,7 +493,11 @@ mod tests {
         let config = LumaParadeConfig {
             width: 120,
             height: 60,
-            channels: vec![ParadeChannel::Red, ParadeChannel::Green, ParadeChannel::Blue],
+            channels: vec![
+                ParadeChannel::Red,
+                ParadeChannel::Green,
+                ParadeChannel::Blue,
+            ],
             show_grid: false,
         };
         let parade = LumaParade::generate(&pixels, 8, 8, &config);

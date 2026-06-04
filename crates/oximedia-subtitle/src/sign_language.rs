@@ -74,16 +74,24 @@ impl PipAnchor {
         match self {
             Self::TopLeft => (margin_x, margin_y),
             Self::TopRight => {
-                let x = frame_width.saturating_sub(pip_width).saturating_sub(margin_x);
+                let x = frame_width
+                    .saturating_sub(pip_width)
+                    .saturating_sub(margin_x);
                 (x, margin_y)
             }
             Self::BottomLeft => {
-                let y = frame_height.saturating_sub(pip_height).saturating_sub(margin_y);
+                let y = frame_height
+                    .saturating_sub(pip_height)
+                    .saturating_sub(margin_y);
                 (margin_x, y)
             }
             Self::BottomRight => {
-                let x = frame_width.saturating_sub(pip_width).saturating_sub(margin_x);
-                let y = frame_height.saturating_sub(pip_height).saturating_sub(margin_y);
+                let x = frame_width
+                    .saturating_sub(pip_width)
+                    .saturating_sub(margin_x);
+                let y = frame_height
+                    .saturating_sub(pip_height)
+                    .saturating_sub(margin_y);
                 (x, y)
             }
             Self::Custom { x, y } => (x, y),
@@ -136,7 +144,12 @@ impl Rect {
     /// Create a new rectangle.
     #[must_use]
     pub fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     /// Right edge (exclusive).
@@ -503,10 +516,7 @@ impl SignLanguageScheduler {
     /// Total duration (ms) covered by all visibility windows (after merging).
     #[must_use]
     pub fn total_coverage_ms(&self) -> i64 {
-        self.merged_windows()
-            .iter()
-            .map(|w| w.duration_ms())
-            .sum()
+        self.merged_windows().iter().map(|w| w.duration_ms()).sum()
     }
 }
 
@@ -592,7 +602,10 @@ mod tests {
     fn test_anchor_next_clockwise() {
         assert_eq!(PipAnchor::TopLeft.next_clockwise(), PipAnchor::TopRight);
         assert_eq!(PipAnchor::TopRight.next_clockwise(), PipAnchor::BottomRight);
-        assert_eq!(PipAnchor::BottomRight.next_clockwise(), PipAnchor::BottomLeft);
+        assert_eq!(
+            PipAnchor::BottomRight.next_clockwise(),
+            PipAnchor::BottomLeft
+        );
         assert_eq!(PipAnchor::BottomLeft.next_clockwise(), PipAnchor::TopLeft);
     }
 
@@ -743,7 +756,11 @@ mod tests {
         scheduler.add_window(0, 10_000);
         let frame = scheduler.frame_at(500, 1920, 1080).expect("should exist");
         // At 500ms into a 1000ms fade-in → opacity ≈ 0.5
-        assert!((frame.opacity - 0.5).abs() < 0.01, "opacity={}", frame.opacity);
+        assert!(
+            (frame.opacity - 0.5).abs() < 0.01,
+            "opacity={}",
+            frame.opacity
+        );
     }
 
     #[test]

@@ -150,10 +150,7 @@ fn hash_component(kind: &str, value: &str) -> [u8; 32] {
 
     // Finalise: additional mixing passes
     for _ in 0..4 {
-        state[0] = state[0]
-            .wrapping_add(state[3])
-            .rotate_left(23)
-            ^ state[1];
+        state[0] = state[0].wrapping_add(state[3]).rotate_left(23) ^ state[1];
         state[1] = state[1].wrapping_mul(0xc4ceb9fe1a85ec53);
         state[2] = state[2].wrapping_add(state[0]).rotate_right(31);
         state[3] ^= state[2].wrapping_mul(0x517cc1b727220a95);
@@ -335,8 +332,7 @@ impl FingerprintBuilder {
 
     /// Add a locale tag.
     pub fn locale(mut self, v: impl Into<String>) -> Self {
-        self.components
-            .push(FingerprintComponent::Locale(v.into()));
+        self.components.push(FingerprintComponent::Locale(v.into()));
         self
     }
 
@@ -543,7 +539,11 @@ impl FingerprintRegistry {
                 (id.as_str(), result)
             })
             .filter(|(_, r)| r.is_likely_same_device(self.matcher.threshold))
-            .max_by(|(_, a), (_, b)| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|(_, a), (_, b)| {
+                a.score
+                    .partial_cmp(&b.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     }
 
     /// Number of registered devices.
@@ -594,8 +594,14 @@ mod tests {
 
     #[test]
     fn test_different_components_different_digest() {
-        let fp1 = FingerprintBuilder::new().cpu_id("A").platform("linux").build();
-        let fp2 = FingerprintBuilder::new().cpu_id("B").platform("linux").build();
+        let fp1 = FingerprintBuilder::new()
+            .cpu_id("A")
+            .platform("linux")
+            .build();
+        let fp2 = FingerprintBuilder::new()
+            .cpu_id("B")
+            .platform("linux")
+            .build();
         assert_ne!(fp1.as_hex(), fp2.as_hex());
     }
 
@@ -640,14 +646,14 @@ mod tests {
     fn test_similarity_one_component_changed() {
         let reference = full_fp();
         let candidate = FingerprintBuilder::new()
-            .cpu_id("GenuineIntel:0x506E3")    // same
-            .mac_address("AA:BB:CC:DD:EE:FF")   // same
-            .disk_serial("SN123456")             // same
-            .platform("linux")                   // same
-            .os_version("6.2.0")                 // CHANGED
-            .app_id("OxiMediaPlayer-1.0")        // same
-            .timezone("UTC")                     // same
-            .locale("en-US")                     // same
+            .cpu_id("GenuineIntel:0x506E3") // same
+            .mac_address("AA:BB:CC:DD:EE:FF") // same
+            .disk_serial("SN123456") // same
+            .platform("linux") // same
+            .os_version("6.2.0") // CHANGED
+            .app_id("OxiMediaPlayer-1.0") // same
+            .timezone("UTC") // same
+            .locale("en-US") // same
             .build();
 
         let matcher = FingerprintMatcher::with_default_threshold();
@@ -776,8 +782,12 @@ mod tests {
 
         let matcher = FingerprintMatcher::new(0.0);
         let result = matcher.compare(&reference, &candidate);
-        assert!(result.missing_in_candidate.contains(&"platform".to_string()));
-        assert!(result.extra_in_candidate.contains(&"os_version".to_string()));
+        assert!(result
+            .missing_in_candidate
+            .contains(&"platform".to_string()));
+        assert!(result
+            .extra_in_candidate
+            .contains(&"os_version".to_string()));
     }
 
     #[test]

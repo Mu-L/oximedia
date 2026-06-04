@@ -400,7 +400,10 @@ mod tests {
     fn test_set_get() {
         let mut store = PluginConfigStore::new_in_memory();
         store.set("my-plugin", "threads", ConfigValue::Int(4));
-        assert_eq!(store.get("my-plugin", "threads"), Some(&ConfigValue::Int(4)));
+        assert_eq!(
+            store.get("my-plugin", "threads"),
+            Some(&ConfigValue::Int(4))
+        );
         assert_eq!(store.get("my-plugin", "missing"), None);
         assert_eq!(store.get("other-plugin", "threads"), None);
     }

@@ -338,7 +338,13 @@ impl AffinityMatcher {
 mod tests {
     use super::*;
 
-    fn worker(id: &str, tags: &[&str], memory_gb: f32, cpu_cores: u8, has_gpu: bool) -> WorkerCapabilities {
+    fn worker(
+        id: &str,
+        tags: &[&str],
+        memory_gb: f32,
+        cpu_cores: u8,
+        has_gpu: bool,
+    ) -> WorkerCapabilities {
         WorkerCapabilities {
             worker_id: id.into(),
             tags: tags.iter().map(|t| t.to_string()).collect(),
@@ -532,9 +538,7 @@ mod tests {
 
     #[test]
     fn test_rank_workers_empty_when_no_match() {
-        let workers = vec![
-            worker("w1", &[], 8.0, 4, false),
-        ];
+        let workers = vec![worker("w1", &[], 8.0, 4, false)];
         let rules = vec![AffinityRule::RequireGpu];
         let ranked = AffinityMatcher::rank_workers(&workers, &rules);
         assert!(ranked.is_empty());

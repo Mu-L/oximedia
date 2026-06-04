@@ -56,9 +56,7 @@ impl Territory {
             Self::Worldwide => true,
             Self::Country(c) => c.eq_ignore_ascii_case(country),
             Self::Region(_) => false,
-            Self::WorldwideExcluding(excl) => !excl
-                .iter()
-                .any(|e| e.eq_ignore_ascii_case(country)),
+            Self::WorldwideExcluding(excl) => !excl.iter().any(|e| e.eq_ignore_ascii_case(country)),
         }
     }
 }
@@ -606,10 +604,7 @@ impl ClearanceRegistry {
     /// # Errors
     ///
     /// Returns `ClearanceError::WorkflowNotFound` if not found.
-    pub fn get_workflow_mut(
-        &mut self,
-        id: Uuid,
-    ) -> Result<&mut ClearanceWorkflow, ClearanceError> {
+    pub fn get_workflow_mut(&mut self, id: Uuid) -> Result<&mut ClearanceWorkflow, ClearanceError> {
         self.workflows
             .get_mut(&id)
             .ok_or(ClearanceError::WorkflowNotFound(id))
@@ -620,11 +615,7 @@ impl ClearanceRegistry {
     pub fn workflows_for_asset(&self, asset_id: Uuid) -> Vec<&ClearanceWorkflow> {
         self.by_asset
             .get(&asset_id)
-            .map(|ids| {
-                ids.iter()
-                    .filter_map(|id| self.workflows.get(id))
-                    .collect()
-            })
+            .map(|ids| ids.iter().filter_map(|id| self.workflows.get(id)).collect())
             .unwrap_or_default()
     }
 
@@ -839,9 +830,6 @@ mod tests {
     fn test_usage_type_label() {
         assert_eq!(UsageType::Broadcast.label(), "Broadcast");
         assert_eq!(UsageType::Streaming.label(), "Streaming");
-        assert_eq!(
-            UsageType::Custom("Podcast".to_string()).label(),
-            "Podcast"
-        );
+        assert_eq!(UsageType::Custom("Podcast".to_string()).label(), "Podcast");
     }
 }

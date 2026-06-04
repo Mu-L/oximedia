@@ -126,51 +126,108 @@ impl InterleavedFecConfig {
     }
 }
 
-// ─── Chunk-aligned XOR ───────────────────────────────────────────────────────
+// ─── Chunk-aligned XOR with explicit AVX2 SIMD ───────────────────────────────
 
-/// XOR `src` into `dst` using word-sized operations for SIMD autovectorisation.
+/// AVX2 path: XOR `inputs` into `output` 32 bytes at a time.
+///
+/// Uses unaligned loads/stores so that no alignment precondition is required.
+/// The remainder (< 32 bytes) is handled byte-by-byte.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[allow(unsafe_code)]
+unsafe fn xor_blocks_avx2(output: &mut [u8], inputs: &[&[u8]]) {
+    use std::arch::x86_64::*;
+
+    let n = output.len();
+    let out_ptr = output.as_mut_ptr();
+
+    for input in inputs {
+        let in_len = input.len().min(n);
+        let in_ptr = input.as_ptr();
+        let chunks = in_len / 32;
+
+        for i in 0..chunks {
+            let a = _mm256_loadu_si256(out_ptr.add(i * 32) as *const __m256i);
+            let b = _mm256_loadu_si256(in_ptr.add(i * 32) as *const __m256i);
+            _mm256_storeu_si256(out_ptr.add(i * 32) as *mut __m256i, _mm256_xor_si256(a, b));
+        }
+
+        // Byte-granular tail (< 32 bytes remaining).
+        for j in (chunks * 32)..in_len {
+            // Safety: j < in_len ≤ n; both pointers are valid.
+            *out_ptr.add(j) ^= *in_ptr.add(j);
+        }
+    }
+}
+
+/// NEON path (aarch64): XOR `inputs` into `output` 16 bytes at a time.
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code)]
+unsafe fn xor_blocks_neon(output: &mut [u8], inputs: &[&[u8]]) {
+    use std::arch::aarch64::*;
+
+    let n = output.len();
+    let out_ptr = output.as_mut_ptr();
+
+    for input in inputs {
+        let in_len = input.len().min(n);
+        let in_ptr = input.as_ptr();
+        let chunks = in_len / 16;
+
+        for i in 0..chunks {
+            let a = vld1q_u8(out_ptr.add(i * 16));
+            let b = vld1q_u8(in_ptr.add(i * 16));
+            vst1q_u8(out_ptr.add(i * 16), veorq_u8(a, b));
+        }
+
+        for j in (chunks * 16)..in_len {
+            *out_ptr.add(j) ^= *in_ptr.add(j);
+        }
+    }
+}
+
+/// Scalar fallback: XOR `inputs` into `output` one byte at a time.
+fn xor_blocks_scalar(output: &mut [u8], inputs: &[&[u8]]) {
+    for input in inputs {
+        for (o, &i) in output.iter_mut().zip(input.iter()) {
+            *o ^= i;
+        }
+    }
+}
+
+/// Runtime-dispatched multi-input XOR.
+///
+/// Selects the widest SIMD path available at runtime; falls back to scalar.
+/// Always produces the same result as `xor_blocks_scalar`.
+fn xor_blocks(output: &mut [u8], inputs: &[&[u8]]) {
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        // SAFETY: AVX2 availability confirmed at runtime.
+        #[allow(unsafe_code)]
+        unsafe {
+            return xor_blocks_avx2(output, inputs);
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: NEON is mandatory on aarch64.
+        #[allow(unsafe_code)]
+        unsafe {
+            return xor_blocks_neon(output, inputs);
+        }
+    }
+
+    #[allow(unreachable_code)]
+    xor_blocks_scalar(output, inputs);
+}
+
+/// XOR `src` into `dst` using the best available SIMD path.
 ///
 /// Both slices must be the same length; shorter is padded with zeros from `src`.
 /// This is the inner kernel called for every FEC repair computation.
 fn xor_into(dst: &mut [u8], src: &[u8]) {
-    let common = dst.len().min(src.len());
-
-    // Process 8-byte (u64) chunks.
-    let words = common / 8;
-    for i in 0..words {
-        let off = i * 8;
-        // Safety: slice is exactly 8 bytes because `off = i * 8` and `words = common / 8`.
-        let d_arr: [u8; 8] = [
-            dst[off],
-            dst[off + 1],
-            dst[off + 2],
-            dst[off + 3],
-            dst[off + 4],
-            dst[off + 5],
-            dst[off + 6],
-            dst[off + 7],
-        ];
-        let s_arr: [u8; 8] = [
-            src[off],
-            src[off + 1],
-            src[off + 2],
-            src[off + 3],
-            src[off + 4],
-            src[off + 5],
-            src[off + 6],
-            src[off + 7],
-        ];
-        let d = u64::from_le_bytes(d_arr);
-        let s = u64::from_le_bytes(s_arr);
-        dst[off..off + 8].copy_from_slice(&(d ^ s).to_le_bytes());
-    }
-
-    // Byte-granular tail.
-    for i in (words * 8)..common {
-        dst[i] ^= src[i];
-    }
-
-    // If dst is longer than src, the remaining bytes are already XOR'd with 0.
+    xor_blocks(dst, &[src]);
 }
 
 /// XOR all slices in `packets` into a new repair buffer of length `width`.
@@ -179,9 +236,7 @@ fn xor_into(dst: &mut [u8], src: &[u8]) {
 /// are effectively zero-padded.
 fn compute_xor_repair(packets: &[&[u8]], width: usize) -> Vec<u8> {
     let mut repair = vec![0u8; width];
-    for pkt in packets {
-        xor_into(&mut repair, pkt);
-    }
+    xor_blocks(&mut repair, packets);
     repair
 }
 
@@ -797,6 +852,94 @@ mod tests {
         let cfg = InterleavedFecConfig::new(4, 8).expect("cfg");
         let s = format!("{cfg}");
         assert!(s.contains("4×8") || s.contains("4\u{00D7}8"));
+    }
+
+    // ── SIMD XOR tests ──────────────────────────────────────────────────────────
+
+    // 16. SIMD and scalar XOR produce identical output on 4096 random bytes.
+    #[test]
+    fn test_fec_xor_simd_matches_scalar() {
+        use rand::RngExt;
+        let n = 4096_usize;
+        let mut rng = rand::rng();
+
+        let src1: Vec<u8> = (0..n).map(|_| rng.random::<u8>()).collect();
+        let src2: Vec<u8> = (0..n).map(|_| rng.random::<u8>()).collect();
+
+        // Scalar result
+        let mut scalar_out = src1.clone();
+        xor_blocks_scalar(&mut scalar_out, &[src2.as_slice()]);
+
+        // SIMD result (runtime-dispatched — may be AVX2, NEON, or scalar)
+        let mut simd_out = src1.clone();
+        xor_blocks(&mut simd_out, &[src2.as_slice()]);
+
+        assert_eq!(
+            scalar_out, simd_out,
+            "SIMD and scalar XOR must produce identical results on 4096-byte input"
+        );
+    }
+
+    // 17. Non-multiple of 32: 100-byte input must XOR correctly.
+    #[test]
+    fn test_fec_xor_non_multiple_of_32() {
+        let n = 100_usize;
+        let src: Vec<u8> = (0..n).map(|i| i as u8).collect();
+        let expected: Vec<u8> = src.iter().map(|&b| b ^ 0xFF).collect();
+
+        let mask = vec![0xFF_u8; n];
+        let mut out = src.clone();
+        xor_blocks(&mut out, &[mask.as_slice()]);
+
+        assert_eq!(
+            out, expected,
+            "xor_blocks on 100-byte (non-32-multiple) input must be correct"
+        );
+    }
+
+    // 18. Double XOR is identity (SIMD path).
+    #[test]
+    fn test_fec_xor_double_is_identity() {
+        use rand::RngExt;
+        let n = 256_usize;
+        let mut rng = rand::rng();
+        let original: Vec<u8> = (0..n).map(|_| rng.random::<u8>()).collect();
+        let key: Vec<u8> = (0..n).map(|_| rng.random::<u8>()).collect();
+
+        let mut buf = original.clone();
+        xor_blocks(&mut buf, &[key.as_slice()]);
+        xor_blocks(&mut buf, &[key.as_slice()]);
+
+        assert_eq!(buf, original, "double XOR must equal identity");
+    }
+
+    // 19. Multi-input xor_blocks matches repeated xor_into calls.
+    #[test]
+    fn test_fec_xor_multi_input_matches_sequential() {
+        use rand::RngExt;
+        let n = 512_usize;
+        let mut rng = rand::rng();
+
+        let inputs: Vec<Vec<u8>> = (0..4)
+            .map(|_| (0..n).map(|_| rng.random::<u8>()).collect())
+            .collect();
+        let base: Vec<u8> = (0..n).map(|_| rng.random::<u8>()).collect();
+
+        // Sequential xor_into
+        let mut seq_out = base.clone();
+        for inp in &inputs {
+            xor_into(&mut seq_out, inp);
+        }
+
+        // Multi-input xor_blocks
+        let slices: Vec<&[u8]> = inputs.iter().map(Vec::as_slice).collect();
+        let mut multi_out = base.clone();
+        xor_blocks(&mut multi_out, &slices);
+
+        assert_eq!(
+            seq_out, multi_out,
+            "multi-input xor_blocks must equal sequential xor_into"
+        );
     }
 
     // 15. Large payload (1316 B = SRT MTU) round-trip

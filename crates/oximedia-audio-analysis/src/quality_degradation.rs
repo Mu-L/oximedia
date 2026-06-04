@@ -90,8 +90,12 @@ impl DegradationAnalyzer {
             detect_bandwidth_limitation(&magnitude, sample_rate, self.bandwidth_limit_hz);
 
         // ── Encoding artifact detection ────────────────────────────────────
-        let (encoding_artifacts, has_encoding_artifacts) =
-            detect_encoding_artifacts(samples, sample_rate, self.config.fft_size, self.config.hop_size);
+        let (encoding_artifacts, has_encoding_artifacts) = detect_encoding_artifacts(
+            samples,
+            sample_rate,
+            self.config.fft_size,
+            self.config.hop_size,
+        );
 
         // ── Noise floor estimation ─────────────────────────────────────────
         let noise_floor_db = estimate_noise_floor_db(&magnitude, sample_rate);
@@ -149,10 +153,7 @@ fn compute_magnitude_spectrum(samples: &[f32], fft_size: usize) -> Result<Vec<f3
         .collect();
 
     let spectrum = oxifft::fft(&buffer);
-    let magnitude: Vec<f32> = spectrum[..=n / 2]
-        .iter()
-        .map(|c| c.norm() as f32)
-        .collect();
+    let magnitude: Vec<f32> = spectrum[..=n / 2].iter().map(|c| c.norm() as f32).collect();
 
     Ok(magnitude)
 }
@@ -240,12 +241,14 @@ fn detect_encoding_artifacts(
         let prev_start = (i - 1) * hop;
         let prev_end = (prev_start + fft_size).min(samples.len());
         let prev_frame = &samples[prev_start..prev_end];
-        let prev_energy: f32 = prev_frame.iter().map(|&x| x * x).sum::<f32>() / prev_frame.len() as f32;
+        let prev_energy: f32 =
+            prev_frame.iter().map(|&x| x * x).sum::<f32>() / prev_frame.len() as f32;
 
         let next_start = (i + 1) * hop;
         let next_end = (next_start + fft_size).min(samples.len());
         let next_frame = &samples[next_start..next_end];
-        let next_energy: f32 = next_frame.iter().map(|&x| x * x).sum::<f32>() / next_frame.len() as f32;
+        let next_energy: f32 =
+            next_frame.iter().map(|&x| x * x).sum::<f32>() / next_frame.len() as f32;
 
         // If next frame has much higher energy than this frame and prev frame,
         // check that current frame doesn't have elevated energy (pre-echo)
@@ -335,7 +338,10 @@ mod tests {
         let mag = compute_magnitude_spectrum(&samples, n).expect("should compute");
         let (bw_hz, _, _) = detect_bandwidth_limitation(&mag, sr, 15000.0);
         // 440 Hz sine should have very low bandwidth
-        assert!(bw_hz < 5000.0, "440 Hz sine should have low bandwidth: {bw_hz}");
+        assert!(
+            bw_hz < 5000.0,
+            "440 Hz sine should have low bandwidth: {bw_hz}"
+        );
     }
 
     #[test]
@@ -358,7 +364,10 @@ mod tests {
         // White-noise-like spectrum (all bins equal)
         let mag = vec![0.1_f32; 512];
         let floor = estimate_noise_floor_db(&mag, 44100.0);
-        assert!(floor > -40.0 && floor < 0.0, "Floor should be between -40 and 0 dBFS: {floor}");
+        assert!(
+            floor > -40.0 && floor < 0.0,
+            "Floor should be between -40 and 0 dBFS: {floor}"
+        );
     }
 
     #[test]

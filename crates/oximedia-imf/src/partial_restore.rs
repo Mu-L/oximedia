@@ -100,7 +100,9 @@ pub struct PartialRestoreResult {
 
 impl PartialRestoreResult {
     #[must_use]
-    pub fn segment_count(&self) -> usize { self.segments.len() }
+    pub fn segment_count(&self) -> usize {
+        self.segments.len()
+    }
 
     #[must_use]
     pub fn total_duration_frames(&self) -> u64 {
@@ -129,11 +131,15 @@ impl PartialRestore {
     ///
     /// # Errors
     /// Returns `ImfError::InvalidPackage` if `pkg_path` is not a valid IMF package directory.
-    pub fn extract(pkg_path: impl AsRef<Path>, filter: RestoreFilter) -> ImfResult<PartialRestoreResult> {
+    pub fn extract(
+        pkg_path: impl AsRef<Path>,
+        filter: RestoreFilter,
+    ) -> ImfResult<PartialRestoreResult> {
         let pkg_path = pkg_path.as_ref();
         if !pkg_path.is_dir() {
             return Err(ImfError::InvalidPackage(format!(
-                "Not a directory: {}", pkg_path.display()
+                "Not a directory: {}",
+                pkg_path.display()
             )));
         }
 
@@ -141,7 +147,8 @@ impl PartialRestore {
             .map_err(|e| ImfError::Other(e.to_string()))?
             .flatten()
             .filter(|e| {
-                e.path().extension()
+                e.path()
+                    .extension()
                     .and_then(|x| x.to_str())
                     .map(|x| x.eq_ignore_ascii_case("mxf"))
                     .unwrap_or(false)
@@ -149,7 +156,9 @@ impl PartialRestore {
             .collect();
 
         if mxf_files.is_empty() {
-            return Err(ImfError::InvalidPackage("No MXF essence files found".to_string()));
+            return Err(ImfError::InvalidPackage(
+                "No MXF essence files found".to_string(),
+            ));
         }
 
         let mut segments = Vec::new();
@@ -163,7 +172,11 @@ impl PartialRestore {
             let clip_end = end_frame.min(total_frames);
             let clip_start = start_frame.min(clip_end);
             let duration = clip_end.saturating_sub(clip_start);
-            let track_type = if i == 0 { "MainImageSequence" } else { "MainAudioSequence" };
+            let track_type = if i == 0 {
+                "MainImageSequence"
+            } else {
+                "MainAudioSequence"
+            };
             segments.push(ExtractedSegment {
                 track_id: format!("urn:uuid:track-{i}"),
                 track_type: track_type.to_string(),
@@ -190,10 +203,17 @@ impl PartialRestore {
 fn build_cpl(segments: &[ExtractedSegment], filter: &RestoreFilter) -> String {
     let total: u64 = segments.iter().map(|s| s.duration_frames).sum();
     let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-    xml.push_str("<CompositionPlaylist>\n  <Id>urn:uuid:partial-cpl</Id>\n  <EditRate>24 1</EditRate>\n");
-    xml.push_str(&format!("  <!-- frames {}-{} -->\n",
+    xml.push_str(
+        "<CompositionPlaylist>\n  <Id>urn:uuid:partial-cpl</Id>\n  <EditRate>24 1</EditRate>\n",
+    );
+    xml.push_str(&format!(
+        "  <!-- frames {}-{} -->\n",
         filter.start_frame.unwrap_or(0),
-        filter.end_frame.map(|e| e.to_string()).unwrap_or_else(|| "end".to_string())));
+        filter
+            .end_frame
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "end".to_string())
+    ));
     xml.push_str("  <SegmentList><Segment><SequenceList>\n");
     for seg in segments {
         xml.push_str(&format!(
@@ -203,13 +223,16 @@ fn build_cpl(segments: &[ExtractedSegment], filter: &RestoreFilter) -> String {
             seg.track_id, seg.source_in, seg.duration_frames
         ));
     }
-    xml.push_str(&format!("  </SequenceList><Duration>{total}</Duration></Segment></SegmentList>\n"));
+    xml.push_str(&format!(
+        "  </SequenceList><Duration>{total}</Duration></Segment></SegmentList>\n"
+    ));
     xml.push_str("</CompositionPlaylist>\n");
     xml
 }
 
 fn build_pkl(entries: &[std::fs::DirEntry]) -> String {
-    let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<PackingList>\n  <AssetList>\n");
+    let mut xml =
+        String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<PackingList>\n  <AssetList>\n");
     for (i, entry) in entries.iter().enumerate() {
         let name = entry.file_name().to_string_lossy().to_string();
         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);

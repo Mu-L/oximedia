@@ -233,10 +233,7 @@ impl std::fmt::Display for ResolverError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ResourceMismatch { local, remote } => {
-                write!(
-                    f,
-                    "resource mismatch: local={local:?} remote={remote:?}"
-                )
+                write!(f, "resource mismatch: local={local:?} remote={remote:?}")
             }
         }
     }
@@ -309,21 +306,11 @@ impl ConflictResolver {
         }
 
         let outcome = match &self.strategy {
-            ResolutionStrategy::LastWriteWins => {
-                self.resolve_last_write_wins(&conflict)
-            }
-            ResolutionStrategy::FirstWriteWins => {
-                self.resolve_first_write_wins(&conflict)
-            }
-            ResolutionStrategy::SemanticMerge => {
-                self.resolve_semantic_merge(&conflict)
-            }
-            ResolutionStrategy::UserPreference => {
-                self.resolve_user_preference(&conflict)
-            }
-            ResolutionStrategy::OwnerPriority => {
-                self.resolve_owner_priority(&conflict)
-            }
+            ResolutionStrategy::LastWriteWins => self.resolve_last_write_wins(&conflict),
+            ResolutionStrategy::FirstWriteWins => self.resolve_first_write_wins(&conflict),
+            ResolutionStrategy::SemanticMerge => self.resolve_semantic_merge(&conflict),
+            ResolutionStrategy::UserPreference => self.resolve_user_preference(&conflict),
+            ResolutionStrategy::OwnerPriority => self.resolve_owner_priority(&conflict),
         };
 
         self.resolution_log.push(outcome.clone());
@@ -434,10 +421,8 @@ impl ConflictResolver {
                 // Non-scalar: fall back to last-write-wins.
                 let mut outcome = self.resolve_last_write_wins(c);
                 outcome.strategy_used = ResolutionStrategy::SemanticMerge;
-                outcome.reason = format!(
-                    "semantic merge fallback (non-scalar): {}",
-                    outcome.reason
-                );
+                outcome.reason =
+                    format!("semantic merge fallback (non-scalar): {}", outcome.reason);
                 outcome
             }
         }
@@ -520,7 +505,14 @@ mod tests {
 
     // Helper builders.
 
-    fn scalar_op(id: u64, author: &str, is_owner: bool, lamport: u64, wall_ms: u64, val: f64) -> EditOp {
+    fn scalar_op(
+        id: u64,
+        author: &str,
+        is_owner: bool,
+        lamport: u64,
+        wall_ms: u64,
+        val: f64,
+    ) -> EditOp {
         EditOp::new(
             id,
             author,
@@ -658,7 +650,7 @@ mod tests {
     fn test_owner_priority_owner_wins() {
         let mut resolver = ConflictResolver::new(ResolutionStrategy::OwnerPriority);
         let c = conflict(
-            scalar_op(1, "alice", true, 5, 1000, 1.0),  // alice is owner
+            scalar_op(1, "alice", true, 5, 1000, 1.0), // alice is owner
             scalar_op(2, "bob", false, 3, 9000, 0.0),
         );
         let outcome = resolver.resolve(c).expect("resolution should succeed");

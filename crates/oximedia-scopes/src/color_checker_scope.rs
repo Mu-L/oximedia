@@ -163,8 +163,7 @@ pub fn delta_e2000(lab1: [f64; 3], lab2: [f64; 3]) -> f64 {
         (h1p + h2p - 360.0) / 2.0
     };
 
-    let t = 1.0
-        - 0.17 * (h_bar - 30.0).to_radians().cos()
+    let t = 1.0 - 0.17 * (h_bar - 30.0).to_radians().cos()
         + 0.24 * (2.0 * h_bar).to_radians().cos()
         + 0.32 * (3.0 * h_bar + 6.0).to_radians().cos()
         - 0.20 * (4.0 * h_bar - 63.0).to_radians().cos();
@@ -387,9 +386,12 @@ pub fn analyze_color_checker(
     for patch in patches {
         let sampled = sample_patch(frame, width, height, &patch.norm_rect);
         let sampled_lab = LinearRgb::from_srgb8(sampled[0], sampled[1], sampled[2]).to_lab();
-        let ref_lab =
-            LinearRgb::from_srgb8(patch.reference_srgb[0], patch.reference_srgb[1], patch.reference_srgb[2])
-                .to_lab();
+        let ref_lab = LinearRgb::from_srgb8(
+            patch.reference_srgb[0],
+            patch.reference_srgb[1],
+            patch.reference_srgb[2],
+        )
+        .to_lab();
         let de = delta_e2000(sampled_lab, ref_lab);
 
         patch_results.push(PatchResult {
@@ -406,16 +408,17 @@ pub fn analyze_color_checker(
         patch_results.iter().map(|p| p.delta_e).sum::<f64>() / patch_results.len() as f64
     };
 
-    let (max_delta_e, worst_patch_index) = patch_results
-        .iter()
-        .enumerate()
-        .fold((0.0f64, 0usize), |(max_de, max_idx), (i, p)| {
-            if p.delta_e > max_de {
-                (p.delta_e, i)
-            } else {
-                (max_de, max_idx)
-            }
-        });
+    let (max_delta_e, worst_patch_index) =
+        patch_results
+            .iter()
+            .enumerate()
+            .fold((0.0f64, 0usize), |(max_de, max_idx), (i, p)| {
+                if p.delta_e > max_de {
+                    (p.delta_e, i)
+                } else {
+                    (max_de, max_idx)
+                }
+            });
 
     Ok(ColorCheckerAnalysis {
         patches: patch_results,
@@ -516,9 +519,7 @@ pub fn render_color_checker_scope(
     config: &ColorCheckerRenderConfig,
 ) -> OxiResult<Vec<u8>> {
     if analysis.patches.is_empty() {
-        return Err(OxiError::InvalidData(
-            "No patches to render".into(),
-        ));
+        return Err(OxiError::InvalidData("No patches to render".into()));
     }
 
     let out_w = config.width as usize;
@@ -685,7 +686,11 @@ mod tests {
         // Patch with 100% coverage of the reference colour of patch 0 (Dark Skin = 115,82,68)
         let ref_color = [115u8, 82, 68];
         let frame = solid_frame(32, 32, ref_color[0], ref_color[1], ref_color[2]);
-        let patches = vec![CheckerPatch::new("Dark Skin", ref_color, [0.0, 0.0, 1.0, 1.0])];
+        let patches = vec![CheckerPatch::new(
+            "Dark Skin",
+            ref_color,
+            [0.0, 0.0, 1.0, 1.0],
+        )];
         let result = analyze_color_checker(&frame, 32, 32, &patches).expect("ok");
         assert_eq!(result.patches.len(), 1);
         // ΔE should be very small (sampled colour ≈ reference colour)

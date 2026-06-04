@@ -56,6 +56,7 @@
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::missing_errors_doc)]
 
+pub mod ab_test;
 pub mod automation;
 pub mod backup;
 pub mod clock;
@@ -68,17 +69,25 @@ pub mod epg;
 pub mod gap_filler;
 pub mod history;
 pub mod interstitial;
+/// Augmented interval tree for O(log n) schedule overlap detection.
+pub mod interval_tree;
 pub mod live;
+pub mod m3u;
+pub mod m3u8;
 pub mod metadata;
 pub mod multichannel;
 pub mod play_history;
 pub mod playlist;
+pub mod playlist_archive;
 pub mod playlist_diff;
 pub mod playlist_export;
 pub mod playlist_filter;
 pub mod playlist_health;
+pub mod playlist_history;
 pub mod playlist_merge;
+pub mod playlist_notify;
 pub mod playlist_priority;
+pub mod playlist_rotation;
 pub mod playlist_rules;
 pub mod playlist_segment;
 pub mod playlist_stats;
@@ -89,8 +98,10 @@ pub mod queue_manager;
 pub mod recommendation_engine;
 pub mod repeat_policy;
 pub mod schedule;
+pub mod scheduler;
 pub mod secondary;
 pub mod shuffle;
+pub mod smart;
 pub mod smart_play;
 pub mod track_metadata;
 pub mod track_order;

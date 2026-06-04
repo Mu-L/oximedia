@@ -121,7 +121,10 @@ mod tests {
         let output = proc.apply_proximity_eq(2.0, &input);
         assert_eq!(output.len(), input.len());
         for (a, b) in input.iter().zip(output.iter()) {
-            assert!((a - b).abs() < 1e-7, "Expected passthrough at dist > threshold");
+            assert!(
+                (a - b).abs() < 1e-7,
+                "Expected passthrough at dist > threshold"
+            );
         }
     }
 
@@ -170,7 +173,10 @@ mod tests {
         let output = proc.apply_proximity_eq(0.001, &input);
         for v in &output {
             // At 0.001 m the IIR low-pass reduces amplitude; cap is still in effect.
-            assert!(*v <= 0.4 * 1.1, "Gain must be capped (≤ 4.0 × input + tolerance)");
+            assert!(
+                *v <= 0.4 * 1.1,
+                "Gain must be capped (≤ 4.0 × input + tolerance)"
+            );
         }
     }
 

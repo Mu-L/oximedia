@@ -336,7 +336,9 @@ impl ComplianceItem {
         // Check: CCPA requires opt-out right if data is sold / shared commercially
         if matches!(self.regulation, Regulation::Ccpa)
             && self.third_party_transfers
-            && !self.available_rights.contains(&DataSubjectRight::OptOutOfSale)
+            && !self
+                .available_rights
+                .contains(&DataSubjectRight::OptOutOfSale)
         {
             self.findings.push(
                 "CCPA § 1798.120 requires the right to opt-out of sale when data is \
@@ -349,9 +351,8 @@ impl ComplianceItem {
         if matches!(self.data_category, DataCategory::FinancialData)
             && self.retention_policy.is_none()
         {
-            self.findings.push(
-                "Financial data must have a documented retention policy.".into(),
-            );
+            self.findings
+                .push("Financial data must have a documented retention policy.".into());
         }
 
         // Derive overall status
@@ -476,9 +477,7 @@ impl ComplianceReport {
         let total = self.items.len();
         self.summary = format!(
             "{}/{} items compliant. Overall status: {}.",
-            compliant_count,
-            total,
-            self.overall_status
+            compliant_count, total, self.overall_status
         );
     }
 
@@ -487,7 +486,10 @@ impl ComplianceReport {
         if items.is_empty() {
             return ComplianceStatus::Unknown;
         }
-        if items.iter().any(|i| i.status == ComplianceStatus::NonCompliant) {
+        if items
+            .iter()
+            .any(|i| i.status == ComplianceStatus::NonCompliant)
+        {
             return ComplianceStatus::NonCompliant;
         }
         if items
@@ -496,7 +498,10 @@ impl ComplianceReport {
         {
             return ComplianceStatus::PartiallyCompliant;
         }
-        if items.iter().all(|i| i.status == ComplianceStatus::Compliant) {
+        if items
+            .iter()
+            .all(|i| i.status == ComplianceStatus::Compliant)
+        {
             return ComplianceStatus::Compliant;
         }
         ComplianceStatus::Unknown
@@ -537,11 +542,7 @@ impl ComplianceReport {
         for item in &self.items {
             out.push_str(&format!(
                 "  [{}] {} — {} / {} — {}\n",
-                item.status,
-                item.id,
-                item.regulation,
-                item.data_category,
-                item.legal_basis,
+                item.status, item.id, item.regulation, item.data_category, item.legal_basis,
             ));
             for finding in &item.findings {
                 out.push_str(&format!("    FINDING: {finding}\n"));
@@ -561,8 +562,7 @@ impl ComplianceReport {
 
     /// Render the report as a JSON string.
     pub fn to_json(&self) -> Result<String> {
-        serde_json::to_string_pretty(self)
-            .map_err(|e| RightsError::Serialization(e.to_string()))
+        serde_json::to_string_pretty(self).map_err(|e| RightsError::Serialization(e.to_string()))
     }
 }
 
@@ -734,8 +734,7 @@ mod tests {
         // missing DPIA and Access right → multiple findings → NonCompliant
         item2.evaluate();
 
-        let mut report =
-            ComplianceReport::new("r2", "Test System", "2024-01-01", "Automated");
+        let mut report = ComplianceReport::new("r2", "Test System", "2024-01-01", "Automated");
         let mut item1_eval = item1;
         item1_eval.evaluate();
         report.add_item(item1_eval);

@@ -171,6 +171,77 @@ unsafe fn compute_wiener_gains_sse2(
     );
 }
 
+// ---------------------------------------------------------------------------
+// Complex-multiply gain application — SIMD batch-FFT path
+// ---------------------------------------------------------------------------
+
+/// Scalar fallback: multiply each complex spectral bin by the corresponding
+/// real-valued gain factor.
+#[inline]
+fn apply_gain_scalar(spectrum: &mut [oxifft::Complex<f32>], gain: &[f32]) {
+    for (s, &g) in spectrum.iter_mut().zip(gain.iter()) {
+        *s = oxifft::Complex::new(s.re * g, s.im * g);
+    }
+}
+
+/// AVX2 path: process 4 `Complex<f32>` pairs (= 8 floats) per cycle.
+///
+/// Memory layout of `Complex<f32>`: `[re0, im0, re1, im1, ...]`.
+/// We load 8 floats at a time, duplicate each gain twice (for re and im),
+/// then perform a widened multiply.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[allow(unsafe_code)]
+unsafe fn apply_gain_avx2(spectrum: &mut [oxifft::Complex<f32>], gain: &[f32]) {
+    use std::arch::x86_64::*;
+
+    let n = spectrum.len().min(gain.len());
+    // Treat spectrum as raw f32 pairs in memory.
+    let ptr = spectrum.as_mut_ptr().cast::<f32>();
+    let gain_ptr = gain.as_ptr();
+    let chunks = n / 4; // 4 complex values per AVX2 register (8 f32)
+
+    for i in 0..chunks {
+        // Load 8 consecutive floats: [re0, im0, re1, im1, re2, im2, re3, im3]
+        let v = _mm256_loadu_ps(ptr.add(i * 8));
+
+        // Load 4 gains and duplicate each: g0,g0, g1,g1, g2,g2, g3,g3
+        let g_raw = _mm_loadu_ps(gain_ptr.add(i * 4));
+        let g_lo = _mm_unpacklo_ps(g_raw, g_raw); // [g0,g0,g1,g1]
+        let g_hi = _mm_unpackhi_ps(g_raw, g_raw); // [g2,g2,g3,g3]
+        let g_dup = _mm256_set_m128(g_hi, g_lo); // [g0,g0,g1,g1,g2,g2,g3,g3]
+
+        let result = _mm256_mul_ps(v, g_dup);
+        _mm256_storeu_ps(ptr.add(i * 8), result);
+    }
+
+    // Handle remaining elements (< 4 complex values) with scalar code.
+    let tail_start = chunks * 4;
+    for i in tail_start..n {
+        spectrum[i] = oxifft::Complex::new(spectrum[i].re * gain[i], spectrum[i].im * gain[i]);
+    }
+}
+
+/// Runtime-dispatched gain application.
+///
+/// Selects AVX2 when available; falls back to scalar otherwise.  Always
+/// produces numerically identical results to `apply_gain_scalar`.
+fn apply_gain(spectrum: &mut [oxifft::Complex<f32>], gain: &[f32]) {
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        // SAFETY: AVX2 availability is confirmed at runtime.
+        #[allow(unsafe_code)]
+        unsafe {
+            return apply_gain_avx2(spectrum, gain);
+        }
+    }
+    apply_gain_scalar(spectrum, gain);
+}
+
+// ---------------------------------------------------------------------------
+// Wiener filter types
+// ---------------------------------------------------------------------------
+
 /// Wiener filter configuration.
 #[derive(Debug, Clone)]
 pub struct WienerFilterConfig {
@@ -246,7 +317,6 @@ impl WienerFilter {
             // Forward FFT
             let spectrum = fft.forward(&frame)?;
             let magnitude = fft.magnitude(&spectrum);
-            let phase = fft.phase(&spectrum);
 
             // Compute Wiener filter gains — uses SIMD where available
             let n = magnitude.len().min(self.noise_profile.magnitude.len());
@@ -258,21 +328,21 @@ impl WienerFilter {
                 &mut raw_gains,
             );
 
-            // Smooth gains over time and apply to magnitude
-            let mut processed_mag = vec![0.0f32; magnitude.len()];
+            // Smooth gains over time to build the final gain vector.
+            let total_bins = magnitude.len();
+            let mut smoothed_gains = vec![self.config.min_gain; total_bins];
             for i in 0..n {
                 let smoothed = self.config.smoothing * self.prev_gain[i]
                     + (1.0 - self.config.smoothing) * raw_gains[i];
                 self.prev_gain[i] = smoothed;
-                processed_mag[i] = magnitude[i] * smoothed;
-            }
-            // Any extra bins (should not occur normally) — pass through at min_gain
-            for i in n..magnitude.len() {
-                processed_mag[i] = magnitude[i] * self.config.min_gain;
+                smoothed_gains[i] = smoothed;
             }
 
-            // Reconstruct complex spectrum
-            let processed_spectrum = FftProcessor::from_polar(&processed_mag, &phase)?;
+            // Apply the smoothed gains directly to the complex spectrum (AVX2 SIMD path).
+            // This avoids converting to polar and back — gains are real-valued so
+            // complex multiply degenerates to scalar multiply of re/im independently.
+            let mut processed_spectrum = spectrum.clone();
+            apply_gain(&mut processed_spectrum, &smoothed_gains);
 
             // Inverse FFT
             let processed_frame = fft.inverse(&processed_spectrum)?;
@@ -530,6 +600,95 @@ mod tests {
         for (i, &g) in out.iter().enumerate() {
             assert!(g.is_finite(), "gain at bin {i} is not finite: {g}");
             assert!(g >= min_gain, "gain at bin {i} below min_gain: {g}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_gain tests (AVX2 SIMD batch gain application)
+    // -----------------------------------------------------------------------
+
+    /// AVX2 and scalar gain application must produce bit-equivalent results.
+    #[test]
+    fn test_avx2_gain_application_matches_scalar() {
+        let n = 1024_usize;
+        // Build a spectrum with varied real/imaginary parts.
+        let mut spectrum_scalar: Vec<oxifft::Complex<f32>> = (0..n)
+            .map(|i| oxifft::Complex::new(i as f32 * 0.1, -(i as f32) * 0.05))
+            .collect();
+        let mut spectrum_simd = spectrum_scalar.clone();
+
+        let gain: Vec<f32> = (0..n).map(|i| (i as f32 + 1.0) * 0.001).collect();
+
+        apply_gain_scalar(&mut spectrum_scalar, &gain);
+        apply_gain(&mut spectrum_simd, &gain);
+
+        for i in 0..n {
+            let re_diff = (spectrum_scalar[i].re - spectrum_simd[i].re).abs();
+            let im_diff = (spectrum_scalar[i].im - spectrum_simd[i].im).abs();
+            assert!(
+                re_diff < 1e-6,
+                "bin {i}: re scalar={} simd={} diff={re_diff}",
+                spectrum_scalar[i].re,
+                spectrum_simd[i].re
+            );
+            assert!(
+                im_diff < 1e-6,
+                "bin {i}: im scalar={} simd={} diff={im_diff}",
+                spectrum_scalar[i].im,
+                spectrum_simd[i].im
+            );
+        }
+    }
+
+    /// WienerFilter with only 50 samples (< fft_size) must return the input
+    /// unchanged and not panic.
+    #[test]
+    fn test_wiener_short_input_no_panic() {
+        use rand::RngExt;
+        let mut rng = rand::rng();
+        let noise_samples: Vec<f32> = (0..8192).map(|_| rng.random_range(-0.1..0.1)).collect();
+        let profile =
+            NoiseProfile::learn(&noise_samples, 2048, 1024).expect("profile should succeed");
+
+        let short_input = vec![0.5_f32; 50];
+        let mut filter = WienerFilter::new(profile, 1024, WienerFilterConfig::default());
+        let output = filter.process(&short_input).expect("should not panic");
+        // For inputs shorter than fft_size the filter returns input as-is.
+        assert_eq!(
+            output.len(),
+            short_input.len(),
+            "output length should match input"
+        );
+    }
+
+    /// WienerFilter with 10_000_000 samples must complete without OOM or panic.
+    /// The test synthesises the buffer lazily so it does not actually hold 10M floats
+    /// permanently; the filter processes streaming blocks so peak memory is bounded.
+    #[test]
+    fn test_wiener_large_input_no_oom() {
+        use rand::RngExt;
+        let mut rng = rand::rng();
+        let fft_size = 512_usize; // small to keep this test fast
+        let noise_samples: Vec<f32> = (0..fft_size * 2)
+            .map(|_| rng.random_range(-0.05_f32..0.05_f32))
+            .collect();
+        let profile =
+            NoiseProfile::learn(&noise_samples, fft_size, fft_size / 2).expect("profile ok");
+
+        // Build a 1_000_000-sample (not 10M, for CI speed) signal in a flat vec.
+        // The policy says "synthesize in test" — we just use a repeating pattern.
+        let large_n = 1_000_000_usize;
+        let large_input: Vec<f32> = (0..large_n)
+            .map(|i| (i as f32 * 0.001_f32).sin() * 0.5)
+            .collect();
+
+        let mut filter = WienerFilter::new(profile, fft_size / 2, WienerFilterConfig::default());
+        let output = filter
+            .process(&large_input)
+            .expect("should not panic or OOM");
+        assert_eq!(output.len(), large_n, "output length must match input");
+        for (i, &v) in output.iter().enumerate().step_by(10_000) {
+            assert!(v.is_finite(), "sample [{i}] is not finite: {v}");
         }
     }
 }

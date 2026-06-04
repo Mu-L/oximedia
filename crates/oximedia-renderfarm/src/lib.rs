@@ -153,3 +153,6 @@ pub use worker::{Worker, WorkerCapabilities, WorkerId, WorkerState};
 
 /// Version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[cfg(test)]
+mod tests_wave13;

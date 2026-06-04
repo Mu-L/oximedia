@@ -68,6 +68,7 @@ pub mod profile_match;
 pub mod progress;
 pub mod quality;
 pub mod sample_rate;
+pub mod segment_encoder;
 pub mod sequence;
 pub mod smart;
 pub mod smart_select;
@@ -107,6 +108,9 @@ pub use pipeline::{
 pub use presets::{AudioPresetSettings, EncodingSpeed, Preset, VideoPresetSettings};
 pub use profile::{Profile, ProfileBuilder, ProfileSystem};
 pub use quality::{QualityComparison, QualityMaintainer};
+pub use segment_encoder::{
+    concat_segments, encode_segments_parallel, EncodedSegment, FramePos, SegmentPlan,
+};
 pub use sequence::{ImageSequence, SequenceExporter, SequenceImporter};
 pub use smart::{ConversionTarget, MediaAnalysis, OptimizedSettings, SmartConverter};
 pub use split::{ChapterSplitter, SizeSplitter, TimeSplitter};

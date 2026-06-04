@@ -261,6 +261,8 @@ impl MonoDelay {
 }
 
 impl AudioEffect for MonoDelay {
+    const EFFECT_ID: &'static str = "mono_delay";
+
     fn process_sample(&mut self, input: f32) -> f32 {
         // Read delayed sample.
         let delayed = self.delay_line.read(self.delay_samples);
@@ -370,6 +372,8 @@ impl StereoDelay {
 }
 
 impl AudioEffect for StereoDelay {
+    const EFFECT_ID: &'static str = "stereo_delay";
+
     fn process_sample(&mut self, input: f32) -> f32 {
         let (left, _right) = self.process_sample_internal(input, input);
         left

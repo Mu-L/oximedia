@@ -22,29 +22,61 @@ use pyo3::{create_exception, exceptions::PyException, prelude::*, types::PyModul
 
 // ── Exception declarations ────────────────────────────────────────────────
 
-create_exception!(oximedia, OxiError, PyException,
-    "Base exception for all OxiMedia errors.");
+create_exception!(
+    oximedia,
+    OxiError,
+    PyException,
+    "Base exception for all OxiMedia errors."
+);
 
-create_exception!(oximedia, OxiCodecError, OxiError,
-    "Raised when a codec encode or decode operation fails.");
+create_exception!(
+    oximedia,
+    OxiCodecError,
+    OxiError,
+    "Raised when a codec encode or decode operation fails."
+);
 
-create_exception!(oximedia, OxiContainerError, OxiError,
-    "Raised when a container mux or demux operation fails.");
+create_exception!(
+    oximedia,
+    OxiContainerError,
+    OxiError,
+    "Raised when a container mux or demux operation fails."
+);
 
-create_exception!(oximedia, OxiIoError, OxiError,
-    "Raised on I/O or network errors during media operations.");
+create_exception!(
+    oximedia,
+    OxiIoError,
+    OxiError,
+    "Raised on I/O or network errors during media operations."
+);
 
-create_exception!(oximedia, OxiQualityError, OxiError,
-    "Raised when a quality assessment operation fails.");
+create_exception!(
+    oximedia,
+    OxiQualityError,
+    OxiError,
+    "Raised when a quality assessment operation fails."
+);
 
-create_exception!(oximedia, OxiRightsError, OxiError,
-    "Raised on DRM or rights management violations.");
+create_exception!(
+    oximedia,
+    OxiRightsError,
+    OxiError,
+    "Raised on DRM or rights management violations."
+);
 
-create_exception!(oximedia, OxiTimeoutError, OxiError,
-    "Raised when an OxiMedia operation exceeds its time limit.");
+create_exception!(
+    oximedia,
+    OxiTimeoutError,
+    OxiError,
+    "Raised when an OxiMedia operation exceeds its time limit."
+);
 
-create_exception!(oximedia, OxiInvalidArgError, OxiError,
-    "Raised when an invalid argument is passed to an OxiMedia function.");
+create_exception!(
+    oximedia,
+    OxiInvalidArgError,
+    OxiError,
+    "Raised when an invalid argument is passed to an OxiMedia function."
+);
 
 // ── Registration helper ───────────────────────────────────────────────────
 
@@ -63,7 +95,10 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("OxiQualityError", m.py().get_type::<OxiQualityError>())?;
     m.add("OxiRightsError", m.py().get_type::<OxiRightsError>())?;
     m.add("OxiTimeoutError", m.py().get_type::<OxiTimeoutError>())?;
-    m.add("OxiInvalidArgError", m.py().get_type::<OxiInvalidArgError>())?;
+    m.add(
+        "OxiInvalidArgError",
+        m.py().get_type::<OxiInvalidArgError>(),
+    )?;
     Ok(())
 }
 

@@ -226,6 +226,7 @@
 pub(crate) use core::marker::PhantomData;
 use std::io;
 
+pub mod byte_io;
 pub mod huffman;
 pub mod read;
 pub mod write;

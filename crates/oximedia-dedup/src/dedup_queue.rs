@@ -5,8 +5,8 @@
 //! media files, allowing high-priority items (large files, user requests)
 //! to be processed before low-priority background scans.
 
-use std::collections::BinaryHeap;
 use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Priority level for dedup tasks.
@@ -216,12 +216,7 @@ impl DedupQueue {
     }
 
     /// Enqueue a task, returning the assigned ID.
-    pub fn enqueue(
-        &mut self,
-        priority: DedupPriority,
-        kind: DedupTaskKind,
-        target: String,
-    ) -> u64 {
+    pub fn enqueue(&mut self, priority: DedupPriority, kind: DedupTaskKind, target: String) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         let task = DedupTask::new(id, priority, kind, target);
@@ -368,10 +363,15 @@ mod tests {
 
     #[test]
     fn test_task_builders() {
-        let task = DedupTask::new(1, DedupPriority::High, DedupTaskKind::Compare, "a.mp4".to_string())
-            .with_size_hint(1024)
-            .with_compare_target("b.mp4".to_string())
-            .with_max_retries(5);
+        let task = DedupTask::new(
+            1,
+            DedupPriority::High,
+            DedupTaskKind::Compare,
+            "a.mp4".to_string(),
+        )
+        .with_size_hint(1024)
+        .with_compare_target("b.mp4".to_string())
+        .with_max_retries(5);
         assert_eq!(task.size_hint, 1024);
         assert_eq!(task.compare_target.as_deref(), Some("b.mp4"));
         assert_eq!(task.max_retries, 5);
@@ -379,8 +379,13 @@ mod tests {
 
     #[test]
     fn test_task_retry() {
-        let task = DedupTask::new(1, DedupPriority::Normal, DedupTaskKind::HashFile, "x".to_string())
-            .with_max_retries(2);
+        let task = DedupTask::new(
+            1,
+            DedupPriority::Normal,
+            DedupTaskKind::HashFile,
+            "x".to_string(),
+        )
+        .with_max_retries(2);
         assert!(task.can_retry());
 
         let r1 = task.retry().expect("operation should succeed");
@@ -398,9 +403,21 @@ mod tests {
         let mut q = DedupQueue::new();
         assert!(q.is_empty());
 
-        q.enqueue(DedupPriority::Normal, DedupTaskKind::HashFile, "a.mp4".to_string());
-        q.enqueue(DedupPriority::High, DedupTaskKind::HashFile, "b.mp4".to_string());
-        q.enqueue(DedupPriority::Low, DedupTaskKind::HashFile, "c.mp4".to_string());
+        q.enqueue(
+            DedupPriority::Normal,
+            DedupTaskKind::HashFile,
+            "a.mp4".to_string(),
+        );
+        q.enqueue(
+            DedupPriority::High,
+            DedupTaskKind::HashFile,
+            "b.mp4".to_string(),
+        );
+        q.enqueue(
+            DedupPriority::Low,
+            DedupTaskKind::HashFile,
+            "c.mp4".to_string(),
+        );
 
         assert_eq!(q.len(), 3);
 
@@ -419,7 +436,11 @@ mod tests {
         let mut q = DedupQueue::new();
         assert!(q.peek().is_none());
 
-        q.enqueue(DedupPriority::Normal, DedupTaskKind::HashFile, "x".to_string());
+        q.enqueue(
+            DedupPriority::Normal,
+            DedupTaskKind::HashFile,
+            "x".to_string(),
+        );
         assert!(q.peek().is_some());
         assert_eq!(q.len(), 1); // peek doesn't remove
     }
@@ -427,8 +448,16 @@ mod tests {
     #[test]
     fn test_queue_stats() {
         let mut q = DedupQueue::new();
-        q.enqueue(DedupPriority::Normal, DedupTaskKind::HashFile, "a".to_string());
-        q.enqueue(DedupPriority::High, DedupTaskKind::HashFile, "b".to_string());
+        q.enqueue(
+            DedupPriority::Normal,
+            DedupTaskKind::HashFile,
+            "a".to_string(),
+        );
+        q.enqueue(
+            DedupPriority::High,
+            DedupTaskKind::HashFile,
+            "b".to_string(),
+        );
         let _ = q.dequeue();
         q.record_completed();
         q.record_failed();
@@ -443,8 +472,16 @@ mod tests {
     #[test]
     fn test_queue_clear() {
         let mut q = DedupQueue::new();
-        q.enqueue(DedupPriority::Normal, DedupTaskKind::HashFile, "a".to_string());
-        q.enqueue(DedupPriority::Normal, DedupTaskKind::HashFile, "b".to_string());
+        q.enqueue(
+            DedupPriority::Normal,
+            DedupTaskKind::HashFile,
+            "a".to_string(),
+        );
+        q.enqueue(
+            DedupPriority::Normal,
+            DedupTaskKind::HashFile,
+            "b".to_string(),
+        );
         q.clear();
         assert!(q.is_empty());
     }
@@ -453,7 +490,11 @@ mod tests {
     fn test_queue_drain_batch() {
         let mut q = DedupQueue::new();
         for i in 0..5 {
-            q.enqueue(DedupPriority::Normal, DedupTaskKind::HashFile, format!("f{i}"));
+            q.enqueue(
+                DedupPriority::Normal,
+                DedupTaskKind::HashFile,
+                format!("f{i}"),
+            );
         }
         let batch = q.drain_batch(3);
         assert_eq!(batch.len(), 3);
@@ -463,7 +504,11 @@ mod tests {
     #[test]
     fn test_queue_drain_batch_more_than_available() {
         let mut q = DedupQueue::new();
-        q.enqueue(DedupPriority::Normal, DedupTaskKind::HashFile, "a".to_string());
+        q.enqueue(
+            DedupPriority::Normal,
+            DedupTaskKind::HashFile,
+            "a".to_string(),
+        );
         let batch = q.drain_batch(10);
         assert_eq!(batch.len(), 1);
         assert!(q.is_empty());
@@ -491,8 +536,16 @@ mod tests {
     #[test]
     fn test_queue_id_autoincrement() {
         let mut q = DedupQueue::new();
-        let id1 = q.enqueue(DedupPriority::Normal, DedupTaskKind::HashFile, "a".to_string());
-        let id2 = q.enqueue(DedupPriority::Normal, DedupTaskKind::HashFile, "b".to_string());
+        let id1 = q.enqueue(
+            DedupPriority::Normal,
+            DedupTaskKind::HashFile,
+            "a".to_string(),
+        );
+        let id2 = q.enqueue(
+            DedupPriority::Normal,
+            DedupTaskKind::HashFile,
+            "b".to_string(),
+        );
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);
     }

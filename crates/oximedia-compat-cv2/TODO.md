@@ -1,6 +1,6 @@
-# oximedia-compat-cv2 TODO — version 0.1.7
+# oximedia-compat-cv2 TODO — version 0.1.8
 
-## Milestone: v0.1.7 — Initial release [COMPLETE]
+## Milestone: v0.1.8 — Initial release [COMPLETE]
 
 - [x] Mat type (CV_8UC1/3/4, CV_32FC1/3)
 - [x] 134 OpenCV constants

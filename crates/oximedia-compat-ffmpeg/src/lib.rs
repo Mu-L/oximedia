@@ -288,8 +288,11 @@
 
 pub mod arg_parser;
 pub mod argument_builder;
+pub mod batch_mode;
 pub mod codec_map;
 pub mod codec_mapping;
+pub mod compat_ext;
+pub mod concat_compat;
 pub mod diagnostics;
 pub mod encoder_options;
 pub mod ffprobe;
@@ -299,12 +302,15 @@ pub mod filter_graph;
 pub mod filter_lex;
 pub mod filter_shorthand;
 pub mod hwaccel_compat;
+pub mod lavfi_compat;
 pub mod metadata_compat;
 pub mod pass;
+pub mod preset_translator;
 pub mod real_world_tests;
 pub mod seek;
 pub mod stream_spec;
 pub mod translator;
+pub mod two_pass;
 
 pub use arg_parser::{
     FfmpegArgs, GlobalOptions, InputSpec, MapSpec, OutputSpec, StreamOptions, StreamType,
@@ -323,7 +329,8 @@ pub use filter_complex::{
 };
 pub use filter_graph::{FilterChain, FilterGraph as AdvancedFilterGraph, FilterGraphNode};
 pub use filter_lex::{
-    parse_filter_graph, parse_filter_string, parse_filters, FilterGraph, FilterNode, ParsedFilter,
+    parse_filter_graph, parse_filter_graph_zerocopy, parse_filter_string, parse_filters,
+    FilterGraph, FilterNode, FilterToken, ParsedFilter,
 };
 pub use filter_shorthand::{parse_af, parse_vf};
 pub use hwaccel_compat::{
@@ -331,7 +338,8 @@ pub use hwaccel_compat::{
     HwAccelConfig, HwAccelError, HwAccelSummary, HwBackend, HwCodecHint, HwCodecRole,
 };
 pub use metadata_compat::{
-    extract_metadata_from_args, parse_metadata_arg, MetadataError, MetadataMap, MetadataScope,
+    extract_metadata_from_args, parse_metadata_arg, translate_metadata_args, MetadataError,
+    MetadataMap, MetadataScope,
 };
 pub use pass::{parse_pass, PassPhase};
 pub use seek::{check_seek_args, parse_duration, SeekError};

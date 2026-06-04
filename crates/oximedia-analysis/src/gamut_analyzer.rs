@@ -166,7 +166,11 @@ impl GamutAnalyzer {
             let b = chunk[2] as f32 / 255.0;
             let max_c = r.max(g).max(b);
             let min_c = r.min(g).min(b);
-            let sat = if max_c > f32::EPSILON { (max_c - min_c) / max_c } else { 0.0 };
+            let sat = if max_c > f32::EPSILON {
+                (max_c - min_c) / max_c
+            } else {
+                0.0
+            };
             if sat > gamut.max_saturation {
                 out_of_gamut += 1;
             }
@@ -211,7 +215,10 @@ mod tests {
         // Rec.2020 allows saturation up to 1.0 → pure red is in gamut
         let frame = vec![255u8, 0, 0, 255, 0, 0];
         let ratio = GamutAnalyzer::out_of_gamut_ratio(&frame, 2, 1, &Gamut::rec2020());
-        assert!((ratio - 0.0).abs() < f32::EPSILON, "rec2020 should accept pure red");
+        assert!(
+            (ratio - 0.0).abs() < f32::EPSILON,
+            "rec2020 should accept pure red"
+        );
     }
 
     #[test]
@@ -257,7 +264,10 @@ mod tests {
         // max=200/255≈0.784, min=128/255≈0.502 → sat≈(0.784-0.502)/0.784≈0.36 > 0.1 → out of gamut
         let frame = vec![200u8, 128, 128];
         let ratio = GamutAnalyzer::out_of_gamut_ratio(&frame, 1, 1, &custom);
-        assert!((ratio - 1.0).abs() < f32::EPSILON, "pixel should be out of tight custom gamut, ratio={ratio}");
+        assert!(
+            (ratio - 1.0).abs() < f32::EPSILON,
+            "pixel should be out of tight custom gamut, ratio={ratio}"
+        );
     }
 
     #[test]
@@ -265,11 +275,15 @@ mod tests {
         // 2 pixels: one grey (in gamut), one pure red (out of gamut for Rec.709)
         let frame = vec![
             128u8, 128, 128, // grey → sat=0 → in gamut
-            255, 0, 0,       // pure red → sat=1.0 → out of Rec.709 gamut
+            255, 0, 0, // pure red → sat=1.0 → out of Rec.709 gamut
         ];
         let r = GamutAnalyzer::analyze(&frame, 2, 1, &Gamut::rec709());
         assert_eq!(r.total_pixels, 2);
         assert_eq!(r.out_of_gamut_pixels, 1);
-        assert!((r.out_of_gamut_ratio - 0.5).abs() < f32::EPSILON, "ratio={}", r.out_of_gamut_ratio);
+        assert!(
+            (r.out_of_gamut_ratio - 0.5).abs() < f32::EPSILON,
+            "ratio={}",
+            r.out_of_gamut_ratio
+        );
     }
 }

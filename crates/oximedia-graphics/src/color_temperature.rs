@@ -23,7 +23,6 @@
 //! blocks, no `unwrap()` calls, and is self-contained (no external image
 //! dependencies).
 
-
 // ---------------------------------------------------------------------------
 // Kelvin → RGB
 // ---------------------------------------------------------------------------
@@ -351,7 +350,11 @@ fn ease_in_out(t: f32) -> f32 {
 }
 
 /// Linearly interpolate between two `TemperatureGradeParams`.
-fn lerp_params(a: TemperatureGradeParams, b: TemperatureGradeParams, t: f32) -> TemperatureGradeParams {
+fn lerp_params(
+    a: TemperatureGradeParams,
+    b: TemperatureGradeParams,
+    t: f32,
+) -> TemperatureGradeParams {
     let lerp = |x: f32, y: f32| x + (y - x) * t;
     TemperatureGradeParams {
         kelvin: lerp(a.kelvin, b.kelvin),

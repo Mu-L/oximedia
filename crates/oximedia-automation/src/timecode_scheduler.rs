@@ -33,8 +33,8 @@
 //! assert_eq!(fired.len(), 1);
 //! ```
 
-use std::collections::BinaryHeap;
 use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 
 // ---------------------------------------------------------------------------
 // TimecodeActionKind
@@ -288,7 +288,10 @@ impl TimecodeScheduler {
         let trigger = action.trigger_frame();
         let index = self.actions.len();
         self.actions.push(action);
-        self.heap.push(HeapEntry { trigger_frame: trigger, index });
+        self.heap.push(HeapEntry {
+            trigger_frame: trigger,
+            index,
+        });
     }
 
     /// Remove a scheduled action by ID before it fires.
@@ -438,9 +441,13 @@ mod tests {
     use super::*;
 
     fn make_play(id: &str, frame: u64) -> ScheduledAction {
-        ScheduledAction::new(id, frame, TimecodeActionKind::PlayClip {
-            clip_id: format!("clip_{id}"),
-        })
+        ScheduledAction::new(
+            id,
+            frame,
+            TimecodeActionKind::PlayClip {
+                clip_id: format!("clip_{id}"),
+            },
+        )
     }
 
     #[test]
@@ -505,8 +512,8 @@ mod tests {
     #[test]
     fn test_pre_roll_fires_early() {
         let mut s = TimecodeScheduler::new(25);
-        let action = ScheduledAction::new("early", 100, TimecodeActionKind::StopPlayout)
-            .with_pre_roll(5);
+        let action =
+            ScheduledAction::new("early", 100, TimecodeActionKind::StopPlayout).with_pre_roll(5);
         assert_eq!(action.trigger_frame(), 95);
         s.schedule(action);
         let fired = s.advance(95);
@@ -596,7 +603,10 @@ mod tests {
         assert_eq!(TimecodeActionKind::StopPlayout.label(), "StopPlayout");
         assert_eq!(TimecodeActionKind::EndAdBreak.label(), "EndAdBreak");
         assert_eq!(
-            TimecodeActionKind::PlayClip { clip_id: "x".to_string() }.label(),
+            TimecodeActionKind::PlayClip {
+                clip_id: "x".to_string()
+            }
+            .label(),
             "PlayClip"
         );
     }
@@ -622,7 +632,9 @@ mod tests {
         s.schedule(ScheduledAction::new(
             "eas",
             300,
-            TimecodeActionKind::EasAlert { alert_id: "tornado-001".to_string() },
+            TimecodeActionKind::EasAlert {
+                alert_id: "tornado-001".to_string(),
+            },
         ));
         let fired = s.advance(300);
         assert_eq!(fired.len(), 1);

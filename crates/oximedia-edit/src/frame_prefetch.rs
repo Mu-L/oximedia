@@ -4,8 +4,6 @@
 //! direction and speed, and requests them in advance to reduce
 //! latency during playback.
 
-#![allow(dead_code)]
-
 use std::collections::VecDeque;
 
 /// Direction of playback for prefetch prediction.

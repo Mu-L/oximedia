@@ -9,9 +9,7 @@ impl ErrorLogger {
     /// Create a new error logger.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            errors: Vec::new(),
-        }
+        Self { errors: Vec::new() }
     }
 
     /// Log an error.

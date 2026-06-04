@@ -61,6 +61,9 @@ pub struct BatchProcessor {
     qc: Arc<QualityControl>,
     include_detailed_reports: bool,
     parallel_jobs: Option<usize>,
+    /// If `true`, stop running further rules on a file as soon as a
+    /// [`crate::Severity::Error`] (or Critical) result is encountered.
+    abort_on_critical: bool,
 }
 
 impl BatchProcessor {
@@ -71,6 +74,7 @@ impl BatchProcessor {
             qc: Arc::new(qc),
             include_detailed_reports: true,
             parallel_jobs: None,
+            abort_on_critical: false,
         }
     }
 
@@ -85,6 +89,17 @@ impl BatchProcessor {
     #[must_use]
     pub const fn with_parallel_jobs(mut self, jobs: usize) -> Self {
         self.parallel_jobs = Some(jobs);
+        self
+    }
+
+    /// Enables or disables early termination on critical/error results.
+    ///
+    /// When `true`, rule evaluation for a file stops as soon as any
+    /// [`crate::Severity::Error`] (or Critical) result is encountered.
+    /// When `false` (default), all rules are always run.
+    #[must_use]
+    pub const fn with_abort_on_critical(mut self, abort: bool) -> Self {
+        self.abort_on_critical = abort;
         self
     }
 
@@ -113,11 +128,21 @@ impl BatchProcessor {
         let failed = Arc::new(Mutex::new(0usize));
         let errors = Arc::new(Mutex::new(0usize));
 
+        let abort = self.abort_on_critical;
         file_paths.par_iter().for_each(|path| {
             let path_str = path.to_string_lossy().to_string();
             let file_start = std::time::Instant::now();
 
-            match self.qc.validate(&path_str) {
+            // Use abort-aware validation when configured; otherwise normal path.
+            let validate_result = if abort {
+                self.qc
+                    .validate_with_abort(&path_str, true)
+                    .map(|(report, _rules_run)| report)
+            } else {
+                self.qc.validate(&path_str)
+            };
+
+            match validate_result {
                 Ok(report) => {
                     let duration = file_start.elapsed().as_secs_f64();
                     let error_count = report.errors().len() + report.critical_errors().len();
@@ -254,7 +279,11 @@ impl BatchResults {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{QcPreset, QualityControl};
+    use crate::{
+        rules::{CheckResult, QcContext, QcRule, RuleCategory, Severity},
+        QcPreset, QualityControl,
+    };
+    use oximedia_core::OxiResult;
 
     #[test]
     fn test_batch_processor_creation() {
@@ -277,5 +306,103 @@ mod tests {
         let summary = results.summary();
         assert!(summary.contains("Total Files: 10"));
         assert!(summary.contains("Passed: 8"));
+    }
+
+    // ── Early-termination tests ───────────────────────────────────────────────
+
+    /// A test rule that unconditionally returns a result of the given severity.
+    struct FixedRule {
+        name: String,
+        severity: Severity,
+    }
+
+    impl QcRule for FixedRule {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn category(&self) -> RuleCategory {
+            RuleCategory::Video
+        }
+
+        fn check(&self, _context: &QcContext) -> OxiResult<Vec<CheckResult>> {
+            let result = if matches!(self.severity, Severity::Info) {
+                CheckResult::pass(self.name())
+            } else {
+                CheckResult::fail(
+                    self.name(),
+                    self.severity,
+                    format!("Rule {} triggered", self.name()),
+                )
+            };
+            Ok(vec![result])
+        }
+    }
+
+    /// With `abort_on_critical=true` and the first rule returning Error,
+    /// only 1 rule should be executed.
+    #[test]
+    fn test_early_term_stops_on_error() {
+        let mut qc = QualityControl::new();
+        qc.add_rule(Box::new(FixedRule {
+            name: "rule_error".to_string(),
+            severity: Severity::Error,
+        }));
+        qc.add_rule(Box::new(FixedRule {
+            name: "rule_info_1".to_string(),
+            severity: Severity::Info,
+        }));
+        qc.add_rule(Box::new(FixedRule {
+            name: "rule_info_2".to_string(),
+            severity: Severity::Info,
+        }));
+
+        // We need a real file for probe_file. Use a temp file path that exists.
+        let tmp = std::env::temp_dir().join("oximedia-qc-early-term-test.bin");
+        std::fs::write(&tmp, b"fLaC\x00\x00\x00\x00").expect("write temp file");
+        let path = tmp.to_string_lossy().to_string();
+
+        let (_, rules_run) = qc
+            .validate_with_abort(&path, true)
+            .expect("validate_with_abort should succeed");
+
+        // First rule returns Error → loop should break after 1 rule.
+        assert_eq!(
+            rules_run, 1,
+            "abort_on_critical=true: only 1 rule should run, got {rules_run}"
+        );
+    }
+
+    /// With `abort_on_critical=false`, all 3 rules must be run even when the
+    /// first returns Error.
+    #[test]
+    fn test_normal_mode_continues_past_error() {
+        let mut qc = QualityControl::new();
+        qc.add_rule(Box::new(FixedRule {
+            name: "rule_error".to_string(),
+            severity: Severity::Error,
+        }));
+        qc.add_rule(Box::new(FixedRule {
+            name: "rule_info_1".to_string(),
+            severity: Severity::Info,
+        }));
+        qc.add_rule(Box::new(FixedRule {
+            name: "rule_info_2".to_string(),
+            severity: Severity::Info,
+        }));
+
+        let tmp = std::env::temp_dir().join("oximedia-qc-normal-mode-test.bin");
+        std::fs::write(&tmp, b"fLaC\x00\x00\x00\x00").expect("write temp file");
+        let path = tmp.to_string_lossy().to_string();
+
+        let (_, rules_run) = qc
+            .validate_with_abort(&path, false)
+            .expect("validate_with_abort should succeed");
+
+        // abort_on_critical=false: all 3 rules run.
+        assert_eq!(
+            rules_run, 3,
+            "abort_on_critical=false: all 3 rules should run, got {rules_run}"
+        );
     }
 }

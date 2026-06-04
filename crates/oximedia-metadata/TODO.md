@@ -35,12 +35,12 @@
 - [x] Add a `metadata_streaming.rs` module for parsing metadata from streaming data (partial buffers) (verified 2026-05-16; src/metadata_streaming.rs:750 lines StreamingMetadataParser)
 
 ## Performance
-- [ ] Add lazy parsing in `id3v2.rs` (parse frame headers only, defer body parsing until accessed)
+- [x] Add lazy parsing in `id3v2.rs` (parse frame headers only, defer body parsing until accessed) (verified: id3v2.rs:586:LazyId3v2, :606:struct LazyId3v2, :615:impl LazyId3v2)
 - [ ] Implement zero-copy XMP parsing in `xmp.rs` using borrowed strings from the input buffer
-- [ ] Add parallel metadata extraction in `media_metadata.rs` for multi-format probing
+- [x] Add parallel metadata extraction in `media_metadata.rs` for multi-format probing (verified: media_metadata.rs:799:ParallelMetadataExtractor, :808:par_iter, extract_all)
 - [ ] Cache encoding_rs decoders in `id3v2.rs` to avoid re-initialization per text frame
 - [ ] Optimize `tag_normalize.rs` with pre-compiled regex patterns for common tag normalization rules
-- [ ] Add batch metadata write in `bulk_update.rs` to reduce I/O operations for multi-file updates
+- [x] Add batch metadata write in `bulk_update.rs` to reduce I/O operations for multi-file updates (Wave 14, bulk_update.rs — write_batch, BulkWriteMode)
 
 ## Testing
 - [ ] Add round-trip tests for all 9 metadata formats: parse -> modify -> write -> parse -> compare

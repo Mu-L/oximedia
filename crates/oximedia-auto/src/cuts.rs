@@ -384,6 +384,19 @@ impl CutConfig {
     }
 }
 
+/// Options for early termination in [`CutDetector::detect_cuts_with_options`].
+///
+/// Both fields are optional; omitting them yields the same result as the
+/// full scan.
+#[derive(Debug, Clone, Default)]
+pub struct DetectCutsOptions {
+    /// Stop once the accumulated cut span (distance between first and last
+    /// accepted cut) reaches or exceeds this value in milliseconds.
+    pub target_duration_ms: Option<u64>,
+    /// Maximum number of cuts to return.  `Some(0)` returns an empty set.
+    pub max_cuts: Option<usize>,
+}
+
 /// Cut detector for intelligent video editing.
 pub struct CutDetector {
     /// Configuration.
@@ -462,6 +475,72 @@ impl CutDetector {
         cut_points.sort_by_key(|c| c.timestamp.pts);
 
         Ok(cut_points)
+    }
+
+    /// Detect cut points with optional early termination.
+    ///
+    /// Runs the full detection pipeline (same confidence filter and sort as
+    /// [`Self::detect_cuts`]) and then selects a *prefix* of the sorted,
+    /// high-confidence cut list according to the constraints in `options`:
+    ///
+    /// - `max_cuts`: stop after accepting this many cuts.
+    /// - `target_duration_ms`: stop once the span from the first accepted cut
+    ///   to the current cut reaches or exceeds the target.
+    ///
+    /// Because selection happens **after** sorting, the returned set is always
+    /// identical to the prefix that a full scan would return.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if configuration is invalid or detection fails.
+    pub fn detect_cuts_with_options(
+        &self,
+        scene_changes: &[oximedia_cv::scene::SceneChange],
+        beats: Option<&[Beat]>,
+        dialogue: Option<&[DialogueSegment]>,
+        options: DetectCutsOptions,
+    ) -> AutoResult<Vec<CutPoint>> {
+        // Full scan first — always sort before truncating.
+        let all_cuts = self.detect_cuts(scene_changes, beats, dialogue)?;
+
+        // No constraints → return the full set unchanged.
+        let no_max = options.max_cuts.is_none();
+        let no_target = options.target_duration_ms.is_none();
+        if no_max && no_target {
+            return Ok(all_cuts);
+        }
+
+        // max_cuts = Some(0) → always return empty.
+        if let Some(0) = options.max_cuts {
+            return Ok(Vec::new());
+        }
+
+        let mut selected = Vec::new();
+        let mut first_pts: Option<i64> = None;
+
+        for cut in all_cuts {
+            // Enforce max_cuts limit.
+            if let Some(limit) = options.max_cuts {
+                if selected.len() >= limit {
+                    break;
+                }
+            }
+
+            let pts = cut.timestamp.pts;
+            let start_pts = *first_pts.get_or_insert(pts);
+
+            selected.push(cut);
+
+            // Enforce target_duration_ms limit.
+            if let Some(target) = options.target_duration_ms {
+                let span = (pts - start_pts).max(0) as u64;
+                if span >= target {
+                    break;
+                }
+            }
+        }
+
+        Ok(selected)
     }
 
     /// Align cut points to nearby beats.
@@ -694,4 +773,151 @@ pub fn suggest_cuts_from_highlights(
     cuts.sort_by_key(|c| c.timestamp.pts);
 
     cuts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oximedia_core::Rational;
+    use oximedia_cv::scene::{ChangeType, SceneChange};
+
+    fn make_ts(pts: i64) -> Timestamp {
+        Timestamp::new(pts, Rational::new(1, 1000))
+    }
+
+    /// Build a list of synthetic high-confidence hard-cut scene changes spaced
+    /// `gap_ms` apart starting at `start_ms`.
+    fn make_scene_changes(start_ms: i64, gap_ms: i64, count: usize) -> Vec<SceneChange> {
+        (0..count)
+            .map(|i| {
+                SceneChange::new(
+                    i,
+                    make_ts(start_ms + i as i64 * gap_ms),
+                    0.9,
+                    ChangeType::Cut,
+                )
+            })
+            .collect()
+    }
+
+    fn default_detector() -> CutDetector {
+        let mut config = CutConfig::new();
+        config.min_confidence = 0.5;
+        config.beat.enabled = false;
+        config.dialogue.enabled = false;
+        config.jump_cut.enabled = false;
+        config.avoid_dialogue_cuts = false;
+        config.prefer_beat_cuts = false;
+        CutDetector::new(config)
+    }
+
+    /// With a target that fits in the first N cuts, early-term result must
+    /// equal the full result's prefix of the same length.
+    #[test]
+    fn test_early_term_subset_matches_full() {
+        let detector = default_detector();
+        // 10 cuts, 1 second apart: total span = 9 000 ms.
+        let changes = make_scene_changes(0, 1000, 10);
+
+        let full = detector
+            .detect_cuts(&changes, None, None)
+            .expect("detect_cuts should succeed");
+
+        // Target of 3 000 ms → should stop after reaching pts >= 3 000.
+        let early = detector
+            .detect_cuts_with_options(
+                &changes,
+                None,
+                None,
+                DetectCutsOptions {
+                    target_duration_ms: Some(3_000),
+                    max_cuts: None,
+                },
+            )
+            .expect("detect_cuts_with_options should succeed");
+
+        // Early result must be a prefix of the full result.
+        assert!(
+            early.len() <= full.len(),
+            "early-term should return fewer or equal cuts"
+        );
+        assert!(!early.is_empty(), "early-term should return at least 1 cut");
+        for (e, f) in early.iter().zip(full.iter()) {
+            assert_eq!(
+                e.timestamp.pts, f.timestamp.pts,
+                "early-term cuts must match full result prefix"
+            );
+        }
+    }
+
+    /// When the target is larger than the total timeline, the full set is returned.
+    #[test]
+    fn test_early_term_target_larger_than_total() {
+        let detector = default_detector();
+        let changes = make_scene_changes(0, 1000, 5); // total span = 4 000 ms
+
+        let full = detector
+            .detect_cuts(&changes, None, None)
+            .expect("detect_cuts should succeed");
+
+        let early = detector
+            .detect_cuts_with_options(
+                &changes,
+                None,
+                None,
+                DetectCutsOptions {
+                    target_duration_ms: Some(100_000), // much larger than total
+                    max_cuts: None,
+                },
+            )
+            .expect("detect_cuts_with_options should succeed");
+
+        assert_eq!(
+            early.len(),
+            full.len(),
+            "when target > total span, all cuts must be returned"
+        );
+    }
+
+    /// `max_cuts = Some(0)` must return an empty set.
+    #[test]
+    fn test_early_term_max_cuts_zero() {
+        let detector = default_detector();
+        let changes = make_scene_changes(0, 1000, 10);
+
+        let result = detector
+            .detect_cuts_with_options(
+                &changes,
+                None,
+                None,
+                DetectCutsOptions {
+                    target_duration_ms: None,
+                    max_cuts: Some(0),
+                },
+            )
+            .expect("detect_cuts_with_options should succeed");
+
+        assert!(result.is_empty(), "max_cuts=0 must return an empty set");
+    }
+
+    /// `max_cuts = Some(N)` returns exactly N cuts when at least N are available.
+    #[test]
+    fn test_early_term_max_cuts_exact() {
+        let detector = default_detector();
+        let changes = make_scene_changes(0, 1000, 10);
+
+        let result = detector
+            .detect_cuts_with_options(
+                &changes,
+                None,
+                None,
+                DetectCutsOptions {
+                    target_duration_ms: None,
+                    max_cuts: Some(3),
+                },
+            )
+            .expect("detect_cuts_with_options should succeed");
+
+        assert_eq!(result.len(), 3, "max_cuts=3 must return exactly 3 cuts");
+    }
 }

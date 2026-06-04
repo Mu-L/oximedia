@@ -16,29 +16,51 @@
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
 pub mod api;
+/// Immutable append-only audit trail for all job lifecycle events.
+pub mod audit_log;
+/// Per-job and fleet-wide batch analytics: throughput, latency, error rates.
+pub mod batch_analytics;
 pub mod batch_report;
 pub mod batch_runner;
 pub mod batch_schedule;
+/// Job chaining: define DAG-like sequential/parallel chains between jobs.
+pub mod chaining;
+/// Durable checkpoint persistence for mid-job progress and crash recovery.
+pub mod checkpoint;
 pub mod checkpointing;
 #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
 pub mod cli;
+/// Cluster-member discovery and heartbeat tracking for distributed workers.
+pub mod cluster_discovery;
 pub mod conditional_dag;
+/// CPU/GPU/IO cost estimation for job admission control and resource planning.
+pub mod cost_estimator;
 #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
 pub mod database;
+/// Dead-letter queue for failed jobs with replay and quarantine support.
+pub mod dead_letter_queue;
 pub mod dep_graph;
 pub mod dependency;
 pub mod error;
+/// Error recovery strategies: retry with backoff, circuit breaker, fallback.
+pub mod error_recovery;
 #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
 pub mod examples;
 #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
 pub mod execution;
 pub mod fair_scheduler;
+/// Graceful shutdown coordinator: drain window, force-cancel, status reporting.
+pub mod graceful_shutdown;
 pub mod job;
 pub mod job_archive;
+/// Job dependency tracker: declarative `before`/`after` constraint resolution.
+pub mod job_deps;
 pub mod job_migration;
 pub mod job_splitting;
 pub mod metrics;
 pub mod monitoring;
+/// Notification hub: fan-out job events to webhooks, email, and Slack.
+pub mod notification_hub;
 pub mod notifications;
 pub mod operations;
 pub mod output_collector;
@@ -47,9 +69,15 @@ pub mod presets;
 pub mod priority_queue;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod processor;
+/// Progress aggregator: roll up subtask progress into parent-job percentage.
+pub mod progress_agg;
 pub mod progress_tracker;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod queue;
+/// Quota definition types: resource ceilings and usage counters.
+pub mod quota;
+/// Quota enforcer: per-user/team hard limits on concurrent and total jobs.
+pub mod quota_enforcer;
 pub mod rate_limiter;
 pub mod resource_estimator;
 pub mod resource_reservation;

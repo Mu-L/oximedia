@@ -948,13 +948,14 @@ pub fn sad_scalar(a: &[u8], b: &[u8]) -> u32 {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[allow(unsafe_code)]
+#[allow(clippy::cast_ptr_alignment)]
 unsafe fn sad_avx2(a: &[u8], b: &[u8]) -> u32 {
     use std::arch::x86_64::*;
     let chunks = a.len() / 32;
     let mut sum = _mm256_setzero_si256();
     for i in 0..chunks {
-        let va = _mm256_loadu_si256(a.as_ptr().add(i * 32) as *const __m256i);
-        let vb = _mm256_loadu_si256(b.as_ptr().add(i * 32) as *const __m256i);
+        let va = _mm256_loadu_si256(a.as_ptr().add(i * 32).cast::<__m256i>());
+        let vb = _mm256_loadu_si256(b.as_ptr().add(i * 32).cast::<__m256i>());
         let s = _mm256_sad_epu8(va, vb);
         sum = _mm256_add_epi64(sum, s);
     }
@@ -969,13 +970,14 @@ unsafe fn sad_avx2(a: &[u8], b: &[u8]) -> u32 {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.1")]
 #[allow(unsafe_code)]
+#[allow(clippy::cast_ptr_alignment)]
 unsafe fn sad_sse41(a: &[u8], b: &[u8]) -> u32 {
     use std::arch::x86_64::*;
     let chunks = a.len() / 16;
     let mut sum = _mm_setzero_si128();
     for i in 0..chunks {
-        let va = _mm_loadu_si128(a.as_ptr().add(i * 16) as *const __m128i);
-        let vb = _mm_loadu_si128(b.as_ptr().add(i * 16) as *const __m128i);
+        let va = _mm_loadu_si128(a.as_ptr().add(i * 16).cast::<__m128i>());
+        let vb = _mm_loadu_si128(b.as_ptr().add(i * 16).cast::<__m128i>());
         let s = _mm_sad_epu8(va, vb);
         sum = _mm_add_epi64(sum, s);
     }

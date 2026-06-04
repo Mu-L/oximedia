@@ -6,7 +6,7 @@
 
 use super::{
     bitwriter::BitWriter,
-    crc::{crc8, Crc16},
+    crc::{crc16, crc8},
     frame::{BlockingStrategy, ChannelAssignment, FrameHeader, SampleSize, SYNC_CODE},
     subframe::fixed_coefficients,
     StreamInfo,
@@ -265,10 +265,6 @@ impl FlacEncoder {
         let crc8_val = crc8(&header_bytes);
         writer.write_bits(u32::from(crc8_val), 8);
 
-        // Start CRC-16 calculation
-        let mut crc16 = Crc16::new();
-        crc16.update(writer.as_bytes());
-
         // Encode subframes
         for (ch_idx, channel_samples) in encoded_channels.iter().enumerate() {
             let bps = if let Some(side_ch) = channel_assignment.side_channel() {
@@ -284,16 +280,16 @@ impl FlacEncoder {
             self.encode_subframe(&mut writer, channel_samples, bps)?;
         }
 
-        // Byte align
+        // Byte align after all subframes
         writer.byte_align();
 
-        // Update CRC-16 with frame data (everything after header)
-        let all_bytes = writer.as_bytes();
-        let frame_bytes = &all_bytes[header_bytes.len()..];
-        crc16.update(frame_bytes);
+        // Compute CRC-16 over the entire frame (sync + header + CRC8 + subframes).
+        // Per FLAC spec, CRC-16 covers everything from the sync code up to (but not
+        // including) the 2-byte CRC-16 footer.
+        let frame_crc = crc16(writer.as_bytes());
 
         // Write CRC-16
-        writer.write_bits(u32::from(crc16.value()), 16);
+        writer.write_bits(u32::from(frame_crc), 16);
 
         self.frame_number += 1;
 
@@ -565,6 +561,9 @@ impl FlacEncoder {
     }
 
     /// Encode a subframe.
+    ///
+    /// Each candidate is encoded into a temporary writer, and we track the exact
+    /// bit count (not byte count) to avoid spurious padding between subframes.
     #[allow(clippy::cast_possible_wrap)]
     fn encode_subframe(&self, writer: &mut BitWriter, samples: &[i32], bps: u8) -> AudioResult<()> {
         // Check if constant
@@ -572,17 +571,17 @@ impl FlacEncoder {
             return self.encode_constant_subframe(writer, samples, bps);
         }
 
-        // Try different prediction methods and pick best
-        let mut best_size = usize::MAX;
-        let mut best_data = Vec::new();
+        // Try different prediction methods and pick best (by bit count, not byte count)
+        let mut best_bits = usize::MAX;
+        let mut best_writer: Option<BitWriter> = None;
 
         // Try verbatim
         let mut verbatim_writer = BitWriter::new();
         self.encode_verbatim_subframe(&mut verbatim_writer, samples, bps)?;
-        let verbatim_data = verbatim_writer.finish();
-        if verbatim_data.len() < best_size {
-            best_size = verbatim_data.len();
-            best_data = verbatim_data;
+        let verbatim_bits = verbatim_writer.len_bits();
+        if verbatim_bits < best_bits {
+            best_bits = verbatim_bits;
+            best_writer = Some(verbatim_writer);
         }
 
         // Try fixed predictors
@@ -593,10 +592,10 @@ impl FlacEncoder {
                 .encode_fixed_subframe(&mut fixed_writer, samples, order, bps)
                 .is_ok()
             {
-                let fixed_data = fixed_writer.finish();
-                if fixed_data.len() < best_size {
-                    best_size = fixed_data.len();
-                    best_data = fixed_data;
+                let fixed_bits = fixed_writer.len_bits();
+                if fixed_bits < best_bits {
+                    best_bits = fixed_bits;
+                    best_writer = Some(fixed_writer);
                 }
             }
         }
@@ -609,18 +608,18 @@ impl FlacEncoder {
                     .encode_lpc_subframe(&mut lpc_writer, samples, order, bps)
                     .is_ok()
                 {
-                    let lpc_data = lpc_writer.finish();
-                    if lpc_data.len() < best_size {
-                        best_size = lpc_data.len();
-                        best_data = lpc_data;
+                    let lpc_bits = lpc_writer.len_bits();
+                    if lpc_bits < best_bits {
+                        best_bits = lpc_bits;
+                        best_writer = Some(lpc_writer);
                     }
                 }
             }
         }
 
-        // Write best encoding
-        for &byte in &best_data {
-            writer.write_bits(u32::from(byte), 8);
+        // Write best encoding bit-accurately (no padding between subframes)
+        if let Some(src) = best_writer {
+            writer.write_from_bitwriter(&src, best_bits);
         }
 
         Ok(())
@@ -808,14 +807,13 @@ impl FlacEncoder {
             }
             lambda = (autocorr[i + 1] - lambda) / error;
 
-            lpc[i] = lambda;
-            for j in 0..i / 2 + 1 {
-                let tmp = lpc[j];
-                lpc[j] += lambda * lpc[i - 1 - j];
-                if j != i - 1 - j {
-                    lpc[i - 1 - j] += lambda * tmp;
-                }
+            // Update all previous coefficients simultaneously using a snapshot
+            // to avoid using partially-updated values during the update loop.
+            let lpc_snapshot: Vec<f64> = lpc[..i].to_vec();
+            for j in 0..i {
+                lpc[j] += lambda * lpc_snapshot[i - 1 - j];
             }
+            lpc[i] = lambda;
 
             error *= 1.0 - lambda * lambda;
         }

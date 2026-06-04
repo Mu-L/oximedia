@@ -385,7 +385,12 @@ mod tests {
     // 2. SimdTier names are non-empty
     #[test]
     fn test_simd_tier_names_non_empty() {
-        for tier in [SimdTier::Scalar, SimdTier::Sse41, SimdTier::Avx2, SimdTier::Neon] {
+        for tier in [
+            SimdTier::Scalar,
+            SimdTier::Sse41,
+            SimdTier::Avx2,
+            SimdTier::Neon,
+        ] {
             assert!(!tier.name().is_empty(), "name for {tier:?} is empty");
         }
     }
@@ -412,7 +417,8 @@ mod tests {
         let mut reencoded = vec![0.0f32; input.len()];
 
         proc.eotf_batch(&input, &mut linear).expect("eotf_batch");
-        proc.oetf_batch(&linear, &mut reencoded).expect("oetf_batch");
+        proc.oetf_batch(&linear, &mut reencoded)
+            .expect("oetf_batch");
 
         for (i, (&orig, &reenc)) in input.iter().zip(reencoded.iter()).enumerate() {
             assert!(
@@ -435,8 +441,12 @@ mod tests {
         let mut out_scalar = vec![0.0f32; input.len()];
         let mut out_vec = vec![0.0f32; input.len()];
 
-        scalar.eotf_batch(&input, &mut out_scalar).expect("scalar eotf");
-        auto_vec.eotf_batch(&input, &mut out_vec).expect("auto-vec eotf");
+        scalar
+            .eotf_batch(&input, &mut out_scalar)
+            .expect("scalar eotf");
+        auto_vec
+            .eotf_batch(&input, &mut out_vec)
+            .expect("auto-vec eotf");
 
         for (i, (&s, &v)) in out_scalar.iter().zip(out_vec.iter()).enumerate() {
             // Both paths share the same f32 scalar kernel; allow relative tolerance
@@ -520,7 +530,8 @@ mod tests {
             .iter()
             .map(|&pq| pq_eotf_fast(f64::from(pq)) as f32)
             .collect();
-        proc.eotf_frame_inplace(&mut frame).expect("eotf_frame_inplace");
+        proc.eotf_frame_inplace(&mut frame)
+            .expect("eotf_frame_inplace");
         for (i, (&got, &exp)) in frame.iter().zip(expected.iter()).enumerate() {
             assert!(
                 approx_eq_f32(got, exp, 1e-5),
@@ -537,8 +548,10 @@ mod tests {
         let mut frame = original.clone();
 
         // linear → PQ signal → linear
-        proc.oetf_frame_inplace(&mut frame).expect("oetf_frame_inplace");
-        proc.eotf_frame_inplace(&mut frame).expect("eotf_frame_inplace");
+        proc.oetf_frame_inplace(&mut frame)
+            .expect("oetf_frame_inplace");
+        proc.eotf_frame_inplace(&mut frame)
+            .expect("eotf_frame_inplace");
 
         for (i, (&orig, &got)) in original.iter().zip(frame.iter()).enumerate() {
             assert!(
@@ -556,10 +569,7 @@ mod tests {
         let mut out = vec![0.0f32; input.len()];
         proc.eotf_batch(&input, &mut out).expect("eotf_batch");
         for &v in &out {
-            assert!(
-                v >= 0.0,
-                "eotf output {v} is negative"
-            );
+            assert!(v >= 0.0, "eotf output {v} is negative");
         }
     }
 
@@ -571,10 +581,7 @@ mod tests {
         let mut out = vec![0.0f32; input.len()];
         proc.oetf_batch(&input, &mut out).expect("oetf_batch");
         for &v in &out {
-            assert!(
-                (0.0..=1.0).contains(&v),
-                "oetf output {v} out of [0, 1]"
-            );
+            assert!((0.0..=1.0).contains(&v), "oetf output {v} out of [0, 1]");
         }
     }
 

@@ -19,6 +19,8 @@ workspace = true
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+oximedia-core = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -602,10 +602,7 @@ mod tests {
         let checker = ComplianceChecker::new(ComplianceSpec::Broadcast);
         let shots = vec![valid_shot(0, 23, 0.40)];
         let report = checker.check_shots(&shots, None);
-        assert!(
-            !report.is_compliant(),
-            "should be non-compliant without L6"
-        );
+        assert!(!report.is_compliant(), "should be non-compliant without L6");
         let l6_missing = report
             .violations
             .iter()
@@ -634,7 +631,7 @@ mod tests {
             frame_start: 0,
             frame_end: 23,
             l1_min: 0.0,
-            l1_mid: 0.5,  // mid > max: invalid
+            l1_mid: 0.5, // mid > max: invalid
             l1_max: 0.3,
             l2_entries: vec![],
         };
@@ -660,7 +657,10 @@ mod tests {
         };
         let report = checker.check_shots(&[shot], None);
         // MissingL2Entries is a Warning, not an Error → still compliant
-        assert!(report.is_compliant(), "warnings should not block compliance");
+        assert!(
+            report.is_compliant(),
+            "warnings should not block compliance"
+        );
         let missing_l2 = report
             .violations
             .iter()
@@ -686,10 +686,12 @@ mod tests {
         };
         let report = checker.check_shots(&[shot], None);
         assert!(!report.is_compliant());
-        let trim_err = report
-            .violations
-            .iter()
-            .any(|v| matches!(v.kind, ViolationKind::L2TrimOutOfRange { param: "slope", .. }));
+        let trim_err = report.violations.iter().any(|v| {
+            matches!(
+                v.kind,
+                ViolationKind::L2TrimOutOfRange { param: "slope", .. }
+            )
+        });
         assert!(trim_err, "expected L2TrimOutOfRange(slope) violation");
     }
 
@@ -747,7 +749,7 @@ mod tests {
             l1_min: 0.001,
             l1_mid: 0.1,
             l1_max: 0.4,
-            l2_entries: vec![],  // triggers MissingL2Entries (Warning)
+            l2_entries: vec![], // triggers MissingL2Entries (Warning)
         };
         let report = checker.check_shots(&[shot], None);
         assert_eq!(report.count_by_severity(ViolationSeverity::Warning), 1);

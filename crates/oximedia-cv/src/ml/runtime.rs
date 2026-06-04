@@ -162,9 +162,20 @@ impl OnnxRuntime {
     }
 
     /// Build an oxionnx session from file.
+    ///
+    /// Execution-provider selection follows `self.device`:
+    /// - [`DeviceType::Cpu`]       → oxionnx default (CPU)
+    /// - [`DeviceType::Cuda`]      → oxionnx CUDA backend (requires `cuda` feature)
+    /// - [`DeviceType::WebGpu`]    → oxionnx GPU/wgpu backend (requires `webgpu` feature)
+    /// - [`DeviceType::DirectMl`]  → oxionnx DirectML backend (requires `directml` feature)
+    /// - [`DeviceType::Rocm`]      → CPU fallback (no oxionnx ROCm EP yet)
+    /// - [`DeviceType::TensorRt`]  → CPU fallback (no oxionnx TensorRT EP yet)
+    /// - [`DeviceType::CoreMl`]    → CPU fallback (no oxionnx CoreML EP yet)
+    ///
+    /// When oxionnx exposes a typed `ExecutionProvider` selection API the
+    /// per-device branching above will wire directly into `SessionBuilder`.
     #[cfg(feature = "onnx")]
     fn build_session(&self, path: &Path) -> CvResult<OxiSession> {
-        // For GPU device types, ort-backend is required
         self.check_device_support()?;
 
         oxionnx::Session::builder()
@@ -174,9 +185,10 @@ impl OnnxRuntime {
     }
 
     /// Build an oxionnx session from bytes.
+    ///
+    /// See [`build_session`](Self::build_session) for execution-provider notes.
     #[cfg(feature = "onnx")]
     fn build_session_from_bytes(&self, bytes: &[u8]) -> CvResult<OxiSession> {
-        // For GPU device types, ort-backend is required
         self.check_device_support()?;
 
         oxionnx::Session::builder()
@@ -198,12 +210,22 @@ impl OnnxRuntime {
             DeviceType::Cuda => Err(CvError::onnx_runtime(
                 "CUDA support requires the 'cuda' feature".to_owned(),
             )),
-            // ROCm: Pure Rust CPU inference (GPU backend planned).
+            // ROCm: The `rocm` Cargo feature currently maps to `["onnx"]` only —
+            // there is no ROCm-specific oxionnx execution provider yet.  When
+            // the `rocm` feature is enabled inference silently falls back to
+            // CPU (oxionnx default).  If you need true ROCm GPU acceleration,
+            // use `DeviceType::Cuda` with the `cuda` feature on an ROCm-
+            // compatible build of oxionnx, or wait for oxionnx/rocm support.
             #[cfg(feature = "rocm")]
-            DeviceType::Rocm => Ok(()),
+            DeviceType::Rocm => {
+                // NOTE: no ROCm execution provider in oxionnx yet; runs CPU.
+                Ok(())
+            }
             #[cfg(not(feature = "rocm"))]
             DeviceType::Rocm => Err(CvError::onnx_runtime(
-                "ROCm support requires the 'rocm' feature".to_owned(),
+                "ROCm support requires the 'rocm' feature (currently CPU-only fallback; \
+                 no oxionnx ROCm execution provider is available yet)"
+                    .to_owned(),
             )),
             // TensorRT: Pure Rust CPU inference (GPU backend planned).
             #[cfg(feature = "tensorrt")]

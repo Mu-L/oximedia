@@ -25,8 +25,6 @@
 //! assert!(!rec.should_continue());
 //! ```
 
-#![allow(dead_code)]
-
 // ---------------------------------------------------------------------------
 // FailureRecord
 // ---------------------------------------------------------------------------
@@ -104,7 +102,10 @@ impl BatchErrorRecovery {
     /// Return failures for a specific job ID.
     #[must_use]
     pub fn failures_for(&self, job_id: u64) -> Vec<&FailureRecord> {
-        self.failures.iter().filter(|r| r.job_id == job_id).collect()
+        self.failures
+            .iter()
+            .filter(|r| r.job_id == job_id)
+            .collect()
     }
 
     /// Clear all recorded failures.
@@ -228,7 +229,10 @@ mod tests {
         rec.record_failure(1, "err");
         rec.reset();
         assert!(rec.failures().is_empty());
-        assert!(rec.should_continue(), "After reset, abort mode should continue again");
+        assert!(
+            rec.should_continue(),
+            "After reset, abort mode should continue again"
+        );
     }
 
     // ── skip_on_error accessor ────────────────────────────────────────────────

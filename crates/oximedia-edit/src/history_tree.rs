@@ -6,8 +6,6 @@
 //! allowing the user to explore different edit choices and return
 //! to any previous state.
 
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 
 /// Unique identifier for a history node.

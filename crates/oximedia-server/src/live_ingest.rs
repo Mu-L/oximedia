@@ -1,19 +1,37 @@
-//! Live SRT ingest stub.
+//! Live SRT ingest server.
 //!
-//! Provides configuration, session tracking, and statistics for SRT (Secure
-//! Reliable Transport) live ingest.  The actual SRT socket I/O is intentionally
-//! stubbed out; this module focuses on the session-management layer that a full
-//! implementation would sit above.
+//! Provides configuration, session tracking, statistics, and a real
+//! [`oximedia_net::srt::SrtListener`]-backed accept loop for SRT (Secure
+//! Reliable Transport) live ingest.
+//!
+//! Two execution modes are supported:
+//!
+//! 1. **Simulated** — `SrtIngestServer::accept_session` takes a pre-built
+//!    `client_addr` / timestamp and registers an `IngestSession` without
+//!    touching the network.  Used by unit tests and by higher layers that
+//!    drive the session lifecycle themselves.
+//! 2. **Wired** — `SrtIngestServer::accept_connection` binds an SRT
+//!    listener at `SrtIngestConfig::bind_addr`, performs a real SRT
+//!    handshake, captures the
+//!    [`oximedia_net::srt::SrtReceiver`], and stores it inside the session.
+//!    `SrtIngestServer::run` drives that accept path in a loop until a
+//!    shutdown signal is observed.
 
-#![allow(dead_code)]
-
+use oximedia_net::error::{NetError, NetResult};
+use oximedia_net::srt::{SrtConfig, SrtListener, SrtReceiver};
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::{watch, Mutex};
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
 /// Configuration for an SRT ingest listener.
 #[derive(Debug, Clone)]
 pub struct SrtIngestConfig {
+    /// IP address to bind on (defaults to `0.0.0.0` — all interfaces).
+    pub bind_ip: IpAddr,
     /// UDP port to listen on for incoming SRT connections.
     pub port: u16,
     /// Optional stream-ID passphrase for encryption.
@@ -27,6 +45,7 @@ pub struct SrtIngestConfig {
 impl Default for SrtIngestConfig {
     fn default() -> Self {
         Self {
+            bind_ip: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             port: 9998,
             passphrase: None,
             latency_ms: 200,
@@ -43,12 +62,42 @@ impl SrtIngestConfig {
             .map(|p| !p.is_empty())
             .unwrap_or(false)
     }
+
+    /// Returns the [`SocketAddr`] that an [`SrtListener`] should bind to.
+    #[must_use]
+    pub fn bind_addr(&self) -> SocketAddr {
+        SocketAddr::new(self.bind_ip, self.port)
+    }
+
+    /// Converts this ingest config into the lower-level [`SrtConfig`] used by
+    /// `oximedia-net`.  Encryption parameters and latency are propagated.
+    #[must_use]
+    pub fn to_srt_config(&self) -> SrtConfig {
+        let mut cfg = SrtConfig::default().with_latency(self.latency_ms);
+        if let Some(pass) = self.passphrase.as_deref() {
+            if !pass.is_empty() {
+                cfg = cfg.with_passphrase(pass);
+            }
+        }
+        if self.max_bw_mbps > 0.0 {
+            // Convert Mbit/s to bytes/s for SRTO_MAXBW.
+            let max_bw_bytes = ((self.max_bw_mbps * 1_000_000.0) / 8.0) as u64;
+            cfg.max_bandwidth = max_bw_bytes;
+        }
+        cfg
+    }
 }
 
 // ── Session ───────────────────────────────────────────────────────────────────
 
 /// An active (or historical) SRT ingest session.
-#[derive(Debug, Clone)]
+///
+/// Sessions created by [`SrtIngestServer::accept_session`] are pure metadata
+/// (no socket attached).  Sessions created by
+/// [`SrtIngestServer::accept_connection`] additionally hold an `Arc`-wrapped
+/// [`SrtReceiver`] in the `receiver` field so callers can pull payload bytes
+/// off the wire.
+#[derive(Clone)]
 pub struct IngestSession {
     /// Unique session identifier.
     pub id: String,
@@ -60,6 +109,24 @@ pub struct IngestSession {
     pub bytes_received: u64,
     /// Number of lost packets reported by SRT.
     pub packets_lost: u64,
+    /// Optional handle to the underlying SRT receiver.
+    ///
+    /// `None` for simulated sessions, `Some(_)` for sessions accepted via
+    /// [`SrtIngestServer::accept_connection`].
+    pub receiver: Option<Arc<SrtReceiver>>,
+}
+
+impl std::fmt::Debug for IngestSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IngestSession")
+            .field("id", &self.id)
+            .field("client_addr", &self.client_addr)
+            .field("started_at_ms", &self.started_at_ms)
+            .field("bytes_received", &self.bytes_received)
+            .field("packets_lost", &self.packets_lost)
+            .field("receiver", &self.receiver.as_ref().map(|_| "<SrtReceiver>"))
+            .finish()
+    }
 }
 
 impl IngestSession {
@@ -81,6 +148,12 @@ impl IngestSession {
         }
         (self.bytes_received as f64 * 8.0) / elapsed_ms as f64
     }
+
+    /// Returns `true` if this session has a live SRT receiver attached.
+    #[must_use]
+    pub fn is_wired(&self) -> bool {
+        self.receiver.is_some()
+    }
 }
 
 // ── LCG-based session ID generator ───────────────────────────────────────────
@@ -97,7 +170,7 @@ impl LcgIdGen {
     }
 
     /// Advances the LCG state and returns the next value.
-    fn next(&mut self) -> u64 {
+    fn advance(&mut self) -> u64 {
         // Parameters from Knuth's MMIX
         self.state = self
             .state
@@ -108,8 +181,8 @@ impl LcgIdGen {
 
     /// Generates a UUID-like hex string with dashes.
     fn gen_id(&mut self, counter: u64) -> String {
-        let a = self.next() ^ counter;
-        let b = self.next() ^ counter.wrapping_add(1);
+        let a = self.advance() ^ counter;
+        let b = self.advance() ^ counter.wrapping_add(1);
         // Format as xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx (version 4-ish)
         let p1 = (a >> 32) as u32;
         let p2 = ((a >> 16) & 0xFFFF) as u16;
@@ -122,16 +195,33 @@ impl LcgIdGen {
 
 // ── SRT ingest server ─────────────────────────────────────────────────────────
 
-/// Stub SRT ingest server that manages sessions without real socket I/O.
+/// SRT ingest server.
+///
+/// The server owns the session table, the session-ID generator, and (for
+/// wired operation) binds a fresh [`SrtListener`] on
+/// [`SrtIngestConfig::bind_addr`] for every accepted connection.  Two
+/// accept paths are exposed:
+///
+/// * [`Self::accept_session`] — synchronous, registers a simulated session
+///   from caller-supplied metadata.  Used by unit tests and by integrations
+///   that drive the lifecycle externally.
+/// * [`Self::accept_connection`] — async, binds a real [`SrtListener`] and
+///   completes a full SRT handshake before registering the session.
+///
+/// [`Self::run`] drives the async path in a loop until a shutdown signal
+/// is observed on the supplied [`watch::Receiver<bool>`].
 pub struct SrtIngestServer {
     /// Server configuration.
     pub config: SrtIngestConfig,
-    /// Active and historical sessions keyed by session ID.
-    sessions: HashMap<String, IngestSession>,
-    /// ID generator.
-    id_gen: LcgIdGen,
-    /// Monotonically increasing session counter (used to seed the ID generator).
-    session_counter: u64,
+    /// Active and historical sessions keyed by session ID, wrapped in an
+    /// `Arc<Mutex<_>>` so the async `run` loop and synchronous callers can
+    /// share access without races.
+    sessions: Arc<Mutex<HashMap<String, IngestSession>>>,
+    /// ID generator (guarded so async accept paths can mutate it).
+    id_gen: Arc<Mutex<LcgIdGen>>,
+    /// Monotonically increasing session counter (used to seed the ID
+    /// generator); also guarded for async use.
+    session_counter: Arc<Mutex<u64>>,
 }
 
 impl SrtIngestServer {
@@ -141,27 +231,149 @@ impl SrtIngestServer {
         let seed = config.port as u64 ^ 0xDEAD_BEEF_1337_0042;
         Self {
             config,
-            sessions: HashMap::new(),
-            id_gen: LcgIdGen::new(seed),
-            session_counter: 0,
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            id_gen: Arc::new(Mutex::new(LcgIdGen::new(seed))),
+            session_counter: Arc::new(Mutex::new(0)),
         }
     }
 
     /// Simulates accepting a new SRT session from `client_addr` at `now_ms`.
     ///
     /// Returns the newly generated session ID.
+    ///
+    /// This is the legacy synchronous path: no socket is opened and no
+    /// handshake is performed.  Use [`Self::accept_connection`] for the
+    /// wired path.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any of the internal mutexes are concurrently held — which
+    /// cannot happen because the method takes `&mut self`, granting
+    /// exclusive access to the server.
     pub fn accept_session(&mut self, client_addr: String, now_ms: u64) -> String {
-        self.session_counter = self.session_counter.wrapping_add(1);
-        let id = self.id_gen.gen_id(self.session_counter);
+        // `&mut self` guarantees no other reference exists, therefore no
+        // other task can be holding any of these mutexes.
+        let mut counter_guard = self
+            .session_counter
+            .try_lock()
+            .expect("session_counter mutex uncontested in &mut self path");
+        let mut id_gen_guard = self
+            .id_gen
+            .try_lock()
+            .expect("id_gen mutex uncontested in &mut self path");
+        let mut sessions_guard = self
+            .sessions
+            .try_lock()
+            .expect("sessions mutex uncontested in &mut self path");
+
+        *counter_guard = counter_guard.wrapping_add(1);
+        let id = id_gen_guard.gen_id(*counter_guard);
         let session = IngestSession {
             id: id.clone(),
             client_addr,
             started_at_ms: now_ms,
             bytes_received: 0,
             packets_lost: 0,
+            receiver: None,
         };
-        self.sessions.insert(id.clone(), session);
+        sessions_guard.insert(id.clone(), session);
         id
+    }
+
+    /// Accepts a real SRT connection on [`SrtIngestConfig::bind_addr`].
+    ///
+    /// Binds an [`SrtListener`] (re-using [`SrtIngestConfig::to_srt_config`]
+    /// for encryption / latency / bandwidth), waits for the INDUCTION
+    /// datagram, drives the SRT handshake to completion, and registers a
+    /// new [`IngestSession`] populated with the real peer address and the
+    /// held [`SrtReceiver`].
+    ///
+    /// Returns the newly generated session ID on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError`] if socket binding, the initial recv, or the SRT
+    /// handshake fails.
+    pub async fn accept_connection(&self) -> NetResult<String> {
+        let listener = SrtListener::new(self.config.bind_addr(), self.config.to_srt_config());
+        let receiver = listener.accept().await?;
+        let peer = receiver.peer_addr();
+        let now_ms = current_unix_ms();
+
+        let counter_value = {
+            let mut counter_guard = self.session_counter.lock().await;
+            *counter_guard = counter_guard.wrapping_add(1);
+            *counter_guard
+        };
+
+        let id = {
+            let mut id_gen_guard = self.id_gen.lock().await;
+            id_gen_guard.gen_id(counter_value)
+        };
+
+        let session = IngestSession {
+            id: id.clone(),
+            client_addr: peer.to_string(),
+            started_at_ms: now_ms,
+            bytes_received: 0,
+            packets_lost: 0,
+            receiver: Some(Arc::new(receiver)),
+        };
+
+        {
+            let mut sessions_guard = self.sessions.lock().await;
+            sessions_guard.insert(id.clone(), session);
+        }
+
+        Ok(id)
+    }
+
+    /// Drives [`Self::accept_connection`] in a loop until a shutdown signal
+    /// is observed on `shutdown`.
+    ///
+    /// Transient accept errors (handshake failures, peer disconnects) are
+    /// logged via [`tracing::warn`] and the loop continues.  Fatal errors
+    /// (binding the local UDP socket fails, address already in use,
+    /// permission denied, …) abort the loop and are returned to the
+    /// caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`NetError`] when a fatal accept error
+    /// terminates the loop.  Returns `Ok(())` when shutdown is signalled.
+    pub async fn run(&self, mut shutdown: watch::Receiver<bool>) -> NetResult<()> {
+        // If shutdown is already set when we start, return immediately.
+        if *shutdown.borrow() {
+            return Ok(());
+        }
+
+        loop {
+            tokio::select! {
+                accept_res = self.accept_connection() => {
+                    match accept_res {
+                        Ok(id) => {
+                            tracing::info!(session_id = %id, "accepted SRT ingest session");
+                        }
+                        Err(NetError::Io(e)) if is_fatal_io(&e) => {
+                            tracing::error!(error = %e, "fatal I/O error in SRT accept loop");
+                            return Err(NetError::Io(e));
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "transient SRT accept error; continuing");
+                        }
+                    }
+                }
+                changed_res = shutdown.changed() => {
+                    // `changed()` returns `Err` if the sender is dropped — we
+                    // treat that as a shutdown signal too (no more senders
+                    // means we can never be told to stop, so stop now).
+                    if changed_res.is_err() || *shutdown.borrow() {
+                        tracing::info!("SRT ingest server shutting down");
+                        return Ok(());
+                    }
+                }
+            }
+        }
     }
 
     /// Updates statistics for the session identified by `id`.
@@ -169,15 +381,27 @@ impl SrtIngestServer {
     /// `bytes` is the number of additional bytes received since the last update.
     /// `lost` is the number of additional lost packets since the last update.
     pub fn update_session(&mut self, id: &str, bytes: u64, lost: u64) {
-        if let Some(session) = self.sessions.get_mut(id) {
+        let mut sessions_guard = self
+            .sessions
+            .try_lock()
+            .expect("sessions mutex uncontested in &mut self path");
+        if let Some(session) = sessions_guard.get_mut(id) {
             session.bytes_received = session.bytes_received.saturating_add(bytes);
             session.packets_lost = session.packets_lost.saturating_add(lost);
         }
     }
 
-    /// Returns a reference to the session with `id`, or `None` if not found.
-    pub fn session_stats(&self, id: &str) -> Option<&IngestSession> {
-        self.sessions.get(id)
+    /// Returns a clone of the session with `id`, or `None` if not found.
+    pub fn session_stats(&self, id: &str) -> Option<IngestSession> {
+        let sessions_guard = self.sessions.try_lock().ok()?;
+        sessions_guard.get(id).cloned()
+    }
+
+    /// Async variant of [`Self::session_stats`] — does not require the
+    /// mutex to be uncontested.
+    pub async fn session_stats_async(&self, id: &str) -> Option<IngestSession> {
+        let sessions_guard = self.sessions.lock().await;
+        sessions_guard.get(id).cloned()
     }
 
     /// Calculates the packet loss rate for a session.
@@ -185,7 +409,11 @@ impl SrtIngestServer {
     /// Returns `lost / (received_packets + lost)`.  Returns `0.0` if no
     /// packets have been seen or the session does not exist.
     pub fn packet_loss_rate(&self, id: &str) -> f32 {
-        let session = match self.sessions.get(id) {
+        let sessions_guard = match self.sessions.try_lock() {
+            Ok(g) => g,
+            Err(_) => return 0.0,
+        };
+        let session = match sessions_guard.get(id) {
             Some(s) => s,
             None => return 0.0,
         };
@@ -199,18 +427,56 @@ impl SrtIngestServer {
 
     /// Removes a session by ID.  Returns `true` if it existed.
     pub fn remove_session(&mut self, id: &str) -> bool {
-        self.sessions.remove(id).is_some()
+        let mut sessions_guard = self
+            .sessions
+            .try_lock()
+            .expect("sessions mutex uncontested in &mut self path");
+        sessions_guard.remove(id).is_some()
     }
 
     /// Returns the number of active sessions.
     pub fn session_count(&self) -> usize {
-        self.sessions.len()
+        self.sessions.try_lock().map(|g| g.len()).unwrap_or(0)
     }
 
-    /// Returns the IDs of all sessions.
-    pub fn session_ids(&self) -> Vec<&str> {
-        self.sessions.keys().map(String::as_str).collect()
+    /// Async variant of [`Self::session_count`] — usable while the run
+    /// loop holds the mutex.
+    pub async fn session_count_async(&self) -> usize {
+        let g = self.sessions.lock().await;
+        g.len()
     }
+
+    /// Returns the IDs of all sessions (as owned `String`s, since the
+    /// underlying map lives behind a mutex).
+    pub fn session_ids(&self) -> Vec<String> {
+        self.sessions
+            .try_lock()
+            .map(|g| g.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+}
+
+/// Returns the current wall-clock as milliseconds since the UNIX epoch.
+///
+/// Falls back to `0` if the system clock is set before 1970-01-01.
+fn current_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Classifies a [`std::io::Error`] as "fatal" (the accept loop cannot
+/// recover from it) or "transient" (worth logging and retrying).
+fn is_fatal_io(err: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(
+        err.kind(),
+        ErrorKind::AddrInUse
+            | ErrorKind::AddrNotAvailable
+            | ErrorKind::PermissionDenied
+            | ErrorKind::InvalidInput
+    )
 }
 
 // ── LiveIngestHandler ─────────────────────────────────────────────────────────
@@ -322,6 +588,56 @@ mod tests {
         assert!(!cfg.is_encrypted());
     }
 
+    #[test]
+    fn test_config_bind_addr_default() {
+        let cfg = SrtIngestConfig::default();
+        let addr = cfg.bind_addr();
+        assert_eq!(addr.port(), 9998);
+        assert!(addr.ip().is_unspecified());
+    }
+
+    #[test]
+    fn test_config_to_srt_config_propagates_latency() {
+        let cfg = SrtIngestConfig {
+            latency_ms: 250,
+            ..Default::default()
+        };
+        let srt_cfg = cfg.to_srt_config();
+        assert_eq!(srt_cfg.latency_ms, 250);
+    }
+
+    #[test]
+    fn test_config_to_srt_config_propagates_passphrase() {
+        let cfg = SrtIngestConfig {
+            passphrase: Some("secret".to_string()),
+            ..Default::default()
+        };
+        let srt_cfg = cfg.to_srt_config();
+        assert!(srt_cfg.passphrase.is_some());
+        // with_passphrase sets a 16-byte AES-128 key by default.
+        assert_eq!(srt_cfg.key_size, 16);
+    }
+
+    #[test]
+    fn test_config_to_srt_config_max_bw_conversion() {
+        let cfg = SrtIngestConfig {
+            max_bw_mbps: 8.0, // 8 Mbit/s → 1_000_000 bytes/s
+            ..Default::default()
+        };
+        let srt_cfg = cfg.to_srt_config();
+        assert_eq!(srt_cfg.max_bandwidth, 1_000_000);
+    }
+
+    #[test]
+    fn test_config_to_srt_config_zero_bw_leaves_default() {
+        let cfg = SrtIngestConfig {
+            max_bw_mbps: 0.0,
+            ..Default::default()
+        };
+        let srt_cfg = cfg.to_srt_config();
+        assert_eq!(srt_cfg.max_bandwidth, 0);
+    }
+
     // accept_session tests
 
     #[test]
@@ -348,6 +664,7 @@ mod tests {
         assert_eq!(stats.client_addr, "127.0.0.1:5000");
         assert_eq!(stats.started_at_ms, 5_000);
         assert_eq!(stats.bytes_received, 0);
+        assert!(!stats.is_wired());
     }
 
     #[test]
@@ -443,6 +760,7 @@ mod tests {
             started_at_ms: 1000,
             bytes_received: 0,
             packets_lost: 0,
+            receiver: None,
         };
         assert_eq!(session.duration_ms(1500), 500);
     }
@@ -455,9 +773,23 @@ mod tests {
             started_at_ms: 1000,
             bytes_received: 10000,
             packets_lost: 0,
+            receiver: None,
         };
         // Same timestamp as started_at -> elapsed = 0 -> 0 kbps
         assert!((session.throughput_kbps(1000)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_session_is_wired_default_false() {
+        let session = IngestSession {
+            id: "x".to_string(),
+            client_addr: "127.0.0.1:1".to_string(),
+            started_at_ms: 0,
+            bytes_received: 0,
+            packets_lost: 0,
+            receiver: None,
+        };
+        assert!(!session.is_wired());
     }
 
     // ── LiveIngestHandler tests ───────────────────────────────────────────────
@@ -484,7 +816,8 @@ mod tests {
     #[test]
     fn test_rtmp_disconnect() {
         let mut h = LiveIngestHandler::new(1935);
-        h.handle_rtmp_connect("c", "live/a").unwrap();
+        h.handle_rtmp_connect("c", "live/a")
+            .expect("connect should succeed");
         assert!(h.handle_rtmp_disconnect("live/a"));
         assert_eq!(h.connection_count(), 0);
     }
@@ -492,7 +825,8 @@ mod tests {
     #[test]
     fn test_rtmp_session_for_app() {
         let mut h = LiveIngestHandler::new(1935);
-        h.handle_rtmp_connect("c1", "live/b").unwrap();
+        h.handle_rtmp_connect("c1", "live/b")
+            .expect("connect should succeed");
         assert!(h.session_for_app("live/b").is_some());
         assert!(h.session_for_app("live/unknown").is_none());
     }
@@ -513,5 +847,50 @@ mod tests {
             assert_eq!(parts[3].len(), 4);
             assert_eq!(parts[4].len(), 12);
         }
+    }
+
+    // ── is_fatal_io ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_fatal_io_addr_in_use_is_fatal() {
+        let err = std::io::Error::new(std::io::ErrorKind::AddrInUse, "x");
+        assert!(is_fatal_io(&err));
+    }
+
+    #[test]
+    fn test_is_fatal_io_timed_out_is_transient() {
+        let err = std::io::Error::new(std::io::ErrorKind::TimedOut, "x");
+        assert!(!is_fatal_io(&err));
+    }
+
+    // ── current_unix_ms sanity ───────────────────────────────────────────────
+
+    #[test]
+    fn test_current_unix_ms_nonzero() {
+        // After 2020, the value must be substantially greater than the
+        // 1577836800000-ms checkpoint, proving the function actually
+        // consults the system clock.
+        assert!(current_unix_ms() > 1_577_836_800_000);
+    }
+
+    // ── run() shutdown ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_run_returns_when_shutdown_pre_set() {
+        // Build a config that points at the loopback so a listener can be
+        // bound; verify run() exits immediately because shutdown is
+        // already set before run() is awaited.
+        let cfg = SrtIngestConfig {
+            bind_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            port: 0,
+            ..Default::default()
+        };
+        let server = SrtIngestServer::new(cfg);
+        let (tx, rx) = watch::channel(false);
+        tx.send(true).expect("send shutdown");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), server.run(rx))
+            .await
+            .expect("run should exit immediately when shutdown already set");
+        assert!(result.is_ok());
     }
 }

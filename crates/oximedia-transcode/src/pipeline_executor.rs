@@ -354,7 +354,11 @@ impl TimestampManager {
             } else {
                 u64::MAX // ensure first frame always produces output
             };
-            if out_idx != prev_out_idx { 1 } else { 0 }
+            if out_idx != prev_out_idx {
+                1
+            } else {
+                0
+            }
         }
     }
 
@@ -471,10 +475,7 @@ pub struct PipelineExecutor {
 
 impl PipelineExecutor {
     /// Creates a new pipeline executor.
-    pub fn new(
-        decoder: Box<dyn PipelineDecoder>,
-        encoder: Box<dyn PipelineEncoder>,
-    ) -> Self {
+    pub fn new(decoder: Box<dyn PipelineDecoder>, encoder: Box<dyn PipelineEncoder>) -> Self {
         Self {
             decoder,
             stages: Vec::new(),
@@ -744,8 +745,8 @@ mod tests {
         let decoder = Box::new(MockDecoder::new(frames));
         let encoder = Box::new(MockEncoder::new());
 
-        let mut executor = PipelineExecutor::new(decoder, encoder)
-            .with_stage(Box::new(PassthroughStage));
+        let mut executor =
+            PipelineExecutor::new(decoder, encoder).with_stage(Box::new(PassthroughStage));
 
         let stats = executor.execute().expect("pipeline should succeed");
 
@@ -882,8 +883,7 @@ mod tests {
             collect_stage_stats: true,
         };
 
-        let mut executor = PipelineExecutor::new(decoder, encoder)
-            .with_config(config);
+        let mut executor = PipelineExecutor::new(decoder, encoder).with_config(config);
 
         let stats = executor.execute().expect("should succeed");
         assert_eq!(stats.total_decoded, 5);

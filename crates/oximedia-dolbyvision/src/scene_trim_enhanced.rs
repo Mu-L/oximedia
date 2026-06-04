@@ -157,7 +157,9 @@ impl SceneChangeDetector {
         let discontinuities = self.compute_discontinuities(samples);
 
         // Compute adaptive threshold if enabled
-        let threshold = if self.config.adaptive_threshold && discontinuities.len() >= self.config.variance_window {
+        let threshold = if self.config.adaptive_threshold
+            && discontinuities.len() >= self.config.variance_window
+        {
             self.adaptive_threshold(&discontinuities)
         } else {
             self.config.discontinuity_threshold
@@ -447,7 +449,10 @@ impl TrimOptimizer {
     /// Takes scene luminance statistics and produces optimized L2 trim parameters.
     #[must_use]
     pub fn optimize(&self, scene_stats: &[SceneLuminanceStats]) -> Vec<OptimizedTrim> {
-        scene_stats.iter().map(|stats| self.optimize_scene(stats)).collect()
+        scene_stats
+            .iter()
+            .map(|stats| self.optimize_scene(stats))
+            .collect()
     }
 
     /// Optimize L2 trim for a single scene.
@@ -470,8 +475,8 @@ impl TrimOptimizer {
             adj
         } else {
             // Scene fits within display: gentle expansion
-            let adj = self.config.base_trim_slope
-                * (1.0 + (compression_ratio - scene_range_ratio) * 0.2);
+            let adj =
+                self.config.base_trim_slope * (1.0 + (compression_ratio - scene_range_ratio) * 0.2);
             notes.push(format!(
                 "Low DR scene ({} PQ codes): slope expanded to {:.3}",
                 stats.dynamic_range_pq, adj
@@ -848,11 +853,7 @@ mod tests {
 
     #[test]
     fn test_compute_scene_stats_single_scene() {
-        let samples = make_samples(&[
-            (100, 2000, 1000),
-            (120, 2100, 1050),
-            (90, 1900, 950),
-        ]);
+        let samples = make_samples(&[(100, 2000, 1000), (120, 2100, 1050), (90, 1900, 950)]);
         let optimizer = TrimOptimizer::with_defaults();
         let stats = optimizer.compute_scene_stats(&samples, &[]);
 
@@ -897,7 +898,8 @@ mod tests {
         let detector = SceneChangeDetector::with_defaults();
         let detection = detector.detect(&samples);
 
-        let boundary_frames: Vec<u64> = detection.boundaries.iter().map(|b| b.frame_index).collect();
+        let boundary_frames: Vec<u64> =
+            detection.boundaries.iter().map(|b| b.frame_index).collect();
 
         let optimizer = TrimOptimizer::with_defaults();
         let stats = optimizer.compute_scene_stats(&samples, &boundary_frames);

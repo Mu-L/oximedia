@@ -144,7 +144,9 @@ impl ChromaFingerprint {
             let arr: [u8; 4] = chunk.try_into().unwrap_or([0; 4]);
             f64::from(f32::from_le_bytes(arr))
         };
-        let chroma_means = (0..12).map(|i| read_f32(&bytes[i * 4..(i + 1) * 4])).collect();
+        let chroma_means = (0..12)
+            .map(|i| read_f32(&bytes[i * 4..(i + 1) * 4]))
+            .collect();
         let chroma_stds = (0..12)
             .map(|i| read_f32(&bytes[48 + i * 4..48 + (i + 1) * 4]))
             .collect();
@@ -270,11 +272,7 @@ impl ChromagramExtractor {
     }
 
     /// Analyse one windowed FFT frame and return L2-normalised chroma vector.
-    fn analyse_frame(
-        &self,
-        frame: &[f32],
-        sample_rate: u32,
-    ) -> DedupResult<[f64; 12]> {
+    fn analyse_frame(&self, frame: &[f32], sample_rate: u32) -> DedupResult<[f64; 12]> {
         let n = frame.len();
 
         // Apply Hann window and convert to Complex<f64>.
@@ -337,9 +335,7 @@ impl ChromagramExtractor {
 /// Compute a Hann window of length `n`.
 fn hann_window(n: usize) -> Vec<f64> {
     (0..n)
-        .map(|i| {
-            0.5 * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / (n as f64 - 1.0)).cos())
-        })
+        .map(|i| 0.5 * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / (n as f64 - 1.0)).cos()))
         .collect()
 }
 
@@ -420,7 +416,9 @@ mod tests {
     fn test_fingerprint_returns_12_chroma_bins() {
         let extractor = ChromagramExtractor::new(ChromaConfig::default());
         let samples = sine_wave(440.0, 22050, 1.0);
-        let fp = extractor.fingerprint(&samples, 22050).expect("should succeed");
+        let fp = extractor
+            .fingerprint(&samples, 22050)
+            .expect("should succeed");
         assert_eq!(fp.chroma_means.len(), 12);
         assert_eq!(fp.chroma_stds.len(), 12);
     }
@@ -468,7 +466,9 @@ mod tests {
         let extractor = ChromagramExtractor::new(ChromaConfig::default());
         // Signal shorter than one FFT frame (2048 samples).
         let samples: Vec<f32> = vec![0.5; 512];
-        let fp = extractor.fingerprint(&samples, 22050).expect("short signal ok");
+        let fp = extractor
+            .fingerprint(&samples, 22050)
+            .expect("short signal ok");
         assert_eq!(fp.chroma_means.len(), 12);
     }
 
@@ -537,7 +537,10 @@ mod tests {
         let a = vec![1.0, 0.0, 0.0];
         let b = vec![0.0, 1.0, 0.0];
         let sim = cosine_similarity(&a, &b);
-        assert!(sim.abs() < f64::EPSILON, "orthogonal vectors sim should be 0");
+        assert!(
+            sim.abs() < f64::EPSILON,
+            "orthogonal vectors sim should be 0"
+        );
     }
 
     #[test]

@@ -269,11 +269,12 @@ impl MediaTrack {
     /// Renders this track as an SDP `m=` block.
     #[must_use]
     pub fn to_sdp_block(&self) -> String {
-        let channel_str = self
-            .channels
-            .map(|c| format!("/{c}"))
-            .unwrap_or_default();
-        let port = if self.media_type == "video" { 0u16 } else { 0u16 };
+        let channel_str = self.channels.map(|c| format!("/{c}")).unwrap_or_default();
+        let port = if self.media_type == "video" {
+            0u16
+        } else {
+            0u16
+        };
         format!(
             "m={media} {port} RTP/AVP {pt}\r\n\
              a=rtpmap:{pt} {codec}/{rate}{ch}\r\n\
@@ -399,7 +400,8 @@ impl RtspServer {
 
         let mut resp = RtspResponse::ok(cseq);
         resp.session_id = Some(sid);
-        resp.headers.insert("Transport".to_owned(), transport_header);
+        resp.headers
+            .insert("Transport".to_owned(), transport_header);
         resp
     }
 
@@ -408,14 +410,16 @@ impl RtspServer {
         match self.sessions.get_mut(session_id) {
             None => RtspResponse::error(RtspStatus::SessionNotFound, cseq),
             Some(sess) => {
-                if sess.state != RtspSessionState::Ready && sess.state != RtspSessionState::Playing {
+                if sess.state != RtspSessionState::Ready && sess.state != RtspSessionState::Playing
+                {
                     return RtspResponse::error(RtspStatus::MethodNotValidInState, cseq);
                 }
                 sess.state = RtspSessionState::Playing;
                 sess.last_cseq = cseq;
                 let mut resp = RtspResponse::ok(cseq);
                 resp.session_id = Some(session_id.to_owned());
-                resp.headers.insert("Range".to_owned(), "npt=0.000-".to_owned());
+                resp.headers
+                    .insert("Range".to_owned(), "npt=0.000-".to_owned());
                 resp
             }
         }
@@ -447,10 +451,7 @@ impl RtspServer {
     /// Returns the number of sessions currently in the `Playing` state.
     #[must_use]
     pub fn playing_count(&self) -> usize {
-        self.sessions
-            .values()
-            .filter(|s| s.is_playing())
-            .count()
+        self.sessions.values().filter(|s| s.is_playing()).count()
     }
 
     /// Removes torn-down sessions.
@@ -532,9 +533,7 @@ mod tests {
         let server = make_server();
         let resp = server.handle_describe(2, "rtsp://localhost/live");
         assert_eq!(resp.status, RtspStatus::Ok);
-        let sdp = resp
-            .body
-            .expect("DESCRIBE response always has an SDP body");
+        let sdp = resp.body.expect("DESCRIBE response always has an SDP body");
         assert!(sdp.contains("m=video"));
         assert!(sdp.contains("VP9"));
         assert!(sdp.contains("m=audio"));

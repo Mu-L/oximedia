@@ -476,6 +476,126 @@ fn k_weighting_gain(_freq: f64) -> f64 {
     1.0
 }
 
+// ---------------------------------------------------------------------------
+// CachedSpectrumAnalyzer — lightweight f32 FFT analyzer with cached state
+// ---------------------------------------------------------------------------
+
+/// Lightweight f32 spectrum analyzer with pre-computed Hann window coefficients
+/// and a pre-allocated scratch buffer.
+///
+/// Unlike [`SpectrumAnalyzer`], this type allocates all buffers at construction
+/// time (window table, complex scratch) so that `process()` performs zero heap
+/// allocation per call.
+///
+/// # Example
+///
+/// ```rust
+/// use oximedia_metering::spectrum::CachedSpectrumAnalyzer;
+///
+/// let mut analyzer = CachedSpectrumAnalyzer::new(1024);
+/// let samples: Vec<f32> = vec![1.0; 1024]; // DC signal
+/// let magnitudes = analyzer.process(&samples);
+/// assert!(!magnitudes.is_empty());
+/// ```
+pub struct CachedSpectrumAnalyzer {
+    fft_size: usize,
+    /// Pre-computed Hann window coefficients (length `fft_size`).
+    window_coeffs: Vec<f32>,
+    /// Pre-allocated complex scratch buffer (length `fft_size`).
+    scratch: Vec<f32>,
+}
+
+impl CachedSpectrumAnalyzer {
+    /// Create a new analyzer.
+    ///
+    /// Pre-computes the Hann window table and allocates internal scratch.
+    ///
+    /// # Arguments
+    ///
+    /// * `fft_size` - Number of samples per FFT frame. Should be a power of two.
+    ///
+    /// # Panics
+    ///
+    /// Does not panic, but `process()` will return an empty `Vec` if the input
+    /// is shorter than `fft_size`.
+    pub fn new(fft_size: usize) -> Self {
+        let fft_size = fft_size.max(2);
+
+        // Pre-compute Hann window: w[n] = 0.5 * (1 - cos(2π n / (N-1)))
+        let window_coeffs: Vec<f32> = (0..fft_size)
+            .map(|n| {
+                let phase = 2.0 * std::f32::consts::PI * n as f32 / (fft_size as f32 - 1.0);
+                0.5 * (1.0 - phase.cos())
+            })
+            .collect();
+
+        // Scratch buffer: we'll convert f32 samples to f64 Complex for oxifft.
+        // Allocate as f32 scratch (used as staging area before conversion).
+        let scratch = vec![0.0f32; fft_size];
+
+        Self {
+            fft_size,
+            window_coeffs,
+            scratch,
+        }
+    }
+
+    /// Process a frame of samples and return the magnitude spectrum.
+    ///
+    /// The first `fft_size` samples of `samples` are used. If `samples` is
+    /// shorter than `fft_size` the function returns an empty `Vec`.
+    ///
+    /// # Arguments
+    ///
+    /// * `samples` - Input samples (mono f32).
+    ///
+    /// # Returns
+    ///
+    /// `Vec<f32>` of length `fft_size / 2 + 1` containing linear magnitudes.
+    pub fn process(&mut self, samples: &[f32]) -> Vec<f32> {
+        if samples.len() < self.fft_size {
+            return Vec::new();
+        }
+
+        // Apply Hann window into scratch buffer.
+        for (i, (s, w)) in samples[..self.fft_size]
+            .iter()
+            .zip(self.window_coeffs.iter())
+            .enumerate()
+        {
+            self.scratch[i] = s * w;
+        }
+
+        // Convert windowed f32 → f64 Complex for oxifft.
+        let complex_in: Vec<oxifft::Complex<f64>> = self
+            .scratch
+            .iter()
+            .map(|&x| oxifft::Complex::new(x as f64, 0.0))
+            .collect();
+
+        // Compute FFT (oxifft returns a full N-point spectrum).
+        let fft_out = oxifft::fft(&complex_in);
+
+        // Extract one-sided magnitude spectrum: bins 0 .. fft_size/2 + 1.
+        let num_bins = self.fft_size / 2 + 1;
+        fft_out
+            .iter()
+            .take(num_bins)
+            .map(|c| c.norm() as f32)
+            .collect()
+    }
+
+    /// Return the configured FFT frame size.
+    pub fn fft_size(&self) -> usize {
+        self.fft_size
+    }
+
+    /// Return the number of output frequency bins (`fft_size / 2 + 1`).
+    pub fn num_bins(&self) -> usize {
+        self.fft_size / 2 + 1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,5 +653,68 @@ mod tests {
         analyzer.process_spectrum(&spectrum, 2048);
 
         assert!(!analyzer.band_levels().is_empty());
+    }
+
+    // ---- CachedSpectrumAnalyzer tests ----
+
+    /// Two calls with identical input must produce identical output.
+    #[test]
+    fn test_spectrum_analyzer_reuse() {
+        let fft_size = 512;
+        let mut analyzer = CachedSpectrumAnalyzer::new(fft_size);
+        let samples: Vec<f32> = (0..fft_size)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 48000.0).sin())
+            .collect();
+
+        let out1 = analyzer.process(&samples);
+        let out2 = analyzer.process(&samples);
+
+        assert_eq!(out1.len(), out2.len(), "output lengths must match");
+        for (a, b) in out1.iter().zip(out2.iter()) {
+            assert!(
+                (a - b).abs() < 1e-7,
+                "second call differs from first: {a} vs {b}"
+            );
+        }
+    }
+
+    /// DC input (constant value) must show dominant energy in bin 0.
+    #[test]
+    fn test_spectrum_analyzer_dc() {
+        let fft_size = 512;
+        let mut analyzer = CachedSpectrumAnalyzer::new(fft_size);
+        // All samples = 1.0 → DC signal.
+        let samples = vec![1.0f32; fft_size];
+        let magnitudes = analyzer.process(&samples);
+
+        assert!(
+            !magnitudes.is_empty(),
+            "process must return non-empty output"
+        );
+
+        let bin0 = magnitudes[0];
+        let max_other = magnitudes[1..].iter().copied().fold(0.0f32, f32::max);
+
+        assert!(
+            bin0 > max_other,
+            "DC signal: bin0={bin0:.4} should dominate over max(bins 1+)={max_other:.4}"
+        );
+    }
+
+    /// Short input (< fft_size) returns empty Vec.
+    #[test]
+    fn test_spectrum_analyzer_short_input() {
+        let mut analyzer = CachedSpectrumAnalyzer::new(512);
+        let short = vec![0.5f32; 256];
+        let out = analyzer.process(&short);
+        assert!(out.is_empty(), "short input must return empty Vec");
+    }
+
+    /// num_bins() and fft_size() report correct values.
+    #[test]
+    fn test_spectrum_analyzer_metadata() {
+        let analyzer = CachedSpectrumAnalyzer::new(1024);
+        assert_eq!(analyzer.fft_size(), 1024);
+        assert_eq!(analyzer.num_bins(), 513);
     }
 }

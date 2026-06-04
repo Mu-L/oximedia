@@ -204,20 +204,13 @@ pub enum OutputNaming {
 
 impl OutputNaming {
     /// Derive the output path for a given input path and job index.
-    pub fn derive_output(
-        &self,
-        input_path: &str,
-        job_index: usize,
-    ) -> Result<String, BatchError> {
+    pub fn derive_output(&self, input_path: &str, job_index: usize) -> Result<String, BatchError> {
         let path = Path::new(input_path);
         let stem = path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("output");
-        let parent = path
-            .parent()
-            .and_then(|p| p.to_str())
-            .unwrap_or(".");
+        let parent = path.parent().and_then(|p| p.to_str()).unwrap_or(".");
 
         match self {
             Self::SameDir { ext } => {
@@ -225,18 +218,26 @@ impl OutputNaming {
                 Ok(out)
             }
             Self::OutputDir { dir, ext } => {
-                let out = format!("{}/{}.{}", dir.trim_end_matches('/'), stem, ext.trim_start_matches('.'));
+                let out = format!(
+                    "{}/{}.{}",
+                    dir.trim_end_matches('/'),
+                    stem,
+                    ext.trim_start_matches('.')
+                );
                 Ok(out)
             }
             Self::Suffix { suffix, ext } => {
-                let out = format!("{}/{}{}.{}", parent, stem, suffix, ext.trim_start_matches('.'));
+                let out = format!(
+                    "{}/{}{}.{}",
+                    parent,
+                    stem,
+                    suffix,
+                    ext.trim_start_matches('.')
+                );
                 Ok(out)
             }
             Self::Template(template) => {
-                let original_ext = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("");
+                let original_ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
                 let result = template
                     .replace("{name}", stem)
                     .replace("{ext}", original_ext)
@@ -351,8 +352,7 @@ pub struct BatchResult {
 impl BatchResult {
     /// Return `true` if any job or top-level diagnostic is error-level.
     pub fn has_errors(&self) -> bool {
-        self.diagnostics.iter().any(|d| d.is_error())
-            || self.jobs.iter().any(|j| j.has_errors())
+        self.diagnostics.iter().any(|d| d.is_error()) || self.jobs.iter().any(|j| j.has_errors())
     }
 
     /// Return all job output paths.
@@ -378,15 +378,12 @@ pub fn translate_batch(spec: &BatchSpec) -> Result<BatchResult, BatchError> {
 
     // Parse shared args once to extract codec/bitrate/etc. settings.
     // We synthesise a minimal FFmpeg argv: `-i PLACEHOLDER <shared_args> output.mkv`
-    let mut argv: Vec<String> = vec![
-        "-i".into(),
-        "__batch_placeholder__.mkv".into(),
-    ];
+    let mut argv: Vec<String> = vec!["-i".into(), "__batch_placeholder__.mkv".into()];
     argv.extend_from_slice(&spec.shared_args);
     argv.push("__batch_output__.mkv".into());
 
-    let parsed = FfmpegArgs::parse(&argv)
-        .map_err(|e| BatchError::ArgumentParseError(e.to_string()))?;
+    let parsed =
+        FfmpegArgs::parse(&argv).map_err(|e| BatchError::ArgumentParseError(e.to_string()))?;
 
     // Extract settings from the first (and only) output spec.
     let output_spec = parsed.outputs.into_iter().next();
@@ -412,7 +409,8 @@ pub fn translate_batch(spec: &BatchSpec) -> Result<BatchResult, BatchError> {
             match stream_opt.stream_type {
                 StreamType::Video | StreamType::All => {
                     if let Some(codec_name) = &stream_opt.codec {
-                        let resolved = resolve_codec(&codec_map, codec_name, &mut per_file_diagnostics);
+                        let resolved =
+                            resolve_codec(&codec_map, codec_name, &mut per_file_diagnostics);
                         video_codec = Some(resolved);
                     }
                     if let Some(br) = &stream_opt.bitrate {
@@ -424,7 +422,8 @@ pub fn translate_batch(spec: &BatchSpec) -> Result<BatchResult, BatchError> {
                 }
                 StreamType::Audio => {
                     if let Some(codec_name) = &stream_opt.codec {
-                        let resolved = resolve_codec(&codec_map, codec_name, &mut per_file_diagnostics);
+                        let resolved =
+                            resolve_codec(&codec_map, codec_name, &mut per_file_diagnostics);
                         audio_codec = Some(resolved);
                     }
                     if let Some(br) = &stream_opt.bitrate {
@@ -437,7 +436,10 @@ pub fn translate_batch(spec: &BatchSpec) -> Result<BatchResult, BatchError> {
     }
 
     // If the input source is a glob/directory pattern, emit an info diagnostic.
-    if matches!(spec.inputs, InputSource::GlobPattern(_) | InputSource::Directory { .. }) {
+    if matches!(
+        spec.inputs,
+        InputSource::GlobPattern(_) | InputSource::Directory { .. }
+    ) {
         top_diagnostics.push(Diagnostic::info(
             "Batch glob/directory inputs require caller-side expansion before execution",
         ));
@@ -473,11 +475,7 @@ pub fn translate_batch(spec: &BatchSpec) -> Result<BatchResult, BatchError> {
 }
 
 /// Resolve a codec name via the [`CodecMap`], recording patent-substitution diagnostics.
-fn resolve_codec(
-    map: &CodecMap,
-    ffmpeg_name: &str,
-    diags: &mut Vec<Diagnostic>,
-) -> String {
+fn resolve_codec(map: &CodecMap, ffmpeg_name: &str, diags: &mut Vec<Diagnostic>) -> String {
     match map.lookup(ffmpeg_name) {
         Some(entry) => {
             if entry.category == CodecCategory::PatentSubstituted {
@@ -529,6 +527,171 @@ pub fn estimate_batch_duration(durations_secs: &[f64]) -> Option<f64> {
 /// Convert a string path to a [`PathBuf`].
 pub fn to_path_buf(s: &str) -> PathBuf {
     PathBuf::from(s)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BatchJob / translate_batch_command — FFmpeg-style CLI batch parsing
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A single input specification within a batch command.
+///
+/// Corresponds to one `-i <path>` occurrence in the argument list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchInputSpec {
+    /// The input file path.
+    pub path: String,
+    /// The zero-based index of this input within the command.
+    pub index: usize,
+}
+
+/// A single output specification within a batch command.
+///
+/// Corresponds to one output path (positional argument after all per-output
+/// flags) in the argument list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BatchOutputSpec {
+    /// The output file path.
+    pub path: String,
+    /// Target video codec OxiMedia name, or `None` for copy/none.
+    pub video_codec: Option<String>,
+    /// Target audio codec OxiMedia name, or `None` for copy/none.
+    pub audio_codec: Option<String>,
+    /// Video bitrate string, e.g. `"2M"`.
+    pub video_bitrate: Option<String>,
+    /// Audio bitrate string, e.g. `"128k"`.
+    pub audio_bitrate: Option<String>,
+    /// CRF value for quality-based encoding.
+    pub crf: Option<f64>,
+    /// Container format override (e.g. `"webm"`, `"mkv"`).
+    pub format: Option<String>,
+    /// Metadata key/value pairs for this output.
+    pub metadata: HashMap<String, String>,
+}
+
+/// A complete batch job derived from a multi-input, multi-output FFmpeg command.
+///
+/// A single `ffmpeg -i a.mp4 -i b.mp4 merged.mp4` invocation produces one
+/// `BatchJob` with two inputs and one output.
+#[derive(Debug, Clone)]
+pub struct BatchJob {
+    /// All `-i` input specifications, in order.
+    pub inputs: Vec<BatchInputSpec>,
+    /// All output specifications, in order.
+    pub outputs: Vec<BatchOutputSpec>,
+}
+
+impl BatchJob {
+    /// Return `true` if the job has at least one input and one output.
+    pub fn is_valid(&self) -> bool {
+        !self.inputs.is_empty() && !self.outputs.is_empty()
+    }
+}
+
+/// Translate a raw FFmpeg-style argument slice into one or more [`BatchJob`]s.
+///
+/// Handles multiple `-i` inputs and multiple output paths in a single command.
+/// Each contiguous group of output-options + output-path is collapsed into one
+/// [`BatchOutputSpec`].
+///
+/// # Example
+///
+/// ```rust
+/// use oximedia_compat_ffmpeg::batch_mode::translate_batch_command;
+///
+/// let args = &["-i", "a.mp4", "-i", "b.mp4",
+///               "-c:v", "libaom-av1", "-c:a", "libopus",
+///               "merged.mkv"];
+/// let jobs = translate_batch_command(args).unwrap();
+/// assert_eq!(jobs.len(), 1);
+/// let job = &jobs[0];
+/// assert_eq!(job.inputs.len(), 2);
+/// assert_eq!(job.outputs.len(), 1);
+/// assert_eq!(job.inputs[0].path, "a.mp4");
+/// assert_eq!(job.inputs[1].path, "b.mp4");
+/// assert_eq!(job.outputs[0].video_codec.as_deref(), Some("av1"));
+/// ```
+pub fn translate_batch_command(args: &[&str]) -> Result<Vec<BatchJob>, BatchError> {
+    use crate::arg_parser::StreamType;
+    use crate::codec_map::CodecMap;
+
+    let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let parsed = crate::arg_parser::FfmpegArgs::parse(&owned)
+        .map_err(|e| BatchError::ArgumentParseError(e.to_string()))?;
+
+    if parsed.inputs.is_empty() {
+        return Err(BatchError::NoInputs);
+    }
+
+    let codec_map = CodecMap::new();
+
+    let inputs: Vec<BatchInputSpec> = parsed
+        .inputs
+        .iter()
+        .enumerate()
+        .map(|(idx, spec)| BatchInputSpec {
+            path: spec.path.clone(),
+            index: idx,
+        })
+        .collect();
+
+    let outputs: Vec<BatchOutputSpec> = parsed
+        .outputs
+        .iter()
+        .map(|out| {
+            let mut video_codec: Option<String> = None;
+            let mut audio_codec: Option<String> = None;
+            let mut video_bitrate: Option<String> = None;
+            let mut audio_bitrate: Option<String> = None;
+            let mut crf: Option<f64> = None;
+
+            for stream_opt in &out.stream_options {
+                match stream_opt.stream_type {
+                    StreamType::Video | StreamType::All => {
+                        if let Some(name) = &stream_opt.codec {
+                            let resolved = codec_map
+                                .lookup(name)
+                                .map(|e| e.oxi_name.to_string())
+                                .unwrap_or_else(|| name.clone());
+                            video_codec = Some(resolved);
+                        }
+                        if let Some(br) = &stream_opt.bitrate {
+                            video_bitrate = Some(br.clone());
+                        }
+                        if let Some(c) = stream_opt.crf {
+                            crf = Some(c);
+                        }
+                    }
+                    StreamType::Audio => {
+                        if let Some(name) = &stream_opt.codec {
+                            let resolved = codec_map
+                                .lookup(name)
+                                .map(|e| e.oxi_name.to_string())
+                                .unwrap_or_else(|| name.clone());
+                            audio_codec = Some(resolved);
+                        }
+                        if let Some(br) = &stream_opt.bitrate {
+                            audio_bitrate = Some(br.clone());
+                        }
+                    }
+                    StreamType::Subtitle => {}
+                }
+            }
+
+            BatchOutputSpec {
+                path: out.path.clone(),
+                video_codec,
+                audio_codec,
+                video_bitrate,
+                audio_bitrate,
+                crf,
+                format: out.format.clone(),
+                metadata: out.metadata.clone(),
+            }
+        })
+        .collect();
+
+    let job = BatchJob { inputs, outputs };
+    Ok(vec![job])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -585,7 +748,9 @@ mod tests {
     #[test]
     fn test_output_naming_same_dir() {
         let naming = OutputNaming::SameDir { ext: "mkv".into() };
-        let out = naming.derive_output("/videos/clip.mp4", 0).expect("should derive");
+        let out = naming
+            .derive_output("/videos/clip.mp4", 0)
+            .expect("should derive");
         assert!(out.ends_with("clip.mkv"), "got: {}", out);
         assert!(out.contains("/videos/"), "got: {}", out);
     }
@@ -596,7 +761,9 @@ mod tests {
             dir: "/out".into(),
             ext: "webm".into(),
         };
-        let out = naming.derive_output("/source/video.avi", 0).expect("should derive");
+        let out = naming
+            .derive_output("/source/video.avi", 0)
+            .expect("should derive");
         assert!(out.starts_with("/out/"), "got: {}", out);
         assert!(out.ends_with("video.webm"), "got: {}", out);
     }
@@ -614,7 +781,9 @@ mod tests {
     #[test]
     fn test_output_naming_template_basic() {
         let naming = OutputNaming::Template("{dir}/out_{name}_{index}.{ext}".into());
-        let out = naming.derive_output("/media/foo.mkv", 3).expect("should derive");
+        let out = naming
+            .derive_output("/media/foo.mkv", 3)
+            .expect("should derive");
         assert!(out.contains("out_foo_0003"), "got: {}", out);
         assert!(out.contains(".mkv"), "got: {}", out);
     }
@@ -622,7 +791,9 @@ mod tests {
     #[test]
     fn test_output_naming_template_unknown_placeholder() {
         let naming = OutputNaming::Template("{unknown_field}.mp4".into());
-        let err = naming.derive_output("clip.mkv", 0).expect_err("should fail");
+        let err = naming
+            .derive_output("clip.mkv", 0)
+            .expect_err("should fail");
         match err {
             BatchError::UnknownTemplatePlaceholder { placeholder, .. } => {
                 assert_eq!(placeholder, "unknown_field");
@@ -642,9 +813,12 @@ mod tests {
                 ext: "mkv".into(),
             },
             shared_args: vec![
-                "-c:v".into(), "libaom-av1".into(),
-                "-crf".into(), "28".into(),
-                "-c:a".into(), "libopus".into(),
+                "-c:v".into(),
+                "libaom-av1".into(),
+                "-crf".into(),
+                "28".into(),
+                "-c:a".into(),
+                "libopus".into(),
             ],
             overwrite: false,
             dry_run: false,
@@ -673,9 +847,15 @@ mod tests {
         // libx264 is patent-substituted to av1
         assert_eq!(result.jobs[0].video_codec.as_deref(), Some("av1"));
         let has_patent_diag = result.jobs[0].diagnostics.iter().any(|d| {
-            matches!(&d.kind, crate::diagnostics::DiagnosticKind::PatentCodecSubstituted { .. })
+            matches!(
+                &d.kind,
+                crate::diagnostics::DiagnosticKind::PatentCodecSubstituted { .. }
+            )
         });
-        assert!(has_patent_diag, "should have patent substitution diagnostic");
+        assert!(
+            has_patent_diag,
+            "should have patent substitution diagnostic"
+        );
     }
 
     #[test]
@@ -760,9 +940,10 @@ mod tests {
 
         let result = translate_batch(&spec).expect("should succeed");
         // Should have an info diagnostic about glob expansion
-        let has_info = result.diagnostics.iter().any(|d| {
-            matches!(&d.kind, crate::diagnostics::DiagnosticKind::Info { .. })
-        });
+        let has_info = result
+            .diagnostics
+            .iter()
+            .any(|d| matches!(&d.kind, crate::diagnostics::DiagnosticKind::Info { .. }));
         assert!(has_info, "should have info diagnostic for glob input");
     }
 
@@ -809,5 +990,118 @@ mod tests {
             .into_owned();
         let pb = to_path_buf(&p);
         assert_eq!(pb, PathBuf::from(&p));
+    }
+
+    // ── translate_batch_command tests ────────────────────────────────────────
+
+    #[test]
+    fn test_translate_batch_command_two_inputs_one_output() {
+        let args = &[
+            "-i",
+            "a.mp4",
+            "-i",
+            "b.mp4",
+            "-c:v",
+            "libaom-av1",
+            "-c:a",
+            "libopus",
+            "merged.mkv",
+        ];
+        let jobs = translate_batch_command(args).expect("should succeed");
+        assert_eq!(jobs.len(), 1);
+        let job = &jobs[0];
+        assert_eq!(job.inputs.len(), 2);
+        assert_eq!(job.outputs.len(), 1);
+        assert_eq!(job.inputs[0].path, "a.mp4");
+        assert_eq!(job.inputs[0].index, 0);
+        assert_eq!(job.inputs[1].path, "b.mp4");
+        assert_eq!(job.inputs[1].index, 1);
+        assert_eq!(job.outputs[0].path, "merged.mkv");
+    }
+
+    #[test]
+    fn test_translate_batch_command_codec_translation() {
+        let args = &[
+            "-i",
+            "in.mp4",
+            "-c:v",
+            "libaom-av1",
+            "-c:a",
+            "libopus",
+            "out.webm",
+        ];
+        let jobs = translate_batch_command(args).expect("should succeed");
+        let out = &jobs[0].outputs[0];
+        assert_eq!(out.video_codec.as_deref(), Some("av1"));
+        assert_eq!(out.audio_codec.as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn test_translate_batch_command_patent_substitution() {
+        // libx264 is patent-substituted to av1 via codec_map
+        let args = &["-i", "in.mp4", "-c:v", "libx264", "out.mp4"];
+        let jobs = translate_batch_command(args).expect("should succeed");
+        let out = &jobs[0].outputs[0];
+        assert_eq!(out.video_codec.as_deref(), Some("av1"));
+    }
+
+    #[test]
+    fn test_translate_batch_command_two_outputs() {
+        let args = &[
+            "-i",
+            "input.mp4",
+            "-c:v",
+            "libaom-av1",
+            "hd.webm",
+            "-c:v",
+            "libvpx-vp9",
+            "sd.webm",
+        ];
+        let jobs = translate_batch_command(args).expect("should succeed");
+        assert_eq!(jobs[0].inputs.len(), 1);
+        assert_eq!(jobs[0].outputs.len(), 2);
+        assert_eq!(jobs[0].outputs[0].path, "hd.webm");
+        assert_eq!(jobs[0].outputs[1].path, "sd.webm");
+    }
+
+    #[test]
+    fn test_translate_batch_command_no_inputs_error() {
+        let args = &["output.mp4"];
+        let err = translate_batch_command(args).expect_err("should fail");
+        assert!(matches!(err, BatchError::NoInputs));
+    }
+
+    #[test]
+    fn test_translate_batch_command_job_is_valid() {
+        let args = &["-i", "a.mp4", "out.mkv"];
+        let jobs = translate_batch_command(args).expect("should succeed");
+        assert!(jobs[0].is_valid());
+    }
+
+    #[test]
+    fn test_translate_batch_command_crf_propagated() {
+        let args = &[
+            "-i",
+            "in.mp4",
+            "-c:v",
+            "libaom-av1",
+            "-crf",
+            "28",
+            "out.webm",
+        ];
+        let jobs = translate_batch_command(args).expect("should succeed");
+        let out = &jobs[0].outputs[0];
+        assert_eq!(out.crf, Some(28.0));
+    }
+
+    #[test]
+    fn test_translate_batch_command_metadata_propagated() {
+        let args = &["-i", "in.mp4", "-metadata", "title=Test Movie", "out.mp4"];
+        let jobs = translate_batch_command(args).expect("should succeed");
+        let out = &jobs[0].outputs[0];
+        assert_eq!(
+            out.metadata.get("title").map(String::as_str),
+            Some("Test Movie")
+        );
     }
 }

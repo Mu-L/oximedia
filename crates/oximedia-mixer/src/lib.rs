@@ -164,6 +164,72 @@ pub mod parallel_mix;
 /// DAW-style automation lanes with sample-accurate timing and curve interpolation.
 pub mod daw_automation;
 
+/// Sample-accurate automation playback engine with breakpoint interpolation.
+pub mod automation_engine;
+
+/// Time-based automation recording with Write/Touch/Latch/Trim modes.
+pub mod automation_playback;
+
+/// Offline bounce/render engine: processes mixer graph faster-than-realtime.
+pub mod bounce;
+
+/// Lock-free audio buffer pool for reusing Vec<f32> allocations.
+pub mod buffer_pool;
+
+/// Channel fold/unfold: mono↔stereo↔5.1↔7.1 down/up-mix with ITU-R BS.775.
+pub mod channel_fold;
+
+/// Channel folder: stereo↔mono, mid/side encoding for use in the processing chain.
+pub mod channel_folder;
+
+/// Pre-allocated channel output buffer slab: zero heap allocation on audio thread.
+pub mod channel_prealloc;
+
+/// Look-ahead brickwall limiter and clip detector for each channel/bus.
+pub mod clip_guard;
+
+/// PFL/AFL cue bus, cue mix level, and headphone output routing.
+pub mod cue_monitor;
+
+/// Fader grouping and linking (absolute, relative, VCA-style).
+pub mod fader_group;
+
+/// Sample-accurate gain and pan automation recording (Write/Touch/Latch/Trim).
+pub mod gain_automation;
+
+/// Gain staging, dB↔linear conversion, dynamic-range gain computer, and loudness normalizer.
+pub mod gain_computer;
+
+/// Mix scene management: capture, recall, diff, and timed transitions.
+pub mod mix_scene;
+
+/// Offline bounce/render engine with trait-based AudioSource.
+pub mod offline_bounce;
+
+/// Lock-free parameter smoothing (linear ramp, exponential IIR, shared atomic param).
+pub mod param_smoother;
+
+/// Plugin hosting API: VST3-style pure-Rust plugin interface and PluginHost.
+pub mod plugin;
+
+/// SIP/AFL/PFL solo routing with gain multipliers and monitor bus generation.
+pub mod solo_modes;
+
+/// Real-time rolling-window spectrum analyzer (pure-Rust FFT, log-bin grouping).
+pub mod spectrum_analyzer;
+
+/// Stem mixing: named submix groups with level/mute/solo and bus routing.
+pub mod stem_mixer;
+
+/// 5.1/7.1 surround panning with VBAP-style gain computation and LFE crossover.
+pub mod surround_pan;
+
+/// Talkback and communication system for studio monitoring with dim control.
+pub mod talkback;
+
+/// VCA group manager: additive-dB master trim over linked channels with automation.
+pub mod vca_group;
+
 use std::collections::HashMap;
 
 use oximedia_audio::{AudioFrame, ChannelLayout};
@@ -304,6 +370,12 @@ pub struct AudioMixer {
     /// When `false` (default) the legacy `soft_clip()` is used to match the
     /// previous behaviour.  Enable via [`AudioMixer::set_limiter_enabled`].
     limiter_enabled: bool,
+    /// Pool of pre-allocated `f32` buffers sized to `config.buffer_size`.
+    ///
+    /// Used by `extract_f32_samples` to avoid a fresh `Vec` allocation on
+    /// every mix cycle.  The RAII [`PooledBuffer`] guard ensures each buffer
+    /// is returned to the pool after the processing pass.
+    sample_pool: buffer_pool::AudioBufferPool,
 }
 
 impl std::fmt::Debug for AudioMixer {
@@ -342,6 +414,10 @@ impl AudioMixer {
         let master_limiter_r =
             oversampled_limiter::OversampledLimiter::new(-0.3, 50.0, 4, sample_rate_f32);
 
+        // Pre-warm 4 buffers so the first few `process()` calls never need to
+        // allocate.  Each buffer holds exactly `buffer_size` f32 samples.
+        let sample_pool = buffer_pool::AudioBufferPool::new(config.buffer_size, 4);
+
         Self {
             config,
             channels: HashMap::new(),
@@ -356,6 +432,7 @@ impl AudioMixer {
             master_limiter_l,
             master_limiter_r,
             limiter_enabled: false,
+            sample_pool,
         }
     }
 
@@ -553,7 +630,9 @@ impl AudioMixer {
         self.tick_automation(buffer_size);
 
         // Extract f32 samples from the raw byte data in the input frame.
-        let input_samples = extract_f32_samples(frame, buffer_size);
+        // `pooled_input` is an RAII guard; it is returned to `self.sample_pool`
+        // automatically when it drops at the end of this function.
+        let pooled_input = extract_f32_samples(frame, buffer_size, &self.sample_pool);
 
         // Build per-channel processing parameters from Channel state.
         // When any channel is soloed in SIP mode, non-soloed channels are muted.
@@ -591,8 +670,9 @@ impl AudioMixer {
             .collect();
 
         // Delegate to the processing engine.
+        // `PooledBuffer` derefs to `&[f32]`, so no copy is required here.
         let (mut master_left, mut master_right) =
-            self.engine.process_mix(&channel_params, &input_samples);
+            self.engine.process_mix(&channel_params, &pooled_input);
 
         // Apply master bus limiting / soft clipping to prevent digital overs.
         if self.limiter_enabled {
@@ -1027,43 +1107,62 @@ impl AudioMixer {
     }
 }
 
-/// Extract f32 samples from an `AudioFrame`.
+/// Extract f32 samples from an `AudioFrame` into a pooled buffer.
 ///
 /// Interprets the raw bytes in the frame as little-endian f32 values.
-/// Returns a mono buffer of at most `max_samples` samples.
-fn extract_f32_samples(frame: &AudioFrame, max_samples: usize) -> Vec<f32> {
-    let raw_bytes = match &frame.samples {
+/// Returns a [`buffer_pool::PooledBuffer`] of exactly `max_samples` samples.
+/// The buffer is automatically returned to `pool` when the guard is dropped.
+///
+/// Using the pool avoids a heap allocation on every mix cycle; the buffer is
+/// zeroed by the pool before being handed out, so stale samples from a prior
+/// cycle can never leak into the current one.
+fn extract_f32_samples(
+    frame: &AudioFrame,
+    max_samples: usize,
+    pool: &buffer_pool::AudioBufferPool,
+) -> buffer_pool::PooledBuffer {
+    // Borrow a pre-zeroed buffer from the pool.  If the pool's block_size
+    // doesn't match `max_samples` (e.g. the config changed at runtime) an
+    // overflow allocation is transparently returned by the pool.
+    let mut buf = pool.checkout();
+
+    let raw_bytes: &[u8] = match &frame.samples {
         oximedia_audio::AudioBuffer::Interleaved(data) => data.as_ref(),
         oximedia_audio::AudioBuffer::Planar(planes) => {
             if let Some(first) = planes.first() {
                 first.as_ref()
             } else {
-                return vec![0.0; max_samples];
+                // No input data — buffer is already zeroed by the pool; resize
+                // to max_samples by zero-writing directly into the slice.
+                let len = buf.len().min(max_samples);
+                for s in buf[..len].iter_mut() {
+                    *s = 0.0;
+                }
+                return buf;
             }
         }
     };
 
-    // Each f32 sample is 4 bytes
+    // Each f32 sample occupies 4 bytes (little-endian IEEE 754).
     let num_f32_samples = raw_bytes.len() / 4;
-    let count = num_f32_samples.min(max_samples);
+    let count = num_f32_samples.min(max_samples).min(buf.len());
 
-    let mut samples = Vec::with_capacity(count);
     for i in 0..count {
         let offset = i * 4;
-        if offset + 4 <= raw_bytes.len() {
-            let bytes: [u8; 4] = [
-                raw_bytes[offset],
-                raw_bytes[offset + 1],
-                raw_bytes[offset + 2],
-                raw_bytes[offset + 3],
-            ];
-            samples.push(f32::from_le_bytes(bytes));
-        }
+        // SAFETY: `offset + 4 <= raw_bytes.len()` is guaranteed by the count
+        // bound above (count <= num_f32_samples = raw_bytes.len() / 4).
+        let bytes: [u8; 4] = [
+            raw_bytes[offset],
+            raw_bytes[offset + 1],
+            raw_bytes[offset + 2],
+            raw_bytes[offset + 3],
+        ];
+        buf[i] = f32::from_le_bytes(bytes);
     }
+    // Samples beyond `count` up to `buf.len()` were zeroed by the pool on
+    // checkout, so no explicit zero-fill is needed for the tail.
 
-    // Pad with zeros if input is shorter than buffer_size
-    samples.resize(max_samples, 0.0);
-    samples
+    buf
 }
 
 /// Soft clipping function using tanh-like saturation.
@@ -1605,5 +1704,174 @@ mod tests {
         // Mutable refs should be obtainable.
         mixer.master_limiter_l_mut().reset();
         mixer.master_limiter_r_mut().reset();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Buffer-pool integration tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Build a stereo `AudioFrame` with a known constant value in both channels.
+    fn constant_stereo_frame(buffer_size: usize, value: f32) -> AudioFrame {
+        use oximedia_audio::AudioBuffer;
+        use oximedia_core::SampleFormat;
+
+        let mut frame = AudioFrame::new(SampleFormat::F32, 48000, ChannelLayout::Stereo);
+        let mut raw = Vec::with_capacity(buffer_size * 2 * 4);
+        for _ in 0..buffer_size * 2 {
+            raw.extend_from_slice(&value.to_le_bytes());
+        }
+        frame.samples = AudioBuffer::Interleaved(bytes::Bytes::from(raw));
+        frame
+    }
+
+    #[test]
+    fn test_pooled_extraction_identical_to_fresh() {
+        // Calling process() twice with the same input frame should produce
+        // byte-identical output frames.  If the pool were leaking stale samples
+        // the second call would differ from the first.
+        let config = MixerConfig {
+            buffer_size: 128,
+            sample_rate: 48000,
+            ..Default::default()
+        };
+        let mut mixer = AudioMixer::new(config);
+        let frame = constant_stereo_frame(128, 0.25);
+
+        let out1 = mixer.process(&frame).expect("first process should succeed");
+        let out2 = mixer
+            .process(&frame)
+            .expect("second process should succeed");
+
+        let left1 = decode_left_samples(&out1, 128);
+        let left2 = decode_left_samples(&out2, 128);
+
+        assert_eq!(
+            left1.len(),
+            left2.len(),
+            "both outputs should have the same length"
+        );
+        for (i, (a, b)) in left1.iter().zip(left2.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < f32::EPSILON,
+                "sample[{i}] differs between first ({a}) and second ({b}) call — pool may be corrupting data"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pool_reuse_no_stale_samples() {
+        // Call process() with two different input levels and verify that the
+        // second output reflects ONLY the second input (no stale data from the
+        // first cycle leaking through the pool).
+        let config = MixerConfig {
+            buffer_size: 64,
+            sample_rate: 48000,
+            ..Default::default()
+        };
+        let mut mixer = AudioMixer::new(config);
+
+        // First pass: non-zero input.
+        let hot_frame = constant_stereo_frame(64, 0.8);
+        mixer
+            .process(&hot_frame)
+            .expect("first process should succeed");
+
+        // Second pass: silent input.  The pooled buffer is zeroed by the pool
+        // on checkout, so all output samples must be zero (silence).
+        let silent = silent_frame(64);
+        let out = mixer
+            .process(&silent)
+            .expect("second process should succeed");
+        let left = decode_left_samples(&out, 64);
+
+        for (i, &s) in left.iter().enumerate() {
+            assert!(
+                s.abs() < f32::EPSILON,
+                "sample[{i}] = {s} is non-zero — stale data from prior cycle leaked through pool"
+            );
+        }
+    }
+
+    #[test]
+    fn test_soft_clip_never_exceeds_one() {
+        // soft_clip must produce |output| <= 1.0 for all finite inputs and must
+        // not panic on edge-case IEEE 754 values.
+        let cases: &[f32] = &[
+            0.0,
+            0.5,
+            1.0,
+            2.0,
+            100.0,
+            f32::MAX,
+            -0.5,
+            -1.0,
+            -2.0,
+            -100.0,
+            f32::NEG_INFINITY,
+        ];
+        for &x in cases {
+            let y = soft_clip(x);
+            assert!(y.abs() <= 1.0, "soft_clip({x}) = {y} exceeds ±1.0");
+        }
+        // NaN: soft_clip must not panic (output may be NaN — that is acceptable).
+        let _ = soft_clip(f32::NAN);
+    }
+
+    #[test]
+    fn test_dynamic_channel_add_remove() {
+        // Create a mixer, process a block, add a channel, process again, remove
+        // the channel, process a third time.  No panic should occur throughout
+        // and the output should always have the correct (stereo) channel layout.
+        let config = MixerConfig {
+            buffer_size: 32,
+            sample_rate: 48000,
+            ..Default::default()
+        };
+        let mut mixer = AudioMixer::new(config);
+        let frame = silent_frame(32);
+
+        // Baseline: no channels.
+        let out0 = mixer
+            .process(&frame)
+            .expect("process with no channels should succeed");
+        assert!(
+            matches!(out0.samples, oximedia_audio::AudioBuffer::Interleaved(_)),
+            "output should be interleaved stereo"
+        );
+
+        // Add a channel, process.
+        let ch_id = mixer
+            .add_channel(
+                "Dynamic".to_string(),
+                ChannelType::Stereo,
+                ChannelLayout::Stereo,
+            )
+            .expect("add_channel should succeed");
+        let out1 = mixer
+            .process(&frame)
+            .expect("process after add should succeed");
+        assert!(matches!(
+            out1.samples,
+            oximedia_audio::AudioBuffer::Interleaved(_)
+        ));
+
+        // Remove the channel, process.
+        mixer
+            .remove_channel(ch_id)
+            .expect("remove_channel should succeed");
+        let out2 = mixer
+            .process(&frame)
+            .expect("process after remove should succeed");
+        assert!(matches!(
+            out2.samples,
+            oximedia_audio::AudioBuffer::Interleaved(_)
+        ));
+
+        // Channel count must be back to zero.
+        assert_eq!(
+            mixer.channels().len(),
+            0,
+            "all channels should have been removed"
+        );
     }
 }

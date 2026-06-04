@@ -332,7 +332,9 @@ impl SignLanguageTrack {
     /// Whether the sign language track is active at `timecode_ms`.
     #[must_use]
     pub fn active_at(&self, timecode_ms: u64) -> bool {
-        self.coverage_windows.iter().any(|w| w.contains(timecode_ms))
+        self.coverage_windows
+            .iter()
+            .any(|w| w.contains(timecode_ms))
     }
 
     /// Coverage fraction `[0.0, 1.0]` relative to `video_duration_ms`.
@@ -413,7 +415,12 @@ impl SignLanguageRegistry {
             .iter()
             .filter(|t| t.sign_language.iso_code() == iso_code)
             .filter(|t| t.interpreter.is_some())
-            .max_by_key(|t| t.interpreter.as_ref().map(|i| i.quality).unwrap_or(InterpretationQuality::Automated))
+            .max_by_key(|t| {
+                t.interpreter
+                    .as_ref()
+                    .map(|i| i.quality)
+                    .unwrap_or(InterpretationQuality::Automated)
+            })
     }
 
     /// Return distinct ISO codes of all registered sign languages.
@@ -437,8 +444,7 @@ mod tests {
     use super::*;
 
     fn make_track(id: &str, lang: SignLanguageCode) -> SignLanguageTrack {
-        SignLanguageTrack::new(id, lang, SignerPosition::BottomRight, 25.0)
-            .expect("valid track")
+        SignLanguageTrack::new(id, lang, SignerPosition::BottomRight, 25.0).expect("valid track")
     }
 
     #[test]
@@ -476,8 +482,7 @@ mod tests {
 
     #[test]
     fn test_track_covered_ms_and_fraction() {
-        let mut track = make_track("t1", SignLanguageCode::Bsl)
-            .with_video_duration_ms(20_000);
+        let mut track = make_track("t1", SignLanguageCode::Bsl).with_video_duration_ms(20_000);
         track
             .add_coverage_window(CoverageWindow::new(0, 5_000).unwrap())
             .unwrap();
@@ -502,9 +507,27 @@ mod tests {
 
     #[test]
     fn test_track_window_size_validation() {
-        assert!(SignLanguageTrack::new("t", SignLanguageCode::Bsl, SignerPosition::BottomRight, 0.0).is_err());
-        assert!(SignLanguageTrack::new("t", SignLanguageCode::Bsl, SignerPosition::BottomRight, 101.0).is_err());
-        assert!(SignLanguageTrack::new("t", SignLanguageCode::Bsl, SignerPosition::BottomRight, 100.0).is_ok());
+        assert!(SignLanguageTrack::new(
+            "t",
+            SignLanguageCode::Bsl,
+            SignerPosition::BottomRight,
+            0.0
+        )
+        .is_err());
+        assert!(SignLanguageTrack::new(
+            "t",
+            SignLanguageCode::Bsl,
+            SignerPosition::BottomRight,
+            101.0
+        )
+        .is_err());
+        assert!(SignLanguageTrack::new(
+            "t",
+            SignLanguageCode::Bsl,
+            SignerPosition::BottomRight,
+            100.0
+        )
+        .is_ok());
     }
 
     #[test]
@@ -555,8 +578,7 @@ mod tests {
 
     #[test]
     fn test_is_full_coverage() {
-        let mut track = make_track("t1", SignLanguageCode::Bsl)
-            .with_video_duration_ms(5_000);
+        let mut track = make_track("t1", SignLanguageCode::Bsl).with_video_duration_ms(5_000);
         assert!(!track.is_full_coverage());
         track
             .add_coverage_window(CoverageWindow::new(0, 5_000).unwrap())

@@ -530,4 +530,36 @@ mod tests {
         let transform = clip.evaluate(&timeline);
         assert_eq!(transform.position, Point::new(50.0, 50.0));
     }
+
+    /// Evaluate a `KeyframeTrack` at `t < 0.0` and `t > 1.0`.
+    ///
+    /// The evaluate function clamps `t` before passing it to the easing
+    /// function, so out-of-range values must not panic and must return the
+    /// value at the nearest boundary keyframe.
+    #[test]
+    fn test_keyframe_boundary_conditions() {
+        let mut track: AnimationTrack<f32> = AnimationTrack::new();
+        track.add_keyframe(Keyframe::new(0.0, 10.0_f32, Easing::Linear));
+        track.add_keyframe(Keyframe::new(1.0, 90.0_f32, Easing::Linear));
+
+        // t < 0.0 — should not panic; clamped to first keyframe value.
+        let before = track.evaluate(-0.5);
+        assert!(before.is_some(), "evaluate at t<0 must not return None");
+        // The returned value should be at or near the start value (10.0).
+        // (The exact behaviour is "clamp to boundary".)
+        let v_before = before.expect("value present");
+        assert!(
+            v_before >= 10.0 - 1e-3 && v_before <= 90.0 + 1e-3,
+            "out-of-range t should still return a value in [first, last]: got {v_before}"
+        );
+
+        // t > 1.0 — should not panic; clamped to last keyframe value.
+        let after = track.evaluate(1.5);
+        assert!(after.is_some(), "evaluate at t>1 must not return None");
+        let v_after = after.expect("value present");
+        assert!(
+            v_after >= 10.0 - 1e-3 && v_after <= 90.0 + 1e-3,
+            "out-of-range t should still return a value in [first, last]: got {v_after}"
+        );
+    }
 }

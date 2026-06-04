@@ -245,7 +245,11 @@ impl CollectionStats {
     }
 
     /// Compute a completeness score for a single record.
-    pub fn completeness(&self, record_id: &str, fields: &HashMap<String, String>) -> CompletenessScore {
+    pub fn completeness(
+        &self,
+        record_id: &str,
+        fields: &HashMap<String, String>,
+    ) -> CompletenessScore {
         let mut score = CompletenessScore::new(record_id);
         for req in &self.required_fields {
             score.required_total += 1;
@@ -307,9 +311,9 @@ mod tests {
     #[test]
     fn test_field_stats_avg_length() {
         let mut fs = FieldStats::new("genre");
-        fs.record_value("Rock");   // 4
-        fs.record_value("Pop");    // 3
-        fs.record_value("Blues");   // 5
+        fs.record_value("Rock"); // 4
+        fs.record_value("Pop"); // 3
+        fs.record_value("Blues"); // 5
         let avg = fs.avg_length();
         assert!((avg - 4.0).abs() < 1e-9);
     }
@@ -392,9 +396,15 @@ mod tests {
         stats.record(&make_fields(&[("title", "Song A"), ("artist", "Artist 1")]));
         stats.record(&make_fields(&[("title", "Song B")]));
         assert_eq!(stats.total_records, 2);
-        let title_stats = stats.field_stats.get("title").expect("should succeed in test");
+        let title_stats = stats
+            .field_stats
+            .get("title")
+            .expect("should succeed in test");
         assert_eq!(title_stats.present_count, 2);
-        let artist_stats = stats.field_stats.get("artist").expect("should succeed in test");
+        let artist_stats = stats
+            .field_stats
+            .get("artist")
+            .expect("should succeed in test");
         assert_eq!(artist_stats.present_count, 1);
         assert_eq!(artist_stats.absent_count, 1);
     }

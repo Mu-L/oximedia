@@ -327,9 +327,7 @@ impl OfflineEditWorkflow {
             })
             .collect();
 
-        let fully_resolved = resolved_entries
-            .iter()
-            .all(|(_, path)| !path.is_empty());
+        let fully_resolved = resolved_entries.iter().all(|(_, path)| !path.is_empty());
 
         ConformPlan {
             session,
@@ -658,14 +656,12 @@ mod tests {
     fn test_conform_resolves_entries() {
         let spec = ProxySpec::new(1920, 1080, "h264", 8_000);
         let session = OfflineEditWorkflow::prepare("/orig/clip.mov", spec);
-        let edl = vec![
-            EdlEntry {
-                clip_id: "/orig/clip.mov".to_string(),
-                src_in: 0,
-                src_out: 240,
-                timeline_in: 0,
-            },
-        ];
+        let edl = vec![EdlEntry {
+            clip_id: "/orig/clip.mov".to_string(),
+            src_in: 0,
+            src_out: 240,
+            timeline_in: 0,
+        }];
         let plan = OfflineEditWorkflow::conform(session, &edl);
         assert_eq!(plan.resolved_entries.len(), 1);
         assert!(plan.fully_resolved);
@@ -803,6 +799,9 @@ mod tests {
         let orig_frame = FrameData::from_bytes(&orig);
         let psnr = ProxyQualityCompare::psnr_estimate(&proxy_frame, &orig_frame, 40, 25);
         // MSE = 1.0, PSNR = 10 * log10(65025) ≈ 48.1 dB
-        assert!(psnr > 40.0, "expected high PSNR for near-identical frames, got {psnr}");
+        assert!(
+            psnr > 40.0,
+            "expected high PSNR for near-identical frames, got {psnr}"
+        );
     }
 }

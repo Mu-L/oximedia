@@ -104,11 +104,14 @@ impl EasEventCode {
     /// Returns `None` if the code is not in the built-in table; callers can
     /// create custom codes directly via [`EasEventCode`] struct construction.
     pub fn lookup(code: &str) -> Option<Self> {
-        KNOWN_EVENT_CODES.iter().find(|(c, _, _)| *c == code).map(|(c, d, p)| Self {
-            code: c.to_string(),
-            description: d.to_string(),
-            priority: *p,
-        })
+        KNOWN_EVENT_CODES
+            .iter()
+            .find(|(c, _, _)| *c == code)
+            .map(|(c, d, p)| Self {
+                code: c.to_string(),
+                description: d.to_string(),
+                priority: *p,
+            })
     }
 
     /// Return an unknown/custom event code mapped to `Advisory` priority.
@@ -123,9 +126,21 @@ impl EasEventCode {
 
 /// Static table of known EAS event codes (FCC Part 11 / FEMA).
 static KNOWN_EVENT_CODES: &[(&str, &str, AlertPriority)] = &[
-    ("EAN", "Emergency Action Notification (Presidential)", AlertPriority::Presidential),
-    ("EAT", "Emergency Action Termination", AlertPriority::Presidential),
-    ("NIC", "National Information Center", AlertPriority::Presidential),
+    (
+        "EAN",
+        "Emergency Action Notification (Presidential)",
+        AlertPriority::Presidential,
+    ),
+    (
+        "EAT",
+        "Emergency Action Termination",
+        AlertPriority::Presidential,
+    ),
+    (
+        "NIC",
+        "National Information Center",
+        AlertPriority::Presidential,
+    ),
     ("NPT", "National Periodic Test", AlertPriority::Test),
     ("RMT", "Required Monthly Test", AlertPriority::Test),
     ("RWT", "Required Weekly Test", AlertPriority::Test),
@@ -315,7 +330,10 @@ impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TooFewFields { expected, found } => {
-                write!(f, "SAME header has {found} fields; expected at least {expected}")
+                write!(
+                    f,
+                    "SAME header has {found} fields; expected at least {expected}"
+                )
             }
             Self::InvalidPurgeTime(s) => write!(f, "invalid purge time: '{s}'"),
             Self::InvalidIssueTime(s) => write!(f, "invalid issue time: '{s}'"),
@@ -399,7 +417,10 @@ pub enum AlertSchedulerError {
     /// The alert is in a state that does not permit the requested operation.
     InvalidStateTransition { from: AlertStatus, to: AlertStatus },
     /// Minimum priority filter prevented scheduling.
-    BelowMinimumPriority { got: AlertPriority, min: AlertPriority },
+    BelowMinimumPriority {
+        got: AlertPriority,
+        min: AlertPriority,
+    },
 }
 
 impl fmt::Display for AlertSchedulerError {
@@ -515,7 +536,11 @@ impl AlertScheduler {
     ///
     /// The alert is inserted into the priority queue. Returns the assigned
     /// [`AlertId`].
-    pub fn admit(&mut self, header: SameHeader, scheduled_frame: u64) -> Result<AlertId, AlertSchedulerError> {
+    pub fn admit(
+        &mut self,
+        header: SameHeader,
+        scheduled_frame: u64,
+    ) -> Result<AlertId, AlertSchedulerError> {
         // Priority filter
         let passes = header.event.priority >= self.config.min_priority
             || (self.config.admit_tests && header.is_test());
@@ -550,16 +575,20 @@ impl AlertScheduler {
             .get(&id)
             .map(|r| r.header.event.priority)
             .unwrap_or(AlertPriority::Statement);
-        let sched_frame = self
-            .alerts
-            .get(&id)
-            .map(|r| r.scheduled_frame)
-            .unwrap_or(0);
+        let sched_frame = self.alerts.get(&id).map(|r| r.scheduled_frame).unwrap_or(0);
 
         // Find insertion point: higher priority first, then earlier frame
         let pos = self.pending_queue.iter().position(|&eid| {
-            let ep = self.alerts.get(&eid).map(|r| r.header.event.priority).unwrap_or(AlertPriority::Statement);
-            let ef = self.alerts.get(&eid).map(|r| r.scheduled_frame).unwrap_or(0);
+            let ep = self
+                .alerts
+                .get(&eid)
+                .map(|r| r.header.event.priority)
+                .unwrap_or(AlertPriority::Statement);
+            let ef = self
+                .alerts
+                .get(&eid)
+                .map(|r| r.scheduled_frame)
+                .unwrap_or(0);
             // Current entry eid should come after id if id has higher priority,
             // or same priority and earlier frame.
             (priority, std::cmp::Reverse(sched_frame)) > (ep, std::cmp::Reverse(ef))
@@ -588,9 +617,7 @@ impl AlertScheduler {
                 break;
             }
             if let Some(rec) = self.alerts.get(&id) {
-                if rec.scheduled_frame <= target_frame
-                    && rec.status == AlertStatus::Pending
-                {
+                if rec.scheduled_frame <= target_frame && rec.status == AlertStatus::Pending {
                     newly_active.push(id);
                 }
             }
@@ -622,7 +649,10 @@ impl AlertScheduler {
 
     /// Mark an active alert as completed (content has finished airing).
     pub fn complete_alert(&mut self, id: AlertId) -> Result<(), AlertSchedulerError> {
-        let rec = self.alerts.get_mut(&id).ok_or(AlertSchedulerError::AlertNotFound(id))?;
+        let rec = self
+            .alerts
+            .get_mut(&id)
+            .ok_or(AlertSchedulerError::AlertNotFound(id))?;
         if rec.status != AlertStatus::Active {
             return Err(AlertSchedulerError::InvalidStateTransition {
                 from: rec.status,
@@ -648,7 +678,10 @@ impl AlertScheduler {
         id: AlertId,
         station_id: &str,
     ) -> Result<(), AlertSchedulerError> {
-        let rec = self.alerts.get_mut(&id).ok_or(AlertSchedulerError::AlertNotFound(id))?;
+        let rec = self
+            .alerts
+            .get_mut(&id)
+            .ok_or(AlertSchedulerError::AlertNotFound(id))?;
         if !matches!(rec.status, AlertStatus::PendingAck | AlertStatus::Active) {
             return Err(AlertSchedulerError::InvalidStateTransition {
                 from: rec.status,
@@ -665,7 +698,10 @@ impl AlertScheduler {
 
     /// Cancel a pending alert before it has aired.
     pub fn cancel(&mut self, id: AlertId) -> Result<(), AlertSchedulerError> {
-        let rec = self.alerts.get_mut(&id).ok_or(AlertSchedulerError::AlertNotFound(id))?;
+        let rec = self
+            .alerts
+            .get_mut(&id)
+            .ok_or(AlertSchedulerError::AlertNotFound(id))?;
         if rec.status != AlertStatus::Pending {
             return Err(AlertSchedulerError::InvalidStateTransition {
                 from: rec.status,
@@ -855,7 +891,9 @@ mod tests {
         let mut sched = AlertScheduler::new(config);
         let id = sched.admit(make_tor_header(), 0).expect("admit TOR");
         let events = sched.advance_to_frame(0);
-        assert!(events.iter().any(|e| e.alert_id == id && e.kind == InterruptEventKind::Begin));
+        assert!(events
+            .iter()
+            .any(|e| e.alert_id == id && e.kind == InterruptEventKind::Begin));
     }
 
     #[test]
@@ -874,7 +912,10 @@ mod tests {
         let id = sched.admit(make_tor_header(), 0).expect("admit");
         sched.advance_to_frame(0);
         sched.complete_alert(id).expect("complete");
-        assert_eq!(sched.record(id).expect("record").status, AlertStatus::PendingAck);
+        assert_eq!(
+            sched.record(id).expect("record").status,
+            AlertStatus::PendingAck
+        );
     }
 
     #[test]
@@ -885,7 +926,10 @@ mod tests {
         sched.advance_to_frame(0);
         sched.complete_alert(id).expect("complete");
         sched.acknowledge(id, "RELAY-1").expect("ack");
-        assert_eq!(sched.record(id).expect("record").status, AlertStatus::Acknowledged);
+        assert_eq!(
+            sched.record(id).expect("record").status,
+            AlertStatus::Acknowledged
+        );
         assert_eq!(sched.record(id).expect("record").acks.len(), 1);
     }
 
@@ -893,9 +937,14 @@ mod tests {
     fn test_cancel_pending_alert() {
         let config = AlertSchedulerConfig::default();
         let mut sched = AlertScheduler::new(config);
-        let id = sched.admit(make_tor_header(), 1000).expect("admit future alert");
+        let id = sched
+            .admit(make_tor_header(), 1000)
+            .expect("admit future alert");
         sched.cancel(id).expect("cancel");
-        assert_eq!(sched.record(id).expect("record").status, AlertStatus::Cancelled);
+        assert_eq!(
+            sched.record(id).expect("record").status,
+            AlertStatus::Cancelled
+        );
         assert!(sched.pending_ids().is_empty());
     }
 
@@ -910,7 +959,11 @@ mod tests {
         // Advisory is below Warning
         let adv_header = SameHeader {
             originator: "CIV".to_string(),
-            event: EasEventCode { code: "ADR".to_string(), description: "Admin".to_string(), priority: AlertPriority::Statement },
+            event: EasEventCode {
+                code: "ADR".to_string(),
+                description: "Admin".to_string(),
+                priority: AlertPriority::Statement,
+            },
             locations: vec!["012345".to_string()],
             purge_hours: 0,
             purge_minutes: 30,
@@ -920,7 +973,10 @@ mod tests {
             station_id: "TEST".to_string(),
         };
         let result = sched.admit(adv_header, 0);
-        assert!(matches!(result, Err(AlertSchedulerError::BelowMinimumPriority { .. })));
+        assert!(matches!(
+            result,
+            Err(AlertSchedulerError::BelowMinimumPriority { .. })
+        ));
     }
 
     #[test]

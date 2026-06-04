@@ -74,11 +74,7 @@ impl PluginHealthMonitor {
     }
 
     /// Create a monitor with custom EMA alpha and latency threshold.
-    pub fn with_config(
-        name: impl Into<String>,
-        ema_alpha: f64,
-        latency_threshold_ms: f64,
-    ) -> Self {
+    pub fn with_config(name: impl Into<String>, ema_alpha: f64, latency_threshold_ms: f64) -> Self {
         let alpha = ema_alpha.clamp(0.01, 1.0);
         let threshold = latency_threshold_ms.max(1.0);
         Self {

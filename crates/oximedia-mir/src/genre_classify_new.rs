@@ -345,9 +345,7 @@ impl GenreClassifierNew {
             (
                 GenreFamily::Folk,
                 // Low-moderate centroid + low ZCR + low-moderate energy
-                (1.0 - centroid_n) * 1.0
-                    + (1.0 - zcr_n) * 0.8
-                    + (0.5 - (rms_n - 0.15).abs()) * 0.8,
+                (1.0 - centroid_n) * 1.0 + (1.0 - zcr_n) * 0.8 + (0.5 - (rms_n - 0.15).abs()) * 0.8,
             ),
             (
                 GenreFamily::Latin,

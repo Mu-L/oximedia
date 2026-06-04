@@ -265,28 +265,39 @@ impl PluginTelemetryState {
     }
 
     /// Push a new event, evicting the oldest if the buffer is full.
-    fn push_event(
-        &mut self,
-        event: TelemetryEvent,
-        max_events: usize,
-        config_enabled: bool,
-    ) {
+    fn push_event(&mut self, event: TelemetryEvent, max_events: usize, config_enabled: bool) {
         // Update aggregate stats regardless of buffering.
         match &event.kind {
-            TelemetryKind::DecodeEnd { codec, duration, success } => {
+            TelemetryKind::DecodeEnd {
+                codec,
+                duration,
+                success,
+            } => {
                 if *success {
                     self.stats.decode_calls += 1;
                     self.stats.total_decode_duration += *duration;
-                    *self.stats.decode_per_codec.entry(codec.clone()).or_insert(0) += 1;
+                    *self
+                        .stats
+                        .decode_per_codec
+                        .entry(codec.clone())
+                        .or_insert(0) += 1;
                 } else {
                     self.stats.decode_errors += 1;
                 }
             }
-            TelemetryKind::EncodeEnd { codec, duration, success } => {
+            TelemetryKind::EncodeEnd {
+                codec,
+                duration,
+                success,
+            } => {
                 if *success {
                     self.stats.encode_calls += 1;
                     self.stats.total_encode_duration += *duration;
-                    *self.stats.encode_per_codec.entry(codec.clone()).or_insert(0) += 1;
+                    *self
+                        .stats
+                        .encode_per_codec
+                        .entry(codec.clone())
+                        .or_insert(0) += 1;
                 } else {
                     self.stats.encode_errors += 1;
                 }
@@ -370,7 +381,11 @@ impl PluginTelemetry {
             Err(_) => return, // poisoned lock — swallow silently
         };
         let plugin_state = guard.entry(name).or_insert_with(PluginTelemetryState::new);
-        plugin_state.push_event(event, self.config.max_events_per_plugin, self.config.enabled);
+        plugin_state.push_event(
+            event,
+            self.config.max_events_per_plugin,
+            self.config.enabled,
+        );
     }
 
     /// Return aggregated stats for `plugin_name`, or `None` if the plugin
@@ -629,9 +644,7 @@ mod tests {
         assert_eq!(events.len(), 3);
         // The newest should be "event-4"
         let last = events.last().expect("last");
-        assert!(
-            matches!(&last.kind, TelemetryKind::Custom { name, .. } if name == "event-4")
-        );
+        assert!(matches!(&last.kind, TelemetryKind::Custom { name, .. } if name == "event-4"));
     }
 
     // 11. drain_events clears the buffer
@@ -729,8 +742,18 @@ mod tests {
     #[test]
     fn test_start_events_no_aggregate_effect() {
         let t = tel();
-        t.record("p", TelemetryKind::DecodeStart { codec: "av1".into() });
-        t.record("p", TelemetryKind::EncodeStart { codec: "av1".into() });
+        t.record(
+            "p",
+            TelemetryKind::DecodeStart {
+                codec: "av1".into(),
+            },
+        );
+        t.record(
+            "p",
+            TelemetryKind::EncodeStart {
+                codec: "av1".into(),
+            },
+        );
         let stats = t.stats("p").expect("stats");
         assert_eq!(stats.decode_calls, 0);
         assert_eq!(stats.encode_calls, 0);

@@ -23,7 +23,11 @@ pub struct OutlineConfig {
 impl OutlineConfig {
     /// Create a new `OutlineConfig`.
     pub fn new(color: [u8; 4], width: u32, behind_fill: bool) -> Self {
-        Self { color, width: width.clamp(0, 8), behind_fill }
+        Self {
+            color,
+            width: width.clamp(0, 8),
+            behind_fill,
+        }
     }
 }
 
@@ -44,9 +48,17 @@ pub struct InlineShadowConfig {
 
 impl InlineShadowConfig {
     /// Create a new `InlineShadowConfig`.
-    pub fn new(color: [u8; 4], offset_x: i32, offset_y: i32, blur_sigma: f32, opacity: f32) -> Self {
+    pub fn new(
+        color: [u8; 4],
+        offset_x: i32,
+        offset_y: i32,
+        blur_sigma: f32,
+        opacity: f32,
+    ) -> Self {
         Self {
-            color, offset_x, offset_y,
+            color,
+            offset_x,
+            offset_y,
             blur_sigma: blur_sigma.max(0.0),
             opacity: opacity.clamp(0.0, 1.0),
         }
@@ -64,16 +76,20 @@ pub struct TextRenderConfig {
 
 impl TextRenderConfig {
     /// Create a default config with no effects.
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Attach an outline.
     pub fn with_outline(mut self, outline: OutlineConfig) -> Self {
-        self.outline = Some(outline); self
+        self.outline = Some(outline);
+        self
     }
 
     /// Attach a shadow.
     pub fn with_shadow(mut self, shadow: InlineShadowConfig) -> Self {
-        self.shadow = Some(shadow); self
+        self.shadow = Some(shadow);
+        self
     }
 }
 
@@ -123,7 +139,7 @@ pub fn render_text_effects(
             let mut shadow_rgba = vec![0u8; n * 4];
             for i in 0..n {
                 let a = text_alpha[i];
-                shadow_rgba[i * 4]     = s.color[0];
+                shadow_rgba[i * 4] = s.color[0];
                 shadow_rgba[i * 4 + 1] = s.color[1];
                 shadow_rgba[i * 4 + 2] = s.color[2];
                 shadow_rgba[i * 4 + 3] = a;
@@ -143,7 +159,9 @@ pub fn render_text_effects(
                     }
                     let src_idx = src_y as usize * w + src_x as usize;
                     let sa = shadow_rgba[src_idx * 4 + 3];
-                    if sa == 0 { continue; }
+                    if sa == 0 {
+                        continue;
+                    }
                     let dst_idx = y * w + x;
                     let mut dst = [
                         canvas[dst_idx * 4],
@@ -153,7 +171,7 @@ pub fn render_text_effects(
                     ];
                     let src_px = [s.color[0], s.color[1], s.color[2], sa];
                     composite_over(&mut dst, src_px, s.opacity);
-                    canvas[dst_idx * 4]     = dst[0];
+                    canvas[dst_idx * 4] = dst[0];
                     canvas[dst_idx * 4 + 1] = dst[1];
                     canvas[dst_idx * 4 + 2] = dst[2];
                     canvas[dst_idx * 4 + 3] = dst[3];
@@ -168,7 +186,7 @@ pub fn render_text_effects(
             // Build dilated RGBA buffer: set colour+alpha from text_alpha, then dilate
             let mut outline_rgba = vec![0u8; n * 4];
             for i in 0..n {
-                outline_rgba[i * 4]     = o.color[0];
+                outline_rgba[i * 4] = o.color[0];
                 outline_rgba[i * 4 + 1] = o.color[1];
                 outline_rgba[i * 4 + 2] = o.color[2];
                 outline_rgba[i * 4 + 3] = text_alpha[i];
@@ -176,7 +194,9 @@ pub fn render_text_effects(
             dilate_alpha(&mut outline_rgba, width, height, o.width);
             for i in 0..n {
                 let oa = outline_rgba[i * 4 + 3];
-                if oa == 0 { continue; }
+                if oa == 0 {
+                    continue;
+                }
                 let mut dst = [
                     canvas[i * 4],
                     canvas[i * 4 + 1],
@@ -185,7 +205,7 @@ pub fn render_text_effects(
                 ];
                 let src_px = [o.color[0], o.color[1], o.color[2], oa];
                 composite_over(&mut dst, src_px, 1.0);
-                canvas[i * 4]     = dst[0];
+                canvas[i * 4] = dst[0];
                 canvas[i * 4 + 1] = dst[1];
                 canvas[i * 4 + 2] = dst[2];
                 canvas[i * 4 + 3] = dst[3];
@@ -196,7 +216,9 @@ pub fn render_text_effects(
     // --- 3. Text fill (on top) ---
     for i in 0..n {
         let fa = text_alpha[i];
-        if fa == 0 { continue; }
+        if fa == 0 {
+            continue;
+        }
         let mut dst = [
             canvas[i * 4],
             canvas[i * 4 + 1],
@@ -205,7 +227,7 @@ pub fn render_text_effects(
         ];
         let src_px = [fill_color[0], fill_color[1], fill_color[2], fa];
         composite_over(&mut dst, src_px, fill_color[3] as f32 / 255.0);
-        canvas[i * 4]     = dst[0];
+        canvas[i * 4] = dst[0];
         canvas[i * 4 + 1] = dst[1];
         canvas[i * 4 + 2] = dst[2];
         canvas[i * 4 + 3] = dst[3];
@@ -236,82 +258,140 @@ mod tests {
 
     #[test]
     fn test_outline_renders_larger_than_text() {
-        let w = 30usize; let h = 30usize;
+        let w = 30usize;
+        let h = 30usize;
         let alpha = make_alpha_rect(w, h, 10, 10, 20, 20);
         // Baseline: fill only
         let mut canvas_base = vec![0u8; w * h * 4];
         let cfg_none = TextRenderConfig::new();
-        render_text_effects(&mut canvas_base, &alpha, w as u32, h as u32, [255,255,255,255], &cfg_none);
+        render_text_effects(
+            &mut canvas_base,
+            &alpha,
+            w as u32,
+            h as u32,
+            [255, 255, 255, 255],
+            &cfg_none,
+        );
         let base_count = count_nonzero_alpha(&canvas_base);
         // With outline width=3
         let mut canvas_out = vec![0u8; w * h * 4];
-        let cfg_out = TextRenderConfig::new().with_outline(OutlineConfig::new([255,0,0,255], 3, true));
-        render_text_effects(&mut canvas_out, &alpha, w as u32, h as u32, [255,255,255,255], &cfg_out);
+        let cfg_out =
+            TextRenderConfig::new().with_outline(OutlineConfig::new([255, 0, 0, 255], 3, true));
+        render_text_effects(
+            &mut canvas_out,
+            &alpha,
+            w as u32,
+            h as u32,
+            [255, 255, 255, 255],
+            &cfg_out,
+        );
         let out_count = count_nonzero_alpha(&canvas_out);
-        assert!(out_count > base_count, "outline count={out_count} should exceed base={base_count}");
+        assert!(
+            out_count > base_count,
+            "outline count={out_count} should exceed base={base_count}"
+        );
     }
 
     #[test]
     fn test_outline_color_present() {
-        let w = 20usize; let h = 20usize;
+        let w = 20usize;
+        let h = 20usize;
         // Text occupies only the interior; outline should bleed into ring around it
         let alpha = make_alpha_rect(w, h, 5, 5, 15, 15);
         let mut canvas = vec![0u8; w * h * 4];
         let outline_color = [200u8, 50u8, 10u8, 255u8];
         let cfg = TextRenderConfig::new().with_outline(OutlineConfig::new(outline_color, 2, true));
-        render_text_effects(&mut canvas, &alpha, w as u32, h as u32, [255,255,255,255], &cfg);
+        render_text_effects(
+            &mut canvas,
+            &alpha,
+            w as u32,
+            h as u32,
+            [255, 255, 255, 255],
+            &cfg,
+        );
         // Pixel at (4,5) — just outside the text block — should be outline color
         let px_idx = (5 * w + 3) * 4;
-        assert!(canvas[px_idx + 3] > 0, "outline pixel should have non-zero alpha");
+        assert!(
+            canvas[px_idx + 3] > 0,
+            "outline pixel should have non-zero alpha"
+        );
     }
 
     #[test]
     fn test_shadow_renders_offset() {
-        let w = 30usize; let h = 30usize;
+        let w = 30usize;
+        let h = 30usize;
         let alpha = make_alpha_rect(w, h, 5, 5, 10, 10);
         let mut canvas = vec![0u8; w * h * 4];
         // Shadow offset +8,+8, no blur
-        let shadow = InlineShadowConfig::new([0,0,0,255], 8, 8, 0.0, 1.0);
+        let shadow = InlineShadowConfig::new([0, 0, 0, 255], 8, 8, 0.0, 1.0);
         let cfg = TextRenderConfig::new().with_shadow(shadow);
-        render_text_effects(&mut canvas, &alpha, w as u32, h as u32, [255,255,255,255], &cfg);
+        render_text_effects(
+            &mut canvas,
+            &alpha,
+            w as u32,
+            h as u32,
+            [255, 255, 255, 255],
+            &cfg,
+        );
         // Shadow should appear at (5+8, 5+8) = (13,13)
         let shadow_px = (13 * w + 13) * 4;
-        assert!(canvas[shadow_px + 3] > 0, "shadow should appear at offset position");
+        assert!(
+            canvas[shadow_px + 3] > 0,
+            "shadow should appear at offset position"
+        );
     }
 
     #[test]
     fn test_shadow_blur_sigma_zero_hard_edge() {
-        let w = 20usize; let h = 20usize;
+        let w = 20usize;
+        let h = 20usize;
         let alpha = make_alpha_rect(w, h, 5, 5, 10, 10);
         let mut canvas = vec![0u8; w * h * 4];
-        let shadow = InlineShadowConfig::new([0,0,0,255], 2, 2, 0.0, 1.0);
+        let shadow = InlineShadowConfig::new([0, 0, 0, 255], 2, 2, 0.0, 1.0);
         let cfg = TextRenderConfig::new().with_shadow(shadow);
-        render_text_effects(&mut canvas, &alpha, w as u32, h as u32, [255,255,255,255], &cfg);
+        render_text_effects(
+            &mut canvas,
+            &alpha,
+            w as u32,
+            h as u32,
+            [255, 255, 255, 255],
+            &cfg,
+        );
         // With no blur, shadow pixel at offset position should be max alpha
-        let px = ((5+2) * w + (5+2)) * 4;
+        let px = ((5 + 2) * w + (5 + 2)) * 4;
         assert_eq!(canvas[px + 3], 255, "hard shadow should be full alpha");
         // Adjacent pixel just outside the shadow footprint should be zero
-        let px2 = ((5+2) * w + (10+2)) * 4;
-        assert_eq!(canvas[px2 + 3], 0, "pixel outside shadow range should be zero");
+        let px2 = ((5 + 2) * w + (10 + 2)) * 4;
+        assert_eq!(
+            canvas[px2 + 3],
+            0,
+            "pixel outside shadow range should be zero"
+        );
     }
 
     #[test]
     fn test_shadow_behind_text() {
-        let w = 20usize; let h = 20usize;
+        let w = 20usize;
+        let h = 20usize;
         let alpha = make_alpha_rect(w, h, 5, 5, 10, 10);
         let mut canvas = vec![0u8; w * h * 4];
         let fill = [255u8, 255u8, 255u8, 255u8];
-        let shadow = InlineShadowConfig::new([0,0,200,255], 0, 0, 0.0, 1.0); // same position, blue shadow
+        let shadow = InlineShadowConfig::new([0, 0, 200, 255], 0, 0, 0.0, 1.0); // same position, blue shadow
         let cfg = TextRenderConfig::new().with_shadow(shadow);
         render_text_effects(&mut canvas, &alpha, w as u32, h as u32, fill, &cfg);
         // Text fill (white) should dominate at a text pixel: red channel = 255
         let px = (7 * w + 7) * 4;
-        assert_eq!(canvas[px], 255, "fill should dominate over shadow at text pixel");
+        assert_eq!(
+            canvas[px], 255,
+            "fill should dominate over shadow at text pixel"
+        );
     }
 
     #[test]
     fn test_outline_behind_fill() {
-        let w = 20usize; let h = 20usize;
+        let w = 20usize;
+        let h = 20usize;
         let alpha = make_alpha_rect(w, h, 5, 5, 15, 15);
         let mut canvas = vec![0u8; w * h * 4];
         let fill = [255u8, 0u8, 0u8, 255u8]; // red fill
@@ -320,57 +400,133 @@ mod tests {
         render_text_effects(&mut canvas, &alpha, w as u32, h as u32, fill, &cfg);
         // At the center of the text block, fill (red) should dominate
         let px = (10 * w + 10) * 4;
-        assert!(canvas[px] > canvas[px + 2], "fill red should be greater than outline blue at text center");
+        assert!(
+            canvas[px] > canvas[px + 2],
+            "fill red should be greater than outline blue at text center"
+        );
     }
 
     #[test]
     fn test_no_outline_unchanged() {
-        let w = 20usize; let h = 20usize;
+        let w = 20usize;
+        let h = 20usize;
         let alpha = make_alpha_rect(w, h, 5, 5, 15, 15);
         let mut canvas1 = vec![0u8; w * h * 4];
         let mut canvas2 = vec![0u8; w * h * 4];
         let cfg = TextRenderConfig::new(); // no effects
-        render_text_effects(&mut canvas1, &alpha, w as u32, h as u32, [200,200,200,255], &cfg);
-        render_text_effects(&mut canvas2, &alpha, w as u32, h as u32, [200,200,200,255], &cfg);
-        assert_eq!(canvas1, canvas2, "two identical no-effect renders should match");
+        render_text_effects(
+            &mut canvas1,
+            &alpha,
+            w as u32,
+            h as u32,
+            [200, 200, 200, 255],
+            &cfg,
+        );
+        render_text_effects(
+            &mut canvas2,
+            &alpha,
+            w as u32,
+            h as u32,
+            [200, 200, 200, 255],
+            &cfg,
+        );
+        assert_eq!(
+            canvas1, canvas2,
+            "two identical no-effect renders should match"
+        );
     }
 
     #[test]
     fn test_no_shadow_unchanged() {
-        let w = 20usize; let h = 20usize;
+        let w = 20usize;
+        let h = 20usize;
         let alpha = make_alpha_rect(w, h, 5, 5, 15, 15);
         let mut canvas1 = vec![0u8; w * h * 4];
         let mut canvas2 = vec![0u8; w * h * 4];
         let cfg = TextRenderConfig::new(); // shadow: None
-        render_text_effects(&mut canvas1, &alpha, w as u32, h as u32, [180,180,180,255], &cfg);
-        render_text_effects(&mut canvas2, &alpha, w as u32, h as u32, [180,180,180,255], &cfg);
-        assert_eq!(canvas1, canvas2, "two identical no-shadow renders should match");
+        render_text_effects(
+            &mut canvas1,
+            &alpha,
+            w as u32,
+            h as u32,
+            [180, 180, 180, 255],
+            &cfg,
+        );
+        render_text_effects(
+            &mut canvas2,
+            &alpha,
+            w as u32,
+            h as u32,
+            [180, 180, 180, 255],
+            &cfg,
+        );
+        assert_eq!(
+            canvas1, canvas2,
+            "two identical no-shadow renders should match"
+        );
     }
 
     #[test]
     fn test_outline_width_zero_no_effect() {
-        let w = 20usize; let h = 20usize;
+        let w = 20usize;
+        let h = 20usize;
         let alpha = make_alpha_rect(w, h, 5, 5, 15, 15);
         let mut canvas_base = vec![0u8; w * h * 4];
         let mut canvas_zero = vec![0u8; w * h * 4];
         let cfg_base = TextRenderConfig::new();
-        let cfg_zero = TextRenderConfig::new().with_outline(OutlineConfig::new([255,0,0,255], 0, true));
-        render_text_effects(&mut canvas_base, &alpha, w as u32, h as u32, [255,255,255,255], &cfg_base);
-        render_text_effects(&mut canvas_zero, &alpha, w as u32, h as u32, [255,255,255,255], &cfg_zero);
-        assert_eq!(canvas_base, canvas_zero, "width=0 outline should have no visible effect");
+        let cfg_zero =
+            TextRenderConfig::new().with_outline(OutlineConfig::new([255, 0, 0, 255], 0, true));
+        render_text_effects(
+            &mut canvas_base,
+            &alpha,
+            w as u32,
+            h as u32,
+            [255, 255, 255, 255],
+            &cfg_base,
+        );
+        render_text_effects(
+            &mut canvas_zero,
+            &alpha,
+            w as u32,
+            h as u32,
+            [255, 255, 255, 255],
+            &cfg_zero,
+        );
+        assert_eq!(
+            canvas_base, canvas_zero,
+            "width=0 outline should have no visible effect"
+        );
     }
 
     #[test]
     fn test_shadow_opacity_zero_invisible() {
-        let w = 20usize; let h = 20usize;
+        let w = 20usize;
+        let h = 20usize;
         let alpha = make_alpha_rect(w, h, 5, 5, 10, 10);
         let mut canvas_base = vec![0u8; w * h * 4];
         let mut canvas_shadow = vec![0u8; w * h * 4];
         let cfg_base = TextRenderConfig::new();
-        let shadow = InlineShadowConfig::new([0,0,0,255], 4, 4, 0.0, 0.0); // opacity=0
+        let shadow = InlineShadowConfig::new([0, 0, 0, 255], 4, 4, 0.0, 0.0); // opacity=0
         let cfg_shadow = TextRenderConfig::new().with_shadow(shadow);
-        render_text_effects(&mut canvas_base, &alpha, w as u32, h as u32, [255,255,255,255], &cfg_base);
-        render_text_effects(&mut canvas_shadow, &alpha, w as u32, h as u32, [255,255,255,255], &cfg_shadow);
-        assert_eq!(canvas_base, canvas_shadow, "opacity=0 shadow should be invisible");
+        render_text_effects(
+            &mut canvas_base,
+            &alpha,
+            w as u32,
+            h as u32,
+            [255, 255, 255, 255],
+            &cfg_base,
+        );
+        render_text_effects(
+            &mut canvas_shadow,
+            &alpha,
+            w as u32,
+            h as u32,
+            [255, 255, 255, 255],
+            &cfg_shadow,
+        );
+        assert_eq!(
+            canvas_base, canvas_shadow,
+            "opacity=0 shadow should be invisible"
+        );
     }
 }

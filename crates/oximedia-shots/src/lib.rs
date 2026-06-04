@@ -141,7 +141,7 @@ pub mod wipe_patterns;
 
 // Re-export commonly used items at crate root
 pub use error::{ShotError, ShotResult};
-pub use frame_buffer::{FloatImage, FrameBuffer, GrayImage};
+pub use frame_buffer::{FloatImage, FrameBuffer, FrameBufferPool, GrayImage};
 #[cfg(feature = "onnx")]
 pub use ml::MlShotDetector;
 pub use types::{
@@ -237,6 +237,11 @@ impl ShotDetector {
             return Ok(Vec::new());
         }
 
+        // ── FrameBufferPool for working scratch buffers ────────────────────────
+        // Keeps up to 4 recycled FrameBuffer allocations to reduce heap pressure
+        // when the detection loop needs temporary per-shot working copies.
+        let mut frame_pool = FrameBufferPool::new(4);
+
         let mut shot_boundaries = vec![0usize]; // Start of first shot
 
         // ── Parallel boundary detection ────────────────────────────────────────
@@ -288,16 +293,25 @@ impl ShotDetector {
                 ),
             );
 
-            // Classify shot type
+            // Classify shot type using a pooled working copy of the representative frame.
             if self.config.enable_classification && start_frame < frames.len() {
-                let (shot_type, confidence) =
-                    self.shot_classifier.classify(&frames[start_frame])?;
+                let src = &frames[start_frame];
+                let (fh, fw, fc) = src.dim();
+                // Acquire a pooled buffer (reused across shots when dims match).
+                let mut work_buf = frame_pool.acquire(fh, fw, fc);
+                // Copy the source frame data into the working buffer.
+                work_buf.as_mut_slice().copy_from_slice(src.as_slice());
+
+                let (shot_type, confidence) = self.shot_classifier.classify(&work_buf)?;
                 shot.shot_type = shot_type;
                 shot.confidence = confidence;
 
-                // Classify camera angle
-                let (angle, _) = self.angle_classifier.classify(&frames[start_frame])?;
+                // Classify camera angle (reuse the same working copy).
+                let (angle, _) = self.angle_classifier.classify(&work_buf)?;
                 shot.angle = angle;
+
+                // Return the working buffer to the pool for the next shot.
+                frame_pool.release(work_buf);
             }
 
             // Analyze composition

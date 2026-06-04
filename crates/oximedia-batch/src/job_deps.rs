@@ -4,8 +4,6 @@
 //! job IDs, provides topological ordering for execution, detects circular
 //! dependencies at submission time, and supports fan-out / fan-in patterns.
 
-#![allow(dead_code)]
-
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::error::{BatchError, Result};
@@ -111,8 +109,14 @@ impl JobDependencyManager {
             )));
         }
 
-        self.successors.entry(from.clone()).or_default().insert(to.clone());
-        self.predecessors.entry(to.clone()).or_default().insert(from);
+        self.successors
+            .entry(from.clone())
+            .or_default()
+            .insert(to.clone());
+        self.predecessors
+            .entry(to.clone())
+            .or_default()
+            .insert(from);
 
         // Update status: `to` now has at least one unfinished predecessor.
         self.recompute_status(&to);
@@ -228,9 +232,7 @@ impl JobDependencyManager {
     /// Fan-out: number of direct successors.
     #[must_use]
     pub fn fan_out(&self, job_id: &JobId) -> usize {
-        self.successors
-            .get(job_id.as_str())
-            .map_or(0, HashSet::len)
+        self.successors.get(job_id.as_str()).map_or(0, HashSet::len)
     }
 
     /// Fan-in: number of direct predecessors.
@@ -319,7 +321,8 @@ impl JobDependencyManager {
             .iter()
             .any(|p| self.status.get(p) == Some(&DependencyStatus::Failed));
         if any_failed {
-            self.status.insert(node.to_string(), DependencyStatus::Failed);
+            self.status
+                .insert(node.to_string(), DependencyStatus::Failed);
             return;
         }
 
@@ -331,12 +334,14 @@ impl JobDependencyManager {
         if preds.is_empty() || all_completed {
             // Only promote to Ready if currently Pending.
             if self.status.get(node) == Some(&DependencyStatus::Pending) {
-                self.status.insert(node.to_string(), DependencyStatus::Ready);
+                self.status
+                    .insert(node.to_string(), DependencyStatus::Ready);
             }
         } else {
             // Some predecessors are not yet completed.
             if self.status.get(node) == Some(&DependencyStatus::Ready) {
-                self.status.insert(node.to_string(), DependencyStatus::Pending);
+                self.status
+                    .insert(node.to_string(), DependencyStatus::Pending);
             }
         }
     }
@@ -534,8 +539,10 @@ mod tests {
     #[test]
     fn test_execution_order_respects_deps() {
         let mut mgr = JobDependencyManager::new();
-        mgr.add_dependency(&jid("deploy"), &jid("build")).expect("ok");
-        mgr.add_dependency(&jid("deploy"), &jid("test")).expect("ok");
+        mgr.add_dependency(&jid("deploy"), &jid("build"))
+            .expect("ok");
+        mgr.add_dependency(&jid("deploy"), &jid("test"))
+            .expect("ok");
         mgr.add_dependency(&jid("test"), &jid("build")).expect("ok");
         let order = mgr.execution_order().expect("ok");
         let pos = |name: &str| order.iter().position(|x| x == name).expect("in order");

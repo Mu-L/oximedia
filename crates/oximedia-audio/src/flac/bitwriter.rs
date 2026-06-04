@@ -234,6 +234,51 @@ impl BitWriter {
         self.current_byte = 0;
         self.bit_count = 0;
     }
+
+    /// Copy exactly `bit_count` bits from `src` into this writer (no padding).
+    ///
+    /// Reads the first `bit_count` bits from `src` (MSB-first) and appends them
+    /// here in the same order, without any byte-boundary padding.
+    ///
+    /// In a `BitWriter`, the k-th bit written into a byte occupies bit position
+    /// `7 - k` (MSB-first order). So the k-th bit of byte `b` is `(b >> (7-k)) & 1`.
+    pub fn write_from_bitwriter(&mut self, src: &BitWriter, bit_count: usize) {
+        if bit_count == 0 {
+            return;
+        }
+
+        let mut remaining = bit_count;
+        let mut byte_idx = 0usize;
+
+        while remaining > 0 {
+            let byte = if byte_idx < src.buffer.len() {
+                src.buffer[byte_idx]
+            } else if src.bit_count > 0 && byte_idx == src.buffer.len() {
+                src.current_byte
+            } else {
+                break;
+            };
+
+            // How many valid bits are in this byte?
+            // Completed bytes: 8 bits at positions 7..0.
+            // Partial last byte: src.bit_count bits at positions 7..(8-src.bit_count).
+            let valid_bits = if byte_idx < src.buffer.len() {
+                8u8
+            } else {
+                src.bit_count
+            };
+            let bits_to_copy = (valid_bits as usize).min(remaining);
+
+            // Copy bits in MSB-first order: bit k is at position (7 - k).
+            for k in 0..bits_to_copy {
+                let bit = (byte >> (7 - k)) & 1;
+                self.write_bit(bit != 0);
+            }
+
+            remaining -= bits_to_copy;
+            byte_idx += 1;
+        }
+    }
 }
 
 impl Default for BitWriter {

@@ -14,8 +14,13 @@ use tokio::sync::mpsc;
 
 use crate::clip::Clip;
 use crate::error::EditResult;
+use crate::frame_prefetch::{PrefetchConfig, PrefetchEngine};
+use crate::incremental_render::DirtyRegion;
+use crate::parallel_render::{
+    render_tracks_parallel, ClipWithSource, TrackKind, TrackRenderInput, TrackRenderOutput,
+};
 use crate::render_source::RenderSource;
-use crate::timeline::{Timeline, TimelineConfig};
+use crate::timeline::{Timeline, TimelineConfig, TrackType};
 use crate::transition::Transition;
 
 /// Timeline renderer.
@@ -31,6 +36,15 @@ pub struct TimelineRenderer {
     /// Per-path decoded source cache.  Shared via `Arc` so clips pointing at the
     /// same file decode it only once.
     source_cache: HashMap<PathBuf, Arc<RenderSource>>,
+    /// Dirty regions: only frames in these ranges need re-rendering.
+    /// An empty list means everything is clean (or no incremental tracking active).
+    dirty_regions: Vec<DirtyRegion>,
+    /// Predictive prefetch engine.  Advances after each render call to warm the
+    /// cache for upcoming frames.
+    prefetch: PrefetchEngine,
+    /// When `true` multi-track decode is routed through `render_tracks_parallel`
+    /// instead of the sequential compositor loop.
+    use_parallel: bool,
 }
 
 impl TimelineRenderer {
@@ -38,13 +52,90 @@ impl TimelineRenderer {
     #[must_use]
     pub fn new(timeline: Arc<Timeline>, config: RenderConfig) -> Self {
         let cache_size = config.cache_size;
+        let max_pos = timeline.duration.max(0) as i64;
+        let prefetch_config = PrefetchConfig::for_playback(30.0, 1.0);
         Self {
             timeline,
             config,
             cache: FrameCache::new(cache_size),
             raw_frame_cache: RawFrameCache::new(RAW_FRAME_CACHE_CAPACITY),
             source_cache: HashMap::new(),
+            dirty_regions: Vec::new(),
+            prefetch: PrefetchEngine::new(prefetch_config, max_pos),
+            use_parallel: false,
         }
+    }
+
+    // ─── Dirty-region tracking API ────────────────────────────────────────────
+
+    /// Mark a frame range `[start_frame, end_frame)` as dirty (needs re-render).
+    ///
+    /// Overlapping or adjacent regions are coalesced automatically.
+    pub fn mark_dirty(&mut self, start_frame: u64, end_frame: u64) {
+        self.dirty_regions
+            .push(DirtyRegion::new(start_frame, end_frame));
+        self.coalesce_dirty();
+    }
+
+    /// Clear all dirty regions (mark entire timeline as clean).
+    pub fn clear_dirty(&mut self) {
+        self.dirty_regions.clear();
+    }
+
+    /// Mark the entire timeline as dirty, forcing a full re-render.
+    pub fn force_full_redraw(&mut self) {
+        let total = self.timeline.duration.unsigned_abs();
+        self.dirty_regions = vec![DirtyRegion::new(0, total.max(1))];
+    }
+
+    /// Returns `true` when the given frame position overlaps any dirty region.
+    ///
+    /// If no dirty regions are tracked (empty list) the frame is always
+    /// considered dirty so the renderer behaves as if all regions need updating.
+    #[must_use]
+    pub fn is_position_dirty(&self, position: i64) -> bool {
+        if self.dirty_regions.is_empty() {
+            return true;
+        }
+        let frame = position.unsigned_abs();
+        self.dirty_regions.iter().any(|r| r.contains(frame))
+    }
+
+    /// Expose the prefetch engine's last known playhead position for tests.
+    #[must_use]
+    pub fn prefetch_playhead(&self) -> i64 {
+        self.prefetch.playhead()
+    }
+
+    /// Enable or disable parallel multi-track rendering.
+    pub fn set_use_parallel(&mut self, enabled: bool) {
+        self.use_parallel = enabled;
+    }
+
+    /// Return whether parallel rendering is active.
+    #[must_use]
+    pub fn use_parallel(&self) -> bool {
+        self.use_parallel
+    }
+
+    // ── Internal dirty-region coalesce ────────────────────────────────────────
+
+    fn coalesce_dirty(&mut self) {
+        if self.dirty_regions.len() <= 1 {
+            return;
+        }
+        self.dirty_regions.sort_by_key(|r| r.start_frame);
+        let mut merged: Vec<DirtyRegion> = Vec::with_capacity(self.dirty_regions.len());
+        for region in &self.dirty_regions {
+            if let Some(last) = merged.last_mut() {
+                if last.end_frame >= region.start_frame {
+                    last.end_frame = last.end_frame.max(region.end_frame);
+                    continue;
+                }
+            }
+            merged.push(*region);
+        }
+        self.dirty_regions = merged;
     }
 
     /// Render a frame at a specific timeline position.
@@ -88,6 +179,9 @@ impl TimelineRenderer {
         // Cache the frame
         self.cache.put(position, frame.clone());
 
+        // Advance the prefetch engine so it warms the cache for upcoming frames.
+        let _ = self.prefetch.update(position);
+
         Ok(frame)
     }
 
@@ -107,8 +201,18 @@ impl TimelineRenderer {
             return Ok(None);
         }
 
+        // ── Incremental skip: skip entirely if no dirty region overlaps this position ──
+        if !self.is_position_dirty(position) {
+            return Ok(None);
+        }
+
         let w = self.config.width;
         let h = self.config.height;
+
+        // ── Parallel multi-track path ──────────────────────────────────────────
+        if self.use_parallel {
+            return self.render_video_at_parallel(position, w, h);
+        }
 
         // Collect active transitions for this position (clone so we don't hold
         // a borrow on `self.timeline` while calling `&mut self` methods later).
@@ -197,6 +301,86 @@ impl TimelineRenderer {
         output.timestamp = Timestamp::new(position, self.timeline.timebase);
 
         // Write RGBA f32 → luma plane (BT.709 coefficients).
+        fill_output_frame_from_rgba_f32(&mut output, &rgba_f32, w, h);
+
+        Ok(Some(output))
+    }
+
+    /// Parallel variant of `render_video_at`.
+    ///
+    /// Builds one [`TrackRenderInput`] per video track, fans out to
+    /// `render_tracks_parallel`, then composites the RGBA8 layers
+    /// bottom-to-top into the output `VideoFrame`.
+    fn render_video_at_parallel(
+        &mut self,
+        position: i64,
+        w: u32,
+        h: u32,
+    ) -> EditResult<Option<VideoFrame>> {
+        // Build per-track inputs for every Video track.
+        let config_clone = self.config.clone();
+        let timeline_clone = self.timeline.clone();
+
+        let inputs: Vec<TrackRenderInput> = timeline_clone
+            .tracks
+            .iter()
+            .filter(|t| !t.muted && matches!(t.track_type, TrackType::Video))
+            .map(|track| {
+                let active_clips: Vec<ClipWithSource> = track
+                    .clips
+                    .iter()
+                    .filter(|c| c.contains(position) && !c.muted)
+                    .map(|c| {
+                        let source = self.resolve_source(c);
+                        ClipWithSource {
+                            clip: c.clone(),
+                            source,
+                        }
+                    })
+                    .collect();
+                TrackRenderInput::video(track.index, active_clips, position, w, h)
+            })
+            .collect();
+
+        if inputs.is_empty() {
+            return Ok(None);
+        }
+
+        // Fan-out: all tracks rendered in parallel.
+        let outputs: Vec<TrackRenderOutput> = render_tracks_parallel(&inputs);
+
+        // Composite bottom-to-top: output with the *lowest* track index is rendered
+        // first (bottom layer); higher indices sit on top.  `render_tracks_parallel`
+        // preserves input order, so outputs[0] corresponds to inputs[0].
+        use oximedia_graphics::hdr_composite::HdrCompositor;
+
+        let mut compositor = HdrCompositor::new(w, h, 1000.0);
+        for out in outputs.iter().rev() {
+            if out.kind != TrackKind::Video || out.video_rgba8.is_empty() {
+                continue;
+            }
+            // Convert RGBA8 → HdrLayer (opacity = 1.0 per track; per-clip opacity
+            // was already applied inside render_track_frame_stateless).
+            use oximedia_graphics::hdr_composite::HdrLayer;
+            let pixel_count = (w as usize) * (h as usize);
+            let mut layer = HdrLayer::new(w, h);
+            layer.opacity = 1.0;
+            for i in 0..pixel_count {
+                let base = i * 4;
+                if base + 3 < out.video_rgba8.len() {
+                    layer.pixels[base] = out.video_rgba8[base] as f32 / 255.0;
+                    layer.pixels[base + 1] = out.video_rgba8[base + 1] as f32 / 255.0;
+                    layer.pixels[base + 2] = out.video_rgba8[base + 2] as f32 / 255.0;
+                    layer.pixels[base + 3] = out.video_rgba8[base + 3] as f32 / 255.0;
+                }
+            }
+            compositor.add_layer(layer);
+        }
+
+        let rgba_f32 = compositor.composite();
+        let mut output = VideoFrame::new(config_clone.pixel_format, w, h);
+        output.allocate();
+        output.timestamp = Timestamp::new(position, self.timeline.timebase);
         fill_output_frame_from_rgba_f32(&mut output, &rgba_f32, w, h);
 
         Ok(Some(output))
@@ -943,12 +1127,17 @@ impl ExportStream {
 impl TimelineRenderer {
     /// Clone renderer for streaming.
     fn clone_for_stream(&self) -> Self {
+        let max_pos = self.timeline.duration.max(0) as i64;
+        let prefetch_config = PrefetchConfig::for_playback(30.0, 1.0);
         Self {
             timeline: self.timeline.clone(),
             config: self.config.clone(),
             cache: FrameCache::new(self.config.cache_size),
             raw_frame_cache: RawFrameCache::new(RAW_FRAME_CACHE_CAPACITY),
             source_cache: HashMap::new(),
+            dirty_regions: Vec::new(),
+            prefetch: PrefetchEngine::new(prefetch_config, max_pos),
+            use_parallel: self.use_parallel,
         }
     }
 }
@@ -1228,6 +1417,10 @@ mod raw_cache_tests {
         assert!(debug.contains("RawFrameCache"), "debug output: {debug}");
     }
 }
+
+// Note: Unit tests for dirty-region tracking, prefetch wiring, and parallel
+// rendering are in tests/incremental_render.rs (integration tests) and
+// tests/renderer_unit.rs (synchronous unit tests).
 
 /// Transition renderer helper.
 pub struct TransitionRenderer;

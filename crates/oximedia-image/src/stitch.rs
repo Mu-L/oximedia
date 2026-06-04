@@ -462,6 +462,139 @@ pub fn refine_patch_offsets(
         .collect()
 }
 
+// ── Feature descriptor matching ───────────────────────────────────────────────
+
+/// A feature descriptor: a fixed-length vector of `f32` values describing a
+/// local image region, together with its image-space location.
+///
+/// Descriptor vectors are typically L2-normalised (unit vectors).
+#[derive(Debug, Clone)]
+pub struct Descriptor {
+    /// Column (x) of the keypoint in the image.
+    pub x: f32,
+    /// Row (y) of the keypoint in the image.
+    pub y: f32,
+    /// Feature vector. Length must be consistent within a match call.
+    pub values: Vec<f32>,
+}
+
+impl Descriptor {
+    /// Create a new descriptor at the given image position.
+    #[must_use]
+    pub fn new(x: f32, y: f32, values: Vec<f32>) -> Self {
+        Self { x, y, values }
+    }
+
+    /// Squared Euclidean distance between this and another descriptor.
+    ///
+    /// Returns `f32::INFINITY` if lengths differ.
+    #[must_use]
+    pub fn sq_dist(&self, other: &Self) -> f32 {
+        if self.values.len() != other.values.len() {
+            return f32::INFINITY;
+        }
+        self.values
+            .iter()
+            .zip(other.values.iter())
+            .map(|(&a, &b)| (a - b) * (a - b))
+            .sum()
+    }
+}
+
+/// A correspondence between a descriptor in image A and one in image B.
+#[derive(Debug, Clone)]
+pub struct DescriptorMatch {
+    /// Index into `descriptors_a`.
+    pub idx_a: usize,
+    /// Index into `descriptors_b`.
+    pub idx_b: usize,
+    /// Squared Euclidean distance (lower = more similar).
+    pub distance: f32,
+}
+
+/// Find the nearest-neighbour in `candidates` for descriptor `query`.
+///
+/// Returns `None` if `candidates` is empty.
+fn find_nearest(
+    query: &Descriptor,
+    candidates: &[Descriptor],
+    query_idx: usize,
+) -> Option<DescriptorMatch> {
+    candidates
+        .iter()
+        .enumerate()
+        .map(|(bi, b)| DescriptorMatch {
+            idx_a: query_idx,
+            idx_b: bi,
+            distance: query.sq_dist(b),
+        })
+        .min_by(|x, y| {
+            x.distance
+                .partial_cmp(&y.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+}
+
+/// Match descriptors from image A to image B using nearest-neighbour search,
+/// parallelised with rayon so that each descriptor in A is processed
+/// independently.
+///
+/// Each descriptor in `descriptors_a` is matched to the single closest
+/// descriptor in `descriptors_b` (by squared Euclidean distance). The results
+/// are returned in the same order as `descriptors_a`; unmatched queries
+/// (e.g. when `descriptors_b` is empty) are omitted.
+///
+/// # Returns
+///
+/// A `Vec<DescriptorMatch>` with at most `descriptors_a.len()` entries, sorted
+/// by ascending distance.
+pub fn match_descriptors_parallel(
+    descriptors_a: &[Descriptor],
+    descriptors_b: &[Descriptor],
+) -> Vec<DescriptorMatch> {
+    use rayon::prelude::*;
+
+    if descriptors_b.is_empty() {
+        return Vec::new();
+    }
+
+    let mut matches: Vec<DescriptorMatch> = descriptors_a
+        .par_iter()
+        .enumerate()
+        .filter_map(|(ai, da)| find_nearest(da, descriptors_b, ai))
+        .collect();
+
+    matches.sort_by(|a, b| {
+        a.distance
+            .partial_cmp(&b.distance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    matches
+}
+
+/// Match descriptors sequentially (reference implementation used for testing).
+pub fn match_descriptors_sequential(
+    descriptors_a: &[Descriptor],
+    descriptors_b: &[Descriptor],
+) -> Vec<DescriptorMatch> {
+    if descriptors_b.is_empty() {
+        return Vec::new();
+    }
+
+    let mut matches: Vec<DescriptorMatch> = descriptors_a
+        .iter()
+        .enumerate()
+        .filter_map(|(ai, da)| find_nearest(da, descriptors_b, ai))
+        .collect();
+
+    matches.sort_by(|a, b| {
+        a.distance
+            .partial_cmp(&b.distance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    matches
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -690,5 +823,71 @@ mod tests {
         let data = vec![(1u32, vec![0.5_f32; 16])];
         let result = refine_patch_offsets(&builder, &data, 1, 0.0);
         assert!(result.is_empty());
+    }
+
+    // ── Descriptor matching tests ─────────────────────────────────────────
+
+    fn make_desc(x: f32, y: f32, v: Vec<f32>) -> Descriptor {
+        Descriptor::new(x, y, v)
+    }
+
+    /// Build a set of N 8-D unit descriptors where descriptor i has a large
+    /// component in dimension i%8, making nearest neighbours deterministic.
+    fn synthetic_descriptors(n: usize, offset: f32) -> Vec<Descriptor> {
+        (0..n)
+            .map(|i| {
+                let mut v = vec![0.0f32; 8];
+                v[i % 8] = 1.0 + (i as f32) * 0.01 + offset;
+                make_desc(i as f32, 0.0, v)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_stitch_parallel_matches_sequential() {
+        // 200 descriptors in A, 200 in B; parallel and sequential must agree
+        let descs_a = synthetic_descriptors(200, 0.0);
+        let descs_b = synthetic_descriptors(200, 0.5);
+
+        let par = match_descriptors_parallel(&descs_a, &descs_b);
+        let seq = match_descriptors_sequential(&descs_a, &descs_b);
+
+        assert_eq!(par.len(), seq.len(), "match count should be equal");
+        for (p, s) in par.iter().zip(seq.iter()) {
+            assert_eq!(p.idx_a, s.idx_a, "idx_a mismatch");
+            assert_eq!(p.idx_b, s.idx_b, "idx_b mismatch");
+            assert!((p.distance - s.distance).abs() < 1e-5, "distance mismatch");
+        }
+    }
+
+    #[test]
+    fn test_descriptor_sq_dist_identical() {
+        let d = make_desc(0.0, 0.0, vec![1.0, 0.0, 0.0]);
+        assert!((d.sq_dist(&d)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_descriptor_sq_dist_length_mismatch() {
+        let a = make_desc(0.0, 0.0, vec![1.0, 0.0]);
+        let b = make_desc(0.0, 0.0, vec![1.0, 0.0, 0.0]);
+        assert_eq!(a.sq_dist(&b), f32::INFINITY);
+    }
+
+    #[test]
+    fn test_match_empty_b() {
+        let descs_a = synthetic_descriptors(10, 0.0);
+        let descs_b: Vec<Descriptor> = Vec::new();
+        let m = match_descriptors_parallel(&descs_a, &descs_b);
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn test_match_sorted_by_distance() {
+        let descs_a = synthetic_descriptors(50, 0.0);
+        let descs_b = synthetic_descriptors(50, 0.1);
+        let matches = match_descriptors_parallel(&descs_a, &descs_b);
+        for w in matches.windows(2) {
+            assert!(w[0].distance <= w[1].distance, "matches not sorted");
+        }
     }
 }

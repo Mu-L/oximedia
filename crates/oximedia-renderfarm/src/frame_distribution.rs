@@ -1,7 +1,9 @@
 //! Frame distribution across render farm nodes.
 
-#![allow(dead_code)]
 #![allow(clippy::cast_precision_loss)]
+
+use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
+use thiserror::Error;
 
 /// Strategy used to distribute frames across nodes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -272,5 +274,189 @@ mod tests {
     fn test_distributor_estimate_zero_fps() {
         let d = FrameDistributor::new(DistributionStrategy::RoundRobin);
         assert!((d.estimate_completion_s(100, 0.0, 4) - 0.0).abs() < f32::EPSILON);
+    }
+
+    // --- BackpressureDistributor ---
+
+    #[test]
+    fn test_backpressure_distributor_basic_dispatch() {
+        let dist = BackpressureDistributor::new(2, 4);
+        dist.dispatch(FrameTask::new(1, 5, "job-a"))
+            .expect("dispatch ok");
+        // At least one of the two receivers should have the task.
+        let task = dist
+            .worker_receiver(0)
+            .expect("r0 exists")
+            .try_recv()
+            .or_else(|_| dist.worker_receiver(1).expect("r1 exists").try_recv())
+            .expect("task should be received");
+        assert_eq!(task.frame, 1);
+    }
+
+    #[test]
+    fn test_backpressure_distributor_no_workers() {
+        let dist = BackpressureDistributor::new(0, 4);
+        assert!(matches!(
+            dist.dispatch(FrameTask::new(1, 1, "j")),
+            Err(DispatchError::NoWorkers)
+        ));
+    }
+
+    #[test]
+    fn test_backpressure_distributor_try_dispatch_full() {
+        // capacity = max(1 * 1, 1) = 1
+        let dist = BackpressureDistributor::new(1, 1);
+        dist.try_dispatch(FrameTask::new(1, 0, "j"))
+            .expect("first ok");
+        // Channel is now full; second should fail immediately.
+        let result = dist.try_dispatch(FrameTask::new(2, 0, "j"));
+        assert!(matches!(result, Err(DispatchError::AllFull)));
+    }
+
+    #[test]
+    fn test_backpressure_distributor_capacity() {
+        let dist = BackpressureDistributor::new(4, 3);
+        assert_eq!(dist.capacity(), 12);
+        assert_eq!(dist.worker_count(), 4);
+    }
+
+    #[test]
+    fn test_backpressure_distributor_receiver_out_of_range() {
+        let dist = BackpressureDistributor::new(2, 2);
+        assert!(dist.worker_receiver(10).is_none());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BackpressureDistributor
+// ---------------------------------------------------------------------------
+
+/// A task representing a single frame to be rendered by a worker.
+#[derive(Debug, Clone)]
+pub struct FrameTask {
+    /// The frame number to render.
+    pub frame: u32,
+    /// Priority hint — higher values are rendered first.
+    pub priority: u8,
+    /// Optional job identifier for correlation.
+    pub job_id: String,
+}
+
+impl FrameTask {
+    /// Create a new frame task.
+    pub fn new(frame: u32, priority: u8, job_id: impl Into<String>) -> Self {
+        Self {
+            frame,
+            priority,
+            job_id: job_id.into(),
+        }
+    }
+}
+
+/// Errors that can occur when dispatching a frame task.
+#[derive(Debug, Error)]
+pub enum DispatchError {
+    /// All worker channels are full (backpressure threshold reached).
+    #[error("all worker channels are full (backpressure)")]
+    AllFull,
+    /// No workers have been registered.
+    #[error("no workers registered")]
+    NoWorkers,
+    /// The requested worker index is out of range.
+    #[error("worker index {0} out of range")]
+    InvalidWorker(usize),
+}
+
+/// Distributes `FrameTask`s to workers using bounded crossbeam channels.
+///
+/// When all worker channels are full, [`BackpressureDistributor::dispatch`]
+/// **blocks** until a slot opens, providing natural backpressure. The
+/// non-blocking [`BackpressureDistributor::try_dispatch`] returns
+/// [`DispatchError::AllFull`] immediately instead.
+///
+/// Worker selection: the least-loaded worker (fewest queued items) is chosen
+/// on each dispatch call.
+pub struct BackpressureDistributor {
+    /// Per-worker channel capacity.
+    capacity: usize,
+    /// Per-worker senders.
+    senders: Vec<Sender<FrameTask>>,
+    /// Per-worker receivers handed out to workers via `worker_receiver`.
+    receivers: Vec<Receiver<FrameTask>>,
+}
+
+impl BackpressureDistributor {
+    /// Create a distributor for `workers` workers.
+    ///
+    /// Each worker's channel capacity = `workers × in_flight_factor` (minimum 1).
+    pub fn new(workers: usize, in_flight_factor: usize) -> Self {
+        let capacity = (workers * in_flight_factor).max(1);
+        let mut senders = Vec::with_capacity(workers);
+        let mut receivers = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            let (s, r) = bounded(capacity);
+            senders.push(s);
+            receivers.push(r);
+        }
+        Self {
+            capacity,
+            senders,
+            receivers,
+        }
+    }
+
+    /// Dispatch `task` to the least-loaded worker, **blocking** if its
+    /// channel is full.
+    ///
+    /// Returns `Err(DispatchError::NoWorkers)` if no workers are registered.
+    pub fn dispatch(&self, task: FrameTask) -> Result<(), DispatchError> {
+        if self.senders.is_empty() {
+            return Err(DispatchError::NoWorkers);
+        }
+        let idx = self.least_loaded_index();
+        self.senders[idx]
+            .send(task)
+            .map_err(|_| DispatchError::AllFull)
+    }
+
+    /// Non-blocking dispatch: returns `Err(DispatchError::AllFull)` immediately
+    /// if the least-loaded worker's channel is full.
+    pub fn try_dispatch(&self, task: FrameTask) -> Result<(), DispatchError> {
+        if self.senders.is_empty() {
+            return Err(DispatchError::NoWorkers);
+        }
+        let idx = self.least_loaded_index();
+        match self.senders[idx].try_send(task) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => Err(DispatchError::AllFull),
+            Err(TrySendError::Disconnected(_)) => Err(DispatchError::AllFull),
+        }
+    }
+
+    /// Return a reference to the receiver for worker `worker_id`.
+    ///
+    /// Returns `None` if `worker_id` is out of range.
+    pub fn worker_receiver(&self, worker_id: usize) -> Option<&Receiver<FrameTask>> {
+        self.receivers.get(worker_id)
+    }
+
+    /// Channel capacity (same for all workers).
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Number of workers.
+    pub fn worker_count(&self) -> usize {
+        self.senders.len()
+    }
+
+    /// Index of the worker with the fewest queued tasks.
+    fn least_loaded_index(&self) -> usize {
+        self.senders
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, s)| s.len())
+            .map(|(i, _)| i)
+            .unwrap_or(0)
     }
 }

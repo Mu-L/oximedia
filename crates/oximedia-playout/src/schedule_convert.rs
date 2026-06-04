@@ -203,7 +203,11 @@ mod tests {
 
     #[test]
     fn test_convert_preserves_index() {
-        let playlist = vec![item("X", 50, 25.0), item("Y", 50, 25.0), item("Z", 50, 25.0)];
+        let playlist = vec![
+            item("X", 50, 25.0),
+            item("Y", 50, 25.0),
+            item("Z", 50, 25.0),
+        ];
         let result = PlaylistToSchedule::convert(&playlist, 0);
         for (i, s) in result.iter().enumerate() {
             assert_eq!(s.index, i);
@@ -219,7 +223,11 @@ mod tests {
 
     #[test]
     fn test_convert_live_item_does_not_advance_clock() {
-        let playlist = vec![item("Pre", 25, 25.0), live_item("Live"), item("Post", 25, 25.0)];
+        let playlist = vec![
+            item("Pre", 25, 25.0),
+            live_item("Live"),
+            item("Post", 25, 25.0),
+        ];
         let result = PlaylistToSchedule::convert(&playlist, 0);
         // Pre ends at 1000, Live starts at 1000 with 0 duration, Post also starts at 1000
         assert_eq!(result[1].start_ts_ms, 1_000);
@@ -265,7 +273,11 @@ mod tests {
 
     #[test]
     fn test_convert_enabled_filters_disabled() {
-        let playlist = vec![item("A", 25, 25.0), item("!Disabled", 25, 25.0), item("B", 25, 25.0)];
+        let playlist = vec![
+            item("A", 25, 25.0),
+            item("!Disabled", 25, 25.0),
+            item("B", 25, 25.0),
+        ];
         let result = PlaylistToSchedule::convert_enabled(&playlist, 0);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].title, "A");

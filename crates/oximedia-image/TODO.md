@@ -13,9 +13,9 @@
 - Dependencies: oximedia-core, byteorder, half, tiff, flate2, oxiarc-deflate, weezl, rayon
 
 ## Enhancements
-- [ ] Add multi-layer/multi-part support to `exr.rs` for compositing workflows (read/write individual layers) (verified-open 2026-05-16: no MultiLayer/MultiPart in exr.rs)
+- [x] Add multi-layer/multi-part support to `exr.rs` for compositing workflows (read/write individual layers) (verified-open 2026-05-16: no MultiLayer/MultiPart in exr.rs)
 - [x] Extend `dpx.rs` with 10-bit packed pixel read/write (Method A and Method B packing) (verified 2026-05-16; src/dpx.rs:49 PackingMethod::MethodA/MethodB, 10-bit MSB/LSB packing:1043)
-- [ ] Implement full TIFF tag roundtrip in `tiff.rs` (preserve unknown tags during read-modify-write) (verified-open 2026-05-16: tiff.rs:569 skips unknown tags rather than preserving)
+- [x] Implement full TIFF tag roundtrip in `tiff.rs` (preserve unknown tags during read-modify-write) — `TiffInfo::preserve_unknown_tags`/`extra_ifd_entries`/`set_tag`/`get_tag`; round-trip tests for 0xC4A5 and 0x8825; tiff split to `tiff/tests.rs` (0.1.8 Wave 5 Slice γ)
 - [x] Add adaptive thresholding modes (Otsu, triangle) to `segmentation.rs` (verified 2026-05-16; src/segmentation.rs:129 ThresholdMethod::Otsu/Triangle, adaptive_threshold_segment:245)
 - [x] Extend `convolution.rs` with separable kernel optimization (apply 1D horizontal then vertical) (verified 2026-05-16; src/convolution.rs:260 SeparableKernel, gaussian_separable_kernel:311)
 - [x] Add bilateral filter implementation to `filters.rs` for edge-preserving denoising
@@ -36,22 +36,31 @@
 - [x] Implement `color_lut.rs` for applying 3D LUTs directly to ImageData (integrate with oximedia-lut) (verified 2026-05-16; src/color_lut.rs:720 lines)
 
 ## Performance
-- [ ] Add SIMD-accelerated pixel format conversion in `pixel_pipeline.rs` (U8<->F32 batch) (verified-open 2026-05-16: no SIMD/portable_simd in pixel_pipeline.rs)
-- [ ] Implement tiled parallel processing in `convolution.rs` for large images (verified-open 2026-05-16: not yet implemented)
-- [ ] Add memory-mapped I/O path for DPX/EXR sequence reading to reduce allocation overhead (verified-open 2026-05-16: no mmap in image sequence read paths)
-- [ ] Optimize `morphology.rs` dilation/erosion with sliding-window max/min algorithms (verified-open 2026-05-16: no sliding-window in morphology.rs)
-- [ ] Add GPU-accelerated path for `frequency_domain.rs` FFT operations (verified-open 2026-05-16: no wgpu/GPU in frequency_domain.rs)
-- [ ] Parallelize `stitch.rs` feature matching across image pairs with rayon (verified-open 2026-05-16: no rayon par_iter in stitch.rs)
+- [x] Add SIMD-accelerated pixel format conversion (U8↔F32 batch) — `simd_convert.rs` with AVX2/NEON/scalar fallback (0.1.8 Wave 5 Slice γ)
+- [x] Implement tiled parallel processing in `convolution.rs` for large images (convolve_tiled rayon par_iter over tiles, ±1 pixel-exact; 2026-05-30)
+- [x] Add memory-mapped I/O path for DPX/EXR sequence reading to reduce allocation overhead (MmapImageReader memmap2, mmap_reader.rs 432L; 2026-05-30)
+- [x] Optimize morphology dilation/erosion with van Herk–Gil–Werman O(1) sliding-window — `morphology_vhgw.rs` with dispatch in `advanced_morphology.rs` for flat rect and axis-aligned line SEs (0.1.8 Wave 5 Slice γ)
+- [x] Add OxiFFT-accelerated 2D FFT to `frequency_domain.rs` replacing hand-rolled O(N²) DFT with oxifft::fft2d/ifft2d (0.1.8 Wave 13 Slice C)
+- [ ] Add GPU-accelerated path for `frequency_domain.rs` FFT operations (GPU wgpu path deferred — Pure-Rust OxiFFT migration done)
+- [x] Parallelize `stitch.rs` feature matching across image pairs with rayon (match_descriptors_parallel rayon; 2026-05-30)
 
 ## Testing
-- [ ] Add round-trip tests for DPX read/write at all supported bit depths (8, 10, 12, 16)
-- [ ] Test EXR compression round-trips (None, Zip, Piz, B44) with tolerance checks
-- [ ] Add DNG demosaic quality tests comparing against reference implementations
-- [ ] Test `edge_detect.rs` Sobel/Canny operators against known edge maps
-- [ ] Add `blend_mode.rs` tests verifying each mode against Photoshop/GIMP reference outputs
-- [ ] Test `sequence.rs` pattern matching with edge cases (missing frames, non-contiguous ranges)
+- [x] Add round-trip tests for DPX read/write at all supported bit depths (8, 10, 12, 16) — pack_10bit/unpack_10bit_packed Method A & B; 8 tests in wave13_tests.rs (0.1.8 Wave 13 Slice C)
+- [x] Test EXR compression round-trips (None, Zip, Piz, B44) with tolerance checks — code/decode round-trips + ExrDocument API; 7 tests in wave13_tests.rs (0.1.8 Wave 13 Slice C)
+- [x] Add DNG demosaic quality tests comparing against reference implementations — PSNR uniform sensor ≥60 dB, uniform RGB ≥25 dB, known-pixel exact; 4 tests in wave13_tests.rs (0.1.8 Wave 13 Slice C)
+- [x] Test `edge_detect.rs` Sobel/Canny operators against known edge maps — step-edge peak ±1px, uniform→zero, Prewitt; 4 tests in wave13_tests.rs (0.1.8 Wave 13 Slice C)
+- [x] Add `blend_mode.rs` tests verifying each mode against W3C compositing formulas — Multiply/Screen/Overlay/SoftLight/HardLight/Normal with hand-computed expected values; 12 tests in wave13_tests.rs (0.1.8 Wave 13 Slice C)
+- [x] Test `sequence.rs` pattern matching with edge cases (missing frames, non-contiguous ranges) — gap detection, non-contiguous ranges, zero-padded format, empty dir, has_frame checks; 6 tests in wave13_tests.rs (0.1.8 Wave 13 Slice C)
 
 ## Documentation
 - [ ] Document supported DPX header fields and their mapping to ImageData metadata
 - [ ] Add pixel format conversion matrix showing supported PixelType conversions
 - [ ] Document the color science pipeline (color_science -> color_adjust -> color_balance)
+
+## 0.1.8 Wave 5 (completed 2026-05-29)
+- [x] VHGW O(1) rectangular morphology (dilate/erode, 3 compares/pixel regardless of kernel size) (Slice γ)
+  - File: src/morphology_vhgw.rs (395 lines)
+- [x] TIFF unknown-tag round-trip (preserve_unknown_tags + extra_ifd_entries HashMap) (Slice γ)
+  - File: src/tiff/mod.rs; tests extracted to src/tiff/tests.rs (594 lines)
+- [x] SIMD U8↔F32 normalized conversion (AVX2/NEON/scalar fallback) (Slice γ)
+  - File: src/simd_convert.rs (388 lines)

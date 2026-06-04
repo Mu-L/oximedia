@@ -161,9 +161,7 @@ impl ChapterTrack {
         }
 
         // Binary search for the last chapter whose start ≤ ts_ms.
-        let idx = self
-            .chapters
-            .partition_point(|c| c.start_ms <= ts_ms);
+        let idx = self.chapters.partition_point(|c| c.start_ms <= ts_ms);
 
         // partition_point returns the *first* index where the predicate is false,
         // so the last chapter with start ≤ ts_ms is at idx-1 (if idx > 0).

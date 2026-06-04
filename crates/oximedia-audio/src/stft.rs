@@ -106,7 +106,11 @@ impl StftConfig {
             hop_size <= fft_size,
             "hop_size ({hop_size}) must not exceed fft_size ({fft_size})"
         );
-        Self { fft_size, hop_size, window }
+        Self {
+            fft_size,
+            hop_size,
+            window,
+        }
     }
 
     /// Number of complex output bins per frame: `fft_size / 2 + 1`.
@@ -144,14 +148,19 @@ impl Stft {
     /// Under normal usage `StftConfig::new` already enforces `fft_size > 0`.
     pub fn try_new(config: StftConfig) -> AudioResult<Self> {
         let window = make_window(config.window, config.fft_size);
-        let fft_plan =
-            Plan::<f64>::dft_1d(config.fft_size, Direction::Forward, Flags::MEASURE)
-                .or_else(|| Plan::<f64>::dft_1d(config.fft_size, Direction::Forward, Flags::ESTIMATE))
-                .ok_or_else(|| AudioError::InvalidParameter(format!(
+        let fft_plan = Plan::<f64>::dft_1d(config.fft_size, Direction::Forward, Flags::MEASURE)
+            .or_else(|| Plan::<f64>::dft_1d(config.fft_size, Direction::Forward, Flags::ESTIMATE))
+            .ok_or_else(|| {
+                AudioError::InvalidParameter(format!(
                     "Failed to create FFT plan for fft_size={}",
                     config.fft_size
-                )))?;
-        Ok(Self { config, window, fft_plan })
+                ))
+            })?;
+        Ok(Self {
+            config,
+            window,
+            fft_plan,
+        })
     }
 
     /// Create a new STFT processor with the given configuration.
@@ -264,14 +273,19 @@ impl Istft {
     /// Returns an error if the inverse FFT plan cannot be created (e.g., `fft_size` is zero).
     pub fn try_new(config: StftConfig) -> AudioResult<Self> {
         let window = make_window(config.window, config.fft_size);
-        let ifft_plan =
-            Plan::<f64>::dft_1d(config.fft_size, Direction::Backward, Flags::MEASURE)
-                .or_else(|| Plan::<f64>::dft_1d(config.fft_size, Direction::Backward, Flags::ESTIMATE))
-                .ok_or_else(|| AudioError::InvalidParameter(format!(
+        let ifft_plan = Plan::<f64>::dft_1d(config.fft_size, Direction::Backward, Flags::MEASURE)
+            .or_else(|| Plan::<f64>::dft_1d(config.fft_size, Direction::Backward, Flags::ESTIMATE))
+            .ok_or_else(|| {
+                AudioError::InvalidParameter(format!(
                     "Failed to create IFFT plan for fft_size={}",
                     config.fft_size
-                )))?;
-        Ok(Self { config, window, ifft_plan })
+                ))
+            })?;
+        Ok(Self {
+            config,
+            window,
+            ifft_plan,
+        })
     }
 
     /// Create a new ISTFT processor matching the given configuration.
@@ -346,13 +360,7 @@ impl Istft {
         output
             .iter()
             .zip(norm.iter())
-            .map(|(&s, &w)| {
-                if w > 1e-12 {
-                    (s / w) as f32
-                } else {
-                    0.0
-                }
-            })
+            .map(|(&s, &w)| if w > 1e-12 { (s / w) as f32 } else { 0.0 })
             .collect()
     }
 }
@@ -448,7 +456,10 @@ mod tests {
             assert_eq!(m_row.len(), p_row.len());
             for (&m, &p) in m_row.iter().zip(p_row.iter()) {
                 let diff = (m * m - p).abs();
-                assert!(diff < 1e-3, "power should equal magnitude squared; diff={diff}");
+                assert!(
+                    diff < 1e-3,
+                    "power should equal magnitude squared; diff={diff}"
+                );
             }
         }
     }

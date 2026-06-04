@@ -589,7 +589,8 @@ mod tests {
         let hdr = HdrImage::new(pixels, 4, 4).expect("ok");
         let srgb = hdr.to_srgb8_reinhard();
         assert_eq!(srgb.len(), 4 * 4 * 3);
-        assert!(srgb.iter().all(|&v| v <= 255));
+        // All elements are u8, values are inherently 0..=255
+        assert!(!srgb.is_empty());
     }
 
     #[test]

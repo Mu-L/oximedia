@@ -464,6 +464,80 @@ unsafe fn simd_sin_approx(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__
     _mm256_mul_ps(x, p)
 }
 
+// ─── SIMD-accelerated SH dot product ─────────────────────────────────────────
+//
+// The inner loop of `decode_at_direction` computes a dot product of two
+// equal-length f32 slices (the SH coefficient vectors for source and speaker).
+// Vectorising this with AVX2 processes 8 floats per iteration.
+//
+// On non-x86 or when AVX2 is unavailable, the scalar fallback is used.
+
+/// Compute the dot product of two equal-length f32 slices.
+///
+/// Uses an AVX2-vectorised inner loop on x86_64 with runtime detection, falling
+/// back to a scalar implementation everywhere else.
+///
+/// # Panics
+///
+/// Does not panic.  If `a.len() != b.len()`, the shorter length is used.
+pub fn sh_dot_product(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len().min(b.len());
+
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        // SAFETY: AVX2 runtime feature confirmed above.
+        #[allow(unsafe_code)]
+        return unsafe { sh_dot_product_avx2(&a[..n], &b[..n]) };
+    }
+
+    sh_dot_product_scalar(&a[..n], &b[..n])
+}
+
+/// Scalar (portable) dot product.
+#[inline]
+fn sh_dot_product_scalar(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum()
+}
+
+/// AVX2-vectorised dot product (x86_64 only).
+///
+/// Processes 8 floats per iteration using 256-bit packed multiply-add,
+/// with a scalar loop for the tail.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[allow(unsafe_code)]
+unsafe fn sh_dot_product_avx2(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+
+    let n = a.len(); // caller ensures a.len() == b.len()
+    let lanes = 8_usize;
+    let full = n / lanes;
+
+    let mut acc = _mm256_setzero_ps();
+
+    for i in 0..full {
+        let base = i * lanes;
+        let va = _mm256_loadu_ps(a[base..].as_ptr());
+        let vb = _mm256_loadu_ps(b[base..].as_ptr());
+        // acc += va * vb  (fused multiply-add if FMA is available, otherwise mul+add)
+        acc = _mm256_add_ps(acc, _mm256_mul_ps(va, vb));
+    }
+
+    // Horizontal sum of the 8-lane accumulator.
+    // _mm256_hadd_ps halves the lane count; two rounds give a single f32.
+    let sum128 = _mm_add_ps(_mm256_castps256_ps128(acc), _mm256_extractf128_ps(acc, 1));
+    let sum128 = _mm_hadd_ps(sum128, sum128);
+    let sum128 = _mm_hadd_ps(sum128, sum128);
+    let mut total = _mm_cvtss_f32(sum128);
+
+    // Scalar tail.
+    for i in (full * lanes)..n {
+        total += a[i] * b[i];
+    }
+
+    total
+}
+
 /// Apply FuMa normalisation conversion from N3D.
 fn apply_fuma_norm(coeffs: &mut [f32]) {
     // FuMa uses a different normalisation and channel ordering (WXYZ vs ACN).
@@ -738,11 +812,19 @@ impl AmbisonicsDecoder {
         let gain = 1.0 / num_ch as f32;
 
         for i in 0..len {
-            let mut sample = 0.0_f32;
-            for (ch, w) in weights.iter().enumerate().take(num_ch) {
-                sample += channels[ch][i] * w;
+            // Build a per-sample column vector from all active channels.
+            // This is the "gain vector at sample i": g[ch] = channels[ch][i].
+            // The decoded sample = dot(g, weights) * gain.
+            // For the SIMD path to be effective we need a contiguous slice.
+            // We reuse a temporary that is filled on each sample iteration.
+            //
+            // For small `num_ch` (≤ 36 for 5th order) the benefit is in the
+            // tight loop of many samples; the temporary is stack-allocated.
+            let mut col = [0.0_f32; 36];
+            for ch in 0..num_ch {
+                col[ch] = channels[ch][i];
             }
-            out[i] = sample * gain;
+            out[i] = sh_dot_product(&col[..num_ch], &weights[..num_ch]) * gain;
         }
         out
     }
@@ -1434,6 +1516,97 @@ mod tests {
         }
     }
 
+    // ── sh_dot_product (SIMD) ────────────────────────────────────────────────
+
+    /// Generate a deterministic pseudo-random f32 vector of given length.
+    fn rand_vec(len: usize, seed: u32) -> Vec<f32> {
+        let mut state = if seed == 0 { 1u32 } else { seed };
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                (state as f32 / u32::MAX as f32) * 2.0 - 1.0
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_sh_dot_product_correctness() {
+        // Compare SIMD result vs scalar for 256-element random vectors.
+        let a = rand_vec(256, 0xDEAD_BEEFu32);
+        let b = rand_vec(256, 0xCAFE_BABEu32);
+
+        let simd_result = sh_dot_product(&a, &b);
+        let scalar_result = sh_dot_product_scalar(&a, &b);
+
+        assert!(
+            (simd_result - scalar_result).abs() < 1e-4,
+            "SIMD dot product {simd_result} should equal scalar {scalar_result} within 1e-4"
+        );
+    }
+
+    #[test]
+    fn test_sh_dot_product_zero_vectors() {
+        let a = vec![0.0_f32; 64];
+        let b = vec![0.0_f32; 64];
+        let result = sh_dot_product(&a, &b);
+        assert_eq!(result, 0.0, "dot product of zero vectors should be 0");
+    }
+
+    #[test]
+    fn test_sh_dot_product_unit_vectors() {
+        // dot([1,0,0,...], [1,0,0,...]) = 1.0
+        let mut a = vec![0.0_f32; 16];
+        let mut b = vec![0.0_f32; 16];
+        a[0] = 1.0;
+        b[0] = 1.0;
+        let result = sh_dot_product(&a, &b);
+        assert!((result - 1.0).abs() < 1e-6, "unit dot product = {result}");
+    }
+
+    #[test]
+    fn test_sh_dot_product_performance() {
+        // 100,000 calls on 64-element vectors.
+        // In release mode the target is < 50 ms; debug builds are ~40× slower
+        // due to disabled optimisations, so we use a generous 5 000 ms budget
+        // to avoid false failures in debug CI.
+        let a = rand_vec(64, 0x1234_5678u32);
+        let b = rand_vec(64, 0x8765_4321u32);
+
+        let start = std::time::Instant::now();
+        let mut sum = 0.0_f32;
+        for _ in 0..100_000 {
+            sum += sh_dot_product(&a, &b);
+        }
+        let elapsed = start.elapsed();
+
+        // Prevent optimiser from discarding the loop.
+        assert!(sum.is_finite(), "sum should be finite: {sum}");
+
+        // 50 ms in release, 5 000 ms in debug (unoptimised).
+        let budget_ms: u128 = if cfg!(debug_assertions) { 5_000 } else { 50 };
+        assert!(
+            elapsed.as_millis() < budget_ms,
+            "100k calls on 64-element vectors took {}ms, should be < {budget_ms}ms",
+            elapsed.as_millis()
+        );
+    }
+
+    #[test]
+    fn test_sh_dot_product_matches_scalar_various_lengths() {
+        for len in [1usize, 4, 7, 8, 9, 16, 25, 36, 64, 100, 256] {
+            let a = rand_vec(len, len as u32 * 7 + 1);
+            let b = rand_vec(len, len as u32 * 13 + 3);
+            let simd = sh_dot_product(&a, &b);
+            let scalar = sh_dot_product_scalar(&a, &b);
+            assert!(
+                (simd - scalar).abs() < 1e-3,
+                "len={len}: SIMD={simd}, scalar={scalar}"
+            );
+        }
+    }
+
     // ── n3d_sh_batch (SIMD) ──────────────────────────────────────────────────
 
     fn assert_near(a: f32, b: f32, tol: f32, label: &str) {
@@ -1546,5 +1719,100 @@ mod tests {
         for &v in &out {
             assert!(v.is_finite());
         }
+    }
+
+    // ── Energy preservation ────────────────────────────────────────────────
+
+    #[test]
+    fn test_ambisonics_energy_preservation() {
+        // Encode 1024 samples of a 440 Hz sine wave (unit amplitude) at a
+        // representative direction into first-order ambisonics.
+        let n = 1024_usize;
+        let sample_rate = 48_000_u32;
+        let freq = 440.0_f32;
+        let mono: Vec<f32> = (0..n)
+            .map(|i| (2.0 * PI * freq * i as f32 / sample_rate as f32).sin())
+            .collect();
+
+        let input_energy: f32 = mono.iter().map(|x| x * x).sum();
+
+        let enc = AmbisonicsEncoder::new(AmbisonicsOrder::First, sample_rate);
+        let src = SoundSource::new(45.0, 30.0);
+        let encoded = enc.encode_mono(&mono, &src);
+
+        // Sum squared energy across all output channels.
+        let output_energy: f32 = encoded
+            .iter()
+            .map(|ch| ch.iter().map(|x| x * x).sum::<f32>())
+            .sum();
+
+        assert!(
+            output_energy.is_finite(),
+            "Output energy must be finite, got {output_energy}"
+        );
+        assert!(
+            input_energy > 0.0,
+            "Input energy must be positive, got {input_energy}"
+        );
+
+        // The ratio of output energy to input energy is checked against a broad
+        // but meaningful range.  For N3D first-order encoding, the W channel
+        // carries weight 1 and each of the three directional channels carries
+        // weight sqrt(3) ≈ 1.732.  At a generic direction the sum of squared
+        // weights across all 4 channels is typically in the range [3, 5], so a
+        // ratio between 0.1 and 10.0 confirms the encoder is functional without
+        // making fragile assumptions about the exact normalisation constant.
+        let ratio = output_energy / input_energy;
+        assert!(
+            (0.1..=10.0).contains(&ratio),
+            "Energy ratio {ratio} should be in [0.1, 10.0] (in={input_energy}, out={output_energy})"
+        );
+    }
+
+    // ── Round-trip encode → decode ─────────────────────────────────────────
+
+    #[test]
+    fn test_ambisonics_encode_decode_roundtrip() {
+        // Encode a 256-sample sine at azimuth=0°, elevation=0° into first-order
+        // ambisonics and decode back to stereo.  A front-centre source should
+        // appear equally in both stereo channels with reasonable amplitude, so
+        // the correlation between the decoded average and the original must be ≥ 0.60.
+        let n = 256_usize;
+        let sample_rate = 48_000_u32;
+        let freq = 1_000.0_f32;
+        let mono: Vec<f32> = (0..n)
+            .map(|i| (2.0 * PI * freq * i as f32 / sample_rate as f32).sin())
+            .collect();
+
+        let enc = AmbisonicsEncoder::new(AmbisonicsOrder::First, sample_rate);
+        let src = SoundSource::new(0.0, 0.0); // front centre
+        let encoded = enc.encode_mono(&mono, &src);
+
+        let dec = AmbisonicsDecoder::new(AmbisonicsOrder::First);
+        let (left, right) = dec.decode_stereo(&encoded);
+
+        // Mix the stereo output to mono for correlation.
+        let decoded_mono: Vec<f32> = left
+            .iter()
+            .zip(right.iter())
+            .map(|(l, r)| (l + r) * 0.5)
+            .collect();
+
+        // Normalised cross-correlation at lag 0.
+        let sum_xy: f32 = mono
+            .iter()
+            .zip(decoded_mono.iter())
+            .map(|(x, y)| x * y)
+            .sum();
+        let sum_xx: f32 = mono.iter().map(|x| x * x).sum();
+        let sum_yy: f32 = decoded_mono.iter().map(|y| y * y).sum();
+
+        let denom = (sum_xx * sum_yy).sqrt().max(1e-10);
+        let correlation = sum_xy / denom;
+
+        assert!(
+            correlation >= 0.60,
+            "Round-trip correlation {correlation:.4} should be ≥ 0.60"
+        );
     }
 }

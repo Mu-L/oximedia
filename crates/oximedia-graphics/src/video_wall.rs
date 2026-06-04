@@ -604,7 +604,10 @@ mod tests {
             .build()
             .expect("valid wall");
         assert!(wall.assign_source(0, "cam1"));
-        assert_eq!(wall.cell(0).and_then(|c| c.source_id.as_deref()), Some("cam1"));
+        assert_eq!(
+            wall.cell(0).and_then(|c| c.source_id.as_deref()),
+            Some("cam1")
+        );
     }
 
     #[test]

@@ -63,8 +63,7 @@ impl TrackDirtyState {
                     self.dirty_range = Some((start, end));
                 } else {
                     // Expand the dirty range to include both
-                    self.dirty_range =
-                        Some((existing_start.min(start), existing_end.max(end)));
+                    self.dirty_range = Some((existing_start.min(start), existing_end.max(end)));
                 }
             }
             None => {
@@ -140,7 +139,9 @@ impl ChangeTracker {
 
     /// Register a track for change tracking.
     pub fn register_track(&mut self, track_id: TrackId) {
-        self.tracks.entry(track_id).or_insert_with(TrackDirtyState::new);
+        self.tracks
+            .entry(track_id)
+            .or_insert_with(TrackDirtyState::new);
     }
 
     /// Remove a track from change tracking.
@@ -152,21 +153,30 @@ impl ChangeTracker {
     /// Mark a clip as modified on a specific track.
     pub fn mark_clip_changed(&mut self, track_id: TrackId, clip_id: ClipId) {
         self.global_version += 1;
-        let state = self.tracks.entry(track_id).or_insert_with(TrackDirtyState::new);
+        let state = self
+            .tracks
+            .entry(track_id)
+            .or_insert_with(TrackDirtyState::new);
         state.mark_clip(clip_id);
     }
 
     /// Mark a specific frame range as dirty on a track.
     pub fn mark_range_dirty(&mut self, track_id: TrackId, start: i64, end: i64) {
         self.global_version += 1;
-        let state = self.tracks.entry(track_id).or_insert_with(TrackDirtyState::new);
+        let state = self
+            .tracks
+            .entry(track_id)
+            .or_insert_with(TrackDirtyState::new);
         state.mark_range(start, end);
     }
 
     /// Mark an entire track as dirty (e.g., after adding/removing a clip).
     pub fn mark_track_dirty(&mut self, track_id: TrackId) {
         self.global_version += 1;
-        let state = self.tracks.entry(track_id).or_insert_with(TrackDirtyState::new);
+        let state = self
+            .tracks
+            .entry(track_id)
+            .or_insert_with(TrackDirtyState::new);
         state.mark_all_dirty();
     }
 
@@ -189,11 +199,9 @@ impl ChangeTracker {
     /// Returns `true` if a specific track has any dirty state.
     #[must_use]
     pub fn is_track_dirty_any(&self, track_id: TrackId) -> bool {
-        self.tracks
-            .get(&track_id)
-            .map_or(false, |state| {
-                state.dirty_range.is_none() || !state.dirty_clips.is_empty()
-            })
+        self.tracks.get(&track_id).map_or(false, |state| {
+            state.dirty_range.is_none() || !state.dirty_clips.is_empty()
+        })
     }
 
     /// Returns the set of dirty track IDs at the given frame.
@@ -323,7 +331,11 @@ impl IncrementalRenderer {
             }
         }
 
-        RenderPlan { dirty, cached, frame }
+        RenderPlan {
+            dirty,
+            cached,
+            frame,
+        }
     }
 
     /// Store a rendered layer in the cache.
@@ -331,7 +343,8 @@ impl IncrementalRenderer {
         let key = (layer.track_id, layer.frame);
 
         // Evict if at capacity
-        if self.layer_cache.len() >= self.max_cache_entries && !self.layer_cache.contains_key(&key) {
+        if self.layer_cache.len() >= self.max_cache_entries && !self.layer_cache.contains_key(&key)
+        {
             // Simple eviction: remove oldest entry
             if let Some(&oldest_key) = self.layer_cache.keys().next() {
                 self.layer_cache.remove(&oldest_key);
@@ -713,16 +726,31 @@ mod tests {
         let t3 = TrackId::new();
 
         renderer.cache_layer(CachedLayer {
-            track_id: t1, version: 1, frame: 0, data: vec![1], width: 1, height: 1,
+            track_id: t1,
+            version: 1,
+            frame: 0,
+            data: vec![1],
+            width: 1,
+            height: 1,
         });
         renderer.cache_layer(CachedLayer {
-            track_id: t2, version: 1, frame: 0, data: vec![2], width: 1, height: 1,
+            track_id: t2,
+            version: 1,
+            frame: 0,
+            data: vec![2],
+            width: 1,
+            height: 1,
         });
         assert_eq!(renderer.cache_size(), 2);
 
         // Adding a third layer should evict one
         renderer.cache_layer(CachedLayer {
-            track_id: t3, version: 1, frame: 0, data: vec![3], width: 1, height: 1,
+            track_id: t3,
+            version: 1,
+            frame: 0,
+            data: vec![3],
+            width: 1,
+            height: 1,
         });
         assert_eq!(renderer.cache_size(), 2);
     }

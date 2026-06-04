@@ -63,7 +63,7 @@ impl Av1MetadataObuHeader {
     /// (obu_type uses the full upper nibble; this is a non-standard extension to support
     /// Dolby Vision OBU type 16 which exceeds the 4-bit AV1 standard range).
     ///
-    /// For the wire format we use one byte and encode the type in bits [7:4].
+    /// For the wire format we use one byte and encode the type in bits \[7:4\].
     #[must_use]
     pub fn encode_byte(&self) -> u8 {
         // Bits 7:4 = upper 4 bits of obu_type (covers 0-255 by using a 2-byte scheme,

@@ -292,7 +292,10 @@ impl SpaceSavingsEstimator {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Compute savings for a single duplicate group under the given strategy.
-fn compute_group_savings(entries: &[GroupEntry], strategy: RetentionStrategy) -> DuplicateGroupSavings {
+fn compute_group_savings(
+    entries: &[GroupEntry],
+    strategy: RetentionStrategy,
+) -> DuplicateGroupSavings {
     let canonical_idx = match strategy {
         RetentionStrategy::KeepLargest => entries
             .iter()
@@ -406,7 +409,11 @@ mod tests {
     #[test]
     fn test_keep_first_strategy() {
         let mut est = SpaceSavingsEstimator::new(RetentionStrategy::KeepFirst);
-        est.add_group(make_group(&[("a.mp4", 300), ("b.mp4", 100), ("c.mp4", 200)]));
+        est.add_group(make_group(&[
+            ("a.mp4", 300),
+            ("b.mp4", 100),
+            ("c.mp4", 200),
+        ]));
         let report = est.estimate();
         // a.mp4 is kept; b.mp4 + c.mp4 = 300 bytes removed
         assert_eq!(report.total_bytes_saved, 300);
@@ -416,7 +423,11 @@ mod tests {
     #[test]
     fn test_keep_last_strategy() {
         let mut est = SpaceSavingsEstimator::new(RetentionStrategy::KeepLast);
-        est.add_group(make_group(&[("a.mp4", 300), ("b.mp4", 100), ("c.mp4", 200)]));
+        est.add_group(make_group(&[
+            ("a.mp4", 300),
+            ("b.mp4", 100),
+            ("c.mp4", 200),
+        ]));
         let report = est.estimate();
         assert_eq!(report.group_details[0].canonical.path, "c.mp4");
         // a.mp4 + b.mp4 = 400 removed
@@ -427,7 +438,11 @@ mod tests {
     fn test_keep_median_three_files() {
         let mut est = SpaceSavingsEstimator::new(RetentionStrategy::KeepMedianSized);
         // Sizes: 100, 200, 300 → median = 200 (b.mp4)
-        est.add_group(make_group(&[("a.mp4", 100), ("b.mp4", 200), ("c.mp4", 300)]));
+        est.add_group(make_group(&[
+            ("a.mp4", 100),
+            ("b.mp4", 200),
+            ("c.mp4", 300),
+        ]));
         let report = est.estimate();
         assert_eq!(report.group_details[0].canonical.path, "b.mp4");
         assert_eq!(report.total_bytes_saved, 400); // 100 + 300
@@ -551,6 +566,9 @@ mod tests {
         assert_eq!(RetentionStrategy::KeepSmallest.label(), "keep-smallest");
         assert_eq!(RetentionStrategy::KeepFirst.label(), "keep-first");
         assert_eq!(RetentionStrategy::KeepLast.label(), "keep-last");
-        assert_eq!(RetentionStrategy::KeepMedianSized.label(), "keep-median-sized");
+        assert_eq!(
+            RetentionStrategy::KeepMedianSized.label(),
+            "keep-median-sized"
+        );
     }
 }

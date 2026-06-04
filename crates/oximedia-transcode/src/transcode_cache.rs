@@ -122,9 +122,9 @@ impl CacheParams {
 
         let mut h: u64 = OFFSET;
         let mix = |h: u64, bytes: &[u8]| -> u64 {
-            bytes.iter().fold(h, |acc, &b| {
-                acc.wrapping_mul(PRIME) ^ u64::from(b)
-            })
+            bytes
+                .iter()
+                .fold(h, |acc, &b| acc.wrapping_mul(PRIME) ^ u64::from(b))
         };
 
         h = mix(h, self.codec.as_bytes());
@@ -336,7 +336,8 @@ impl TranscodeCache {
         self.stats.current_bytes = self.stats.current_bytes.saturating_add(size_bytes);
         self.stats.current_entries += 1;
         self.stats.total_inserts += 1;
-        self.entries.insert(key, CacheEntry::new(output_path, size_bytes));
+        self.entries
+            .insert(key, CacheEntry::new(output_path, size_bytes));
         Ok(())
     }
 
@@ -436,10 +437,8 @@ impl TranscodeCache {
 
         if let Some(key) = victim_key {
             if let Some(evicted) = self.entries.remove(&key) {
-                self.stats.current_bytes = self
-                    .stats
-                    .current_bytes
-                    .saturating_sub(evicted.size_bytes);
+                self.stats.current_bytes =
+                    self.stats.current_bytes.saturating_sub(evicted.size_bytes);
                 self.stats.current_entries = self.stats.current_entries.saturating_sub(1);
             }
             self.stats.total_evictions += 1;
@@ -500,7 +499,9 @@ mod tests {
     fn test_remove_entry() {
         let mut cache = TranscodeCache::with_defaults();
         let key = make_key(7, "opus", 128_000);
-        cache.insert(key.clone(), tmp_path("audio.ogg"), 512).unwrap();
+        cache
+            .insert(key.clone(), tmp_path("audio.ogg"), 512)
+            .unwrap();
         assert!(cache.remove(&key));
         assert!(cache.get(&key).is_none());
     }
@@ -515,7 +516,9 @@ mod tests {
         let mut cache = TranscodeCache::new(cfg);
         for i in 0u64..5 {
             let key = make_key(i, "vp9", i * 1000);
-            cache.insert(key, tmp_path(&format!("out{i}.webm")), 100).unwrap();
+            cache
+                .insert(key, tmp_path(&format!("out{i}.webm")), 100)
+                .unwrap();
         }
         // Only 3 entries should remain after 5 inserts.
         assert_eq!(cache.len(), 3, "LRU eviction should cap at max_entries");
@@ -532,7 +535,9 @@ mod tests {
         let mut cache = TranscodeCache::new(cfg);
         for i in 0u64..4 {
             let key = make_key(i, "av1", i * 500);
-            cache.insert(key, tmp_path(&format!("lfu{i}.webm")), 200).unwrap();
+            cache
+                .insert(key, tmp_path(&format!("lfu{i}.webm")), 200)
+                .unwrap();
         }
         assert_eq!(cache.len(), 2);
     }
@@ -553,7 +558,10 @@ mod tests {
         // This should evict the largest entry (k1, 500 bytes).
         cache.insert(k2.clone(), tmp_path("c.webm"), 200).unwrap();
         assert_eq!(cache.len(), 2);
-        assert!(cache.get(&k1).is_none(), "largest entry should have been evicted");
+        assert!(
+            cache.get(&k1).is_none(),
+            "largest entry should have been evicted"
+        );
     }
 
     #[test]
@@ -567,7 +575,9 @@ mod tests {
         // Insert entries totalling >1000 bytes.
         for i in 0u64..5 {
             let key = make_key(i, "av1", i);
-            cache.insert(key, tmp_path(&format!("b{i}.webm")), 300).unwrap();
+            cache
+                .insert(key, tmp_path(&format!("b{i}.webm")), 300)
+                .unwrap();
         }
         // Current bytes should be <=1000 after evictions.
         assert!(
@@ -582,7 +592,9 @@ mod tests {
         let mut cache = TranscodeCache::with_defaults();
         for i in 0u64..5 {
             let key = make_key(i, "flac", i);
-            cache.insert(key, tmp_path(&format!("f{i}.flac")), 400).unwrap();
+            cache
+                .insert(key, tmp_path(&format!("f{i}.flac")), 400)
+                .unwrap();
         }
         cache.clear();
         assert!(cache.is_empty());
@@ -647,7 +659,9 @@ mod tests {
         let mut cache = TranscodeCache::with_defaults();
         for i in 0u64..3 {
             let key = make_key(i, "vp9", i);
-            cache.insert(key, tmp_path(&format!("t{i}.webm")), 100).unwrap();
+            cache
+                .insert(key, tmp_path(&format!("t{i}.webm")), 100)
+                .unwrap();
         }
         // Evict anything older than a very short duration. Since entries were
         // just inserted this should not evict all of them, but evicting with

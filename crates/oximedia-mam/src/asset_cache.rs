@@ -8,11 +8,11 @@
 //!
 //! # Components
 //!
-//! - [`CacheEntry`] — a generic value wrapper with expiry metadata.
-//! - [`CachePolicy`] — TTL and capacity settings for each cache tier.
-//! - [`AssetCacheKey`] — typed key variants (asset by ID, search results, etc.).
-//! - [`AssetCache`] — the main LRU cache structure with TTL eviction.
-//! - [`CacheStats`] — runtime hit/miss/eviction counters.
+//! - `CacheEntry` — a generic value wrapper with expiry metadata.
+//! - `CachePolicy` — TTL and capacity settings for each cache tier.
+//! - `AssetCacheKey` — typed key variants (asset by ID, search results, etc.).
+//! - `AssetCache` — the main LRU cache structure with TTL eviction.
+//! - `CacheStats` — runtime hit/miss/eviction counters.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -46,7 +46,11 @@ impl CachePolicy {
     /// Create a policy with the given TTL and capacity.
     #[must_use]
     pub fn new(ttl: Duration, max_entries: usize) -> Self {
-        Self { ttl, max_entries, ..Self::default() }
+        Self {
+            ttl,
+            max_entries,
+            ..Self::default()
+        }
     }
 }
 
@@ -153,7 +157,11 @@ impl CacheStats {
     #[must_use]
     pub fn hit_ratio(&self) -> f64 {
         let total = self.hits + self.misses;
-        if total == 0 { 0.0 } else { self.hits as f64 / total as f64 }
+        if total == 0 {
+            0.0
+        } else {
+            self.hits as f64 / total as f64
+        }
     }
 
     /// Miss ratio in range `[0.0, 1.0]`.
@@ -194,11 +202,6 @@ impl LruOrder {
         if let Some(pos) = self.order.iter().position(|k| k == key) {
             self.order.remove(pos);
         }
-    }
-
-    #[allow(dead_code)]
-    fn len(&self) -> usize {
-        self.order.len()
     }
 }
 
@@ -268,11 +271,7 @@ impl AssetCache {
     /// Returns `None` if the key is absent or its entry has expired.
     pub fn get(&mut self, key: &AssetCacheKey) -> Option<&serde_json::Value> {
         // Check for expiry
-        let is_expired = self
-            .store
-            .get(key)
-            .map(|e| !e.is_valid())
-            .unwrap_or(true);
+        let is_expired = self.store.get(key).map(|e| !e.is_valid()).unwrap_or(true);
 
         if is_expired {
             if self.store.remove(key).is_some() {
@@ -486,7 +485,10 @@ mod tests {
 
     #[test]
     fn test_lru_eviction_at_capacity() {
-        let policy = CachePolicy { max_entries: 3, ..CachePolicy::default() };
+        let policy = CachePolicy {
+            max_entries: 3,
+            ..CachePolicy::default()
+        };
         let mut cache = AssetCache::new(policy);
         for i in 0..4u32 {
             cache.insert(AssetCacheKey::AssetById(i.to_string()), json!(i));
@@ -539,7 +541,10 @@ mod tests {
     fn test_clear_empties_cache() {
         let mut cache = AssetCache::with_defaults();
         cache.insert(AssetCacheKey::AssetById("a1".into()), json!(1));
-        cache.insert(AssetCacheKey::UserPermissions("user-42".into()), json!(["read"]));
+        cache.insert(
+            AssetCacheKey::UserPermissions("user-42".into()),
+            json!(["read"]),
+        );
         cache.clear();
         assert!(cache.is_empty());
     }

@@ -261,7 +261,7 @@ impl Default for AuthGateConfig {
             global_capacity: 1000.0,
             global_refill_rate: 100.0, // 100 req/s globally
             device_capacity: 10.0,
-            device_refill_rate: 0.5,  // 1 req per 2s per device
+            device_refill_rate: 0.5, // 1 req per 2s per device
             burst_max: 5,
             burst_window_secs: 10,
             auto_register: true,
@@ -401,14 +401,16 @@ impl TokenBucketAuthGate {
 
     /// Manually register a device without issuing a request.
     pub fn register_device(&mut self, device_id: &str) {
-        self.devices.entry(device_id.to_string()).or_insert_with(|| {
-            DeviceState::new(
-                self.config.device_capacity,
-                self.config.device_refill_rate,
-                self.config.burst_max,
-                self.config.burst_window_secs,
-            )
-        });
+        self.devices
+            .entry(device_id.to_string())
+            .or_insert_with(|| {
+                DeviceState::new(
+                    self.config.device_capacity,
+                    self.config.device_refill_rate,
+                    self.config.burst_max,
+                    self.config.burst_window_secs,
+                )
+            });
     }
 
     /// Block a device until `unblocked_at_secs`.
@@ -474,9 +476,8 @@ impl TokenBucketAuthGate {
 
     /// Remove stale device entries that have not been used for `idle_secs` seconds.
     pub fn evict_idle_devices(&mut self, now_secs: u64, idle_secs: u64) {
-        self.devices.retain(|_, state| {
-            now_secs.saturating_sub(state.bucket.last_refill_secs) < idle_secs
-        });
+        self.devices
+            .retain(|_, state| now_secs.saturating_sub(state.bucket.last_refill_secs) < idle_secs);
     }
 
     /// Number of registered devices.
@@ -519,7 +520,7 @@ mod tests {
             global_refill_rate: 100.0,
             device_capacity: 3.0,
             device_refill_rate: 1.0,
-            burst_max: 100,          // large burst allowance
+            burst_max: 100, // large burst allowance
             burst_window_secs: 1000,
             auto_register: true,
         });
@@ -679,7 +680,9 @@ mod tests {
 
     #[test]
     fn test_auth_error_messages() {
-        let e = AuthError::GlobalLimitExceeded { retry_after_secs: 3 };
+        let e = AuthError::GlobalLimitExceeded {
+            retry_after_secs: 3,
+        };
         assert!(format!("{e}").contains("global"));
 
         let e2 = AuthError::DeviceBlocked {

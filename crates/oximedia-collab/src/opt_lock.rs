@@ -161,7 +161,11 @@ mod tests {
         let lock = OptimisticLock::new(0);
         let clone = lock.clone();
         lock.try_update(0, 7);
-        assert_eq!(clone.version(), 7, "clone must reflect updates to the original");
+        assert_eq!(
+            clone.version(),
+            7,
+            "clone must reflect updates to the original"
+        );
     }
 
     #[test]

@@ -30,8 +30,6 @@
 //! Push attempts on a full buffer increment `overflow_count`.
 //! Pop attempts on an empty buffer increment `underrun_count`.
 
-#![allow(dead_code)]
-
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -515,7 +513,13 @@ mod tests {
         ring.pop();
 
         let stats = ring.stats();
-        assert!(stats.has_overflow(), "expected overflow after filling buffer");
-        assert!(stats.has_underrun(), "expected underrun after draining buffer");
+        assert!(
+            stats.has_overflow(),
+            "expected overflow after filling buffer"
+        );
+        assert!(
+            stats.has_underrun(),
+            "expected underrun after draining buffer"
+        );
     }
 }

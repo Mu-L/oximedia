@@ -229,11 +229,8 @@ impl WhipWhepServer {
 
         validate_sdp_minimal(offer_sdp)?;
 
-        let mut session = WhipWhepSession::new(
-            session_id.clone(),
-            SessionRole::WhipIngester,
-            self.now_ms,
-        );
+        let mut session =
+            WhipWhepSession::new(session_id.clone(), SessionRole::WhipIngester, self.now_ms);
         session.remote_sdp = Some(SdpBody {
             sdp: offer_sdp.to_owned(),
             sdp_type: SdpType::Offer,
@@ -246,7 +243,13 @@ impl WhipWhepServer {
         });
 
         self.sessions.insert(session_id.clone(), session);
-        Ok((session_id, SdpBody { sdp: answer, sdp_type: SdpType::Answer }))
+        Ok((
+            session_id,
+            SdpBody {
+                sdp: answer,
+                sdp_type: SdpType::Answer,
+            },
+        ))
     }
 
     /// Handles a WHEP HTTP `POST` request: creates an egress session and
@@ -263,11 +266,8 @@ impl WhipWhepServer {
 
         validate_sdp_minimal(offer_sdp)?;
 
-        let mut session = WhipWhepSession::new(
-            session_id.clone(),
-            SessionRole::WhepViewer,
-            self.now_ms,
-        );
+        let mut session =
+            WhipWhepSession::new(session_id.clone(), SessionRole::WhepViewer, self.now_ms);
         session.remote_sdp = Some(SdpBody {
             sdp: offer_sdp.to_owned(),
             sdp_type: SdpType::Offer,
@@ -280,7 +280,13 @@ impl WhipWhepServer {
         });
 
         self.sessions.insert(session_id.clone(), session);
-        Ok((session_id, SdpBody { sdp: answer, sdp_type: SdpType::Answer }))
+        Ok((
+            session_id,
+            SdpBody {
+                sdp: answer,
+                sdp_type: SdpType::Answer,
+            },
+        ))
     }
 
     /// Handles a trickle-ICE `PATCH` request: appends a remote ICE candidate to
@@ -357,11 +363,7 @@ impl WhipWhepServer {
 
     fn check_resource_limit(&self) -> WhipWhepResult<()> {
         if self.max_sessions > 0 {
-            let active = self
-                .sessions
-                .values()
-                .filter(|s| s.is_active())
-                .count();
+            let active = self.sessions.values().filter(|s| s.is_active()).count();
             if active >= self.max_sessions {
                 return Err(WhipWhepError::ResourceLimit(format!(
                     "max {max} concurrent sessions reached",
@@ -401,9 +403,7 @@ fn validate_sdp_minimal(sdp: &str) -> WhipWhepResult<()> {
 fn generate_sdp_answer(offer_sdp: &str, session_id: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
     lines.push("v=0".to_owned());
-    lines.push(format!(
-        "o=oximedia-videoip 0 1 IN IP4 0.0.0.0"
-    ));
+    lines.push(format!("o=oximedia-videoip 0 1 IN IP4 0.0.0.0"));
     lines.push(format!("s=OxiMedia WHIP/WHEP session {session_id}"));
     lines.push("t=0 0".to_owned());
     lines.push("a=group:BUNDLE".to_owned());
@@ -421,7 +421,10 @@ fn generate_sdp_answer(offer_sdp: &str, session_id: &str) -> String {
             mid_index += 1;
             lines.push("a=recvonly".to_owned());
         } else if in_media {
-            if line.starts_with("a=sendrecv") || line.starts_with("a=sendonly") || line.starts_with("a=recvonly") {
+            if line.starts_with("a=sendrecv")
+                || line.starts_with("a=sendonly")
+                || line.starts_with("a=recvonly")
+            {
                 // Direction already set above; skip the offer's direction.
                 continue;
             }
@@ -503,7 +506,9 @@ mod tests {
             .handle_whip_offer("s1".into(), MINIMAL_OFFER)
             .expect("valid offer");
         server.handle_delete("s1").expect("session s1 exists");
-        let sess = server.get_session("s1").expect("session s1 still exists (Closed state)");
+        let sess = server
+            .get_session("s1")
+            .expect("session s1 still exists (Closed state)");
         assert_eq!(sess.state, SessionState::Closed);
     }
 
@@ -533,9 +538,7 @@ mod tests {
         server
             .handle_ice_candidate("s1", cand)
             .expect("session s1 exists");
-        let sess = server
-            .get_session("s1")
-            .expect("session s1 exists");
+        let sess = server.get_session("s1").expect("session s1 exists");
         assert_eq!(sess.pending_candidates.len(), 1);
     }
 

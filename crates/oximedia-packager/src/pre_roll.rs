@@ -125,10 +125,7 @@ impl PreRollInjector {
     ///
     /// Pre-roll (if configured) is prepended; bumper (if configured) is appended.
     #[must_use]
-    pub fn inject(
-        &self,
-        content: &[SegmentEntry],
-    ) -> Vec<SegmentEntry> {
+    pub fn inject(&self, content: &[SegmentEntry]) -> Vec<SegmentEntry> {
         let mut result: Vec<SegmentEntry> = Vec::with_capacity(
             content.len()
                 + usize::from(self.pre_roll.is_some())
@@ -171,10 +168,7 @@ impl PreRollInjector {
                 injection_tag: None,
             })
             .collect();
-        self.inject(&entries)
-            .into_iter()
-            .map(|e| e.uri)
-            .collect()
+        self.inject(&entries).into_iter().map(|e| e.uri).collect()
     }
 
     /// Generate an HLS `#EXTINF` + URI block for all injected entries.
@@ -195,9 +189,7 @@ impl PreRollInjector {
     /// Total injected pre-roll duration in seconds (0.0 if no pre-roll).
     #[must_use]
     pub fn pre_roll_duration_secs(&self) -> f64 {
-        self.pre_roll
-            .as_ref()
-            .map_or(0.0, |p| p.duration_secs)
+        self.pre_roll.as_ref().map_or(0.0, |p| p.duration_secs)
     }
 
     /// Total bumper duration in seconds (0.0 if no bumper).
@@ -311,7 +303,10 @@ mod tests {
         let injector = PreRollInjector::new().with_pre_roll(pre);
         let content = make_content(&["seg.ts"]);
         let block = injector.to_hls_extinf_block(&content);
-        assert!(block.contains("#EXTINF:5.000,"), "block should have pre-roll EXTINF");
+        assert!(
+            block.contains("#EXTINF:5.000,"),
+            "block should have pre-roll EXTINF"
+        );
         assert!(block.contains("pre.ts"), "block should have pre-roll URI");
         assert!(block.contains("seg.ts"), "block should have content URI");
     }

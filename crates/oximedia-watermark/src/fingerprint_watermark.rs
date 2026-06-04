@@ -537,7 +537,7 @@ mod tests {
             strength: 0.15,
             ..Default::default()
         };
-        let wm = FingerprintWatermarker::new(config, 44100);
+        let wm = FingerprintWatermarker::new(config, 44100).expect("construct ok");
         let samples = test_signal(73728);
 
         let r1 = wm.embed(&samples, b"AAA").expect("embed ok");

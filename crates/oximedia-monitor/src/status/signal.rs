@@ -1,6 +1,6 @@
 //! Signal status monitoring.
 
-use super::{SignalQuality, MonitoringStatus};
+use super::MonitoringStatus;
 
 /// Signal monitor.
 pub struct SignalMonitor {

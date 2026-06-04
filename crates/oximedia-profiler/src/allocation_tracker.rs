@@ -1,5 +1,24 @@
 //! Memory allocation type tracking and peak-bytes analysis.
-#![allow(dead_code)]
+//!
+//! # Atomic counter design
+//!
+//! The three scalar counters (`seq_counter`, `current_bytes`, `peak_bytes`)
+//! are stored as `AtomicU64` values so that `record()` and `free()` can take
+//! `&self` and be called from multiple threads without locking.
+//!
+//! The `records` `Vec` is kept behind a `Mutex` because pushing into a `Vec`
+//! requires exclusive access.  Making the `Vec` lock-free is out of scope for
+//! this implementation; only the hot counters are atomicised.
+//!
+//! # Usage note
+//!
+//! Call `record()` / `free()` concurrently from any number of threads.  Call
+//! `records()` / `total_bytes()` / `bytes_by_type()` from any thread —
+//! they acquire the mutex briefly.  `reset()` requires `&mut self` (exclusive
+//! ownership) because it replaces the entire internal state.
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 /// Category of a memory allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,104 +86,155 @@ impl AllocRecord {
 }
 
 /// Tracker that accumulates allocation records and computes aggregate stats.
-#[derive(Debug, Default)]
+///
+/// ## Concurrency
+///
+/// `record()` and `free()` are `&self` — they can be called from multiple
+/// threads simultaneously.  The three scalar counters (`seq_counter`,
+/// `current_bytes`, `peak_bytes`) use `AtomicU64` for wait-free updates.
+/// The record list uses a `Mutex<Vec<…>>` for thread-safe push/read.
+#[derive(Debug)]
 pub struct AllocationTracker {
-    records: Vec<AllocRecord>,
-    seq_counter: u64,
-    peak_bytes: usize,
-    current_bytes: usize,
+    records: Mutex<Vec<AllocRecord>>,
+    /// Monotonically increasing sequence counter.
+    seq_counter: AtomicU64,
+    /// Live byte total (incremented on record, decremented on free).
+    current_bytes: AtomicU64,
+    /// Peak simultaneous live bytes seen since the last reset.
+    peak_bytes: AtomicU64,
 }
 
 impl AllocationTracker {
     /// Create a new, empty tracker.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            records: Mutex::new(Vec::new()),
+            seq_counter: AtomicU64::new(0),
+            current_bytes: AtomicU64::new(0),
+            peak_bytes: AtomicU64::new(0),
+        }
     }
 
     /// Record a new allocation.
-    pub fn record(
-        &mut self,
-        alloc_type: AllocationType,
-        size_bytes: usize,
-        tag: impl Into<String>,
-    ) {
-        let seq = self.seq_counter;
-        self.seq_counter += 1;
-        self.current_bytes += size_bytes;
-        if self.current_bytes > self.peak_bytes {
-            self.peak_bytes = self.current_bytes;
+    ///
+    /// Takes `&self` — can be called from multiple threads simultaneously.
+    pub fn record(&self, alloc_type: AllocationType, size_bytes: usize, tag: impl Into<String>) {
+        // Assign a unique sequence number.
+        let seq = self.seq_counter.fetch_add(1, Ordering::Relaxed);
+
+        // Add size to live byte total.
+        let new_current = self
+            .current_bytes
+            .fetch_add(size_bytes as u64, Ordering::Relaxed)
+            + size_bytes as u64;
+
+        // CAS-max loop to update peak_bytes.
+        let mut old_peak = self.peak_bytes.load(Ordering::Relaxed);
+        loop {
+            let new_peak = old_peak.max(new_current);
+            match self.peak_bytes.compare_exchange_weak(
+                old_peak,
+                new_peak,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => old_peak = actual,
+            }
         }
-        self.records
-            .push(AllocRecord::new(alloc_type, size_bytes, tag, seq));
+
+        // Push record into the protected Vec.
+        let record = AllocRecord::new(alloc_type, size_bytes, tag, seq);
+        if let Ok(mut guard) = self.records.lock() {
+            guard.push(record);
+        }
     }
 
     /// Simulate a deallocation (reduces current live byte count).
+    ///
+    /// Takes `&self` — can be called from multiple threads simultaneously.
     /// Does not remove the record — it remains in history.
-    pub fn free(&mut self, size_bytes: usize) {
-        self.current_bytes = self.current_bytes.saturating_sub(size_bytes);
+    pub fn free(&self, size_bytes: usize) {
+        // Saturating subtract via a fetch_update loop to avoid underflow.
+        let _ = self
+            .current_bytes
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub(size_bytes as u64))
+            });
     }
 
     /// Sum of all recorded allocation sizes in bytes.
     pub fn total_bytes(&self) -> usize {
-        self.records.iter().map(|r| r.size_bytes).sum()
+        let guard = self.records.lock().unwrap_or_else(|e| e.into_inner());
+        guard.iter().map(|r| r.size_bytes).sum()
     }
 
     /// Peak simultaneous live bytes seen during this session.
     pub fn peak_bytes(&self) -> usize {
-        self.peak_bytes
+        self.peak_bytes.load(Ordering::Relaxed) as usize
     }
 
     /// Current live byte total (after any `free` calls).
     pub fn current_bytes(&self) -> usize {
-        self.current_bytes
+        self.current_bytes.load(Ordering::Relaxed) as usize
     }
 
     /// Number of recorded allocations.
     pub fn record_count(&self) -> usize {
-        self.records.len()
+        let guard = self.records.lock().unwrap_or_else(|e| e.into_inner());
+        guard.len()
     }
 
-    /// All records.
-    pub fn records(&self) -> &[AllocRecord] {
-        &self.records
+    /// All records — returns a cloned snapshot to avoid holding the lock.
+    pub fn records(&self) -> Vec<AllocRecord> {
+        let guard = self.records.lock().unwrap_or_else(|e| e.into_inner());
+        guard.clone()
     }
 
-    /// Records filtered by allocation type.
-    pub fn records_by_type(&self, alloc_type: AllocationType) -> Vec<&AllocRecord> {
-        self.records
+    /// Records filtered by allocation type (cloned snapshot).
+    pub fn records_by_type(&self, alloc_type: AllocationType) -> Vec<AllocRecord> {
+        let guard = self.records.lock().unwrap_or_else(|e| e.into_inner());
+        guard
             .iter()
             .filter(|r| r.alloc_type == alloc_type)
+            .cloned()
             .collect()
     }
 
-    /// Records that exceed the large-allocation threshold.
-    pub fn large_allocations(&self) -> Vec<&AllocRecord> {
-        self.records.iter().filter(|r| r.is_large()).collect()
+    /// Records that exceed the large-allocation threshold (cloned snapshot).
+    pub fn large_allocations(&self) -> Vec<AllocRecord> {
+        let guard = self.records.lock().unwrap_or_else(|e| e.into_inner());
+        guard.iter().filter(|r| r.is_large()).cloned().collect()
     }
 
     /// Bytes allocated broken down by type: (stack, heap, mmap).
     pub fn bytes_by_type(&self) -> (usize, usize, usize) {
-        let stack: usize = self
-            .records_by_type(AllocationType::Stack)
-            .iter()
-            .map(|r| r.size_bytes)
-            .sum();
-        let heap: usize = self
-            .records_by_type(AllocationType::Heap)
-            .iter()
-            .map(|r| r.size_bytes)
-            .sum();
-        let mmap: usize = self
-            .records_by_type(AllocationType::Mmap)
-            .iter()
-            .map(|r| r.size_bytes)
-            .sum();
+        let guard = self.records.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stack = 0usize;
+        let mut heap = 0usize;
+        let mut mmap = 0usize;
+        for r in guard.iter() {
+            match r.alloc_type {
+                AllocationType::Stack => stack += r.size_bytes,
+                AllocationType::Heap => heap += r.size_bytes,
+                AllocationType::Mmap => mmap += r.size_bytes,
+            }
+        }
         (stack, heap, mmap)
     }
 
     /// Clear all records and reset counters.
+    ///
+    /// Requires `&mut self` for exclusive ownership — this is intentional
+    /// so that resets do not race with concurrent record/free operations.
     pub fn reset(&mut self) {
-        *self = Self::default();
+        *self = Self::new();
+    }
+}
+
+impl Default for AllocationTracker {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -206,7 +276,7 @@ mod tests {
 
     #[test]
     fn test_tracker_total_bytes() {
-        let mut t = AllocationTracker::new();
+        let t = AllocationTracker::new();
         t.record(AllocationType::Heap, 100, "a");
         t.record(AllocationType::Stack, 50, "b");
         assert_eq!(t.total_bytes(), 150);
@@ -214,7 +284,7 @@ mod tests {
 
     #[test]
     fn test_tracker_peak_bytes() {
-        let mut t = AllocationTracker::new();
+        let t = AllocationTracker::new();
         t.record(AllocationType::Heap, 1000, "alloc1");
         t.record(AllocationType::Heap, 500, "alloc2");
         t.free(1000);
@@ -225,7 +295,7 @@ mod tests {
 
     #[test]
     fn test_tracker_current_bytes_after_free() {
-        let mut t = AllocationTracker::new();
+        let t = AllocationTracker::new();
         t.record(AllocationType::Heap, 200, "x");
         t.free(100);
         assert_eq!(t.current_bytes(), 100);
@@ -233,7 +303,7 @@ mod tests {
 
     #[test]
     fn test_tracker_free_saturates_at_zero() {
-        let mut t = AllocationTracker::new();
+        let t = AllocationTracker::new();
         t.record(AllocationType::Heap, 10, "y");
         t.free(9999);
         assert_eq!(t.current_bytes(), 0);
@@ -241,7 +311,7 @@ mod tests {
 
     #[test]
     fn test_tracker_record_count() {
-        let mut t = AllocationTracker::new();
+        let t = AllocationTracker::new();
         for i in 0..5 {
             t.record(AllocationType::Heap, i * 10, "item");
         }
@@ -250,7 +320,7 @@ mod tests {
 
     #[test]
     fn test_tracker_records_by_type() {
-        let mut t = AllocationTracker::new();
+        let t = AllocationTracker::new();
         t.record(AllocationType::Heap, 100, "h1");
         t.record(AllocationType::Stack, 50, "s1");
         t.record(AllocationType::Heap, 200, "h2");
@@ -260,7 +330,7 @@ mod tests {
 
     #[test]
     fn test_tracker_large_allocations() {
-        let mut t = AllocationTracker::new();
+        let t = AllocationTracker::new();
         t.record(AllocationType::Heap, 512, "small");
         t.record(AllocationType::Heap, 2 * 1024 * 1024, "big");
         let large = t.large_allocations();
@@ -270,7 +340,7 @@ mod tests {
 
     #[test]
     fn test_tracker_bytes_by_type() {
-        let mut t = AllocationTracker::new();
+        let t = AllocationTracker::new();
         t.record(AllocationType::Stack, 100, "s");
         t.record(AllocationType::Heap, 200, "h");
         t.record(AllocationType::Mmap, 400, "m");
@@ -292,10 +362,88 @@ mod tests {
 
     #[test]
     fn test_seq_monotonic() {
-        let mut t = AllocationTracker::new();
+        let t = AllocationTracker::new();
         t.record(AllocationType::Heap, 1, "a");
         t.record(AllocationType::Heap, 2, "b");
-        let seqs: Vec<u64> = t.records().iter().map(|r| r.seq).collect();
+        let records = t.records();
+        let seqs: Vec<u64> = records.iter().map(|r| r.seq).collect();
         assert_eq!(seqs, vec![0, 1]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Atomic counter concurrency tests (Wave 15, Slice H)
+    // -----------------------------------------------------------------------
+
+    /// Spawn 8 threads, each recording 1_000 allocations of 100 B.
+    /// After joining, `current_bytes` must equal 800_000.
+    /// Then free all; `current_bytes` must reach 0 and `peak_bytes` ≥ 800_000.
+    #[test]
+    fn test_atomic_counter_concurrent() {
+        use std::sync::Arc;
+
+        const N_THREADS: usize = 8;
+        const RECORDS_PER_THREAD: usize = 1_000;
+        const ALLOC_SIZE: usize = 100;
+        const EXPECTED_TOTAL: usize = N_THREADS * RECORDS_PER_THREAD * ALLOC_SIZE;
+
+        let tracker = Arc::new(AllocationTracker::new());
+
+        let handles: Vec<_> = (0..N_THREADS)
+            .map(|tid| {
+                let t = Arc::clone(&tracker);
+                std::thread::spawn(move || {
+                    for _ in 0..RECORDS_PER_THREAD {
+                        t.record(AllocationType::Heap, ALLOC_SIZE, format!("thread_{}", tid));
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+
+        assert_eq!(
+            tracker.current_bytes(),
+            EXPECTED_TOTAL,
+            "current_bytes after all records must equal {}",
+            EXPECTED_TOTAL
+        );
+
+        // Free all allocations.
+        for _ in 0..N_THREADS * RECORDS_PER_THREAD {
+            tracker.free(ALLOC_SIZE);
+        }
+
+        assert_eq!(
+            tracker.current_bytes(),
+            0,
+            "current_bytes must reach zero after all frees"
+        );
+        assert!(
+            tracker.peak_bytes() >= EXPECTED_TOTAL,
+            "peak_bytes must be >= {}; got {}",
+            EXPECTED_TOTAL,
+            tracker.peak_bytes()
+        );
+    }
+
+    /// Single-threaded: allocate 100 B + 200 B, free 100 B, free 200 B.
+    /// Peak must be exactly 300 B (point when both were live).
+    #[test]
+    fn test_atomic_peak_bytes_correctness() {
+        let t = AllocationTracker::new();
+
+        t.record(AllocationType::Heap, 100, "a"); // current=100, peak=100
+        t.record(AllocationType::Heap, 200, "b"); // current=300, peak=300
+        t.free(100); //                              current=200, peak=300
+        t.free(200); //                              current=0,   peak=300
+
+        assert_eq!(t.current_bytes(), 0, "current must be 0 after all frees");
+        assert_eq!(
+            t.peak_bytes(),
+            300,
+            "peak must be exactly 300 (both allocations live simultaneously)"
+        );
     }
 }

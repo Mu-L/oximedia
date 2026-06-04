@@ -3,8 +3,8 @@
 pub mod display;
 pub mod validate;
 
-use crate::{MonitorError, MonitorResult};
-use oximedia_timecode::{Timecode, FrameRate};
+use crate::MonitorResult;
+use oximedia_timecode::{FrameRate, Timecode};
 use serde::{Deserialize, Serialize};
 
 pub use display::TimecodeDisplay;

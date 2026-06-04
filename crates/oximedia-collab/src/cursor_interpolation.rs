@@ -69,7 +69,11 @@ impl CursorSample {
     /// Create a new cursor sample.
     #[must_use]
     pub fn new(timestamp_ms: u64, frame: f64, track: f64) -> Self {
-        Self { timestamp_ms, frame, track }
+        Self {
+            timestamp_ms,
+            frame,
+            track,
+        }
     }
 
     /// Linearly interpolate between `self` and `other` using parameter `t ∈ [0, 1]`.
@@ -200,7 +204,9 @@ impl CursorInterpolator {
 
         // Find the bracketing pair (s0.timestamp_ms ≤ query_ms < s1.timestamp_ms).
         let samples: Vec<&CursorSample> = queue.iter().collect();
-        let idx = samples.partition_point(|s| s.timestamp_ms <= query_ms).saturating_sub(1);
+        let idx = samples
+            .partition_point(|s| s.timestamp_ms <= query_ms)
+            .saturating_sub(1);
         let s0 = samples[idx];
         let s1 = samples[idx + 1];
 
@@ -283,7 +289,12 @@ impl ViewportSample {
     /// Create a new viewport sample.
     #[must_use]
     pub fn new(timestamp_ms: u64, start_frame: f64, end_frame: f64, zoom: f64) -> Self {
-        Self { timestamp_ms, start_frame, end_frame, zoom }
+        Self {
+            timestamp_ms,
+            start_frame,
+            end_frame,
+            zoom,
+        }
     }
 
     /// Linearly interpolate between `self` and `other`.
@@ -351,7 +362,9 @@ impl ViewportInterpolator {
         }
 
         let samples: Vec<&ViewportSample> = queue.iter().collect();
-        let idx = samples.partition_point(|s| s.timestamp_ms <= query_ms).saturating_sub(1);
+        let idx = samples
+            .partition_point(|s| s.timestamp_ms <= query_ms)
+            .saturating_sub(1);
         let s0 = samples[idx];
         let s1 = samples[idx + 1];
 

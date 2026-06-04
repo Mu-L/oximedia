@@ -224,12 +224,7 @@ pub struct ApprovalDecision {
 impl ApprovalDecision {
     /// Create a new decision.
     #[must_use]
-    pub fn new(
-        run_id: Uuid,
-        stage_id: Uuid,
-        reviewer_id: Uuid,
-        verdict: DecisionVerdict,
-    ) -> Self {
+    pub fn new(run_id: Uuid, stage_id: Uuid, reviewer_id: Uuid, verdict: DecisionVerdict) -> Self {
         Self {
             id: Uuid::new_v4(),
             run_id,
@@ -399,9 +394,7 @@ impl ApprovalRun {
             return Err(ApprovalError::AlreadyTerminal(self.status.clone()));
         }
 
-        let stage = self
-            .current_stage()
-            .ok_or(ApprovalError::NoActiveStage)?;
+        let stage = self.current_stage().ok_or(ApprovalError::NoActiveStage)?;
 
         if decision.stage_id != stage.id {
             return Err(ApprovalError::WrongStage {
@@ -411,18 +404,16 @@ impl ApprovalRun {
         }
 
         // Verify the reviewer is designated (unless approver_ids is empty = open review)
-        if !stage.approver_ids.is_empty()
-            && !stage.approver_ids.contains(&decision.reviewer_id)
-        {
+        if !stage.approver_ids.is_empty() && !stage.approver_ids.contains(&decision.reviewer_id) {
             return Err(ApprovalError::NotAnApprover(decision.reviewer_id));
         }
 
         // Check for duplicate decision
-        let existing = self
-            .decisions_by_stage
-            .entry(stage.id)
-            .or_default();
-        if existing.iter().any(|d| d.reviewer_id == decision.reviewer_id) {
+        let existing = self.decisions_by_stage.entry(stage.id).or_default();
+        if existing
+            .iter()
+            .any(|d| d.reviewer_id == decision.reviewer_id)
+        {
             return Err(ApprovalError::AlreadyDecided(decision.reviewer_id));
         }
 
@@ -447,7 +438,11 @@ impl ApprovalRun {
 
         // Re-borrow stage for quorum check
         let stage = &self.workflow.stages[self.current_stage_index];
-        let decisions = self.decisions_by_stage.get(&stage.id).map(Vec::as_slice).unwrap_or(&[]);
+        let decisions = self
+            .decisions_by_stage
+            .get(&stage.id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let approved_count = decisions
             .iter()
             .filter(|d| d.verdict == DecisionVerdict::Approved)
@@ -610,7 +605,8 @@ mod tests {
         assert_eq!(run.status, RunStatus::InProgress);
 
         let decision = ApprovalDecision::new(run.id, stage_id, approver, DecisionVerdict::Approved);
-        run.cast_decision(decision).expect("cast_decision should succeed");
+        run.cast_decision(decision)
+            .expect("cast_decision should succeed");
 
         assert_eq!(run.status, RunStatus::Approved);
         assert!(run.completed_at.is_some());
@@ -701,8 +697,8 @@ mod tests {
 
         // Workflow needs two approvers so AnyOne quorum doesn't close the stage after first vote
         let approver2 = make_user();
-        let stage = ApprovalStage::new("Review", vec![approver, approver2])
-            .with_quorum(QuorumPolicy::All);
+        let stage =
+            ApprovalStage::new("Review", vec![approver, approver2]).with_quorum(QuorumPolicy::All);
         let wf = WorkflowBuilder::new("All Required")
             .created_by(submitter)
             .stage(stage)

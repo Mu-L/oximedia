@@ -5,8 +5,6 @@
 //! The progression is tracked through [`ShutdownPhase`] and observable at any
 //! time via `phase()`.
 
-#![allow(dead_code)]
-
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
@@ -204,19 +202,14 @@ impl GracefulShutdown {
                 self.phase()
             )));
         }
-        self.in_progress
-            .write()
-            .insert(job_id.as_str().to_string());
+        self.in_progress.write().insert(job_id.as_str().to_string());
         Ok(())
     }
 
     /// Mark a job as completed (removing it from the in-progress set).
     /// During the drain phase, the job ID is recorded in `drained_jobs`.
     pub fn complete_job(&self, job_id: &JobId) {
-        let removed = self
-            .in_progress
-            .write()
-            .remove(job_id.as_str());
+        let removed = self.in_progress.write().remove(job_id.as_str());
         if removed && self.phase() == ShutdownPhase::Draining {
             self.drained.write().push(job_id.as_str().to_string());
         }

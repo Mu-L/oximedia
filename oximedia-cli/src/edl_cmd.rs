@@ -121,7 +121,7 @@ async fn parse_edl_file(
                     "number": e.number,
                     "reel": e.reel,
                     "clip_name": e.clip_name,
-                    "comments": e.comments,
+                    "comments": e.comments.as_slice(),
                 })
             })
             .collect();

@@ -446,16 +446,16 @@ fn compute_gradients_flow(
     let mut iy = Array2::zeros((h, w));
     let mut it = Array2::zeros((h, w));
 
-    for y in 1..(h.saturating_sub(1)) {
-        for x in 1..(w.saturating_sub(1)) {
+    for y in 1_usize..(h.saturating_sub(1)) {
+        for x in 1_usize..(w.saturating_sub(1)) {
             // Central differences averaged over both frames
-            let gx_prev = (prev[[y, x + 1]] - prev[[y, x.saturating_sub(1)]]) * 0.5;
-            let gx_curr = (curr[[y, x + 1]] - curr[[y, x.saturating_sub(1)]]) * 0.5;
-            ix[[y, x]] = (gx_prev + gx_curr) * 0.5;
+            let gx_prev = (prev[[y, x + 1]] - prev[[y, x.saturating_sub(1)]]) * 0.5_f64;
+            let gx_curr = (curr[[y, x + 1]] - curr[[y, x.saturating_sub(1)]]) * 0.5_f64;
+            ix[[y, x]] = (gx_prev + gx_curr) * 0.5_f64;
 
-            let gy_prev = (prev[[y + 1, x]] - prev[[y.saturating_sub(1), x]]) * 0.5;
-            let gy_curr = (curr[[y + 1, x]] - curr[[y.saturating_sub(1), x]]) * 0.5;
-            iy[[y, x]] = (gy_prev + gy_curr) * 0.5;
+            let gy_prev = (prev[[y + 1, x]] - prev[[y.saturating_sub(1), x]]) * 0.5_f64;
+            let gy_curr = (curr[[y + 1, x]] - curr[[y.saturating_sub(1), x]]) * 0.5_f64;
+            iy[[y, x]] = (gy_prev + gy_curr) * 0.5_f64;
 
             it[[y, x]] = curr[[y, x]] - prev[[y, x]];
         }

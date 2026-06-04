@@ -60,9 +60,7 @@ pub fn to_pdf_stub(session_name: &str, clip_count: usize, matched_count: usize) 
 
     // Object 5: Font
     let obj5_offset = pdf.len();
-    pdf.push_str(
-        "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
-    );
+    pdf.push_str("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n");
 
     // Cross-reference table
     let xref_offset = pdf.len();
@@ -157,16 +155,21 @@ impl ResolveXmlImport {
             remaining = &remaining[end + 1..];
 
             // Extract all attributes from the element string
-            let name = Self::extract_attr(element_src, "name")
-                .ok_or_else(|| XmlImportError::MalformedXml("Missing 'name' on <clip>".to_string()))?;
-            let src_in = Self::extract_attr(element_src, "srcIn")
-                .ok_or_else(|| XmlImportError::MalformedXml("Missing 'srcIn' on <clip>".to_string()))?;
-            let src_out = Self::extract_attr(element_src, "srcOut")
-                .ok_or_else(|| XmlImportError::MalformedXml("Missing 'srcOut' on <clip>".to_string()))?;
-            let rec_in = Self::extract_attr(element_src, "recIn")
-                .ok_or_else(|| XmlImportError::MalformedXml("Missing 'recIn' on <clip>".to_string()))?;
-            let rec_out = Self::extract_attr(element_src, "recOut")
-                .ok_or_else(|| XmlImportError::MalformedXml("Missing 'recOut' on <clip>".to_string()))?;
+            let name = Self::extract_attr(element_src, "name").ok_or_else(|| {
+                XmlImportError::MalformedXml("Missing 'name' on <clip>".to_string())
+            })?;
+            let src_in = Self::extract_attr(element_src, "srcIn").ok_or_else(|| {
+                XmlImportError::MalformedXml("Missing 'srcIn' on <clip>".to_string())
+            })?;
+            let src_out = Self::extract_attr(element_src, "srcOut").ok_or_else(|| {
+                XmlImportError::MalformedXml("Missing 'srcOut' on <clip>".to_string())
+            })?;
+            let rec_in = Self::extract_attr(element_src, "recIn").ok_or_else(|| {
+                XmlImportError::MalformedXml("Missing 'recIn' on <clip>".to_string())
+            })?;
+            let rec_out = Self::extract_attr(element_src, "recOut").ok_or_else(|| {
+                XmlImportError::MalformedXml("Missing 'recOut' on <clip>".to_string())
+            })?;
 
             clips.push(XmlClip {
                 name,
@@ -295,7 +298,11 @@ impl TimelineGapDetector {
 
         // Sort clips by their timeline offset.
         let mut sorted: Vec<&ConformClip> = clips.iter().collect();
-        sorted.sort_by(|a, b| a.offset_s.partial_cmp(&b.offset_s).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| {
+            a.offset_s
+                .partial_cmp(&b.offset_s)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let mut gaps = Vec::new();
         let fps_f64 = f64::from(fps);
@@ -700,24 +707,21 @@ mod tests {
     #[test]
     fn test_gap_found_between_non_adjacent_clips() {
         let clips = vec![
-            make_clip("A", 0.0, 10.0),  // ends at 10s
-            make_clip("B", 15.0, 5.0),  // starts at 15s → gap 10s..15s
+            make_clip("A", 0.0, 10.0), // ends at 10s
+            make_clip("B", 15.0, 5.0), // starts at 15s → gap 10s..15s
         ];
         let gaps = TimelineGapDetector::find_gaps(&clips, 25.0);
         assert_eq!(gaps.len(), 1);
         let gap = &gaps[0];
         assert_eq!(gap.start_frame, 250); // 10s * 25fps
-        assert_eq!(gap.end_frame, 375);   // 15s * 25fps
+        assert_eq!(gap.end_frame, 375); // 15s * 25fps
         assert_eq!(gap.duration_frames, 125); // 5s * 25fps
         assert!((gap.duration_secs - 5.0).abs() < 1e-6);
     }
 
     #[test]
     fn test_no_gap_adjacent_clips() {
-        let clips = vec![
-            make_clip("A", 0.0, 10.0),
-            make_clip("B", 10.0, 5.0),
-        ];
+        let clips = vec![make_clip("A", 0.0, 10.0), make_clip("B", 10.0, 5.0)];
         let gaps = TimelineGapDetector::find_gaps(&clips, 25.0);
         assert!(gaps.is_empty());
     }
@@ -727,7 +731,7 @@ mod tests {
         // Pass clips in reverse order – detector should sort them
         let clips = vec![
             make_clip("B", 20.0, 5.0),
-            make_clip("A", 0.0, 5.0),  // ends at 5s, next starts at 20s → gap
+            make_clip("A", 0.0, 5.0), // ends at 5s, next starts at 20s → gap
         ];
         let gaps = TimelineGapDetector::find_gaps(&clips, 25.0);
         assert_eq!(gaps.len(), 1);
@@ -755,9 +759,9 @@ mod tests {
 
     #[test]
     fn test_sync_cameras_no_overlap() {
-        let primary = vec![make_clip("P1", 0.0, 10.0)];    // frames 0..10000
+        let primary = vec![make_clip("P1", 0.0, 10.0)]; // frames 0..10000
         let secondary = vec![make_clip("S1", 20.0, 10.0)]; // frames 20000..30000
-        // sync_point=500 is within primary but not secondary
+                                                           // sync_point=500 is within primary but not secondary
         let pairs = MultiCamConformer::sync_cameras(&primary, &secondary, 500);
         assert!(pairs.is_empty());
     }

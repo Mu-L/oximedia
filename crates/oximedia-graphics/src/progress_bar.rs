@@ -46,7 +46,13 @@ impl ProgressEasing {
     pub fn apply(self, t: f32) -> f32 {
         let t = t.clamp(0.0, 1.0);
         match self {
-            Self::None => if t >= 1.0 { 1.0 } else { 0.0 },
+            Self::None => {
+                if t >= 1.0 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
             Self::Linear => t,
             Self::EaseInOut => t * t * (3.0 - 2.0 * t),
             Self::EaseOut => {
@@ -660,7 +666,9 @@ mod tests {
         assert_eq!(data.len(), 100 * 20 * 4);
         // Should have both primary and gap pixels.
         let has_primary = data.chunks_exact(4).any(|p| p[1] == 200);
-        let has_gap = data.chunks_exact(4).any(|p| p[0] == 0 && p[1] == 0 && p[3] == 255);
+        let has_gap = data
+            .chunks_exact(4)
+            .any(|p| p[0] == 0 && p[1] == 0 && p[3] == 255);
         assert!(has_primary);
         assert!(has_gap);
     }

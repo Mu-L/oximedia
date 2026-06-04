@@ -4,18 +4,18 @@
 //!
 //! # Overview
 //!
-//! [`MultiCdnRouter`] maintains a registry of [`CdnProvider`]s and distributes
+//! `MultiCdnRouter` maintains a registry of `CdnProvider`s and distributes
 //! requests using one of four strategies:
 //!
-//! - [`RoutingStrategy::Primary`]       — always use the highest-priority healthy provider.
-//! - [`RoutingStrategy::WeightedSplit`] — distribute traffic by normalized weight.
-//! - [`RoutingStrategy::LeastErrors`]   — prefer the provider with the lowest recent error rate.
-//! - [`RoutingStrategy::LowestLatency`] — prefer the provider with the lowest EWMA latency.
+//! - `RoutingStrategy::Primary`       — always use the highest-priority healthy provider.
+//! - `RoutingStrategy::WeightedSplit` — distribute traffic by normalized weight.
+//! - `RoutingStrategy::LeastErrors`   — prefer the provider with the lowest recent error rate.
+//! - `RoutingStrategy::LowestLatency` — prefer the provider with the lowest EWMA latency.
 //!
 //! Each provider has atomic health state and EWMA latency tracking analogous to
 //! [`OriginServer`](crate::origin_failover::OriginServer), but at the CDN-provider
 //! level.  No external HTTP calls are made — callers record outcomes via
-//! [`MultiCdnRouter::record_success`] and [`MultiCdnRouter::record_failure`].
+//! `MultiCdnRouter::record_success` and `MultiCdnRouter::record_failure`.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};

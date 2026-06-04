@@ -21,7 +21,8 @@
 //! assert_eq!(rpu.profile, Profile::Profile8_4);
 //! ```
 
-#![forbid(unsafe_code)]
+// SIMD intrinsics in ipt_pq_simd require unsafe blocks; all other modules are safe.
+#![warn(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod ambient_metadata;
@@ -34,6 +35,7 @@ pub mod dv_xml_metadata;
 pub mod enhancement;
 pub mod frame_analysis;
 pub mod ipt_pq;
+pub mod ipt_pq_simd;
 pub mod level_analysis;
 pub mod level_mapping;
 pub mod mapping_curve;
@@ -58,6 +60,43 @@ pub mod trim_passes;
 pub mod validation;
 mod writer;
 pub mod xml_metadata;
+
+// ── Wave 6: orphan modules ────────────────────────────────────────────────────
+// Wire dv_xml_export first; dv_compliance, rpu_statistics, rpu_validator depend on it.
+pub mod dv_xml_export;
+
+/// Dolby Vision compliance checker (profile constraints, L1/L2/L6 consistency).
+pub mod dv_compliance;
+/// RPU sequence statistics with PQ histogram and percentile computation (full).
+pub mod rpu_statistics;
+/// RPU metadata sequence validator (Basic / Strict / Broadcast levels, comprehensive).
+pub mod rpu_validator;
+
+// Remaining orphans (alphabetical):
+pub mod auto_profile_detect;
+pub mod batch_rpu;
+pub mod conformance;
+pub mod display_mapping;
+/// HDR10+/DolbyVision extended bridge.
+pub mod dv_hdr10plus_bridge;
+pub mod gamut_mapping;
+/// HDR10+ bridge (basic).
+pub mod hdr10plus_bridge;
+pub mod metadata_report;
+pub mod profile10;
+pub mod rpu_merge;
+/// RPU statistics (lightweight).
+pub mod rpu_stats;
+pub mod rpu_timeline;
+/// RPU validation (basic).
+pub mod rpu_validate;
+pub mod rpu_visualize;
+pub mod scene_stats;
+pub mod scene_trim_enhanced;
+pub mod streaming_parser;
+pub mod tone_map_preview;
+pub mod trim_meta;
+pub mod xml_manifest;
 
 // Re-export types, but avoid ambiguous glob re-exports
 pub use metadata::{

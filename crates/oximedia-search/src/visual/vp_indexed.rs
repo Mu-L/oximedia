@@ -38,8 +38,6 @@
 //! assert_eq!(results[0].asset_id, id1); // closest to [0,0,0]
 //! ```
 
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -299,9 +297,7 @@ mod tests {
     use super::*;
 
     fn make_uuid(n: u8) -> Uuid {
-        Uuid::from_bytes([
-            n, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ])
+        Uuid::from_bytes([n, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
     }
 
     fn build_index(points: &[(u8, &[f32])]) -> VpIndexedVisual {
@@ -366,7 +362,10 @@ mod tests {
         let res = idx.search_knn(&[0.0, 0.0], 3);
         assert_eq!(res.len(), 3);
         assert_eq!(res[0].asset_id, id0);
-        assert!(res[0].distance.abs() < 1e-5, "exact match should have dist ≈ 0");
+        assert!(
+            res[0].distance.abs() < 1e-5,
+            "exact match should have dist ≈ 0"
+        );
     }
 
     #[test]
@@ -423,13 +422,13 @@ mod tests {
 
     #[test]
     fn test_radius_search_captures_nearby() {
-        let idx = build_index(&[
-            (0, &[0.0, 0.0]),
-            (1, &[0.5, 0.0]),
-            (2, &[10.0, 0.0]),
-        ]);
+        let idx = build_index(&[(0, &[0.0, 0.0]), (1, &[0.5, 0.0]), (2, &[10.0, 0.0])]);
         let res = idx.search_radius(&[0.0, 0.0], 1.0);
-        assert_eq!(res.len(), 2, "only points within radius 1.0 should be returned");
+        assert_eq!(
+            res.len(),
+            2,
+            "only points within radius 1.0 should be returned"
+        );
         assert!(res.iter().all(|r| r.distance <= 1.0));
     }
 
@@ -451,11 +450,7 @@ mod tests {
     #[test]
     fn test_dirty_fallback_knn_agrees_with_tree() {
         // Build tree
-        let mut idx = build_index(&[
-            (0, &[0.0, 0.0]),
-            (1, &[1.0, 0.0]),
-            (2, &[5.0, 5.0]),
-        ]);
+        let mut idx = build_index(&[(0, &[0.0, 0.0]), (1, &[1.0, 0.0]), (2, &[5.0, 5.0])]);
 
         // Add a new point → tree becomes dirty
         idx.add_document(make_uuid(3), vec![0.1, 0.0]);

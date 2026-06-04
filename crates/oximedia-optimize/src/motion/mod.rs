@@ -9,5 +9,8 @@ pub mod subpel;
 
 pub use bidirectional::{BiPredResult, BidirectionalOptimizer};
 pub use predictor::{MvPredictor, MvPredictorList, TemporalMvPredictor};
-pub use search::{MotionOptimizer, MotionSearchResult, MotionVector, SearchAlgorithm};
+pub use search::{
+    parallel_motion_search, MotionOptimizer, MotionSearchResult, MotionVector,
+    ParallelSearchResult, SearchAlgorithm,
+};
 pub use subpel::{SubpelOptimizer, SubpelPrecision};

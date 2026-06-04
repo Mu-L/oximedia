@@ -126,7 +126,11 @@ impl SsaiMarkerWriter {
     /// Breaks are sorted by `offset_secs` on construction.
     #[must_use]
     pub fn new(mut breaks: Vec<AdBreak>) -> Self {
-        breaks.sort_by(|a, b| a.offset_secs.partial_cmp(&b.offset_secs).unwrap_or(std::cmp::Ordering::Equal));
+        breaks.sort_by(|a, b| {
+            a.offset_secs
+                .partial_cmp(&b.offset_secs)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         Self { breaks }
     }
 
@@ -253,46 +257,74 @@ mod tests {
     fn test_total_ad_duration() {
         let writer = SsaiMarkerWriter::new(sample_breaks());
         let total = writer.total_ad_duration_secs();
-        assert!((total - 125.0).abs() < 1e-9, "expected 125s total, got {total}");
+        assert!(
+            (total - 125.0).abs() < 1e-9,
+            "expected 125s total, got {total}"
+        );
     }
 
     #[test]
     fn test_hls_cue_markers_contains_cue_out() {
         let writer = SsaiMarkerWriter::new(sample_breaks());
         let hls = writer.hls_cue_markers();
-        assert!(hls.contains("EXT-X-CUE-OUT"), "HLS output must contain CUE-OUT tag");
-        assert!(hls.contains("EXT-X-CUE-IN"), "HLS output must contain CUE-IN tag");
+        assert!(
+            hls.contains("EXT-X-CUE-OUT"),
+            "HLS output must contain CUE-OUT tag"
+        );
+        assert!(
+            hls.contains("EXT-X-CUE-IN"),
+            "HLS output must contain CUE-IN tag"
+        );
     }
 
     #[test]
     fn test_hls_cue_markers_duration() {
         let writer = SsaiMarkerWriter::new(vec![AdBreak::mid_roll("m1", 60.0, 30.0)]);
         let hls = writer.hls_cue_markers();
-        assert!(hls.contains("30.000"), "CUE-OUT should include 30-second duration");
+        assert!(
+            hls.contains("30.000"),
+            "CUE-OUT should include 30-second duration"
+        );
     }
 
     #[test]
     fn test_hls_daterange_tags_id() {
         let writer = SsaiMarkerWriter::new(vec![AdBreak::mid_roll("mid1", 60.0, 30.0)]);
         let tags = writer.hls_daterange_tags("2024-01-01T00:00:00");
-        assert!(tags.contains("mid1"), "DATERANGE tag should include break ID");
-        assert!(tags.contains("EXT-X-DATERANGE"), "should include DATERANGE tag");
+        assert!(
+            tags.contains("mid1"),
+            "DATERANGE tag should include break ID"
+        );
+        assert!(
+            tags.contains("EXT-X-DATERANGE"),
+            "should include DATERANGE tag"
+        );
     }
 
     #[test]
     fn test_dash_event_stream_structure() {
         let writer = SsaiMarkerWriter::new(vec![AdBreak::mid_roll("ev1", 60.0, 30.0)]);
         let xml = writer.dash_event_stream(90_000);
-        assert!(xml.contains("EventStream"), "DASH output should have EventStream element");
+        assert!(
+            xml.contains("EventStream"),
+            "DASH output should have EventStream element"
+        );
         assert!(xml.contains("ev1"), "DASH output should contain break ID");
-        assert!(xml.contains("presentationTime"), "DASH output should have presentationTime");
+        assert!(
+            xml.contains("presentationTime"),
+            "DASH output should have presentationTime"
+        );
     }
 
     #[test]
     fn test_breaks_in_range() {
         let writer = SsaiMarkerWriter::new(sample_breaks());
         let in_range = writer.breaks_in_range(50.0, 200.0);
-        assert_eq!(in_range.len(), 2, "should find ad1 and ad2 in range [50, 200)");
+        assert_eq!(
+            in_range.len(),
+            2,
+            "should find ad1 and ad2 in range [50, 200)"
+        );
         assert_eq!(in_range[0].break_id, "ad1");
         assert_eq!(in_range[1].break_id, "ad2");
     }
@@ -306,7 +338,11 @@ mod tests {
         ];
         let writer = SsaiMarkerWriter::new(unsorted);
         let offsets: Vec<f64> = writer.breaks.iter().map(|b| b.offset_secs).collect();
-        assert_eq!(offsets, vec![60.0, 180.0, 300.0], "breaks should be sorted by offset");
+        assert_eq!(
+            offsets,
+            vec![60.0, 180.0, 300.0],
+            "breaks should be sorted by offset"
+        );
     }
 
     #[test]

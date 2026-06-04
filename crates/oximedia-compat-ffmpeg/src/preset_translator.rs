@@ -112,9 +112,7 @@ pub struct TranslatedEncoderOptions {
 impl TranslatedEncoderOptions {
     /// Return `true` if no preset, tune, or profile was recognised.
     pub fn is_empty(&self) -> bool {
-        self.oxi_speed.is_none()
-            && self.oxi_tune.is_none()
-            && self.oxi_profile.is_none()
+        self.oxi_speed.is_none() && self.oxi_tune.is_none() && self.oxi_profile.is_none()
     }
 
     /// Return `true` if any diagnostic is at error level.
@@ -324,7 +322,8 @@ mod tests {
 
     #[test]
     fn test_translate_preset_medium() {
-        let speed = PresetTuneProfileTranslator::translate_preset("medium").expect("should succeed");
+        let speed =
+            PresetTuneProfileTranslator::translate_preset("medium").expect("should succeed");
         assert_eq!(speed, 6, "medium should map to AV1 speed 6");
     }
 
@@ -365,8 +364,8 @@ mod tests {
 
     #[test]
     fn test_translate_preset_unknown_returns_error() {
-        let err =
-            PresetTuneProfileTranslator::translate_preset("superduperslow").expect_err("should fail");
+        let err = PresetTuneProfileTranslator::translate_preset("superduperslow")
+            .expect_err("should fail");
         assert!(
             matches!(err, PresetTranslationError::UnknownPreset(_)),
             "should be UnknownPreset"
@@ -377,8 +376,7 @@ mod tests {
 
     #[test]
     fn test_translate_tune_film() {
-        let tune =
-            PresetTuneProfileTranslator::translate_tune("film").expect("should succeed");
+        let tune = PresetTuneProfileTranslator::translate_tune("film").expect("should succeed");
         assert_eq!(tune, "film");
     }
 
@@ -391,8 +389,7 @@ mod tests {
 
     #[test]
     fn test_translate_tune_grain() {
-        let tune =
-            PresetTuneProfileTranslator::translate_tune("grain").expect("should succeed");
+        let tune = PresetTuneProfileTranslator::translate_tune("grain").expect("should succeed");
         assert_eq!(tune, "grain");
     }
 
@@ -405,8 +402,8 @@ mod tests {
 
     #[test]
     fn test_translate_tune_unknown_returns_error() {
-        let err =
-            PresetTuneProfileTranslator::translate_tune("totally_unknown_tune").expect_err("should fail");
+        let err = PresetTuneProfileTranslator::translate_tune("totally_unknown_tune")
+            .expect_err("should fail");
         assert!(
             matches!(err, PresetTranslationError::UnknownTune(_)),
             "should be UnknownTune"
@@ -459,8 +456,8 @@ mod tests {
 
     #[test]
     fn test_translate_profile_unknown_returns_error() {
-        let err =
-            PresetTuneProfileTranslator::translate_profile("superultra422").expect_err("should fail");
+        let err = PresetTuneProfileTranslator::translate_profile("superultra422")
+            .expect_err("should fail");
         assert!(
             matches!(err, PresetTranslationError::UnknownProfile(_)),
             "should be UnknownProfile"
@@ -472,12 +469,18 @@ mod tests {
     #[test]
     fn test_from_args_full_options() {
         let a = args(&[
-            "-i", "input.mkv",
-            "-c:v", "libaom-av1",
-            "-preset", "medium",
-            "-tune", "film",
-            "-profile:v", "main",
-            "-crf", "28",
+            "-i",
+            "input.mkv",
+            "-c:v",
+            "libaom-av1",
+            "-preset",
+            "medium",
+            "-tune",
+            "film",
+            "-profile:v",
+            "main",
+            "-crf",
+            "28",
             "output.webm",
         ]);
         let opts = PresetTuneProfileTranslator::from_args(&a);
@@ -510,7 +513,10 @@ mod tests {
     fn test_from_args_no_options() {
         let a = args(&["-i", "in.mkv", "-c:v", "av1", "out.webm"]);
         let opts = PresetTuneProfileTranslator::from_args(&a);
-        assert!(opts.is_empty(), "should be empty when no preset/tune/profile");
+        assert!(
+            opts.is_empty(),
+            "should be empty when no preset/tune/profile"
+        );
     }
 
     #[test]
@@ -566,9 +572,15 @@ mod tests {
     #[test]
     fn test_known_presets_not_empty() {
         let presets = PresetTuneProfileTranslator::known_presets();
-        assert!(presets.len() >= 10, "should have at least 10 preset entries");
+        assert!(
+            presets.len() >= 10,
+            "should have at least 10 preset entries"
+        );
         assert!(presets.contains(&"medium"), "medium should be present");
-        assert!(presets.contains(&"ultrafast"), "ultrafast should be present");
+        assert!(
+            presets.contains(&"ultrafast"),
+            "ultrafast should be present"
+        );
     }
 
     #[test]
@@ -581,7 +593,10 @@ mod tests {
     #[test]
     fn test_known_profiles_not_empty() {
         let profiles = PresetTuneProfileTranslator::known_profiles();
-        assert!(profiles.len() >= 5, "should have at least 5 profile entries");
+        assert!(
+            profiles.len() >= 5,
+            "should have at least 5 profile entries"
+        );
         assert!(profiles.contains(&"main"), "main should be present");
     }
 

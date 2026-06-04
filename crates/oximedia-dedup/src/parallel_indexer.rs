@@ -121,10 +121,7 @@ impl IndexEntry {
     /// Return the file extension in lowercase (no leading dot).
     #[must_use]
     pub fn extension(&self) -> &str {
-        self.path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
+        self.path.extension().and_then(|e| e.to_str()).unwrap_or("")
     }
 }
 
@@ -178,10 +175,7 @@ impl IndexResult {
                 .or_default()
                 .push(entry);
         }
-        by_hash
-            .into_values()
-            .filter(|g| g.len() >= 2)
-            .collect()
+        by_hash.into_values().filter(|g| g.len() >= 2).collect()
     }
 
     /// Total bytes occupied by redundant copies (exact duplicates only).
@@ -263,10 +257,7 @@ impl ParallelIndexer {
         let start = Instant::now();
 
         // Pre-filter paths according to configuration.
-        let filtered: Vec<&PathBuf> = paths
-            .iter()
-            .filter(|p| self.passes_filter(p))
-            .collect();
+        let filtered: Vec<&PathBuf> = paths.iter().filter(|p| self.passes_filter(p)).collect();
 
         let total = filtered.len();
         let completed = Arc::new(Mutex::new(0usize));
@@ -350,14 +341,12 @@ impl ParallelIndexer {
 
 /// Process a single file: hash it and optionally compute a perceptual hash.
 fn process_file(path: &Path, config: &IndexConfig) -> Result<IndexEntry, IndexError> {
-    let meta = std::fs::metadata(path).map_err(|e| {
-        IndexError::new(path.to_path_buf(), format!("stat failed: {e}"))
-    })?;
+    let meta = std::fs::metadata(path)
+        .map_err(|e| IndexError::new(path.to_path_buf(), format!("stat failed: {e}")))?;
     let size_bytes = meta.len();
 
-    let file_hash: FileHash = compute_file_hash(path).map_err(|e| {
-        IndexError::new(path.to_path_buf(), format!("hash failed: {e}"))
-    })?;
+    let file_hash: FileHash = compute_file_hash(path)
+        .map_err(|e| IndexError::new(path.to_path_buf(), format!("hash failed: {e}")))?;
 
     let blake3_hex = file_hash.to_hex();
 
@@ -416,15 +405,16 @@ fn build_pool(max_threads: usize) -> rayon::ThreadPool {
     };
 
     // Single-threaded fallback (all platforms: always succeeds).
-    primary.or_else(|_| rayon::ThreadPoolBuilder::new().num_threads(1).build())
-           // Default-configuration fallback as a last resort.
-           .or_else(|_| rayon::ThreadPoolBuilder::new().build())
-           .unwrap_or_else(|e| {
-               // This branch is statistically impossible: rayon cannot build
-               // *any* thread pool, which indicates a severe OS-level failure.
-               // Log descriptively rather than using a bare unwrap.
-               panic!("oximedia-dedup: rayon failed to create any thread pool: {e}")
-           })
+    primary
+        .or_else(|_| rayon::ThreadPoolBuilder::new().num_threads(1).build())
+        // Default-configuration fallback as a last resort.
+        .or_else(|_| rayon::ThreadPoolBuilder::new().build())
+        .unwrap_or_else(|e| {
+            // This branch is statistically impossible: rayon cannot build
+            // *any* thread pool, which indicates a severe OS-level failure.
+            // Log descriptively rather than using a bare unwrap.
+            panic!("oximedia-dedup: rayon failed to create any thread pool: {e}")
+        })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -456,7 +446,7 @@ mod tests {
         let path = write_temp_file(b"hello world");
         let config = IndexConfig::default();
         let indexer = ParallelIndexer::new(config);
-        let result = indexer.index_files(&[path.clone()]);
+        let result = indexer.index_files(std::slice::from_ref(&path));
         assert_eq!(result.indexed_count(), 1);
         assert_eq!(result.error_count(), 0);
         assert_eq!(result.entries[0].size_bytes, 11);
@@ -562,7 +552,7 @@ mod tests {
             ..Default::default()
         };
         let indexer = ParallelIndexer::new(config);
-        let result = indexer.index_files(&[path.clone()]);
+        let result = indexer.index_files(std::slice::from_ref(&path));
         assert_eq!(result.indexed_count(), 1);
         assert!(result.entries[0].phash.is_some());
         let _ = std::fs::remove_file(&path);
@@ -606,7 +596,7 @@ mod tests {
         let p = write_temp_file(b"throughput test");
         let config = IndexConfig::default();
         let indexer = ParallelIndexer::new(config);
-        let result = indexer.index_files(&[p.clone()]);
+        let result = indexer.index_files(std::slice::from_ref(&p));
         // files_per_second may be very high on a fast machine; just check > 0.
         assert!(result.files_per_second() >= 0.0);
         let _ = std::fs::remove_file(&p);

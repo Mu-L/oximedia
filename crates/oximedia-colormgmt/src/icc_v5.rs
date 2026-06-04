@@ -45,33 +45,23 @@ pub const ICC_VERSION_5: u8 = 5;
 // ICC.1:2022 §7.2 and ICC.2:2023 §7.2.  Not all offsets are accessed in
 // every code path, but they are part of the normative specification and
 // are retained here for reference and future use.
-#[allow(dead_code)]
 const HEADER_PROFILE_SIZE_OFFSET: usize = 0;
-#[allow(dead_code)]
-const HEADER_CMM_TYPE_OFFSET: usize = 4;
+const _HEADER_CMM_TYPE_OFFSET: usize = 4;
 const HEADER_VERSION_OFFSET: usize = 8;
 const HEADER_CLASS_OFFSET: usize = 12;
 const HEADER_COLORSPACE_OFFSET: usize = 16;
 const HEADER_PCS_OFFSET: usize = 20;
-#[allow(dead_code)]
-const HEADER_CREATION_DATE_OFFSET: usize = 24;
+const _HEADER_CREATION_DATE_OFFSET: usize = 24;
 const HEADER_SIGNATURE_OFFSET: usize = 36;
-#[allow(dead_code)]
-const HEADER_PLATFORM_OFFSET: usize = 40;
+const _HEADER_PLATFORM_OFFSET: usize = 40;
 const HEADER_FLAGS_OFFSET: usize = 44;
-#[allow(dead_code)]
-const HEADER_MANUFACTURER_OFFSET: usize = 48;
-#[allow(dead_code)]
-const HEADER_MODEL_OFFSET: usize = 52;
-#[allow(dead_code)]
-const HEADER_ATTRIBUTES_OFFSET: usize = 56;
+const _HEADER_MANUFACTURER_OFFSET: usize = 48;
+const _HEADER_MODEL_OFFSET: usize = 52;
+const _HEADER_ATTRIBUTES_OFFSET: usize = 56;
 const HEADER_RENDERING_INTENT_OFFSET: usize = 64;
-#[allow(dead_code)]
-const HEADER_ILLUMINANT_OFFSET: usize = 68;
-#[allow(dead_code)]
-const HEADER_CREATOR_OFFSET: usize = 80;
-#[allow(dead_code)]
-const HEADER_PROFILE_ID_OFFSET: usize = 84;
+const _HEADER_ILLUMINANT_OFFSET: usize = 68;
+const _HEADER_CREATOR_OFFSET: usize = 80;
+const _HEADER_PROFILE_ID_OFFSET: usize = 84;
 const HEADER_SIZE: usize = 128;
 
 // ── Profile version ───────────────────────────────────────────────────────────
@@ -91,7 +81,11 @@ impl ProfileVersion {
     /// Creates a new profile version.
     #[must_use]
     pub const fn new(major: u8, minor: u8, bugfix: u8) -> Self {
-        Self { major, minor, bugfix }
+        Self {
+            major,
+            minor,
+            bugfix,
+        }
     }
 
     /// ICC v2.0.0
@@ -317,7 +311,11 @@ impl SpectralRange {
                 "SpectralRange: num_steps must be at least 2".into(),
             ));
         }
-        Ok(Self { start_nm, end_nm, num_steps })
+        Ok(Self {
+            start_nm,
+            end_nm,
+            num_steps,
+        })
     }
 
     /// Returns the wavelength step size in nanometres.
@@ -457,9 +455,13 @@ impl MpeStage {
     #[must_use]
     pub fn output_channels(&self) -> usize {
         match self {
-            Self::Matrix { output_channels, .. } => *output_channels,
+            Self::Matrix {
+                output_channels, ..
+            } => *output_channels,
             Self::CurveSet { channels, .. } => *channels,
-            Self::Clut { output_channels, .. } => *output_channels,
+            Self::Clut {
+                output_channels, ..
+            } => *output_channels,
             Self::Identity { channels } => *channels,
         }
     }
@@ -884,11 +886,15 @@ impl IccV5HeaderBuilder {
     ///
     /// Returns `ColorError::IccProfile` if required fields are missing.
     pub fn build(self) -> Result<IccV5Header> {
-        let class = self.class.ok_or_else(|| {
-            ColorError::IccProfile("IccV5HeaderBuilder: class not set".into())
-        })?;
+        let class = self
+            .class
+            .ok_or_else(|| ColorError::IccProfile("IccV5HeaderBuilder: class not set".into()))?;
 
-        let spectral_pcs_flags = if self.spectral_range.is_some() { 0x8000u16 } else { 0 };
+        let spectral_pcs_flags = if self.spectral_range.is_some() {
+            0x8000u16
+        } else {
+            0
+        };
 
         Ok(IccV5Header {
             profile_size: 0, // Updated when full profile is serialised
@@ -1054,7 +1060,9 @@ mod tests {
     #[test]
     fn test_mpe_stage_identity() {
         let s = MpeStage::Identity { channels: 3 };
-        let out = s.apply(&[0.1, 0.5, 0.9]).expect("identity stage should succeed");
+        let out = s
+            .apply(&[0.1, 0.5, 0.9])
+            .expect("identity stage should succeed");
         assert_eq!(out, vec![0.1, 0.5, 0.9]);
     }
 
@@ -1064,14 +1072,12 @@ mod tests {
         let s = MpeStage::Matrix {
             input_channels: 3,
             output_channels: 3,
-            coefficients: vec![
-                1.0, 0.0, 0.0,
-                0.0, 1.0, 0.0,
-                0.0, 0.0, 1.0,
-            ],
+            coefficients: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             offset: None,
         };
-        let out = s.apply(&[0.2, 0.4, 0.6]).expect("matrix stage should succeed");
+        let out = s
+            .apply(&[0.2, 0.4, 0.6])
+            .expect("matrix stage should succeed");
         for (a, b) in out.iter().zip([0.2, 0.4, 0.6].iter()) {
             assert!((a - b).abs() < 1e-12);
         }
@@ -1100,7 +1106,9 @@ mod tests {
     #[test]
     fn test_mpe_pipeline_empty() {
         let p = MpePipeline::new();
-        let out = p.apply(&[0.5, 0.5, 0.5]).expect("empty pipeline should pass-through");
+        let out = p
+            .apply(&[0.5, 0.5, 0.5])
+            .expect("empty pipeline should pass-through");
         assert_eq!(out, vec![0.5, 0.5, 0.5]);
     }
 
@@ -1112,7 +1120,9 @@ mod tests {
             channels: 3,
             gamma: vec![1.0, 1.0, 1.0],
         });
-        let out = p.apply(&[0.3, 0.6, 0.9]).expect("two-stage pipeline should succeed");
+        let out = p
+            .apply(&[0.3, 0.6, 0.9])
+            .expect("two-stage pipeline should succeed");
         for (a, b) in out.iter().zip([0.3, 0.6, 0.9].iter()) {
             assert!((a - b).abs() < 1e-10);
         }
@@ -1149,7 +1159,10 @@ mod tests {
             .expect("build should succeed");
 
         let bytes = header.to_bytes();
-        assert_eq!(&bytes[HEADER_SIGNATURE_OFFSET..HEADER_SIGNATURE_OFFSET + 4], b"acsp");
+        assert_eq!(
+            &bytes[HEADER_SIGNATURE_OFFSET..HEADER_SIGNATURE_OFFSET + 4],
+            b"acsp"
+        );
         // Check version byte is 5
         assert_eq!(bytes[HEADER_VERSION_OFFSET], 5);
     }

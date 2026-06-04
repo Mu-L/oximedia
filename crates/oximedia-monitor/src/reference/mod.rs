@@ -75,7 +75,13 @@ impl ReferenceComparator {
         }
     }
 
-    fn calculate_difference(&self, ref_frame: &[u8], frame: &[u8], width: u32, height: u32) -> ReferenceDiff {
+    fn calculate_difference(
+        &self,
+        ref_frame: &[u8],
+        frame: &[u8],
+        width: u32,
+        height: u32,
+    ) -> ReferenceDiff {
         let mut mse = 0.0f32;
         let pixel_count = (width * height * 3) as usize;
 

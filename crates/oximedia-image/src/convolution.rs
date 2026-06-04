@@ -464,6 +464,261 @@ impl SeparableFilter {
 }
 
 // ---------------------------------------------------------------------------
+// Tiled parallel convolution (u8 multi-channel API)
+// ---------------------------------------------------------------------------
+
+/// Apply a separable 2D convolution kernel to a `u8` image using tiled rayon
+/// parallelism.
+///
+/// # Parameters
+///
+/// - `src`: raw pixel bytes in row-major, interleaved-channel order.
+/// - `w`, `h`: image dimensions in pixels.
+/// - `channels`: number of channels per pixel (e.g. 1 for grey, 3 for RGB).
+/// - `kernel`: the 1-D kernel (applied horizontally then vertically — separable
+///   convolution). Its length should be odd. Weights are normalised internally
+///   so that the kernel sums to 1.
+/// - `tile_size`: tile width *and* height in pixels (default: 256).
+///
+/// # Returns
+///
+/// A new `Vec<u8>` of length `w * h * channels` containing the convolution
+/// result. Each channel is processed independently.
+///
+/// # Notes
+///
+/// The function uses reflect-border padding at the image boundary so that tiles
+/// at the edge produce the same output as a full-image sequential pass.
+pub fn convolve_tiled(
+    src: &[u8],
+    w: u32,
+    h: u32,
+    channels: u32,
+    kernel: &[f32],
+    tile_size: u32,
+) -> Vec<u8> {
+    use rayon::prelude::*;
+
+    let w = w as usize;
+    let h = h as usize;
+    let channels = channels as usize;
+    let tile_size = tile_size as usize;
+
+    let klen = kernel.len();
+    let pad = klen / 2; // half-width of kernel
+
+    // Normalise kernel so it sums to 1
+    let ksum: f32 = kernel.iter().sum();
+    let norm_kernel: Vec<f32> = if ksum.abs() > f32::EPSILON {
+        kernel.iter().map(|&v| v / ksum).collect()
+    } else {
+        kernel.to_vec()
+    };
+
+    // ── Helper: clamp-reflect a coordinate into [0, size) ────────────────
+    #[inline]
+    fn reflect(v: isize, size: usize) -> usize {
+        let n = size as isize;
+        if size == 0 {
+            return 0;
+        }
+        let mut x = v;
+        while x < 0 {
+            x = -x - 1;
+        }
+        while x >= n {
+            x = 2 * n - x - 1;
+        }
+        x as usize
+    }
+
+    // ── Horizontal pass: for each row, convolve with kernel across x ──────
+    fn horiz_pass(
+        src: &[u8],
+        w: usize,
+        h: usize,
+        channels: usize,
+        kernel: &[f32],
+        pad: usize,
+        out: &mut Vec<f32>,
+    ) {
+        out.resize(w * h * channels, 0.0);
+        for y in 0..h {
+            for x in 0..w {
+                for c in 0..channels {
+                    let mut acc = 0.0f32;
+                    for (ki, &kw) in kernel.iter().enumerate() {
+                        let sx_signed = x as isize + ki as isize - pad as isize;
+                        let sx = reflect(sx_signed, w);
+                        acc += src[y * w * channels + sx * channels + c] as f32 * kw;
+                    }
+                    out[y * w * channels + x * channels + c] = acc;
+                }
+            }
+        }
+    }
+
+    // ── Vertical pass: convolve f32 intermediate across y, write to u8 ───
+    fn vert_pass(
+        inter: &[f32],
+        w: usize,
+        h: usize,
+        channels: usize,
+        kernel: &[f32],
+        pad: usize,
+        dst: &mut [u8],
+    ) {
+        for y in 0..h {
+            for x in 0..w {
+                for c in 0..channels {
+                    let mut acc = 0.0f32;
+                    for (ki, &kw) in kernel.iter().enumerate() {
+                        let sy_signed = y as isize + ki as isize - pad as isize;
+                        let sy = reflect(sy_signed, h);
+                        acc += inter[sy * w * channels + x * channels + c] * kw;
+                    }
+                    let v = acc.round().clamp(0.0, 255.0) as u8;
+                    dst[y * w * channels + x * channels + c] = v;
+                }
+            }
+        }
+    }
+
+    // ── Trivial / small image: sequential path ──────────────────────────
+    if w == 0 || h == 0 || klen == 0 {
+        return src.to_vec();
+    }
+
+    // ── Enumerate tile grid ─────────────────────────────────────────────
+    let cols = (w + tile_size - 1) / tile_size;
+    let rows = (h + tile_size - 1) / tile_size;
+
+    // Build flat list of tile descriptors (out_x, out_y, tile_w, tile_h)
+    let tile_descs: Vec<(usize, usize, usize, usize)> = (0..rows)
+        .flat_map(|tr| {
+            (0..cols).map(move |tc| {
+                let ox = tc * tile_size;
+                let oy = tr * tile_size;
+                let tw = (w - ox).min(tile_size);
+                let th = (h - oy).min(tile_size);
+                (ox, oy, tw, th)
+            })
+        })
+        .collect();
+
+    // ── Process tiles in parallel ───────────────────────────────────────
+    // Each tile: extract halo-padded slice → horiz pass → vert pass →
+    // u8 result for (tile_w × tile_h × channels).
+    let tile_results: Vec<(usize, usize, usize, usize, Vec<u8>)> = tile_descs
+        .par_iter()
+        .map(|&(ox, oy, tw, th)| {
+            // Expanded read region including halo
+            let read_x_start = ox.saturating_sub(pad);
+            let read_y_start = oy.saturating_sub(pad);
+            let read_x_end = (ox + tw + pad).min(w);
+            let read_y_end = (oy + th + pad).min(h);
+            let rw = read_x_end - read_x_start;
+            let rh = read_y_end - read_y_start;
+
+            // Copy halo-expanded region from src (reflect at borders handled
+            // by using the full-image reflect coordinates in the pass, so we
+            // re-run the full-pass using the coordinate offset approach).
+            //
+            // Rather than extracting a sub-buffer (which complicates padding
+            // at edges), we apply the passes directly over the tile output
+            // coordinates but read from the full src.  This is safe because
+            // src is read-only and tiles write to disjoint output regions.
+
+            let mut inter: Vec<f32> = vec![0.0; tw * th * channels];
+            // Horizontal pass over the tile rows
+            for ty in 0..th {
+                let sy = oy + ty;
+                for tx in 0..tw {
+                    let sx = ox + tx;
+                    for c in 0..channels {
+                        let mut acc = 0.0f32;
+                        for (ki, &kw) in norm_kernel.iter().enumerate() {
+                            let src_x_signed = sx as isize + ki as isize - pad as isize;
+                            let src_x = reflect(src_x_signed, w);
+                            acc += src[sy * w * channels + src_x * channels + c] as f32 * kw;
+                        }
+                        inter[ty * tw * channels + tx * channels + c] = acc;
+                    }
+                }
+            }
+
+            // Vertical pass over the intermediate buffer
+            let mut tile_out: Vec<u8> = vec![0u8; tw * th * channels];
+            for ty in 0..th {
+                let sy = oy + ty;
+                for tx in 0..tw {
+                    for c in 0..channels {
+                        let mut acc = 0.0f32;
+                        for (ki, &kw) in norm_kernel.iter().enumerate() {
+                            let src_y_signed = sy as isize + ki as isize - pad as isize;
+                            let src_y = reflect(src_y_signed, h);
+                            // intermediate is indexed relative to tile
+                            let tile_src_y = src_y.saturating_sub(oy);
+                            // For rows outside this tile's vertical range, fall
+                            // back to reading from the full-image horizontal-
+                            // pass result. Since we only have per-tile
+                            // intermediate, re-do the horizontal accumulation
+                            // for rows outside [oy, oy+th).
+                            let int_val = if src_y >= oy && src_y < oy + th {
+                                inter[tile_src_y * tw * channels + tx * channels + c]
+                            } else {
+                                // Re-compute horizontal convolution for this row
+                                let sx = ox + tx;
+                                let mut hacc = 0.0f32;
+                                for (ki2, &kw2) in norm_kernel.iter().enumerate() {
+                                    let src_x_signed = sx as isize + ki2 as isize - pad as isize;
+                                    let src_x = reflect(src_x_signed, w);
+                                    hacc += src[src_y * w * channels + src_x * channels + c] as f32
+                                        * kw2;
+                                }
+                                hacc
+                            };
+                            acc += int_val * kw;
+                        }
+                        let v = acc.round().clamp(0.0, 255.0) as u8;
+                        tile_out[ty * tw * channels + tx * channels + c] = v;
+                    }
+                }
+            }
+
+            // suppress warnings from the unused local variables for rw/rh
+            let _ = (rw, rh, read_x_start, read_y_start);
+            (ox, oy, tw, th, tile_out)
+        })
+        .collect();
+
+    // ── Reassemble ──────────────────────────────────────────────────────
+    let mut dst = vec![0u8; w * h * channels];
+    for (ox, oy, tw, th, tile_data) in tile_results {
+        for ty in 0..th {
+            let dst_row = oy + ty;
+            let src_off = ty * tw * channels;
+            let dst_off = dst_row * w * channels + ox * channels;
+            dst[dst_off..dst_off + tw * channels]
+                .copy_from_slice(&tile_data[src_off..src_off + tw * channels]);
+        }
+    }
+    dst
+}
+
+/// Apply a separable 2D convolution to a `u8` image using the default tile size
+/// of 256×256 pixels.  See [`convolve_tiled`] for full documentation.
+pub fn convolve_tiled_default(
+    src: &[u8],
+    w: u32,
+    h: u32,
+    channels: u32,
+    kernel: &[f32],
+) -> Vec<u8> {
+    convolve_tiled(src, w, h, channels, kernel, 256)
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -719,6 +974,130 @@ mod tests {
         // Uniform input should produce ~uniform output
         for &v in &output {
             assert!((v - 0.5).abs() < 0.05, "Large kernel uniform mismatch: {v}");
+        }
+    }
+
+    // ── convolve_tiled tests ────────────────────────────────────────────
+
+    /// Build a sequential separable-conv reference for u8 images.
+    fn convolve_sequential_u8(
+        src: &[u8],
+        w: u32,
+        h: u32,
+        channels: u32,
+        kernel: &[f32],
+    ) -> Vec<u8> {
+        let w = w as usize;
+        let h = h as usize;
+        let channels = channels as usize;
+        let klen = kernel.len();
+        let pad = klen / 2;
+
+        let ksum: f32 = kernel.iter().sum();
+        let nk: Vec<f32> = if ksum.abs() > f32::EPSILON {
+            kernel.iter().map(|&v| v / ksum).collect()
+        } else {
+            kernel.to_vec()
+        };
+
+        fn reflect_c(v: isize, size: usize) -> usize {
+            let n = size as isize;
+            if size == 0 {
+                return 0;
+            }
+            let mut x = v;
+            while x < 0 {
+                x = -x - 1;
+            }
+            while x >= n {
+                x = 2 * n - x - 1;
+            }
+            x as usize
+        }
+
+        // Horizontal pass
+        let mut inter = vec![0.0f32; w * h * channels];
+        for y in 0..h {
+            for x in 0..w {
+                for c in 0..channels {
+                    let mut acc = 0.0f32;
+                    for (ki, &kw) in nk.iter().enumerate() {
+                        let sx = reflect_c(x as isize + ki as isize - pad as isize, w);
+                        acc += src[y * w * channels + sx * channels + c] as f32 * kw;
+                    }
+                    inter[y * w * channels + x * channels + c] = acc;
+                }
+            }
+        }
+        // Vertical pass
+        let mut dst = vec![0u8; w * h * channels];
+        for y in 0..h {
+            for x in 0..w {
+                for c in 0..channels {
+                    let mut acc = 0.0f32;
+                    for (ki, &kw) in nk.iter().enumerate() {
+                        let sy = reflect_c(y as isize + ki as isize - pad as isize, h);
+                        acc += inter[sy * w * channels + x * channels + c] * kw;
+                    }
+                    dst[y * w * channels + x * channels + c] = acc.round().clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+        dst
+    }
+
+    #[test]
+    fn test_convolve_tiled_matches_sequential() {
+        // 512×512 single-channel box blur: tiled result == sequential result (±1)
+        let w = 512u32;
+        let h = 512u32;
+        let channels = 1u32;
+        let src: Vec<u8> = (0..w * h).map(|i| (i % 251) as u8).collect();
+        let kernel = vec![1.0f32; 3]; // box kernel
+
+        let tiled = convolve_tiled(&src, w, h, channels, &kernel, 256);
+        let seq = convolve_sequential_u8(&src, w, h, channels, &kernel);
+
+        assert_eq!(tiled.len(), seq.len());
+        for (i, (&t, &s)) in tiled.iter().zip(seq.iter()).enumerate() {
+            assert!(
+                (t as i32 - s as i32).abs() <= 1,
+                "Mismatch at pixel {i}: tiled={t}, seq={s}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_convolve_tiled_edge_tiles() {
+        // Small image (17×13) with 3-channel data to exercise edge tiles
+        let w = 17u32;
+        let h = 13u32;
+        let channels = 3u32;
+        let n = (w * h * channels) as usize;
+        let src: Vec<u8> = (0..n).map(|i| (i % 200) as u8).collect();
+        let kernel = vec![1.0f32; 3]; // box
+
+        // Should not panic and produce correct output length
+        let out = convolve_tiled(&src, w, h, channels, &kernel, 8);
+        assert_eq!(out.len(), n, "output length mismatch");
+        // All values must be finite (trivially true for u8, but we verify non-empty)
+        assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn test_convolve_tiled_large_kernel() {
+        // Kernel wider than tile size (tile=4, kernel=9): must not panic
+        let w = 16u32;
+        let h = 16u32;
+        let channels = 1u32;
+        let src = vec![128u8; (w * h) as usize];
+        // Gaussian kernel of size 9 (wider than a 4-pixel tile)
+        let kernel: Vec<f32> = vec![1.0, 4.0, 9.0, 16.0, 20.0, 16.0, 9.0, 4.0, 1.0];
+        let out = convolve_tiled(&src, w, h, channels, &kernel, 4);
+        assert_eq!(out.len(), (w * h) as usize);
+        // Constant input → constant output (all values should be ~128)
+        for &v in &out {
+            assert!((v as i32 - 128).abs() <= 1, "expected ~128, got {v}");
         }
     }
 }

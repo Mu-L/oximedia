@@ -287,6 +287,160 @@ pub fn generate_db_scale(min_db: f64, max_db: f64) -> Vec<ScaleMark> {
     marks
 }
 
+/// One column of a waveform display (oscilloscope-style per-pixel envelope).
+#[derive(Debug, Clone)]
+pub struct WaveformColumn {
+    /// Minimum sample value in this column's time window.
+    pub min: f32,
+    /// Maximum sample value in this column's time window.
+    pub max: f32,
+    /// Root-mean-square level in this column's time window.
+    pub rms: f32,
+}
+
+/// Per-pixel waveform envelope data suitable for oscilloscope display.
+#[derive(Debug, Clone)]
+pub struct WaveformData {
+    /// Ordered list of per-column envelope data, one entry per display pixel column.
+    pub columns: Vec<WaveformColumn>,
+}
+
+impl WaveformData {
+    /// Generate waveform display data from interleaved audio samples.
+    ///
+    /// `samples` — mono or interleaved audio (use channel 0 for simplicity)
+    /// `width`   — number of display columns (pixels wide)
+    pub fn generate(samples: &[f32], width: usize) -> Self {
+        if samples.is_empty() || width == 0 {
+            return Self { columns: vec![] };
+        }
+        let mut columns = Vec::with_capacity(width);
+        for col in 0..width {
+            let start = col * samples.len() / width;
+            let end = ((col + 1) * samples.len() / width)
+                .max(start + 1)
+                .min(samples.len());
+            let segment = &samples[start..end];
+            let mut min = f32::INFINITY;
+            let mut max = f32::NEG_INFINITY;
+            let mut sum_sq = 0.0f32;
+            for &s in segment {
+                if s < min {
+                    min = s;
+                }
+                if s > max {
+                    max = s;
+                }
+                sum_sq += s * s;
+            }
+            let rms = (sum_sq / segment.len() as f32).sqrt();
+            columns.push(WaveformColumn { min, max, rms });
+        }
+        Self { columns }
+    }
+}
+
+/// One bin in a vectorscope display grid.
+#[derive(Debug, Clone, Default)]
+pub struct VectorscopeBin {
+    /// Accumulated hit count for this (x, y) position.
+    pub count: u32,
+}
+
+/// Vectorscope data for chroma/phase display.
+#[derive(Debug, Clone)]
+pub struct VectorscopeData {
+    /// 2D grid of bins, row-major: bins[y * width + x].
+    pub bins: Vec<VectorscopeBin>,
+    /// Horizontal dimension of the bin grid in pixels.
+    pub width: usize,
+    /// Vertical dimension of the bin grid in pixels.
+    pub height: usize,
+}
+
+/// Polar reference point for the 75% color bar graticule.
+#[derive(Debug, Clone)]
+pub struct GraticulePoint {
+    /// Normalized X coordinate in [-1, 1].
+    pub x: f32,
+    /// Normalized Y coordinate in [-1, 1].
+    pub y: f32,
+    /// Short human-readable label for this color bar reference (e.g. "Y", "C", "G").
+    pub label: &'static str,
+}
+
+impl VectorscopeData {
+    /// Generate vectorscope data from (Cb, Cr) chroma pairs in [-0.5, 0.5].
+    ///
+    /// Cb maps to X axis, Cr maps to Y axis.
+    /// Values outside [-0.5, 0.5] are clamped to the grid boundary.
+    pub fn generate(cb_cr_pairs: &[(f32, f32)], width: usize, height: usize) -> Self {
+        let bins = vec![VectorscopeBin::default(); width * height];
+        let mut data = Self {
+            bins,
+            width,
+            height,
+        };
+        for &(cb, cr) in cb_cr_pairs {
+            // Map [-0.5, 0.5] → [0, width/height)
+            let nx = ((cb + 0.5).clamp(0.0, 1.0) * (width - 1) as f32) as usize;
+            let ny = ((cr + 0.5).clamp(0.0, 1.0) * (height - 1) as f32) as usize;
+            let idx = ny * width + nx;
+            if idx < data.bins.len() {
+                data.bins[idx].count = data.bins[idx].count.saturating_add(1);
+            }
+        }
+        data
+    }
+
+    /// Returns the 8 standard 75% color-bar reference points in (Cb, Cr) space.
+    pub fn graticule_75pct_bar() -> Vec<GraticulePoint> {
+        // Standard 75% color-bar CbCr values (BT.601/BT.709 approximate)
+        vec![
+            GraticulePoint {
+                x: -0.169,
+                y: 0.500,
+                label: "Y",
+            }, // Yellow
+            GraticulePoint {
+                x: -0.338,
+                y: -0.169,
+                label: "C",
+            }, // Cyan
+            GraticulePoint {
+                x: -0.169,
+                y: -0.338,
+                label: "G",
+            }, // Green
+            GraticulePoint {
+                x: 0.169,
+                y: 0.169,
+                label: "M",
+            }, // Magenta
+            GraticulePoint {
+                x: 0.500,
+                y: 0.169,
+                label: "R",
+            }, // Red
+            GraticulePoint {
+                x: 0.338,
+                y: -0.169,
+                label: "B",
+            }, // Blue
+            GraticulePoint {
+                x: 0.0,
+                y: 0.0,
+                label: "W",
+            }, // White (origin)
+            GraticulePoint {
+                x: 0.0,
+                y: 0.0,
+                label: "K",
+            }, // Black (origin)
+        ]
+    }
+}
+
 /// Circular meter configuration for radial displays.
 #[derive(Clone, Debug)]
 pub struct CircularMeterConfig {
@@ -397,5 +551,68 @@ mod tests {
 
         let circular_config = CircularMeterConfig::default();
         assert_eq!(circular_config.radius, 80);
+    }
+
+    #[test]
+    fn test_waveform_column_bounds_samples() {
+        let samples: Vec<f32> = (0..100).map(|i| (i as f32 / 50.0) - 1.0).collect();
+        let data = WaveformData::generate(&samples, 10);
+        assert_eq!(data.columns.len(), 10);
+        for col in &data.columns {
+            // Every sample in the segment must lie within [min, max]
+            assert!(col.min <= col.max);
+            assert!(col.rms >= 0.0 && col.rms <= 1.0 + 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_waveform_column_count() {
+        let samples = vec![0.0f32; 100];
+        let data = WaveformData::generate(&samples, 16);
+        assert_eq!(data.columns.len(), 16);
+    }
+
+    #[test]
+    fn test_waveform_empty_returns_empty() {
+        let data = WaveformData::generate(&[], 10);
+        assert!(data.columns.is_empty());
+        let data2 = WaveformData::generate(&[0.1, 0.2], 0);
+        assert!(data2.columns.is_empty());
+    }
+
+    #[test]
+    fn test_vectorscope_correct_quadrant() {
+        // (Cb=0.25, Cr=0.25) → right-top quadrant (x > width/2, y > height/2)
+        let pairs = vec![(0.25f32, 0.25f32)];
+        let data = VectorscopeData::generate(&pairs, 32, 32);
+        // Find the bin with count > 0
+        let hit = data
+            .bins
+            .iter()
+            .position(|b| b.count > 0)
+            .expect("expected a hit bin");
+        let hx = hit % 32;
+        let hy = hit / 32;
+        assert!(hx > 16, "x should be in right half for Cb=0.25");
+        assert!(hy > 16, "y should be in top half for Cr=0.25");
+    }
+
+    #[test]
+    fn test_vectorscope_bin_accumulation() {
+        let pairs = vec![(0.0f32, 0.0f32); 5]; // 5 identical pairs → bin count = 5
+        let data = VectorscopeData::generate(&pairs, 16, 16);
+        let total: u32 = data.bins.iter().map(|b| b.count).sum();
+        assert_eq!(total, 5);
+    }
+
+    #[test]
+    fn test_graticule_has_8_points() {
+        let graticule = VectorscopeData::graticule_75pct_bar();
+        assert_eq!(graticule.len(), 8);
+        // All points should be in [-0.5, 0.5]
+        for p in &graticule {
+            assert!(p.x.abs() <= 0.55, "x={} out of range", p.x);
+            assert!(p.y.abs() <= 0.55, "y={} out of range", p.y);
+        }
     }
 }

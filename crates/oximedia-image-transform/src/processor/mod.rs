@@ -22,6 +22,7 @@ pub(crate) mod color;
 pub(crate) mod filters;
 pub(crate) mod geometry;
 pub(crate) mod resize;
+pub mod streaming;
 
 #[cfg(test)]
 mod tests;

@@ -88,10 +88,7 @@ impl PklGenerator {
                 xml_escape(&asset.path)
             ));
             xml.push_str(&format!("      <Size>{}</Size>\n", asset.size));
-            xml.push_str(&format!(
-                "      <Hash>{}</Hash>\n",
-                xml_escape(&asset.hash)
-            ));
+            xml.push_str(&format!("      <Hash>{}</Hash>\n", xml_escape(&asset.hash)));
             xml.push_str("    </Asset>\n");
         }
         xml.push_str("  </AssetList>\n</PackingList>\n");

@@ -8,8 +8,6 @@
 //! upconversion where full perceptual inverse tone-mapping is not required.
 //! For a reference-quality implementation see [`crate::tone_mapping_ext`].
 
-#![allow(dead_code)]
-
 // ── SdrToHdrConverter ─────────────────────────────────────────────────────────
 
 /// Converts SDR linear RGB triples to HDR linear RGB.

@@ -305,6 +305,13 @@ pub struct TiffInfo {
     pub jpeg_quality: u8,
     /// Metadata.
     pub metadata: HashMap<String, String>,
+    /// When `true`, IFD tags not consumed by the standard reader are preserved
+    /// in `extra_ifd_entries` and re-emitted verbatim on the write path.
+    pub preserve_unknown_tags: bool,
+    /// IFD entries for non-standard (unknown) tags, keyed by tag number.
+    /// Populated during reading when `preserve_unknown_tags` is `true`.
+    /// Written to the IFD after all standard tags on the write path.
+    pub extra_ifd_entries: HashMap<u16, IfdEntry>,
 }
 
 impl Default for TiffInfo {
@@ -329,7 +336,22 @@ impl Default for TiffInfo {
             jpeg_tables: None,
             jpeg_quality: 90,
             metadata: HashMap::new(),
+            preserve_unknown_tags: true,
+            extra_ifd_entries: HashMap::new(),
         }
+    }
+}
+
+impl TiffInfo {
+    /// Insert a custom IFD entry, overwriting any existing entry with the same tag.
+    pub fn set_tag(&mut self, tag: u16, entry: IfdEntry) {
+        self.extra_ifd_entries.insert(tag, entry);
+    }
+
+    /// Retrieve a reference to a custom IFD entry by tag number.
+    #[must_use]
+    pub fn get_tag(&self, tag: u16) -> Option<&IfdEntry> {
+        self.extra_ifd_entries.get(&tag)
     }
 }
 
@@ -580,7 +602,18 @@ fn read_ifd(file: &mut File, offset: u64, endian: Endian) -> ImageResult<TiffInf
                 // JPEGTables: abbreviated JPEG datastream with shared tables.
                 info.jpeg_tables = Some(read_tag_bytes(file, count, value_offset)?);
             }
-            _ => {} // Skip unknown tags
+            _ => {
+                // Preserve unknown/non-standard tags when requested.
+                if info.preserve_unknown_tags {
+                    let entry = IfdEntry {
+                        tag,
+                        data_type,
+                        count,
+                        value_offset,
+                    };
+                    info.extra_ifd_entries.insert(tag, entry);
+                }
+            }
         }
     }
 
@@ -1263,9 +1296,23 @@ fn write_ifd(
     let sfmt_inline = samples <= 2;
     let has_jpeg_tables = info.jpeg_tables.as_ref().is_some_and(|t| !t.is_empty());
 
+    // Collect extra inline tags (only those whose value fits in 4 bytes).
+    // Sort by tag number so the IFD remains in ascending order.
+    let mut extra_tags: Vec<&IfdEntry> = info
+        .extra_ifd_entries
+        .values()
+        .filter(|e| {
+            let size = e.data_type.size() * e.count as usize;
+            size <= 4
+        })
+        .collect();
+    extra_tags.sort_by_key(|e| e.tag);
+    let extra_count = extra_tags.len() as u16;
+
     // 12 base tags (256, 257, 258, 259, 262, 273, 277, 278, 279, 284, 305,
-    // 339); the JPEGTables tag (347) adds a 13th when present.
-    let tag_count: u16 = if has_jpeg_tables { 13 } else { 12 };
+    // 339); the JPEGTables tag (347) adds a 13th when present; extra inline
+    // tags add further entries.
+    let tag_count: u16 = (if has_jpeg_tables { 13 } else { 12 }) + extra_count;
 
     // The IFD occupies: 2-byte count + tag_count*12-byte entries + 4-byte
     // next-IFD pointer. Out-of-line data blocks follow directly after, in a
@@ -1395,6 +1442,19 @@ fn write_ifd(
         )?;
     }
 
+    // Extra inline tags (unknown/non-standard), sorted by tag number.
+    // Only inline-fitting entries (size <= 4 bytes) are emitted.
+    for entry in &extra_tags {
+        write_tag(
+            file,
+            entry.tag,
+            entry.data_type,
+            entry.count,
+            entry.value_offset,
+            endian,
+        )?;
+    }
+
     // Next IFD offset (0 = no more IFDs).
     match endian {
         Endian::Big => file.write_u32::<BigEndian>(0)?,
@@ -1500,464 +1560,8 @@ fn write_software_tag(file: &mut File, endian: Endian) -> ImageResult<()> {
 }
 
 // ===========================================================================
-// Tests
+// Tests (moved to tests.rs to keep this file under 2000 lines)
 // ===========================================================================
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use byteorder::{LittleEndian, WriteBytesExt};
-    use std::io::Write;
-
-    /// Builds a minimal tiled TIFF binary (little-endian, RGB 8-bit, no compression).
-    ///
-    /// Image:  4 × 4 pixels
-    /// Tiles:  2 × 2 pixels → 2 tiles across × 2 tiles down = 4 tiles
-    ///
-    /// Tile fill values (R,G,B for every pixel in that tile):
-    ///   Tile 0 (top-left):     0x01, 0x02, 0x03
-    ///   Tile 1 (top-right):    0x04, 0x05, 0x06
-    ///   Tile 2 (bottom-left):  0x07, 0x08, 0x09
-    ///   Tile 3 (bottom-right): 0x0A, 0x0B, 0x0C
-    fn build_tiled_tiff() -> Vec<u8> {
-        let mut buf: Vec<u8> = Vec::new();
-
-        // ---- TIFF header ----
-        buf.write_u16::<LittleEndian>(TIFF_MAGIC_LE).expect("magic");
-        buf.write_u16::<LittleEndian>(TIFF_VERSION)
-            .expect("version");
-        // IFD offset placeholder at bytes 4..8 — patched below.
-        buf.write_u32::<LittleEndian>(0)
-            .expect("ifd offset placeholder");
-
-        // ---- Raw tile pixel data (no compression) ----
-        // 4 tiles × 2×2 pixels × 3 bytes/pixel = 48 bytes
-        // Each tile is 12 bytes (4 pixels × 3 channels)
-        let tile_data_base: u32 = buf.len() as u32; // = 8
-
-        let tiles: &[(u8, u8, u8)] = &[
-            (0x01, 0x02, 0x03),
-            (0x04, 0x05, 0x06),
-            (0x07, 0x08, 0x09),
-            (0x0A, 0x0B, 0x0C),
-        ];
-
-        // Per-tile byte offsets within the file
-        let tile_offsets: Vec<u32> = (0..4u32).map(|i| tile_data_base + i * 12).collect();
-
-        for &(r, g, b) in tiles {
-            for _ in 0..4u8 {
-                buf.push(r);
-                buf.push(g);
-                buf.push(b);
-            }
-        }
-
-        // ---- Out-of-line arrays ----
-
-        // BitsPerSample: [8, 8, 8] stored out-of-line (3 × u16 = 6 bytes > 4)
-        let bits_per_sample_pos: u32 = buf.len() as u32;
-        for _ in 0..3u8 {
-            buf.write_u16::<LittleEndian>(8)
-                .expect("bits_per_sample entry");
-        }
-
-        // TileOffsets: 4 × u32
-        let tile_offsets_arr_pos: u32 = buf.len() as u32;
-        for &off in &tile_offsets {
-            buf.write_u32::<LittleEndian>(off)
-                .expect("tile offset entry");
-        }
-
-        // TileByteCounts: 4 × u32 (all = 12)
-        let tile_byte_counts_arr_pos: u32 = buf.len() as u32;
-        for _ in 0..4u32 {
-            buf.write_u32::<LittleEndian>(12)
-                .expect("tile byte count entry");
-        }
-
-        // ---- IFD ----
-        let ifd_pos: u32 = buf.len() as u32;
-        // 10 tags
-        buf.write_u16::<LittleEndian>(10).expect("tag count");
-
-        // Inline macro to write one 12-byte IFD entry (LE).
-        macro_rules! tag {
-            ($tag:expr, $dtype:expr, $count:expr, $val:expr) => {{
-                buf.write_u16::<LittleEndian>($tag).expect("ifd tag");
-                buf.write_u16::<LittleEndian>($dtype).expect("ifd dtype");
-                buf.write_u32::<LittleEndian>($count).expect("ifd count");
-                buf.write_u32::<LittleEndian>($val).expect("ifd value");
-            }};
-        }
-
-        tag!(256, 4, 1, 4); // ImageWidth = 4
-        tag!(257, 4, 1, 4); // ImageLength = 4
-                            // BitsPerSample: count=3 (one per channel), offset→bits_per_sample_pos
-                            // total size = 3×2=6 > 4 → stored out-of-line
-        tag!(258, 3, 3, bits_per_sample_pos); // BitsPerSample = [8,8,8]
-        tag!(259, 3, 1, 1); // Compression = 1 (None)
-        tag!(262, 3, 1, 2); // PhotometricInterpretation = 2 (RGB)
-        tag!(277, 3, 1, 3); // SamplesPerPixel = 3
-        tag!(322, 3, 1, 2); // TileWidth = 2
-        tag!(323, 3, 1, 2); // TileLength = 2
-        tag!(324, 4, 4, tile_offsets_arr_pos); // TileOffsets
-        tag!(325, 4, 4, tile_byte_counts_arr_pos); // TileByteCounts
-
-        // Next-IFD pointer = 0 (end)
-        buf.write_u32::<LittleEndian>(0).expect("next ifd");
-
-        // Patch IFD offset at header bytes [4..8]
-        buf[4..8].copy_from_slice(&ifd_pos.to_le_bytes());
-
-        buf
-    }
-
-    #[test]
-    fn test_read_tiled_tiff_2x2_tiles() {
-        let tiff_bytes = build_tiled_tiff();
-
-        let mut temp_path = std::env::temp_dir();
-        temp_path.push("oximedia_test_tiled_tiff_2x2.tif");
-
-        {
-            let mut f = std::fs::File::create(&temp_path).expect("should create temp file");
-            f.write_all(&tiff_bytes).expect("should write TIFF bytes");
-        }
-
-        let frame = read_tiff(&temp_path, 0).expect("should read tiled TIFF");
-
-        assert_eq!(frame.width, 4, "width mismatch");
-        assert_eq!(frame.height, 4, "height mismatch");
-
-        let data = frame.data.as_slice().expect("data should be interleaved");
-        // 4 × 4 × 3 bytes = 48
-        assert_eq!(data.len(), 48, "data length mismatch");
-
-        // Stride = 4 cols × 3 bytes = 12 bytes/row
-        // Tile 0 (top-left):  pixel (col=0, row=0) → byte offset = 0
-        assert_eq!(data[0], 0x01, "R at (0,0)");
-        assert_eq!(data[1], 0x02, "G at (0,0)");
-        assert_eq!(data[2], 0x03, "B at (0,0)");
-
-        // Tile 1 (top-right): pixel (col=2, row=0) → byte offset = 2*3 = 6
-        assert_eq!(data[6], 0x04, "R at (2,0)");
-        assert_eq!(data[7], 0x05, "G at (2,0)");
-        assert_eq!(data[8], 0x06, "B at (2,0)");
-
-        // Tile 2 (bottom-left): pixel (col=0, row=2) → byte offset = 2*12 = 24
-        assert_eq!(data[24], 0x07, "R at (0,2)");
-        assert_eq!(data[25], 0x08, "G at (0,2)");
-        assert_eq!(data[26], 0x09, "B at (0,2)");
-
-        // Tile 3 (bottom-right): pixel (col=2, row=2) → byte offset = 2*12 + 2*3 = 30
-        assert_eq!(data[30], 0x0A, "R at (2,2)");
-        assert_eq!(data[31], 0x0B, "G at (2,2)");
-        assert_eq!(data[32], 0x0C, "B at (2,2)");
-
-        let _ = std::fs::remove_file(&temp_path);
-    }
-
-    // -----------------------------------------------------------------------
-    // JPEG-in-TIFF round trip (write_tiff → read_tiff)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_jpeg_tiff_roundtrip_rgb() {
-        // A smooth 32x32 RGB gradient survives baseline JPEG compression with
-        // a bounded per-channel error.
-        let width = 32u32;
-        let height = 32u32;
-        let mut pixels: Vec<u8> = Vec::with_capacity((width * height * 3) as usize);
-        for y in 0..height {
-            for x in 0..width {
-                pixels.push((x * 8) as u8);
-                pixels.push((y * 8) as u8);
-                pixels.push(((x + y) * 4) as u8);
-            }
-        }
-        let frame = ImageFrame::new(
-            0,
-            width,
-            height,
-            PixelType::U8,
-            3,
-            ColorSpace::Srgb,
-            ImageData::interleaved(pixels.clone()),
-        );
-
-        let mut path = std::env::temp_dir();
-        path.push("oximedia_tiff_jpeg_rgb_roundtrip.tif");
-        write_tiff(&path, &frame, TiffCompression::Jpeg).expect("write JPEG TIFF");
-
-        let decoded = read_tiff(&path, 0).expect("read JPEG TIFF");
-        assert_eq!(decoded.width, width);
-        assert_eq!(decoded.height, height);
-        let data = decoded.data.as_slice().expect("interleaved");
-        assert_eq!(data.len(), pixels.len());
-
-        // Baseline JPEG is lossy; check the mean absolute error stays small.
-        let total: u64 = data
-            .iter()
-            .zip(&pixels)
-            .map(|(&a, &b)| u64::from(a.abs_diff(b)))
-            .sum();
-        let mae = total as f64 / data.len() as f64;
-        assert!(mae < 24.0, "JPEG mean abs error too high: {mae}");
-
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn test_jpeg_tiff_roundtrip_grey() {
-        // A flat grey image must round-trip near-exactly.
-        let width = 24u32;
-        let height = 16u32;
-        let pixels = vec![137u8; (width * height) as usize];
-        let frame = ImageFrame::new(
-            0,
-            width,
-            height,
-            PixelType::U8,
-            1,
-            ColorSpace::Luma,
-            ImageData::interleaved(pixels.clone()),
-        );
-
-        let mut path = std::env::temp_dir();
-        path.push("oximedia_tiff_jpeg_grey_roundtrip.tif");
-        write_tiff(&path, &frame, TiffCompression::Jpeg).expect("write grey JPEG TIFF");
-
-        let decoded = read_tiff(&path, 0).expect("read grey JPEG TIFF");
-        let data = decoded.data.as_slice().expect("interleaved");
-        assert_eq!(data.len(), pixels.len());
-        for &v in data {
-            assert!(v.abs_diff(137) <= 4, "flat grey JPEG drifted too far: {v}");
-        }
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn test_jpeg_tiff_emits_jpegtables() {
-        // A JPEG-compressed TIFF must carry the JPEGTables (347) tag and the
-        // tag must be re-readable.
-        let width = 8u32;
-        let height = 8u32;
-        let pixels = vec![64u8; (width * height * 3) as usize];
-        let frame = ImageFrame::new(
-            0,
-            width,
-            height,
-            PixelType::U8,
-            3,
-            ColorSpace::Srgb,
-            ImageData::interleaved(pixels),
-        );
-        let mut path = std::env::temp_dir();
-        path.push("oximedia_tiff_jpeg_tables.tif");
-        write_tiff(&path, &frame, TiffCompression::Jpeg).expect("write");
-
-        // Re-parse the IFD directly and confirm JPEGTables is present.
-        let mut file = File::open(&path).expect("open");
-        let _magic = file.read_u16::<BigEndian>().expect("magic");
-        let endian = Endian::native();
-        let _ver = match endian {
-            Endian::Big => file.read_u16::<BigEndian>().expect("ver"),
-            Endian::Little => file.read_u16::<LittleEndian>().expect("ver"),
-        };
-        let ifd_off = match endian {
-            Endian::Big => u64::from(file.read_u32::<BigEndian>().expect("ifd")),
-            Endian::Little => u64::from(file.read_u32::<LittleEndian>().expect("ifd")),
-        };
-        let info = read_ifd(&mut file, ifd_off, endian).expect("ifd parse");
-        let tables = info.jpeg_tables.expect("JPEGTables must be present");
-        assert!(tables.len() > 4, "JPEGTables payload too small");
-        // The abbreviated stream begins with SOI and ends with EOI.
-        assert_eq!(&tables[0..2], &[0xFF, 0xD8]);
-        assert_eq!(&tables[tables.len() - 2..], &[0xFF, 0xD9]);
-
-        let _ = std::fs::remove_file(&path);
-    }
-
-    // -----------------------------------------------------------------------
-    // CCITT fax compression round trips (compress_image_data → decompress_strip)
-    // -----------------------------------------------------------------------
-
-    /// Pack a bilevel test pattern into a 1-bpp bitmap (WhiteIsZero polarity,
-    /// 1 bit = black).
-    fn pack_bilevel(width: usize, height: usize, black: impl Fn(usize, usize) -> bool) -> Vec<u8> {
-        let row_bytes = width.div_ceil(8);
-        let mut out = vec![0u8; row_bytes * height];
-        for y in 0..height {
-            for x in 0..width {
-                if black(x, y) {
-                    out[y * row_bytes + (x >> 3)] |= 1 << (7 - (x & 7));
-                }
-            }
-        }
-        out
-    }
-
-    fn bilevel_info(width: u32, height: u32, compression: TiffCompression) -> TiffInfo {
-        let mut info = TiffInfo::default();
-        info.width = width;
-        info.height = height;
-        info.bits_per_sample = vec![1];
-        info.samples_per_pixel = 1;
-        info.compression = compression;
-        info.photometric = PhotometricInterpretation::WhiteIsZero;
-        info.rows_per_strip = height;
-        info
-    }
-
-    #[test]
-    fn test_ccitt_rle_tiff_codec_roundtrip() {
-        let width = 40u32;
-        let height = 12u32;
-        let packed = pack_bilevel(width as usize, height as usize, |x, y| (x / 3 + y) % 2 == 0);
-        let info = bilevel_info(width, height, TiffCompression::CcittRle);
-        let compressed = compress_image_data(&packed, &info).expect("ccitt rle encode");
-        let decoded =
-            decompress_strip(&compressed, &info, height as usize).expect("ccitt rle decode");
-        assert_eq!(decoded, packed, "CcittRle TIFF codec must round-trip");
-    }
-
-    #[test]
-    fn test_ccitt_g3_tiff_codec_roundtrip() {
-        let width = 96u32;
-        let height = 20u32;
-        let packed = pack_bilevel(width as usize, height as usize, |x, y| {
-            ((x as i32 - y as i32 * 2).rem_euclid(20)) < 11
-        });
-        let info = bilevel_info(width, height, TiffCompression::CcittFax3);
-        let compressed = compress_image_data(&packed, &info).expect("g3 encode");
-        let decoded = decompress_strip(&compressed, &info, height as usize).expect("g3 decode");
-        assert_eq!(decoded, packed, "CcittFax3 TIFF codec must round-trip");
-    }
-
-    #[test]
-    fn test_ccitt_g4_tiff_codec_roundtrip() {
-        let width = 128u32;
-        let height = 64u32;
-        let packed = pack_bilevel(width as usize, height as usize, |x, y| {
-            let cx = x as i32 - 64;
-            let cy = y as i32 - 32;
-            cx * cx + cy * cy * 4 < 1600
-        });
-        let info = bilevel_info(width, height, TiffCompression::CcittFax4);
-        let compressed = compress_image_data(&packed, &info).expect("g4 encode");
-        // G4 should compress this filled-ellipse image well below raw size.
-        assert!(
-            compressed.len() < packed.len(),
-            "G4 should compress: {} vs {}",
-            compressed.len(),
-            packed.len()
-        );
-        let decoded = decompress_strip(&compressed, &info, height as usize).expect("g4 decode");
-        assert_eq!(decoded, packed, "CcittFax4 TIFF codec must round-trip");
-    }
-
-    /// Build a complete single-strip bilevel TIFF (little-endian) with the
-    /// given compression and pre-encoded strip bytes.
-    fn build_bilevel_tiff(width: u32, height: u32, compression: u16, strip: &[u8]) -> Vec<u8> {
-        let mut buf: Vec<u8> = Vec::new();
-        buf.write_u16::<LittleEndian>(TIFF_MAGIC_LE).expect("magic");
-        buf.write_u16::<LittleEndian>(TIFF_VERSION).expect("ver");
-        buf.write_u32::<LittleEndian>(0).expect("ifd ptr");
-
-        // Strip data immediately after the 8-byte header.
-        let strip_offset = buf.len() as u32;
-        buf.extend_from_slice(strip);
-
-        let ifd_pos = buf.len() as u32;
-        buf.write_u16::<LittleEndian>(8).expect("tag count");
-
-        macro_rules! tag {
-            ($tag:expr, $dtype:expr, $count:expr, $val:expr) => {{
-                buf.write_u16::<LittleEndian>($tag).expect("tag");
-                buf.write_u16::<LittleEndian>($dtype).expect("dtype");
-                buf.write_u32::<LittleEndian>($count).expect("count");
-                buf.write_u32::<LittleEndian>($val).expect("value");
-            }};
-        }
-        tag!(256, 4, 1, width); // ImageWidth
-        tag!(257, 4, 1, height); // ImageLength
-        tag!(258, 3, 1, 1); // BitsPerSample = 1
-        tag!(259, 3, 1, u32::from(compression)); // Compression
-        tag!(262, 3, 1, 0); // PhotometricInterpretation = WhiteIsZero
-        tag!(273, 4, 1, strip_offset); // StripOffsets
-        tag!(278, 4, 1, height); // RowsPerStrip
-        tag!(279, 4, 1, strip.len() as u32); // StripByteCounts
-        buf.write_u32::<LittleEndian>(0).expect("next ifd");
-
-        buf[4..8].copy_from_slice(&ifd_pos.to_le_bytes());
-        buf
-    }
-
-    #[test]
-    fn test_ccitt_g4_tiff_file_read() {
-        // Encode a known bitmap, embed it in a hand-built TIFF, read it back
-        // through the full read_tiff path.
-        let width = 64u32;
-        let height = 32u32;
-        let packed = pack_bilevel(width as usize, height as usize, |x, y| (x + y) % 5 < 2);
-        let strip = ccitt::encode_ccitt_fax4(&packed, width as usize, height as usize, true);
-        let tiff_bytes = build_bilevel_tiff(width, height, 4, &strip);
-
-        let mut path = std::env::temp_dir();
-        path.push("oximedia_tiff_ccitt_g4_file.tif");
-        std::fs::write(&path, &tiff_bytes).expect("write tiff");
-
-        let frame = read_tiff(&path, 0).expect("read CCITT G4 TIFF");
-        assert_eq!(frame.width, width);
-        assert_eq!(frame.height, height);
-        let data = frame.data.as_slice().expect("interleaved");
-        assert_eq!(data, packed.as_slice(), "G4 TIFF file must decode exactly");
-
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn test_ccitt_g3_tiff_file_read() {
-        let width = 80u32;
-        let height = 24u32;
-        let packed = pack_bilevel(width as usize, height as usize, |x, _| (x / 7) % 2 == 1);
-        let strip = ccitt::encode_ccitt_fax3(&packed, width as usize, height as usize, true);
-        let tiff_bytes = build_bilevel_tiff(width, height, 3, &strip);
-
-        let mut path = std::env::temp_dir();
-        path.push("oximedia_tiff_ccitt_g3_file.tif");
-        std::fs::write(&path, &tiff_bytes).expect("write tiff");
-
-        let frame = read_tiff(&path, 0).expect("read CCITT G3 TIFF");
-        let data = frame.data.as_slice().expect("interleaved");
-        assert_eq!(data, packed.as_slice(), "G3 TIFF file must decode exactly");
-
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn test_old_style_jpeg_rejected() {
-        // Compression 6 (old-style JPEG) must be rejected, not silently
-        // mis-decoded.
-        let mut info = TiffInfo::default();
-        info.width = 8;
-        info.height = 8;
-        info.compression = TiffCompression::JpegOld;
-        let err = decompress_strip(&[0u8; 16], &info, 8);
-        assert!(err.is_err(), "old-style JPEG must be rejected on read");
-
-        let frame = ImageFrame::new(
-            0,
-            8,
-            8,
-            PixelType::U8,
-            1,
-            ColorSpace::Luma,
-            ImageData::interleaved(vec![0u8; 64]),
-        );
-        let info2 = create_tiff_info(&frame, TiffCompression::JpegOld).expect("info");
-        let werr = compress_image_data(&vec![0u8; 64], &info2);
-        assert!(werr.is_err(), "old-style JPEG must be rejected on write");
-    }
-}
+mod tests;

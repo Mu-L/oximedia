@@ -92,7 +92,8 @@ impl OverwritePattern {
             Self::Byte(b) => vec![*b; size],
             Self::PseudoRandom(seed) => {
                 // Xorshift64 PRNG — no external dependency, deterministic
-                let mut state = seed.wrapping_add(u64::from(pass_index).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+                let mut state =
+                    seed.wrapping_add(u64::from(pass_index).wrapping_mul(0x9e37_79b9_7f4a_7c15));
                 if state == 0 {
                     state = 1;
                 }
@@ -130,7 +131,11 @@ pub struct OverwritePass {
 impl OverwritePass {
     /// Creates a new overwrite pass.
     #[must_use]
-    pub fn new(pass_number: u32, pattern: OverwritePattern, description: impl Into<String>) -> Self {
+    pub fn new(
+        pass_number: u32,
+        pattern: OverwritePattern,
+        description: impl Into<String>,
+    ) -> Self {
         Self {
             pass_number,
             pattern,
@@ -183,17 +188,17 @@ pub fn build_passes(standard: DeletionStandard) -> Vec<OverwritePass> {
             // Passes 32–35: random
             let gutmann_bytes: &[u8] = &[
                 // 27 specific byte patterns for passes 5-31
-                0x55, 0xAA, 0x92, 0x49, 0x24, 0x49, 0x24, 0x92,
-                0x6D, 0xB6, 0xDB, 0xB6, 0xDB, 0x6D, 0x00, 0x11,
-                0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
-                0xAA, 0xBB, 0xCC,
+                0x55, 0xAA, 0x92, 0x49, 0x24, 0x49, 0x24, 0x92, 0x6D, 0xB6, 0xDB, 0xB6, 0xDB, 0x6D,
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC,
             ];
             let mut passes = Vec::with_capacity(35);
             // Passes 1-4: random
             for i in 1u32..=4 {
                 passes.push(OverwritePass::new(
                     i,
-                    OverwritePattern::PseudoRandom(u64::from(i).wrapping_mul(0x9999_AAAA_BBBB_CCCCu64)),
+                    OverwritePattern::PseudoRandom(
+                        u64::from(i).wrapping_mul(0x9999_AAAA_BBBB_CCCCu64),
+                    ),
                     format!("Gutmann pass {i} — random"),
                 ));
             }
@@ -210,7 +215,9 @@ pub fn build_passes(standard: DeletionStandard) -> Vec<OverwritePass> {
             for i in 32u32..=35 {
                 passes.push(OverwritePass::new(
                     i,
-                    OverwritePattern::PseudoRandom(u64::from(i).wrapping_mul(0x1111_2222_3333_4444u64)),
+                    OverwritePattern::PseudoRandom(
+                        u64::from(i).wrapping_mul(0x1111_2222_3333_4444u64),
+                    ),
                     format!("Gutmann pass {i} — random"),
                 ));
             }
@@ -221,7 +228,9 @@ pub fn build_passes(standard: DeletionStandard) -> Vec<OverwritePass> {
                 let pattern = if i % 2 == 0 {
                     OverwritePattern::Ones
                 } else {
-                    OverwritePattern::PseudoRandom(u64::from(i).wrapping_mul(0x5A5A_5A5A_5A5A_5A5Au64))
+                    OverwritePattern::PseudoRandom(
+                        u64::from(i).wrapping_mul(0x5A5A_5A5A_5A5A_5A5Au64),
+                    )
                 };
                 OverwritePass::new(i, pattern, format!("Custom pass {i}"))
             })
@@ -250,7 +259,8 @@ impl DeletionResult {
     /// Returns true if the deletion is considered fully successful.
     #[must_use]
     pub fn is_successful(&self) -> bool {
-        self.file_unlinked && self.verification_passed
+        self.file_unlinked
+            && self.verification_passed
             && self.passes_completed == self.standard.pass_count()
     }
 }
@@ -356,7 +366,12 @@ pub fn secure_delete(path: &Path, config: &SecureDeleteConfig) -> io::Result<Del
 }
 
 /// Overwrites a file with a single pass pattern.
-fn overwrite_file(path: &Path, file_len: u64, pass: &OverwritePass, buffer_size: usize) -> io::Result<()> {
+fn overwrite_file(
+    path: &Path,
+    file_len: u64,
+    pass: &OverwritePass,
+    buffer_size: usize,
+) -> io::Result<()> {
     let mut file = OpenOptions::new().write(true).open(path)?;
     file.seek(SeekFrom::Start(0))?;
 
@@ -391,7 +406,10 @@ pub fn verify_absent(path: &Path) -> bool {
 /// # Errors
 ///
 /// Returns an [`io::Error`] if any file or directory operation fails.
-pub fn secure_delete_dir(dir: &Path, config: &SecureDeleteConfig) -> io::Result<Vec<DeletionResult>> {
+pub fn secure_delete_dir(
+    dir: &Path,
+    config: &SecureDeleteConfig,
+) -> io::Result<Vec<DeletionResult>> {
     let mut results = Vec::new();
     secure_delete_dir_recursive(dir, config, &mut results)?;
     // Remove the directory hierarchy after files are gone
@@ -557,8 +575,8 @@ mod tests {
         // Keep the file alive until we explicitly delete it
         let _keep = f;
 
-        let config = SecureDeleteConfig::new(DeletionStandard::SinglePassZero)
-            .without_verification();
+        let config =
+            SecureDeleteConfig::new(DeletionStandard::SinglePassZero).without_verification();
         let result = secure_delete(&path, &config).expect("secure delete");
 
         assert!(result.file_unlinked);
@@ -597,7 +615,10 @@ mod tests {
     #[test]
     fn test_verify_absent_existing_file() {
         let f = tempfile::NamedTempFile::new().expect("tempfile");
-        assert!(!verify_absent(f.path()), "file exists, should not be absent");
+        assert!(
+            !verify_absent(f.path()),
+            "file exists, should not be absent"
+        );
     }
 
     #[test]
@@ -675,8 +696,8 @@ mod tests {
         }
 
         // Don't drop dir yet — we need the files to exist
-        let config = SecureDeleteConfig::new(DeletionStandard::SinglePassZero)
-            .without_verification();
+        let config =
+            SecureDeleteConfig::new(DeletionStandard::SinglePassZero).without_verification();
         let results = secure_delete_dir(&dir_path, &config).expect("secure delete dir");
 
         // dir.into_path() to prevent cleanup since we already removed it

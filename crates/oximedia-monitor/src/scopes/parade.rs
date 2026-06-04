@@ -1,6 +1,6 @@
 //! RGB parade monitor implementation.
 
-use crate::{MonitorError, MonitorResult};
+use crate::MonitorResult;
 use oximedia_scopes::ScopeConfig;
 use serde::{Deserialize, Serialize};
 

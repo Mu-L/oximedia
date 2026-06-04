@@ -108,7 +108,12 @@ pub struct FusionQuaternion {
 impl FusionQuaternion {
     /// Identity quaternion (no rotation).
     pub fn identity() -> Self {
-        Self { w: 1.0, x: 0.0, y: 0.0, z: 0.0 }
+        Self {
+            w: 1.0,
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        }
     }
 
     /// Normalise to unit length.  Returns identity if near-zero.
@@ -162,7 +167,11 @@ impl FusionQuaternion {
         let cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
         let yaw = siny_cosp.atan2(cosy_cosp) * RAD_TO_DEG;
 
-        EulerAngles { yaw_deg: yaw, pitch_deg: pitch, roll_deg: roll }
+        EulerAngles {
+            yaw_deg: yaw,
+            pitch_deg: pitch,
+            roll_deg: roll,
+        }
     }
 }
 
@@ -218,7 +227,10 @@ impl MahonyConfig {
 
     /// Create a 6-DOF configuration (gyro + accelerometer only, no magnetometer).
     pub fn six_dof() -> Self {
-        Self { disable_magnetometer: true, ..Self::new() }
+        Self {
+            disable_magnetometer: true,
+            ..Self::new()
+        }
     }
 }
 
@@ -248,17 +260,17 @@ impl MagCalibration {
     pub fn identity() -> Self {
         Self {
             hard_iron: [0.0; 3],
-            soft_iron: [
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-            ],
+            soft_iron: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
         }
     }
 
     /// Apply calibration to a raw magnetometer reading.
     pub fn apply(&self, raw: MagReading) -> MagReading {
-        let v = [raw.x - self.hard_iron[0], raw.y - self.hard_iron[1], raw.z - self.hard_iron[2]];
+        let v = [
+            raw.x - self.hard_iron[0],
+            raw.y - self.hard_iron[1],
+            raw.z - self.hard_iron[2],
+        ];
         let m = &self.soft_iron;
         MagReading {
             x: m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
@@ -450,8 +462,8 @@ impl MahonyFilter {
                     // Estimated magnetic field direction from current quaternion.
                     let wx = 2.0 * bx * (0.5 - q.y * q.y - q.z * q.z)
                         + 2.0 * bz * (q.x * q.z - q.w * q.y);
-                    let wy = 2.0 * bx * (q.x * q.y - q.w * q.z)
-                        + 2.0 * bz * (q.w * q.x + q.y * q.z);
+                    let wy =
+                        2.0 * bx * (q.x * q.y - q.w * q.z) + 2.0 * bz * (q.w * q.x + q.y * q.z);
                     let wz = 2.0 * bx * (q.w * q.y + q.x * q.z)
                         + 2.0 * bz * (0.5 - q.x * q.x - q.y * q.y);
 
@@ -482,9 +494,9 @@ impl MahonyFilter {
         let half_dt = 0.5 * dt;
         let dq = FusionQuaternion {
             w: -q.x * gx - q.y * gy - q.z * gz,
-            x:  q.w * gx + q.y * gz - q.z * gy,
-            y:  q.w * gy - q.x * gz + q.z * gx,
-            z:  q.w * gz + q.x * gy - q.y * gx,
+            x: q.w * gx + q.y * gz - q.z * gy,
+            y: q.w * gy - q.x * gz + q.z * gx,
+            z: q.w * gz + q.x * gy - q.y * gx,
         };
         self.quaternion = FusionQuaternion {
             w: q.w + dq.w * half_dt,
@@ -626,8 +638,16 @@ mod tests {
 
     fn flat_sample(gyro_x: f32, gyro_y: f32, gyro_z: f32) -> ImuSample {
         ImuSample {
-            gyro: GyroReading { x: gyro_x, y: gyro_y, z: gyro_z },
-            accel: AccelReading { x: 0.0, y: 0.0, z: 1.0 },
+            gyro: GyroReading {
+                x: gyro_x,
+                y: gyro_y,
+                z: gyro_z,
+            },
+            accel: AccelReading {
+                x: 0.0,
+                y: 0.0,
+                z: 1.0,
+            },
             mag: None,
         }
     }
@@ -643,13 +663,25 @@ mod tests {
 
     #[test]
     fn test_quaternion_normalise() {
-        let q = FusionQuaternion { w: 2.0, x: 0.0, y: 0.0, z: 0.0 }.normalise();
+        let q = FusionQuaternion {
+            w: 2.0,
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        }
+        .normalise();
         assert!((q.w - 1.0).abs() < 1e-6);
     }
 
     #[test]
     fn test_quaternion_near_zero_normalise() {
-        let q = FusionQuaternion { w: 0.0, x: 0.0, y: 0.0, z: 0.0 }.normalise();
+        let q = FusionQuaternion {
+            w: 0.0,
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        }
+        .normalise();
         // Should return identity
         assert!((q.w - 1.0).abs() < 1e-6);
     }
@@ -667,13 +699,25 @@ mod tests {
         // Feed 200 samples with zero gyro and gravity pointing down.
         let mut filter = MahonyFilter::new(MahonyConfig::six_dof());
         let sample = flat_sample(0.0, 0.0, 0.0);
-        let mut last_angles = EulerAngles { yaw_deg: 0.0, pitch_deg: 0.0, roll_deg: 0.0 };
+        let mut last_angles = EulerAngles {
+            yaw_deg: 0.0,
+            pitch_deg: 0.0,
+            roll_deg: 0.0,
+        };
         for _ in 0..200 {
             last_angles = filter.update(sample, 0.01);
         }
         // With gravity pointing in +Z, pitch and roll should stay near zero.
-        assert!(last_angles.pitch_deg.abs() < 2.0, "pitch={}", last_angles.pitch_deg);
-        assert!(last_angles.roll_deg.abs() < 2.0, "roll={}", last_angles.roll_deg);
+        assert!(
+            last_angles.pitch_deg.abs() < 2.0,
+            "pitch={}",
+            last_angles.pitch_deg
+        );
+        assert!(
+            last_angles.roll_deg.abs() < 2.0,
+            "roll={}",
+            last_angles.roll_deg
+        );
     }
 
     #[test]
@@ -681,13 +725,25 @@ mod tests {
         let mut est = GyroBiasEstimator::new(50);
         for _ in 0..50 {
             est.update(
-                GyroReading { x: 0.3, y: -0.1, z: 0.05 },
-                AccelReading { x: 0.0, y: 0.0, z: 1.0 },
+                GyroReading {
+                    x: 0.3,
+                    y: -0.1,
+                    z: 0.05,
+                },
+                AccelReading {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 1.0,
+                },
             );
         }
         // After 50 static samples, bias should be estimated.
         assert!((est.bias[0] - 0.3).abs() < 0.01, "bias_x={}", est.bias[0]);
-        assert!((est.bias[1] - (-0.1)).abs() < 0.01, "bias_y={}", est.bias[1]);
+        assert!(
+            (est.bias[1] - (-0.1)).abs() < 0.01,
+            "bias_y={}",
+            est.bias[1]
+        );
     }
 
     #[test]
@@ -700,7 +756,11 @@ mod tests {
             static_gyro_threshold: 1.0,
             static_accel_tolerance: 0.05,
         };
-        let debiased = est.debias(GyroReading { x: 1.5, y: 2.5, z: 3.5 });
+        let debiased = est.debias(GyroReading {
+            x: 1.5,
+            y: 2.5,
+            z: 3.5,
+        });
         assert!((debiased.x - 0.5).abs() < 1e-6);
         assert!((debiased.y - 0.5).abs() < 1e-6);
         assert!((debiased.z - 0.5).abs() < 1e-6);
@@ -709,7 +769,11 @@ mod tests {
     #[test]
     fn test_mag_calibration_identity() {
         let cal = MagCalibration::identity();
-        let raw = MagReading { x: 30.0, y: -10.0, z: 5.0 };
+        let raw = MagReading {
+            x: 30.0,
+            y: -10.0,
+            z: 5.0,
+        };
         let out = cal.apply(raw);
         assert!((out.x - 30.0).abs() < 1e-5);
         assert!((out.y - (-10.0)).abs() < 1e-5);
@@ -722,7 +786,11 @@ mod tests {
             hard_iron: [10.0, 5.0, 2.0],
             soft_iron: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
         };
-        let raw = MagReading { x: 40.0, y: 15.0, z: 7.0 };
+        let raw = MagReading {
+            x: 40.0,
+            y: 15.0,
+            z: 7.0,
+        };
         let out = cal.apply(raw);
         assert!((out.x - 30.0).abs() < 1e-5);
         assert!((out.y - 10.0).abs() < 1e-5);
@@ -743,8 +811,16 @@ mod tests {
         // Feed some non-zero motion.
         for _ in 0..50 {
             let _ = pipeline.process(ImuSample {
-                gyro: GyroReading { x: 10.0, y: 5.0, z: 2.0 },
-                accel: AccelReading { x: 0.1, y: 0.0, z: 0.99 },
+                gyro: GyroReading {
+                    x: 10.0,
+                    y: 5.0,
+                    z: 2.0,
+                },
+                accel: AccelReading {
+                    x: 0.1,
+                    y: 0.0,
+                    z: 0.99,
+                },
                 mag: None,
             });
         }
@@ -757,9 +833,21 @@ mod tests {
     fn test_pipeline_with_magnetometer() {
         let mut pipeline = ImuFusionPipeline::new(100);
         let sample = ImuSample {
-            gyro: GyroReading { x: 0.0, y: 0.0, z: 0.0 },
-            accel: AccelReading { x: 0.0, y: 0.0, z: 1.0 },
-            mag: Some(MagReading { x: 30.0, y: 0.0, z: -50.0 }),
+            gyro: GyroReading {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            accel: AccelReading {
+                x: 0.0,
+                y: 0.0,
+                z: 1.0,
+            },
+            mag: Some(MagReading {
+                x: 30.0,
+                y: 0.0,
+                z: -50.0,
+            }),
         };
         for _ in 0..100 {
             let result = pipeline.process(sample);
@@ -781,8 +869,16 @@ mod tests {
         let mut est = GyroBiasEstimator::new(50);
         // Motion: gyro magnitude > threshold
         est.update(
-            GyroReading { x: 90.0, y: 0.0, z: 0.0 },
-            AccelReading { x: 0.0, y: 0.0, z: 1.0 },
+            GyroReading {
+                x: 90.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            AccelReading {
+                x: 0.0,
+                y: 0.0,
+                z: 1.0,
+            },
         );
         // Bias should remain zero (not updated from a single motion sample).
         assert!(est.bias[0].abs() < 1e-6);

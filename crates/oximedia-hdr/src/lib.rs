@@ -4,23 +4,40 @@
 //! Rec. 2020 / Rec. 2100 gamut handling, HDR10 and HDR10+ metadata,
 //! and a suite of tone-mapping operators for HDR-to-SDR conversion.
 
+pub mod ambient_light_adaptation;
 pub mod color_volume;
 pub mod color_volume_transform;
 pub mod cuva_metadata;
+pub mod display_db;
 pub mod display_model;
 pub mod dolby_vision_profile;
 pub mod dovi_rpu;
 pub mod dynamic_metadata;
+pub mod dynamic_metadata_validator;
 pub mod gamut;
+pub mod hdr10plus;
+pub mod hdr10plus_generator;
+pub mod hdr_fingerprint;
+pub mod hdr_grading_assistant;
 pub mod hdr_histogram;
+pub mod hdr_lut_pipeline;
 pub mod hdr_metadata_extractor;
+pub mod hdr_metadata_validator;
+pub mod hdr_scene_analysis;
 pub mod hdr_scopes;
 pub mod hlg_advanced;
+pub mod hlg_broadcast_constraints;
+pub mod hlg_display_gamma;
+pub mod hlg_reference_display;
+pub mod hlg_to_pq;
 pub mod luminance_stats;
 pub mod metadata;
 pub mod metadata_passthrough;
 pub mod pq_hlg_convert;
+pub mod pq_simd;
 pub mod scene_grading;
+pub mod sdr_to_hdr;
+pub mod soft_clip_gamut;
 pub mod st2094;
 pub mod tone_mapping;
 pub mod tone_mapping_ext;

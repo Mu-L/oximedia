@@ -3,6 +3,10 @@
 
 //! Batch image transform: process multiple output variants in a single request.
 //!
+//! Variant processing is parallelised with `rayon`: each [`TransformVariant`]
+//! is validated and processed on a rayon thread-pool worker, so multiple
+//! variants are handled concurrently.
+//!
 //! A [`BatchTransformRequest`] bundles a source image ID with a list of
 //! [`TransformVariant`] descriptors (width, height, format, quality, suffix).
 //! [`BatchTransformer::process_batch`] iterates over all variants, validates
@@ -33,6 +37,7 @@
 //! assert!(result.outputs[0].success);
 //! ```
 
+use rayon::prelude::*;
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -273,7 +278,7 @@ impl BatchTransformer {
 
         let outputs: Vec<TransformOutput> = request
             .variants
-            .iter()
+            .par_iter()
             .map(|variant| self.process_variant(variant, &source_base))
             .collect();
 
@@ -286,13 +291,14 @@ impl BatchTransformer {
     /// Process a single variant.
     fn process_variant(&self, variant: &TransformVariant, source_base: &str) -> TransformOutput {
         // Apply quality override if configured.
-        let effective_variant = if let Some(&override_q) = self.quality_overrides.get(&variant.format) {
-            let mut v = variant.clone();
-            v.quality = override_q;
-            v
-        } else {
-            variant.clone()
-        };
+        let effective_variant =
+            if let Some(&override_q) = self.quality_overrides.get(&variant.format) {
+                let mut v = variant.clone();
+                v.quality = override_q;
+                v
+            } else {
+                variant.clone()
+            };
 
         // Validate before processing.
         if let Err(msg) = effective_variant.validate() {
@@ -413,7 +419,9 @@ mod tests {
 
     #[test]
     fn test_variant_all_known_formats() {
-        for fmt in &["jpeg", "jpg", "webp", "avif", "png", "gif", "baseline", "json"] {
+        for fmt in &[
+            "jpeg", "jpg", "webp", "avif", "png", "gif", "baseline", "json",
+        ] {
             let mut v = good_variant("test");
             v.format = fmt.to_string();
             assert!(v.validate().is_ok(), "format {fmt} should be valid");
@@ -516,7 +524,11 @@ mod tests {
         let transformer = BatchTransformer::new();
         let request = BatchTransformRequest {
             source_id: "photo.jpg".to_string(),
-            variants: vec![good_variant("a"), bad_variant_zero_width("b"), good_variant("c")],
+            variants: vec![
+                good_variant("a"),
+                bad_variant_zero_width("b"),
+                good_variant("c"),
+            ],
         };
         let result = transformer.process_batch(&request);
         let paths = result.successful_paths();

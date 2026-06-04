@@ -402,10 +402,7 @@ mod tests {
         a.merge(&b);
         assert_eq!(a.get("key1"), Some(&ConfigValue::Int(1)));
         assert_eq!(a.get("key2"), Some(&ConfigValue::Bool(true)));
-        assert_eq!(
-            a.get("key3"),
-            Some(&ConfigValue::String("new".to_string()))
-        );
+        assert_eq!(a.get("key3"), Some(&ConfigValue::String("new".to_string())));
     }
 
     // 5. PluginConfigStore set/get
@@ -413,7 +410,11 @@ mod tests {
     fn test_store_set_get() {
         let mut store = PluginConfigStore::new();
         store.set("my-plugin", "bitrate", ConfigValue::Int(5000));
-        store.set("my-plugin", "preset", ConfigValue::String("fast".to_string()));
+        store.set(
+            "my-plugin",
+            "preset",
+            ConfigValue::String("fast".to_string()),
+        );
 
         assert_eq!(
             store.get("my-plugin", "bitrate"),
@@ -457,10 +458,7 @@ mod tests {
         store.save_to_file(&path).expect("save");
         let loaded = PluginConfigStore::load_from_file(&path).expect("load");
 
-        assert_eq!(
-            loaded.get("codec-x", "threads"),
-            Some(&ConfigValue::Int(4))
-        );
+        assert_eq!(loaded.get("codec-x", "threads"), Some(&ConfigValue::Int(4)));
         assert_eq!(
             loaded.get("codec-x", "lossless"),
             Some(&ConfigValue::Bool(false))

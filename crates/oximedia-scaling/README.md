@@ -6,7 +6,7 @@ Professional video scaling operations for OxiMedia. Provides high-quality video 
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.7 | Tests: 900 — 2026-05-16
+Version: 0.1.8 | Tests: 900 — 2026-05-29
 
 ## Features
 
@@ -34,7 +34,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-scaling = "0.1.7"
+oximedia-scaling = "0.1.8"
 ```
 
 ```rust

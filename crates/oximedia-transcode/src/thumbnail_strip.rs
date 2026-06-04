@@ -86,8 +86,7 @@ impl ThumbnailStrip {
             let frame_height = config.frame_height;
             let interval = config.interval_secs;
 
-            let count =
-                (total_duration_secs / interval).ceil() as u32;
+            let count = (total_duration_secs / interval).ceil() as u32;
 
             (0..count)
                 .map(|i| {
@@ -137,14 +136,11 @@ impl ThumbnailStrip {
         }
 
         // Find the position whose timestamp is nearest to the requested time.
-        let best = self
-            .positions
-            .iter()
-            .min_by(|a, b| {
-                let da = (a.time_secs - time_secs).abs();
-                let db = (b.time_secs - time_secs).abs();
-                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-            });
+        let best = self.positions.iter().min_by(|a, b| {
+            let da = (a.time_secs - time_secs).abs();
+            let db = (b.time_secs - time_secs).abs();
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         match best {
             Some(p) => p.clone(),

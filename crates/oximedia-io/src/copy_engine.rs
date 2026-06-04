@@ -3,8 +3,6 @@
 //! Provides configurable copy strategies (buffered, direct, sparse) and
 //! reports measured throughput after a copy job completes.
 
-#![allow(dead_code)]
-
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -19,6 +17,11 @@ pub enum CopyMode {
     Sparse,
     /// Copy in fixed-size chunks, useful for progress reporting.
     Chunked,
+    /// Zero-copy path: delegates to `std::io::copy` which on Linux will
+    /// transparently use `copy_file_range`/`sendfile` via the kernel; on
+    /// other platforms it falls back to a buffered copy in the standard
+    /// library.  No external dependencies — 100 % Pure Rust.
+    ZeroCopy,
 }
 
 impl std::fmt::Display for CopyMode {
@@ -27,6 +30,7 @@ impl std::fmt::Display for CopyMode {
             CopyMode::Buffered => write!(f, "buffered"),
             CopyMode::Sparse => write!(f, "sparse"),
             CopyMode::Chunked => write!(f, "chunked"),
+            CopyMode::ZeroCopy => write!(f, "zero-copy"),
         }
     }
 }
@@ -129,6 +133,11 @@ impl CopyEngine {
         let bytes_copied = match job.mode {
             CopyMode::Buffered | CopyMode::Sparse => std::fs::copy(&job.src, &job.dst)?,
             CopyMode::Chunked => Self::copy_chunked(&job.src, &job.dst, job.chunk_size)?,
+            CopyMode::ZeroCopy => {
+                let mut src_file = std::fs::File::open(&job.src)?;
+                let mut dst_file = std::fs::File::create(&job.dst)?;
+                std::io::copy(&mut src_file, &mut dst_file)?
+            }
         };
         let elapsed_secs = start.elapsed().as_secs_f64();
 
@@ -151,7 +160,7 @@ impl CopyEngine {
                 break;
             }
             writer.write_all(&buf[..n])?;
-            total += n as u64;
+            total += u64::try_from(n).unwrap_or(u64::MAX);
         }
         Ok(total)
     }
@@ -339,6 +348,42 @@ mod tests {
             .with_mode(CopyMode::Chunked)
             .with_chunk_size(1024 * 1024);
         let result = engine.run(&job).expect("copy should succeed");
-        assert_eq!(result.bytes_copied, data.len() as u64);
+        assert_eq!(result.bytes_copied, u64::try_from(data.len()).unwrap());
+    }
+
+    // -----------------------------------------------------------------------
+    // ZeroCopy tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_zerocopy_byte_identical() {
+        let content = b"zero-copy byte-identical test payload 0123456789";
+        let (_sf, src) = make_src(content);
+        let dst = std::env::temp_dir().join("oximedia-io-zerocopy-test-identical.bin");
+        let engine = CopyEngine::new();
+        let job = CopyJob::new(&src, &dst).with_mode(CopyMode::ZeroCopy);
+        let result = engine.run(&job).expect("zero-copy should succeed");
+        let dst_bytes = std::fs::read(&dst).expect("read dst");
+        let _ = std::fs::remove_file(&dst);
+        assert_eq!(result.bytes_copied, u64::try_from(content.len()).unwrap());
+        assert_eq!(dst_bytes, content);
+    }
+
+    #[test]
+    fn test_zerocopy_empty_file() {
+        let (_sf, src) = make_src(b"");
+        let dst = std::env::temp_dir().join("oximedia-io-zerocopy-test-empty.bin");
+        let engine = CopyEngine::new();
+        let job = CopyJob::new(&src, &dst).with_mode(CopyMode::ZeroCopy);
+        let result = engine.run(&job).expect("zero-copy empty should succeed");
+        let dst_bytes = std::fs::read(&dst).expect("read dst");
+        let _ = std::fs::remove_file(&dst);
+        assert_eq!(result.bytes_copied, 0);
+        assert!(dst_bytes.is_empty());
+    }
+
+    #[test]
+    fn test_zerocopy_to_string() {
+        assert_eq!(CopyMode::ZeroCopy.to_string(), "zero-copy");
     }
 }

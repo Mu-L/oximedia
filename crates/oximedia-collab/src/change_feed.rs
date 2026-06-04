@@ -556,7 +556,7 @@ mod tests {
     fn test_since_evicted_seq_returns_error() {
         let mut feed = ChangeFeed::new(3).expect("capacity should be valid");
         append_n(&mut feed, 5); // entries 3,4,5 retained; 1,2 evicted
-        // Asking for entries after seq=0 means wanting seq 1+ but oldest is 3
+                                // Asking for entries after seq=0 means wanting seq 1+ but oldest is 3
         let result = feed.since(0);
         assert!(matches!(
             result,
@@ -617,10 +617,7 @@ mod tests {
     fn test_catch_up_unknown_subscriber_returns_error() {
         let mut feed = make_feed();
         let result = feed.catch_up("ghost:99");
-        assert!(matches!(
-            result,
-            Err(ChangeFeedError::UnknownSubscriber(_))
-        ));
+        assert!(matches!(result, Err(ChangeFeedError::UnknownSubscriber(_))));
     }
 
     #[test]

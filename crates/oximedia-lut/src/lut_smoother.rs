@@ -174,21 +174,9 @@ fn convolve_axis(lut: &[Rgb], size: usize, kernel: &[f64], radius: usize, axis: 
                 for (ki, &kv) in kernel.iter().enumerate() {
                     let offset = ki as isize - radius as isize;
                     let (sr, sg, sb) = match axis {
-                        Axis::R => (
-                            clamp_coord(r as isize + offset, size),
-                            g,
-                            b,
-                        ),
-                        Axis::G => (
-                            r,
-                            clamp_coord(g as isize + offset, size),
-                            b,
-                        ),
-                        Axis::B => (
-                            r,
-                            g,
-                            clamp_coord(b as isize + offset, size),
-                        ),
+                        Axis::R => (clamp_coord(r as isize + offset, size), g, b),
+                        Axis::G => (r, clamp_coord(g as isize + offset, size), b),
+                        Axis::B => (r, g, clamp_coord(b as isize + offset, size)),
                     };
                     let src = lut[flat_idx(sr, sg, sb, size)];
                     acc[0] += src[0] * kv;
@@ -224,10 +212,9 @@ fn local_contrast(lut: &[Rgb], r: usize, g: usize, b: usize, size: usize) -> f64
             continue;
         }
         let n = lut[flat_idx(nr, ng, nb, size)];
-        let diff = ((center[0] - n[0]).powi(2)
-            + (center[1] - n[1]).powi(2)
-            + (center[2] - n[2]).powi(2))
-        .sqrt();
+        let diff =
+            ((center[0] - n[0]).powi(2) + (center[1] - n[1]).powi(2) + (center[2] - n[2]).powi(2))
+                .sqrt();
         if diff > max_diff {
             max_diff = diff;
         }
@@ -325,8 +312,7 @@ impl SmootherDiff {
         let mut above = 0usize;
 
         for (a, b) in original.iter().zip(smoothed.iter()) {
-            let d = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2))
-                .sqrt();
+            let d = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
             per_entry.push(d);
             sum_sq += d * d;
             sum += d;

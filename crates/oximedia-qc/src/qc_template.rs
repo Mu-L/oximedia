@@ -1,11 +1,37 @@
 //! QC template system: reusable check configurations for quality control workflows.
 //!
 //! Allows building named templates of QC checks that can be saved to a library
-//! and instantiated per-job.
+//! and instantiated per-job.  Templates support **inheritance**: a custom template
+//! can extend a built-in preset via [`QcTemplateRef`], overriding only the fields
+//! that differ from the parent.
+//!
+//! # Template Inheritance
+//!
+//! ```rust
+//! use oximedia_qc::qc_template::{
+//!     QcTemplateLibrary, QcTemplateRef, QcTemplateOverrides, resolve_template,
+//! };
+//!
+//! let mut library = QcTemplateLibrary::new();
+//! // register built-in presets …
+//! // library.register(make_broadcast_hd_template());
+//!
+//! let child = QcTemplateRef {
+//!     base: Some("broadcast_hd".to_string()),
+//!     name: "my_hdr_broadcast".to_string(),
+//!     overrides: QcTemplateOverrides {
+//!         max_peak_luma: Some(4000.0),
+//!         ..Default::default()
+//!     },
+//! };
+//! // let resolved = resolve_template(&child, &library).unwrap();
+//! // resolved.max_peak_luma == 4000.0
+//! ```
 
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use std::fmt;
 
 /// Categories of QC checks with associated severity levels.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -89,6 +115,12 @@ impl QcTemplateEntry {
 }
 
 /// A named collection of QC checks forming a reusable template.
+///
+/// In addition to the ordered list of [`QcTemplateEntry`] items, a template
+/// carries *parameter fields* (luma limits, allowed codecs, loudness target)
+/// that drive threshold-based validation rules.  These parameters are the
+/// fields that are eligible for override in the template inheritance system —
+/// see [`QcTemplateRef`] and [`resolve_template`].
 #[derive(Debug, Clone)]
 pub struct QcTemplate {
     /// Template name, e.g. `"broadcast_hd"`.
@@ -97,15 +129,37 @@ pub struct QcTemplate {
     pub description: String,
     /// Ordered list of check entries.
     entries: Vec<QcTemplateEntry>,
+
+    // ---- parameter fields ----
+    /// Maximum allowed peak luma in nits (e.g. 1000.0 for HDR10, 100.0 for SDR).
+    ///
+    /// Default: 1000.0 nits (PQ / HDR10 reference peak).
+    pub max_peak_luma: f32,
+    /// Minimum allowed peak luma in nits.
+    ///
+    /// Default: 0.005 nits (mastering display black level).
+    pub min_peak_luma: f32,
+    /// Codec identifiers permitted by this template (e.g. `["av1", "vp9"]`).
+    ///
+    /// An empty list means *all patent-free codecs are accepted*.
+    pub allowed_codecs: Vec<String>,
+    /// Maximum integrated loudness target in LUFS (negative, e.g. -23.0).
+    ///
+    /// Default: -23.0 LUFS (EBU R128).
+    pub max_loudness_lufs: f32,
 }
 
 impl QcTemplate {
-    /// Create an empty template.
+    /// Create an empty template with sensible parameter defaults.
     pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             description: description.into(),
             entries: Vec::new(),
+            max_peak_luma: 1000.0,
+            min_peak_luma: 0.005,
+            allowed_codecs: Vec::new(),
+            max_loudness_lufs: -23.0,
         }
     }
 
@@ -164,6 +218,150 @@ impl QcTemplateLibrary {
             .map(std::string::String::as_str)
             .collect()
     }
+}
+
+// ============================================================================
+// Template inheritance
+// ============================================================================
+
+/// Errors that can occur when resolving a [`QcTemplateRef`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QcError {
+    /// The named base template does not exist in the registry.
+    TemplateNotFound(String),
+}
+
+impl fmt::Display for QcError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TemplateNotFound(name) => {
+                write!(f, "QC template not found: {name:?}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for QcError {}
+
+/// Partial overrides applied when resolving a child template.
+///
+/// Every field is wrapped in `Option<T>`.  A `Some(value)` replaces the
+/// parent template's value; `None` means "keep parent value".  When there
+/// is no parent (i.e. [`QcTemplateRef::base`] is `None`), `None` fields fall
+/// back to the defaults defined in [`QcTemplate::new`].
+#[derive(Debug, Clone, Default)]
+pub struct QcTemplateOverrides {
+    /// Override for [`QcTemplate::max_peak_luma`].
+    pub max_peak_luma: Option<f32>,
+    /// Override for [`QcTemplate::min_peak_luma`].
+    pub min_peak_luma: Option<f32>,
+    /// Override for [`QcTemplate::allowed_codecs`].
+    pub allowed_codecs: Option<Vec<String>>,
+    /// Override for [`QcTemplate::max_loudness_lufs`].
+    pub max_loudness_lufs: Option<f32>,
+    /// Override for [`QcTemplate::description`].
+    pub description: Option<String>,
+}
+
+/// A reference to a [`QcTemplate`] that supports single-level inheritance.
+///
+/// When resolved via [`resolve_template`]:
+/// - If [`QcTemplateRef::base`] is `Some(name)`, the named template is looked
+///   up in the registry and used as the starting point; the child's
+///   [`overrides`](QcTemplateRef::overrides) are then applied on top.
+/// - If [`QcTemplateRef::base`] is `None`, a fresh template is built using the
+///   defaults from [`QcTemplate::new`] with overrides applied.
+///
+/// Check entries (the [`Vec<QcTemplateEntry>`] part of the template) are
+/// *inherited as-is* from the base template; the override mechanism only
+/// affects parameter fields.
+#[derive(Debug, Clone)]
+pub struct QcTemplateRef {
+    /// Optional name of the parent template to inherit from.
+    pub base: Option<String>,
+    /// Name for the resolved template.
+    pub name: String,
+    /// Field-level overrides that take priority over the parent template.
+    pub overrides: QcTemplateOverrides,
+}
+
+impl QcTemplateRef {
+    /// Create a new template reference with no base (standalone).
+    #[must_use]
+    pub fn standalone(name: impl Into<String>) -> Self {
+        Self {
+            base: None,
+            name: name.into(),
+            overrides: QcTemplateOverrides::default(),
+        }
+    }
+
+    /// Create a new template reference that extends an existing template.
+    #[must_use]
+    pub fn extending(name: impl Into<String>, base: impl Into<String>) -> Self {
+        Self {
+            base: Some(base.into()),
+            name: name.into(),
+            overrides: QcTemplateOverrides::default(),
+        }
+    }
+}
+
+/// Resolve a [`QcTemplateRef`] into a concrete [`QcTemplate`].
+///
+/// # Algorithm
+///
+/// 1. If `template_ref.base` is `None`, start from [`QcTemplate::new`] defaults.
+/// 2. If `template_ref.base` is `Some(base_name)`, look up `base_name` in
+///    `registry`.  Returns [`QcError::TemplateNotFound`] if not found.
+/// 3. Apply each field in `template_ref.overrides`: a `Some(v)` replaces the
+///    corresponding field; `None` leaves it unchanged.
+/// 4. Set the template `name` to `template_ref.name`.
+///
+/// Check entries ([`QcTemplateEntry`] items) are cloned from the base
+/// template and are *not* affected by the overrides.
+///
+/// # Errors
+///
+/// Returns [`QcError::TemplateNotFound`] when the base template name does not
+/// exist in the registry.
+pub fn resolve_template(
+    template_ref: &QcTemplateRef,
+    registry: &QcTemplateLibrary,
+) -> Result<QcTemplate, QcError> {
+    // Step 1 / 2: obtain base template (or default)
+    let mut resolved = match &template_ref.base {
+        None => QcTemplate::new(&template_ref.name, ""),
+        Some(base_name) => {
+            let parent = registry
+                .get(base_name)
+                .ok_or_else(|| QcError::TemplateNotFound(base_name.clone()))?;
+            parent.clone()
+        }
+    };
+
+    // Step 3: apply overrides
+    let ov = &template_ref.overrides;
+    if let Some(v) = ov.max_peak_luma {
+        resolved.max_peak_luma = v;
+    }
+    if let Some(v) = ov.min_peak_luma {
+        resolved.min_peak_luma = v;
+    }
+    if let Some(ref codecs) = ov.allowed_codecs {
+        resolved.allowed_codecs = codecs.clone();
+    }
+    if let Some(v) = ov.max_loudness_lufs {
+        resolved.max_loudness_lufs = v;
+    }
+    if let Some(ref desc) = ov.description {
+        resolved.description = desc.clone();
+    }
+
+    // Step 4: always use the child's name
+    resolved.name = template_ref.name.clone();
+
+    Ok(resolved)
 }
 
 #[cfg(test)]
@@ -275,5 +473,135 @@ mod tests {
         lib.register(QcTemplate::new("alpha", ""));
         let names = lib.names();
         assert!(names.contains(&"alpha"));
+    }
+
+    // ---- Template inheritance tests ----
+
+    /// Build a registry with a single "broadcast_hd" parent template.
+    fn make_registry_with_broadcast() -> QcTemplateLibrary {
+        let mut lib = QcTemplateLibrary::new();
+        let mut parent = QcTemplate::new("broadcast_hd", "Standard broadcast HD");
+        // Set non-default values so we can verify fallthrough.
+        parent.max_peak_luma = 1000.0;
+        parent.min_peak_luma = 0.05;
+        parent.max_loudness_lufs = -23.0;
+        parent.allowed_codecs = vec!["av1".to_string(), "vp9".to_string()];
+        parent.add_check(make_entry(QcCheckType::VideoLevels, true));
+        lib.register(parent);
+        lib
+    }
+
+    /// Child overrides parent's `max_peak_luma`; resolved template uses child value.
+    #[test]
+    fn test_template_inheritance_override() {
+        let registry = make_registry_with_broadcast();
+        let child = QcTemplateRef {
+            base: Some("broadcast_hd".to_string()),
+            name: "hdr_broadcast".to_string(),
+            overrides: QcTemplateOverrides {
+                max_peak_luma: Some(4000.0),
+                ..Default::default()
+            },
+        };
+        let resolved = resolve_template(&child, &registry).expect("should resolve");
+        assert_eq!(resolved.name, "hdr_broadcast");
+        assert!(
+            (resolved.max_peak_luma - 4000.0).abs() < f32::EPSILON,
+            "child override should win: expected 4000.0, got {}",
+            resolved.max_peak_luma
+        );
+    }
+
+    /// Field NOT overridden in child → resolved template uses parent value.
+    #[test]
+    fn test_template_inheritance_fallthrough() {
+        let registry = make_registry_with_broadcast();
+        let child = QcTemplateRef {
+            base: Some("broadcast_hd".to_string()),
+            name: "slight_variant".to_string(),
+            overrides: QcTemplateOverrides {
+                // Only override loudness; luma should fall through from parent.
+                max_loudness_lufs: Some(-24.0),
+                ..Default::default()
+            },
+        };
+        let resolved = resolve_template(&child, &registry).expect("should resolve");
+        // max_peak_luma was NOT overridden → keeps parent value 1000.0
+        assert!(
+            (resolved.max_peak_luma - 1000.0).abs() < f32::EPSILON,
+            "should fall through to parent 1000.0, got {}",
+            resolved.max_peak_luma
+        );
+        // min_peak_luma also falls through
+        assert!(
+            (resolved.min_peak_luma - 0.05).abs() < f32::EPSILON,
+            "should fall through to parent 0.05, got {}",
+            resolved.min_peak_luma
+        );
+        // loudness override applied
+        assert!(
+            (resolved.max_loudness_lufs - (-24.0)).abs() < f32::EPSILON,
+            "loudness override should apply: expected -24.0, got {}",
+            resolved.max_loudness_lufs
+        );
+        // check entries inherited from parent
+        assert_eq!(
+            resolved.check_count(),
+            1,
+            "check entries should be inherited"
+        );
+    }
+
+    /// None base → builds from overrides/defaults.
+    #[test]
+    fn test_template_inheritance_no_base() {
+        let registry = QcTemplateLibrary::new(); // empty
+        let child = QcTemplateRef {
+            base: None,
+            name: "custom_sdr".to_string(),
+            overrides: QcTemplateOverrides {
+                max_peak_luma: Some(100.0),
+                allowed_codecs: Some(vec!["av1".to_string()]),
+                ..Default::default()
+            },
+        };
+        let resolved = resolve_template(&child, &registry).expect("should resolve");
+        assert_eq!(resolved.name, "custom_sdr");
+        assert!(
+            (resolved.max_peak_luma - 100.0).abs() < f32::EPSILON,
+            "override applied, got {}",
+            resolved.max_peak_luma
+        );
+        assert_eq!(resolved.allowed_codecs, vec!["av1".to_string()]);
+        // Non-overridden fields use defaults from QcTemplate::new
+        assert!(
+            (resolved.min_peak_luma - 0.005).abs() < 1e-6_f32,
+            "default min_peak_luma, got {}",
+            resolved.min_peak_luma
+        );
+        assert!(
+            (resolved.max_loudness_lufs - (-23.0)).abs() < f32::EPSILON,
+            "default loudness, got {}",
+            resolved.max_loudness_lufs
+        );
+    }
+
+    /// Err when base template not found in registry.
+    #[test]
+    fn test_template_inheritance_unknown_base() {
+        let registry = QcTemplateLibrary::new(); // empty
+        let child = QcTemplateRef {
+            base: Some("nonexistent_template".to_string()),
+            name: "orphan".to_string(),
+            overrides: QcTemplateOverrides::default(),
+        };
+        let result = resolve_template(&child, &registry);
+        assert!(result.is_err(), "should fail for unknown base");
+        assert_eq!(
+            result.err(),
+            Some(QcError::TemplateNotFound(
+                "nonexistent_template".to_string()
+            ))
+        );
     }
 }

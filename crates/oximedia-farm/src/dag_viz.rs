@@ -254,7 +254,8 @@ impl DagViz {
             return Err(VizError::DuplicateNode(id));
         }
         self.node_order.push(id.clone());
-        self.nodes.insert(id.clone(), VizNode::new(id, label, state));
+        self.nodes
+            .insert(id.clone(), VizNode::new(id, label, state));
         Ok(())
     }
 
@@ -264,7 +265,8 @@ impl DagViz {
         if !self.nodes.contains_key(&id) {
             self.node_order.push(id.clone());
         }
-        self.nodes.insert(id.clone(), VizNode::new(id, label, state));
+        self.nodes
+            .insert(id.clone(), VizNode::new(id, label, state));
     }
 
     /// Add a node with metadata.
@@ -491,7 +493,11 @@ impl DagViz {
 
         let graph = JsonGraph {
             name: &self.name,
-            nodes: self.node_order.iter().filter_map(|id| self.nodes.get(id)).collect(),
+            nodes: self
+                .node_order
+                .iter()
+                .filter_map(|id| self.nodes.get(id))
+                .collect(),
             edges: self
                 .edges
                 .iter()
@@ -564,7 +570,13 @@ impl DagViz {
 fn sanitize_dot_id(id: &str) -> String {
     let s: String = id
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     // DOT identifiers must not start with a digit
     if s.starts_with(|c: char| c.is_ascii_digit()) {
@@ -584,7 +596,13 @@ fn escape_dot_label(s: &str) -> String {
 /// Sanitize a node ID for use as a Mermaid identifier.
 fn sanitize_mermaid_id(id: &str) -> String {
     id.chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -634,7 +652,10 @@ mod tests {
     fn test_ascii_output_contains_pipeline_name() {
         let viz = build_simple_dag();
         let ascii = viz.render(VizFormat::Ascii).expect("ascii render");
-        assert!(ascii.contains("test-pipeline"), "ASCII should contain pipeline name");
+        assert!(
+            ascii.contains("test-pipeline"),
+            "ASCII should contain pipeline name"
+        );
     }
 
     #[test]
@@ -652,7 +673,10 @@ mod tests {
     fn test_mermaid_output_contains_flowchart() {
         let viz = build_simple_dag();
         let mermaid = viz.render(VizFormat::Mermaid).expect("mermaid render");
-        assert!(mermaid.contains("flowchart"), "Mermaid should start with flowchart");
+        assert!(
+            mermaid.contains("flowchart"),
+            "Mermaid should start with flowchart"
+        );
         assert!(mermaid.contains("-->"), "should contain edge arrows");
     }
 
@@ -681,7 +705,8 @@ mod tests {
     fn test_set_state_updates_node() {
         let mut viz = DagViz::new("x");
         viz.add_node("job1", "Job 1", NodeState::Pending);
-        viz.set_state("job1", NodeState::Completed).expect("set state");
+        viz.set_state("job1", NodeState::Completed)
+            .expect("set state");
         let snap = viz.render(VizFormat::Dot).expect("dot");
         assert!(snap.contains("Completed") || snap.contains("green"));
     }
@@ -699,7 +724,8 @@ mod tests {
         viz.add_node("a", "A", NodeState::Pending);
         viz.add_node("b", "B", NodeState::Pending);
         viz.add_edge("b", "a").expect("first");
-        viz.add_edge("b", "a").expect("duplicate should be silently ignored");
+        viz.add_edge("b", "a")
+            .expect("duplicate should be silently ignored");
         assert_eq!(viz.edge_count(), 1);
     }
 

@@ -70,11 +70,7 @@ pub struct OtelMetricPoint {
 impl OtelMetricPoint {
     /// Create a new metric point.
     #[must_use]
-    pub fn new(
-        metric_name: impl Into<String>,
-        value: f64,
-        timestamp_nanos: u64,
-    ) -> Self {
+    pub fn new(metric_name: impl Into<String>, value: f64, timestamp_nanos: u64) -> Self {
         Self {
             metric_name: metric_name.into(),
             value,
@@ -382,9 +378,9 @@ impl MetricBridge {
         let mut groups: BTreeMap<String, OtelGauge> = BTreeMap::new();
 
         for m in metrics {
-            let gauge = groups.entry(m.name.clone()).or_insert_with(|| {
-                OtelGauge::new(&m.name, "", "")
-            });
+            let gauge = groups
+                .entry(m.name.clone())
+                .or_insert_with(|| OtelGauge::new(&m.name, "", ""));
             gauge.push(self.convert(m));
         }
 
@@ -573,14 +569,8 @@ mod tests {
         let attrs = cfg.resource_attributes();
         let service_name = attrs.iter().find(|(k, _)| k == "service.name");
         let service_version = attrs.iter().find(|(k, _)| k == "service.version");
-        assert_eq!(
-            service_name.map(|(_, v)| v.as_str()),
-            Some("my-service")
-        );
-        assert_eq!(
-            service_version.map(|(_, v)| v.as_str()),
-            Some("2.0.0")
-        );
+        assert_eq!(service_name.map(|(_, v)| v.as_str()), Some("my-service"));
+        assert_eq!(service_version.map(|(_, v)| v.as_str()), Some("2.0.0"));
     }
 
     #[test]
@@ -618,15 +608,22 @@ mod tests {
     fn test_bridge_convert_labels_preserved() {
         let cfg = OtelExportConfig::new("svc", "1.0");
         let bridge = MetricBridge::new(&cfg);
-        let internal =
-            InternalMetric::new("cpu", 80.0, 0).with_label("host", "srv-1").with_label("dc", "us-east");
+        let internal = InternalMetric::new("cpu", 80.0, 0)
+            .with_label("host", "srv-1")
+            .with_label("dc", "us-east");
         let point = bridge.convert(&internal);
         assert!(
-            point.labels.iter().any(|(k, v)| k == "host" && v == "srv-1"),
+            point
+                .labels
+                .iter()
+                .any(|(k, v)| k == "host" && v == "srv-1"),
             "host label must be preserved"
         );
         assert!(
-            point.labels.iter().any(|(k, v)| k == "dc" && v == "us-east"),
+            point
+                .labels
+                .iter()
+                .any(|(k, v)| k == "dc" && v == "us-east"),
             "dc label must be preserved"
         );
     }

@@ -34,15 +34,13 @@ impl VmafEstimator {
     #[must_use]
     pub fn estimate(ref_frame: &[u8], dist_frame: &[u8], width: u32, height: u32) -> f32 {
         let pixels = (width as usize) * (height as usize);
-        if pixels == 0
-            || ref_frame.len() < pixels
-            || dist_frame.len() < pixels
-        {
+        if pixels == 0 || ref_frame.len() < pixels || dist_frame.len() < pixels {
             return 0.0;
         }
 
         let psnr_norm = compute_psnr_normalized(&ref_frame[..pixels], &dist_frame[..pixels]);
-        let ssim = compute_ssim_estimate(&ref_frame[..pixels], &dist_frame[..pixels], width as usize);
+        let ssim =
+            compute_ssim_estimate(&ref_frame[..pixels], &dist_frame[..pixels], width as usize);
 
         let score = 0.3 * psnr_norm * 100.0 + 0.7 * ssim * 100.0;
         score.clamp(0.0, 100.0)
@@ -160,21 +158,31 @@ mod tests {
     fn test_identical_frames_score_100() {
         let frame = vec![128u8; 64 * 64];
         let score = VmafEstimator::estimate(&frame, &frame, 64, 64);
-        assert!((score - 100.0).abs() < 1.0, "identical frames should score ~100, got {score}");
+        assert!(
+            (score - 100.0).abs() < 1.0,
+            "identical frames should score ~100, got {score}"
+        );
     }
 
     #[test]
     fn test_score_in_range_0_100() {
-        let reference: Vec<u8> = (0..64).flat_map(|y: u8| (0..64u8).map(move |x| x.wrapping_add(y))).collect();
+        let reference: Vec<u8> = (0..64)
+            .flat_map(|y: u8| (0..64u8).map(move |x| x.wrapping_add(y)))
+            .collect();
         let distorted: Vec<u8> = reference.iter().map(|&v| v.wrapping_add(30)).collect();
         let score = VmafEstimator::estimate(&reference, &distorted, 64, 64);
-        assert!(score >= 0.0 && score <= 100.0, "score out of range: {score}");
+        assert!(
+            score >= 0.0 && score <= 100.0,
+            "score out of range: {score}"
+        );
     }
 
     #[test]
     fn test_degraded_frame_lower_score_than_identical() {
         let reference = vec![100u8; 32 * 32];
-        let distorted: Vec<u8> = (0..32 * 32).map(|i: usize| ((i * 37 + 13) % 256) as u8).collect();
+        let distorted: Vec<u8> = (0..32 * 32)
+            .map(|i: usize| ((i * 37 + 13) % 256) as u8)
+            .collect();
         let ideal_score = VmafEstimator::estimate(&reference, &reference, 32, 32);
         let degraded_score = VmafEstimator::estimate(&reference, &distorted, 32, 32);
         assert!(
@@ -198,9 +206,14 @@ mod tests {
 
     #[test]
     fn test_ssim_estimate_identical() {
-        let frame: Vec<u8> = (0..64u8).flat_map(|y| (0..64u8).map(move |x| x.wrapping_add(y))).collect();
+        let frame: Vec<u8> = (0..64u8)
+            .flat_map(|y| (0..64u8).map(move |x| x.wrapping_add(y)))
+            .collect();
         let ssim = compute_ssim_estimate(&frame, &frame, 64);
-        assert!(ssim >= 0.99, "identical frame SSIM should be ~1.0, got {ssim}");
+        assert!(
+            ssim >= 0.99,
+            "identical frame SSIM should be ~1.0, got {ssim}"
+        );
     }
 
     #[test]
@@ -208,7 +221,10 @@ mod tests {
         let reference = vec![128u8; 64 * 64];
         let distorted = vec![128u8; 32 * 32]; // too small
         let score = VmafEstimator::estimate(&reference, &distorted, 64, 64);
-        assert!((score - 0.0).abs() < f32::EPSILON, "mismatched sizes should return 0.0, got {score}");
+        assert!(
+            (score - 0.0).abs() < f32::EPSILON,
+            "mismatched sizes should return 0.0, got {score}"
+        );
     }
 
     #[test]
@@ -217,6 +233,9 @@ mod tests {
         // Invert all pixel values → maximum distortion
         let distorted: Vec<u8> = reference.iter().map(|&v| 255 - v).collect();
         let score = VmafEstimator::estimate(&reference, &distorted, 32, 32);
-        assert!(score < 50.0, "heavily distorted frame should score below 50.0, got {score}");
+        assert!(
+            score < 50.0,
+            "heavily distorted frame should score below 50.0, got {score}"
+        );
     }
 }

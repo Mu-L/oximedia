@@ -8,17 +8,36 @@
 //!
 //! The AAF Edit Protocol (as described in the AAF SDK documentation) requires
 //! that a host performing partial edits must not silently drop properties it
-//! does not understand.  `AafEditSession` models this by keeping a "raw
-//! property bag" alongside the decoded in-memory `AafFile` and merging the
-//! two layers back together on `save`.
+//! does not understand.  `AafEditSession` models this by keeping a structured
+//! "raw property bag" alongside the decoded in-memory `AafFile` and merging
+//! the two layers back together on `save`.
 //!
-//! In this implementation the raw bag is an opaque `Vec<u8>` placeholder that
-//! represents binary data read from the file; a full implementation would
-//! store the structured-storage property stream here.
+//! # Serialisation format
+//!
+//! [`AafEditSession::write_to`] emits a Microsoft Compound File Binary
+//! container (the same wrapper used by AAF / SMPTE ST 377-1) whose root
+//! storage holds:
+//!
+//! - `/Header` — header local-set (KLV stream of object-model properties).
+//! - `/MetaDictionary` — extensibility dictionary local-set.
+//! - `/ContentStorage` — all mobs serialised as nested local-sets.
+//! - `/EssenceData` — optional list of essence-data entries.
+//! - `/UnknownProperties` — verbatim copy of the round-trip bag.
+//!
+//! Each stream is a sequence of KLV (key-length-value) triples per
+//! SMPTE ST 379-1.  See [`crate::klv`] and [`crate::local_set_encode`].
 
-use crate::{AafError, AafFile, ContentStorage, Result};
+use crate::local_set_decode::{
+    decode_content_storage, decode_essence_data_list, decode_header, decode_unknown_properties,
+};
+use crate::local_set_encode::{
+    encode_dictionary_local_set, encode_essence_data_list, encode_unknown_properties,
+    LocalSetEncode,
+};
+use crate::structured_storage::{StorageReader, StorageWriter};
+use crate::{klv, AafError, AafFile, ContentStorage, Result};
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 /// A key-value property preserved verbatim from the source file.
@@ -73,13 +92,57 @@ impl AafEditSession {
     /// `AafError::InvalidFile` if the file is not a valid (or stub) AAF file.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path_buf = path.as_ref().to_path_buf();
-        let _file = std::fs::File::open(&path_buf)?;
-        // A full implementation would call AafReader::new(file).read() here.
-        // For the protocol stub we return an empty session tied to the path.
+        let file = std::fs::File::open(&path_buf)?;
+        let mut session = Self::from_reader(file)?;
+        session.source_path = Some(path_buf);
+        Ok(session)
+    }
+
+    /// Construct an edit session from any `Read + Seek` source containing a
+    /// previously-written AAF Edit Session CFB stream.
+    ///
+    /// This is the symmetric counterpart of [`Self::write_to`] and is the
+    /// canonical round-trip entry point.  It does **not** go through the
+    /// crate's generic `AafReader::read` because that path is wired to
+    /// per-stream stubs the rest of the codebase depends on; instead it
+    /// reads the streams written by this module directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AafError::ParseError`] if the streams cannot be decoded.
+    pub fn from_reader<R: Read + Seek>(reader: R) -> Result<Self> {
+        let mut storage = StorageReader::new(reader)?;
+        let mut file = AafFile::new();
+
+        // Header (optional — if absent we keep the default)
+        if let Ok(stream) = storage.read_stream_by_path("Header") {
+            let decoded = decode_header(&stream)?;
+            file.header = decoded.header;
+        }
+
+        // ContentStorage
+        if let Ok(stream) = storage.read_stream_by_path("ContentStorage") {
+            let decoded = decode_content_storage(&stream)?;
+            file.content_storage = decoded;
+        }
+
+        // EssenceData (optional)
+        if let Ok(stream) = storage.read_stream_by_path("EssenceData") {
+            file.essence_data = decode_essence_data_list(&stream)?;
+        }
+
+        // UnknownProperties (optional)
+        let unknown_properties =
+            if let Ok(stream) = storage.read_stream_by_path("UnknownProperties") {
+                decode_unknown_properties(&stream)?
+            } else {
+                HashMap::new()
+            };
+
         Ok(Self {
-            source_path: Some(path_buf),
-            file: AafFile::new(),
-            unknown_properties: HashMap::new(),
+            source_path: None,
+            file,
+            unknown_properties,
             dirty: false,
         })
     }
@@ -169,22 +232,50 @@ impl AafEditSession {
         Ok(())
     }
 
-    /// Write the session to any `Write` sink.
+    /// Write the session as a binary AAF Compound File.
+    ///
+    /// The writer constructs a CFB container (see [`StorageWriter`]) whose
+    /// root holds five streams:
+    ///
+    /// - `Header` — header local-set
+    /// - `MetaDictionary` — dictionary local-set
+    /// - `ContentStorage` — mobs serialised as nested local-sets
+    /// - `EssenceData` — essence-data list (empty if none)
+    /// - `UnknownProperties` — verbatim copy of the unknown-property bag
     ///
     /// # Errors
     ///
-    /// Returns an I/O error if writing fails.
-    pub fn write_to<W: Write>(&self, writer: &mut W) -> Result<()> {
-        // Stub serialisation: write a marker + preserved property count.
-        let header = self.file.header();
-        let prop_count: usize = self.unknown_properties.values().map(Vec::len).sum();
-        let out = format!(
-            "AAF_EDIT_SESSION v{}.{} unknown_props={}\n",
-            header.major_version,
-            header.minor_version,
-            prop_count,
-        );
-        writer.write_all(out.as_bytes())?;
+    /// Returns an I/O error if writing fails, or [`AafError::WriteError`] if
+    /// stream serialisation hits an internal limit.
+    pub fn write_to<W: Write + Seek>(&self, writer: &mut W) -> Result<()> {
+        // ── Build each KLV stream as a byte buffer ───────────────────
+        let header_bytes = klv::encode_local_set(&self.file.header.encode_local_set());
+        let dict_bytes = klv::encode_local_set(&encode_dictionary_local_set(&self.file.dictionary));
+        let content_bytes = klv::encode_local_set(&self.file.content_storage.encode_local_set());
+        let essence_bytes =
+            klv::encode_local_set(&encode_essence_data_list(&self.file.essence_data));
+        let unknown_bytes =
+            klv::encode_local_set(&encode_unknown_properties(&self.unknown_properties));
+
+        // ── Stream those into a CFB container ────────────────────────
+        let mut storage = StorageWriter::new(writer)?;
+        // Mark the root with the AAF storage CLSID (canonical AAF root id).
+        const AAF_ROOT_CLSID: [u8; 16] = [
+            0x9A, 0xD6, 0xD8, 0xD7, 0xD8, 0x4D, 0xD0, 0x11, 0x8A, 0x30, 0x08, 0x00, 0x91, 0xCD,
+            0xA0, 0x05,
+        ];
+        storage.set_root_clsid(AAF_ROOT_CLSID);
+
+        storage.write_stream_in(0, "Header", &header_bytes)?;
+        storage.write_stream_in(0, "MetaDictionary", &dict_bytes)?;
+        storage.write_stream_in(0, "ContentStorage", &content_bytes)?;
+        if !self.file.essence_data.is_empty() {
+            storage.write_stream_in(0, "EssenceData", &essence_bytes)?;
+        }
+        if !self.unknown_properties.is_empty() {
+            storage.write_stream_in(0, "UnknownProperties", &unknown_bytes)?;
+        }
+        storage.finalize()?;
         Ok(())
     }
 }
@@ -224,11 +315,18 @@ mod tests {
 
     #[test]
     fn test_session_write_to_buffer() {
+        use std::io::Cursor;
         let session = AafEditSession::from_file(AafFile::new());
-        let mut buf: Vec<u8> = Vec::new();
-        session.write_to(&mut buf).expect("write must succeed");
-        let text = String::from_utf8_lossy(&buf);
-        assert!(text.starts_with("AAF_EDIT_SESSION"));
+        let mut cur = Cursor::new(Vec::<u8>::new());
+        session.write_to(&mut cur).expect("write must succeed");
+        let buf = cur.into_inner();
+        // CFB signature must be at offset 0
+        assert!(buf.len() >= 8);
+        assert_eq!(
+            &buf[..8],
+            &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1],
+            "CFB signature mismatch"
+        );
     }
 
     #[test]
@@ -276,14 +374,24 @@ mod tests {
     }
 
     #[test]
-    fn test_session_write_includes_prop_count() {
+    fn test_session_write_preserves_unknown_via_round_trip() {
+        use std::io::Cursor;
         let mut session = AafEditSession::from_file(AafFile::new());
-        session.preserve_property("A", UnknownProperty::new(1, vec![0]));
-        session.preserve_property("B", UnknownProperty::new(2, vec![0]));
-        let mut buf: Vec<u8> = Vec::new();
-        session.write_to(&mut buf).expect("write must succeed");
-        let text = String::from_utf8_lossy(&buf);
-        assert!(text.contains("unknown_props=2"));
+        session.preserve_property("A", UnknownProperty::new(1, vec![0xAA, 0xBB]));
+        session.preserve_property("B", UnknownProperty::new(2, vec![0xCC]));
+        session.preserve_property("A", UnknownProperty::new(3, vec![0xDD, 0xEE, 0xFF]));
+
+        let mut cur = Cursor::new(Vec::<u8>::new());
+        session.write_to(&mut cur).expect("write must succeed");
+        cur.set_position(0);
+        let recovered = AafEditSession::from_reader(cur).expect("read must succeed");
+        let total: usize = recovered.unknown_properties.values().map(Vec::len).sum();
+        assert_eq!(total, 3);
+        assert_eq!(recovered.preserved_properties("A").len(), 2);
+        assert_eq!(recovered.preserved_properties("B").len(), 1);
+        let a_props = recovered.preserved_properties("A");
+        let tags: Vec<u16> = a_props.iter().map(|p| p.tag).collect();
+        assert!(tags.contains(&1) && tags.contains(&3));
     }
 
     #[test]

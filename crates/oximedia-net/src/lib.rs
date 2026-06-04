@@ -63,6 +63,7 @@
 
 pub mod abr;
 pub mod abr_buffer;
+pub mod bandwidth_adaptation;
 pub mod bandwidth_estimator;
 pub mod bandwidth_probe;
 pub mod bandwidth_throttle;
@@ -108,6 +109,7 @@ pub mod srt;
 pub mod srt_aes256gcm;
 pub mod srt_config;
 pub mod srt_group;
+pub mod srt_pacing;
 pub mod stream_health_monitor;
 pub mod stream_mux;
 pub mod webrtc;

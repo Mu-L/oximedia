@@ -1115,4 +1115,116 @@ mod tests {
         );
         assert_eq!(data[3], 200, "alpha unchanged");
     }
+
+    // ── Frame checksum round-trip ─────────────────────────────────────────────
+
+    /// Synthesise a 64×64 synthetic frame whose luma channel stays in [0, 127]
+    /// (the "dark half" of the range), apply a gain×2 / gain×0.5 round-trip,
+    /// and verify PSNR ≥ 25 dB.
+    ///
+    /// Pixels in [0, 127] survive gain×2 without clamping (result ≤ 254), so the
+    /// ×0.5 inverse recovers the original within u8 rounding error (≤ 1 LSB).
+    /// Pixels that would have saturated at 255 are deliberately excluded so that
+    /// a meaningful PSNR bound can be asserted without false positives.
+    ///
+    /// In a real pipeline this is analogous to encoding a mid-exposure frame with
+    /// a codec that applies a logarithmic transfer, then decoding back — the
+    /// highlight roll-off behaviour is intentionally out of scope here.
+    #[test]
+    fn test_transcode_round_trip_frame_similarity() {
+        const W: u32 = 64;
+        const H: u32 = 64;
+        const PIXELS: usize = (W * H) as usize;
+
+        // Gradient luma ramp confined to [0, 127] so gain×2 never clips.
+        let mut original: Vec<u8> = Vec::with_capacity(PIXELS * 4);
+        for i in 0..PIXELS {
+            let luma = ((i * 127) / (PIXELS - 1)) as u8; // 0 → 127
+            original.extend_from_slice(&[luma, 64u8, 32u8, 255u8]);
+        }
+
+        // "Encode" pass: gain ×2.0 — no clamping because luma ≤ 127.
+        let mut encoded = original.clone();
+        let mut w = W;
+        let mut h = H;
+        apply_video_ops(
+            &mut encoded,
+            &mut w,
+            &mut h,
+            &[VideoFrameOp::GainAdjust { gain: 2.0 }],
+        );
+        assert_eq!(w, W, "width unchanged after gain");
+        assert_eq!(h, H, "height unchanged after gain");
+
+        // "Decode" pass: gain ×0.5 — inverse recovers original within ±1 LSB.
+        let mut decoded = encoded.clone();
+        apply_video_ops(
+            &mut decoded,
+            &mut w,
+            &mut h,
+            &[VideoFrameOp::GainAdjust { gain: 0.5 }],
+        );
+
+        // Compute per-pixel MSE on the R channel (luma proxy).
+        let mse: f64 = original
+            .chunks_exact(4)
+            .zip(decoded.chunks_exact(4))
+            .map(|(orig, dec)| {
+                let diff = orig[0] as f64 - dec[0] as f64;
+                diff * diff
+            })
+            .sum::<f64>()
+            / PIXELS as f64;
+
+        // For a luma-confined round-trip the only source of error is u8 truncation
+        // in the ×0.5 step (max 1 LSB per pixel).  MSE ≤ 1.0 → PSNR ≥ 48 dB.
+        // We assert ≥ 25 dB as a very conservative lower bound.
+        let psnr_db = if mse < f64::EPSILON {
+            f64::INFINITY
+        } else {
+            10.0 * (255.0_f64 * 255.0 / mse).log10()
+        };
+
+        assert!(
+            psnr_db >= 25.0,
+            "Round-trip PSNR {psnr_db:.2} dB is below 25 dB threshold (MSE={mse:.4})"
+        );
+    }
+
+    /// Frame checksum: a zero-gain (identity no-op) round-trip must produce
+    /// pixel-perfect output (PSNR = infinity, checksum unchanged).
+    #[test]
+    fn test_transcode_identity_ops_preserve_checksum() {
+        const W: u32 = 64;
+        const H: u32 = 64;
+        const PIXELS: usize = (W * H) as usize;
+
+        // Gradient frame identical to the one in the round-trip test.
+        let mut frame: Vec<u8> = Vec::with_capacity(PIXELS * 4);
+        for i in 0..PIXELS {
+            let luma = ((i * 255) / (PIXELS - 1)) as u8;
+            frame.extend_from_slice(&[luma, 128u8, 64u8, 255u8]);
+        }
+
+        let original_checksum: u64 = frame.iter().map(|&b| u64::from(b)).sum();
+
+        let mut w = W;
+        let mut h = H;
+        // GainAdjust {gain: 1.0} is documented as a no-op.
+        apply_video_ops(
+            &mut frame,
+            &mut w,
+            &mut h,
+            &[VideoFrameOp::GainAdjust { gain: 1.0 }],
+        );
+
+        let output_checksum: u64 = frame.iter().map(|&b| u64::from(b)).sum();
+
+        assert_eq!(
+            original_checksum, output_checksum,
+            "Identity gain must not alter any pixels (checksum mismatch)"
+        );
+        assert_eq!(w, W, "width must not change");
+        assert_eq!(h, H, "height must not change");
+    }
 }

@@ -4,8 +4,8 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.85+-orange.svg)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/version-v0.1.7-green.svg)](https://github.com/cool-japan/oximedia)
-[![Released](https://img.shields.io/badge/released-2026--05--16-brightgreen.svg)](https://github.com/cool-japan/oximedia)
+[![Version](https://img.shields.io/badge/version-v0.1.8-green.svg)](https://github.com/cool-japan/oximedia)
+[![Released](https://img.shields.io/badge/released-2026--06--02-brightgreen.svg)](https://github.com/cool-japan/oximedia)
 [![Crates](https://img.shields.io/badge/crates-109-blue.svg)](https://github.com/cool-japan/oximedia)
 [![SLOC](https://img.shields.io/badge/SLOC-~2.75M-blueviolet.svg)](https://github.com/cool-japan/oximedia)
 
@@ -55,22 +55,22 @@ Computer vision (object detection, motion tracking, video enhancement, quality a
 
 ## Project Scale
 
-OxiMedia is a **production-grade** framework at **v0.1.7** (active cycle, 2026-05-12):
+OxiMedia is a **production-grade** framework at **v0.1.8** (active cycle, 2026-06-02):
 
 | Metric | Value |
 |--------|-------|
 | Total crates | 109 |
 | Total SLOC (Rust) | ~2,752,000 |
-| Tests passing | 84,064 (0 failures, 245 skipped — `cargo nextest run --workspace --all-features`) |
+| Tests passing | 100,278 (0 failures, 0 warnings — `cargo nextest run --workspace --all-features`) |
 | Stable crates | 109 |
 | Alpha crates | 0 |
 | Partial crates | 0 |
 | License | Apache 2.0 |
 | MSRV | Rust 1.85+ |
 
-## Sovereign ML Pipelines (v0.1.7)
+## Sovereign ML Pipelines (v0.1.7+)
 
-OxiMedia 0.1.7 adds the [`oximedia-ml`](crates/oximedia-ml/) crate — a typed
+OxiMedia 0.1.7 introduced the [`oximedia-ml`](crates/oximedia-ml/) crate — a typed
 ML pipeline layer built atop the Pure-Rust [OxiONNX](https://crates.io/crates/oxionnx)
 runtime. Inference is entirely opt-in; the default `oximedia` build still
 pulls in **zero** ONNX symbols and stays C/Fortran-free.
@@ -89,7 +89,7 @@ pulls in **zero** ONNX symbols and stays C/Fortran-free.
 
 ```toml
 [dependencies]
-oximedia = { version = "0.1.7", features = ["ml", "ml-scene-classifier", "ml-onnx"] }
+oximedia = { version = "0.1.8", features = ["ml", "ml-scene-classifier", "ml-onnx"] }
 ```
 
 ```rust,ignore
@@ -139,17 +139,30 @@ See [`docs/ml_guide.md`](docs/ml_guide.md) for the full feature matrix,
 per-pipeline I/O contracts, device selection details, WASM support
 matrix, and roadmap.
 
-## What's New in v0.1.7
+## What's New in v0.1.8
 
-Active cycle starting 2026-05-12. Theme: **Performance caching, zero-copy streaming, and ML runtime upgrades**.
+Active cycle — latest release 2026-06-02. Theme: **Codec completeness, audio restoration, algorithmic depth, and entropy coding improvements**.
 
-- **`GamutConversionMatrix` OnceLock cache** (`oximedia-hdr`): Gamut conversion matrices are now computed once and memoized via `OnceLock`, eliminating repeated matrix allocation on every frame in HDR tone-mapping paths.
-- **SCTE-35 section roundtrip tests** (`oximedia-stream`): Full encode/decode roundtrip test coverage for SCTE-35 splice sections, ensuring compliance with ANSI/SCTE 35 2022 for ad-insertion signaling in CMAF streams.
-- **`bytes::Bytes` zero-copy `CmafChunk`** (`oximedia-stream`): `CmafChunk` now carries `bytes::Bytes` instead of `Vec<u8>`, enabling reference-counted zero-copy handoff between the packager, CDN edge cache, and HTTP response layers.
-- **`ToneCurve` enum** (`oximedia-colormgmt`): New `ToneCurve` enum with `Reinhard`, `Filmic`, and `ACES` variants, each implemented as a full parametric curve with configurable shoulder/toe and direct LUT bake-out support.
-- **`MergeExecutor` with symlink/hardlink/delete resolution** (`oximedia-dedup`): New executor that resolves detected duplicates via configurable strategies (symlink, hardlink, or delete), with dry-run mode and a summary report of reclaimed bytes.
-- **oxionnx 0.1.2 → 0.1.3**: Updated to OxiONNX 0.1.3 across the workspace — picks up `SessionBuilder::with_provider_kinds` for fine-grained EP selection and the new DirectML execution provider for GPU inference on Windows without CUDA.
-- **84,064 tests passing** (0 failures, 245 skipped — `cargo nextest run --workspace --all-features`).
+- **SILK encoder with NSQ noise-shaped quantisation** (`oximedia-audio`): Real SILK encoder path with noise-shaped quantisation loop; 440 Hz sine round-trip SNR ≥ 6 dB verified.
+- **AV1 non-square TX block coefficient decoding fixed** (`oximedia-codec`): `CoeffBuffer::pos_to_rowcol` now correctly handles non-square transform blocks, fixing a symbol-vs-position bug in AV1 entropy decoding EOB CDF paths.
+- **AAF binary serializer** (`oximedia-aaf`): Full SMPTE ST 377-1 CFB + KLV binary serializer; 22 previously orphan AAF modules registered and wired into the workspace.
+- **NDI SpeedHQ Huffman entropy coding** (`oximedia-ndi`): Real Huffman entropy coding for NDI SpeedHQ streams; 22 NDI orphan modules registered and wired.
+- **DRM software TPM 2.0 emulator + Secure Enclave emulator** (`oximedia-drm`): Pure-Rust software TPM 2.0 emulator and Secure Enclave emulator — enables DRM key protection on platforms without hardware TPM/SE.
+- **Audio restoration: AR-LPC declick + Boll 1979 spectral subtraction + Wiener denoiser** (`oximedia-restore`): Three new audio restoration algorithms: AR-LPC-based declicker, Boll 1979 spectral subtraction noise reducer, and a parametric Wiener filter denoiser.
+- **Y4M reader/writer + ITU-T P.910 SI/TI/motion metrics** (`oximedia-bench`): Y4M (YUV4MPEG2) container reader/writer and full ITU-T P.910 Spatial Information, Temporal Information, and motion activity metrics.
+- **S3 multipart upload with retry + configurable parallelism** (`oximedia-server`): S3 multipart upload with per-part retry logic and configurable upload parallelism for high-throughput media ingest.
+- **FLAC/Opus/MP3/Vorbis waveform decode wired** (`oximedia-clips`): Clip waveform extraction now uses the real demuxer path for FLAC, Opus, MP3, and Vorbis — replacing stub silence.
+- **SRT ingest server wired to real `SrtListener::accept`** (`oximedia-net`): SRT ingest now calls the real `SrtListener::accept` instead of the previous no-op stub, enabling live SRT stream ingestion.
+- **AutoCaptionPipeline example refreshed; ONNX/ML pipeline improvements** (`oximedia-ml`, `oximedia-caption-gen`): AutoCaption example updated to current API; ML pipeline feature flags and ONNX runtime wiring improved across the workspace.
+- **AnalysisScale Half/Quarter + downsample_box_luma** (`oximedia-analysis`): Configurable downscaling (Full/Half/Quarter) for the analysis pipeline; box-filter downsample; 5 new tests.
+- **rFFT phase correlation** (`oximedia-align`): `phase_correlate_1d` now uses `oxifft::rfft`/`irfft` (N/2+1 bins, half the complex ops) matching the OxiFFT policy; 4 regression tests.
+- **DataCite 4.x + PBCore 2.1 + MigrationTriggerPolicy** (`oximedia-archive-pro`): DataCite DOI metadata generation, PBCore metadata crosswalk, and automated format migration triggers; 18 new tests.
+- **batch_conform + ProxyDbExport / import_with_rebase** (`oximedia-proxy`): Batch EDL conforming with merge strategies, proxy database export/import with root-prefix rebase; 9 new tests.
+- **SegmentPlan + encode_segments_parallel** (`oximedia-convert`): Keyframe-boundary segment plan with rayon-parallel encode; codec-agnostic concat; 5 new tests.
+- **scale_tiled + scale_reference** (`oximedia-scaling`): Cache-blocked tiled scaling (bit-exact vs reference), rayon par_iter over tiles; 7 new tests.
+- **Speech-clarity biquad DRC + SIMD contrast enhancement** (`oximedia-access`): Real speech DSP (4th-order Butterworth 300–3400 Hz, downward DRC, peaking boost) and AVX2/NEON SIMD contrast enhancement with 256-entry gamma LUT.
+- **NSQ 440 Hz SNR fix** (`oximedia-codec`): SILK LTP coarse-to-fine decimated pitch search, per-subframe contour RD, fractional-lag refinement, round-trip harness.
+- **Waves 1–20 complete**, 100,278 tests passing (0 failures, 0 warnings — `cargo nextest run --workspace --all-features`).
 - **Zero clippy warnings** workspace-wide; WASM check clean.
 
 ## What's New in v0.1.5

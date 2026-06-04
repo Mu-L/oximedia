@@ -227,15 +227,7 @@ impl CieXyDiagram {
     }
 
     /// Draw a thin line between two pixel coordinates (Bresenham).
-    fn draw_line(
-        buf: &mut [u8],
-        w: usize,
-        x0: i32,
-        y0: i32,
-        x1: i32,
-        y1: i32,
-        rgba: [u8; 4],
-    ) {
+    fn draw_line(buf: &mut [u8], w: usize, x0: i32, y0: i32, x1: i32, y1: i32, rgba: [u8; 4]) {
         let dx = (x1 - x0).abs();
         let dy = -(y1 - y0).abs();
         let sx: i32 = if x0 < x1 { 1 } else { -1 };
@@ -334,7 +326,14 @@ impl CieXyDiagram {
             let py = self.cy(pt.y);
             // Scale dot brightness by luminance (clamped 0..1 → 128..255)
             let brightness = ((pt.luminance.clamp(0.0, 1.0) * 127.0) as u8).saturating_add(128);
-            Self::draw_dot(&mut buf, w, px, py, 2, [brightness, brightness, brightness, 220]);
+            Self::draw_dot(
+                &mut buf,
+                w,
+                px,
+                py,
+                2,
+                [brightness, brightness, brightness, 220],
+            );
         }
 
         buf
@@ -461,7 +460,7 @@ mod tests {
         // D65 is inside, spectral far-green is outside
         let points = vec![
             CieXyPoint::new(0.3127, 0.3290, 1.0), // inside
-            CieXyPoint::new(0.17, 0.80, 1.0),      // outside
+            CieXyPoint::new(0.17, 0.80, 1.0),     // outside
         ];
         let cov = CieXyDiagram::coverage_percent(&points, &boundary);
         // Exactly 1/2 inside → 50%

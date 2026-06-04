@@ -320,8 +320,7 @@ impl BatchAnalytics {
         let mut durations: Vec<f64> = samples.iter().map(|s| s.duration_secs).collect();
         durations.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-        let mean_duration_secs =
-            durations.iter().sum::<f64>() / total_jobs as f64;
+        let mean_duration_secs = durations.iter().sum::<f64>() / total_jobs as f64;
         let p50 = percentile(&durations, 0.50);
         let p95 = percentile(&durations, 0.95);
         let p99 = percentile(&durations, 0.99);
@@ -465,8 +464,7 @@ impl BatchAnalytics {
     #[must_use]
     pub fn top_categories(&self, window: Window, n: usize) -> Vec<(String, usize)> {
         let samples = self.samples_in_window(window);
-        let mut map: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
+        let mut map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for s in &samples {
             *map.entry(s.category.clone()).or_insert(0) += 1;
         }
@@ -565,7 +563,9 @@ mod tests {
     #[test]
     fn test_ingest_batch() {
         let a = BatchAnalytics::new(AnalyticsConfig::default());
-        let samples: Vec<_> = (0..10).map(|_| make_sample(JobState::Completed, 2.0)).collect();
+        let samples: Vec<_> = (0..10)
+            .map(|_| make_sample(JobState::Completed, 2.0))
+            .collect();
         a.ingest_batch(samples);
         assert_eq!(a.sample_count(), 10);
     }
@@ -646,7 +646,7 @@ mod tests {
         let a = BatchAnalytics::new(AnalyticsConfig::default());
         a.ingest(make_sample(JobState::Completed, 5.0));
         a.ingest(make_sample(JobState::Completed, 15.0)); // breaches 10s threshold
-        a.ingest(make_sample(JobState::Failed, 1.0));     // failure always breaches
+        a.ingest(make_sample(JobState::Failed, 1.0)); // failure always breaches
         let report = a.sla_report(Window::LastHour, 10.0);
         assert_eq!(report.within_sla, 1);
         assert_eq!(report.breached_sla, 2);
@@ -720,7 +720,10 @@ mod tests {
         let a = BatchAnalytics::new(AnalyticsConfig::default());
         a.ingest(make_sample(JobState::Completed, 1.0));
         // No data in the previous window → Unknown.
-        assert_eq!(a.throughput_trend(Window::LastMinute), TrendDirection::Unknown);
+        assert_eq!(
+            a.throughput_trend(Window::LastMinute),
+            TrendDirection::Unknown
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -254,7 +254,10 @@ impl LocalizationSet {
     /// All language tags currently in the set.
     #[must_use]
     pub fn language_tags(&self) -> Vec<&str> {
-        self.tracks.iter().map(|t| t.language_tag.as_str()).collect()
+        self.tracks
+            .iter()
+            .map(|t| t.language_tag.as_str())
+            .collect()
     }
 
     /// Total number of tracks.
@@ -291,7 +294,10 @@ impl LocalizationSet {
     /// Clears `is_default` from all other tracks.
     pub fn set_default(&mut self, language_tag: &str) -> bool {
         let tag = language_tag.to_lowercase();
-        let found = self.tracks.iter().any(|t| t.language_tag.to_lowercase() == tag);
+        let found = self
+            .tracks
+            .iter()
+            .any(|t| t.language_tag.to_lowercase() == tag);
         if found {
             for track in &mut self.tracks {
                 track.is_default = track.language_tag.to_lowercase() == tag;
@@ -331,9 +337,7 @@ mod tests {
 
     fn make_set() -> LocalizationSet {
         let mut set = LocalizationSet::default();
-        set.add_track(
-            LocalizedTrack::new("en".to_string(), "English".to_string()).as_default(),
-        );
+        set.add_track(LocalizedTrack::new("en".to_string(), "English".to_string()).as_default());
         set.add_track(LocalizedTrack::new("fr".to_string(), "French".to_string()));
         set.add_track(LocalizedTrack::new("de".to_string(), "German".to_string()));
         set
@@ -352,7 +356,11 @@ mod tests {
         let set = make_set();
         let t = set.get_track("fr");
         assert!(t.is_some());
-        assert_eq!(t.expect("value should be present should succeed").display_name, "French");
+        assert_eq!(
+            t.expect("value should be present should succeed")
+                .display_name,
+            "French"
+        );
     }
 
     #[test]
@@ -362,7 +370,11 @@ mod tests {
         // "en-GB" should fall back to "en"
         let t = set.get_track("en-GB");
         assert!(t.is_some());
-        assert_eq!(t.expect("value should be present should succeed").language_tag, "en");
+        assert_eq!(
+            t.expect("value should be present should succeed")
+                .language_tag,
+            "en"
+        );
     }
 
     #[test]
@@ -380,7 +392,11 @@ mod tests {
         let set = make_set();
         let def = set.default_track();
         assert!(def.is_some());
-        assert_eq!(def.expect("value should be present should succeed").language_tag, "en");
+        assert_eq!(
+            def.expect("value should be present should succeed")
+                .language_tag,
+            "en"
+        );
     }
 
     #[test]
@@ -389,15 +405,27 @@ mod tests {
         set.add_track(LocalizedTrack::new("de".to_string(), "German".to_string()));
         let def = set.default_track();
         assert!(def.is_some());
-        assert_eq!(def.expect("value should be present should succeed").language_tag, "de");
+        assert_eq!(
+            def.expect("value should be present should succeed")
+                .language_tag,
+            "de"
+        );
     }
 
     #[test]
     fn test_set_default() {
         let mut set = make_set();
         set.set_default("fr");
-        assert!(set.get_track("fr").expect("get track should succeed").is_default);
-        assert!(!set.get_track("en").expect("get track should succeed").is_default);
+        assert!(
+            set.get_track("fr")
+                .expect("get track should succeed")
+                .is_default
+        );
+        assert!(
+            !set.get_track("en")
+                .expect("get track should succeed")
+                .is_default
+        );
     }
 
     #[test]
@@ -422,9 +450,17 @@ mod tests {
     fn test_no_duplicate_by_default() {
         let mut set = LocalizationSet::default();
         set.add_track(LocalizedTrack::new("en".to_string(), "English".to_string()));
-        set.add_track(LocalizedTrack::new("en".to_string(), "English US".to_string()));
+        set.add_track(LocalizedTrack::new(
+            "en".to_string(),
+            "English US".to_string(),
+        ));
         assert_eq!(set.len(), 1);
-        assert_eq!(set.get_track("en").expect("get track should succeed").display_name, "English US");
+        assert_eq!(
+            set.get_track("en")
+                .expect("get track should succeed")
+                .display_name,
+            "English US"
+        );
     }
 
     #[test]
@@ -434,7 +470,10 @@ mod tests {
             ..Default::default()
         });
         set.add_track(LocalizedTrack::new("en".to_string(), "English".to_string()));
-        set.add_track(LocalizedTrack::new("en".to_string(), "English SDH".to_string()));
+        set.add_track(LocalizedTrack::new(
+            "en".to_string(),
+            "English SDH".to_string(),
+        ));
         assert_eq!(set.len(), 2);
     }
 
@@ -445,7 +484,10 @@ mod tests {
         assert_eq!(manifest.len(), 3);
         let en = manifest.iter().find(|e| e.language_tag == "en");
         assert!(en.is_some());
-        assert!(en.expect("value should be present should succeed").is_default);
+        assert!(
+            en.expect("value should be present should succeed")
+                .is_default
+        );
     }
 
     #[test]
@@ -475,7 +517,8 @@ mod tests {
 
     #[test]
     fn test_primary_subtag() {
-        let track = LocalizedTrack::new("zh-Hant-TW".to_string(), "Traditional Chinese".to_string());
+        let track =
+            LocalizedTrack::new("zh-Hant-TW".to_string(), "Traditional Chinese".to_string());
         assert_eq!(track.primary_subtag(), "zh");
     }
 

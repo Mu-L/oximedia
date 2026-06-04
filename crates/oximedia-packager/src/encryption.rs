@@ -432,4 +432,44 @@ mod tests {
         assert!(tag.contains("AES-128"));
         assert!(tag.contains("https://example.com/key"));
     }
+
+    #[test]
+    #[cfg(feature = "encryption")]
+    fn test_aes128_encrypt_decrypt_roundtrip() {
+        let key = vec![
+            0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf,
+            0x4f, 0x3c,
+        ];
+        let iv = vec![
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f,
+        ];
+        // exactly 32 bytes of plaintext
+        let plaintext = b"Hello OxiMedia AES-128 test data";
+
+        let key_info = KeyInfo::new(key, iv);
+        let mut handler = EncryptionHandler::new(EncryptionMethod::Aes128);
+        handler
+            .set_key_info(key_info)
+            .expect("set_key_info should succeed in test");
+
+        let ciphertext = handler
+            .encrypt(plaintext)
+            .expect("encrypt should succeed in test");
+        assert_ne!(
+            &ciphertext[..plaintext.len()],
+            plaintext.as_ref(),
+            "ciphertext must differ from plaintext"
+        );
+        assert_eq!(ciphertext.len() % 16, 0, "ciphertext must be block-aligned");
+
+        let decrypted = handler
+            .decrypt(&ciphertext)
+            .expect("decrypt should succeed in test");
+        assert_eq!(
+            &decrypted[..plaintext.len()],
+            plaintext.as_ref(),
+            "AES-128 round-trip must recover original plaintext"
+        );
+    }
 }

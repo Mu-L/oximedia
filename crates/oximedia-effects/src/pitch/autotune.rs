@@ -598,6 +598,8 @@ impl AutoTune {
 }
 
 impl AudioEffect for AutoTune {
+    const EFFECT_ID: &'static str = "auto_tune";
+
     fn process_sample(&mut self, input: f32) -> f32 {
         // Feed sample to pitch detector
         self.detector.push(input);

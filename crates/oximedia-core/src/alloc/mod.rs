@@ -4,7 +4,11 @@
 //! multimedia processing:
 //!
 //! - [`BufferPool`] - Pool of reusable buffers for zero-copy operations
+//! - [`aligned_vec::AlignedVec`] - Cache-line-aligned generic vector (64-byte)
 
-mod buffer_pool;
+pub mod aligned_vec;
+pub mod buffer_pool;
+pub mod cache_aligned;
 
-pub use buffer_pool::BufferPool;
+pub use aligned_vec::AlignedVec;
+pub use buffer_pool::{BufferPool, PressureConfig};

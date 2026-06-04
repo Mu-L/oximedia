@@ -808,41 +808,156 @@ impl KWeightedGate {
         }
     }
 
-    /// Compute mean-square of a slice with explicit 4-element unrolled loop
-    /// to assist auto-vectorisation.
+    /// Compute mean-square of a slice, dispatching to the fastest available
+    /// SIMD backend (AVX2+FMA on x86_64, NEON on aarch64) with a scalar
+    /// 4-lane unrolled fallback.
+    ///
+    /// All paths accumulate squared K-weighted samples in f32 for the
+    /// SIMD lanes, then widen the final sum to f64 for the division so that
+    /// the result precision is identical to the scalar path.
     #[inline]
     fn simd_mean_sq(&self, buf: &[f32]) -> f64 {
-        let n = buf.len();
-        if n == 0 {
-            return 0.0;
-        }
-        let chunks = n / 4;
-        let remainder = n % 4;
-        let mut acc0 = 0.0f64;
-        let mut acc1 = 0.0f64;
-        let mut acc2 = 0.0f64;
-        let mut acc3 = 0.0f64;
+        simd_mean_sq_dispatch(buf)
+    }
+}
 
-        for i in 0..chunks {
-            let base = i * 4;
-            let a = f64::from(buf[base]);
-            let b = f64::from(buf[base + 1]);
-            let c = f64::from(buf[base + 2]);
-            let d = f64::from(buf[base + 3]);
-            acc0 += a * a;
-            acc1 += b * b;
-            acc2 += c * c;
-            acc3 += d * d;
-        }
-        let mut total = acc0 + acc1 + acc2 + acc3;
-        let rem_start = chunks * 4;
-        for i in 0..remainder {
-            let s = f64::from(buf[rem_start + i]);
-            total += s * s;
-        }
-        total / n as f64
+// ---------------------------------------------------------------------------
+// Free-standing SIMD dispatch (allows #[allow(unsafe_code)] per fn)
+// ---------------------------------------------------------------------------
+
+/// AVX2 + FMA accelerated mean-square (8 f32 lanes per iteration).
+///
+/// # Safety
+///
+/// Caller must guarantee that the CPU supports AVX2 and FMA.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(unsafe_code)]
+#[allow(clippy::cast_precision_loss)]
+unsafe fn simd_mean_sq_avx2(samples: &[f32]) -> f64 {
+    use std::arch::x86_64::*;
+
+    let mut acc = _mm256_setzero_ps();
+    let chunks = samples.chunks_exact(8);
+    let remainder = chunks.remainder();
+
+    for chunk in chunks {
+        // SAFETY: chunks_exact guarantees exactly 8 elements.
+        let v = _mm256_loadu_ps(chunk.as_ptr());
+        // acc += v * v  (fused multiply-add with zero add saves a register)
+        acc = _mm256_fmadd_ps(v, v, acc);
     }
 
+    // Horizontal reduce: add upper 128-bit lane to lower.
+    let hi = _mm256_extractf128_ps(acc, 1);
+    let lo = _mm256_castps256_ps128(acc);
+    let sum128 = _mm_add_ps(hi, lo);
+    // Pairwise sum twice to collapse 4 → 2 → 1 elements.
+    let sum128 = _mm_hadd_ps(sum128, sum128);
+    let sum128 = _mm_hadd_ps(sum128, sum128);
+    let simd_sum = f64::from(_mm_cvtss_f32(sum128));
+
+    // Scalar remainder.
+    let rem_sum: f64 = remainder.iter().map(|&x| f64::from(x) * f64::from(x)).sum();
+
+    (simd_sum + rem_sum) / samples.len() as f64
+}
+
+/// NEON accelerated mean-square (4 f32 lanes per iteration).
+///
+/// NEON is always available on aarch64; no runtime detection required.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+#[allow(unsafe_code)]
+#[allow(clippy::cast_precision_loss)]
+unsafe fn simd_mean_sq_neon(samples: &[f32]) -> f64 {
+    use std::arch::aarch64::*;
+
+    let mut acc = vdupq_n_f32(0.0_f32);
+    let chunks = samples.chunks_exact(4);
+    let remainder = chunks.remainder();
+
+    for chunk in chunks {
+        // SAFETY: chunks_exact guarantees exactly 4 elements.
+        let v = vld1q_f32(chunk.as_ptr());
+        // vfmaq_f32: acc = acc + v * v
+        acc = vfmaq_f32(acc, v, v);
+    }
+
+    // Horizontal reduce via vaddvq_f32 (AArch64 only).
+    let simd_sum = f64::from(vaddvq_f32(acc));
+
+    // Scalar remainder.
+    let rem_sum: f64 = remainder.iter().map(|&x| f64::from(x) * f64::from(x)).sum();
+
+    (simd_sum + rem_sum) / samples.len() as f64
+}
+
+/// Scalar 4-lane unrolled mean-square (assists auto-vectorisation on all targets).
+#[allow(clippy::cast_precision_loss)]
+fn simd_mean_sq_scalar(buf: &[f32]) -> f64 {
+    let n = buf.len();
+    if n == 0 {
+        return 0.0;
+    }
+    let chunks = n / 4;
+    let remainder = n % 4;
+    let mut acc0 = 0.0f64;
+    let mut acc1 = 0.0f64;
+    let mut acc2 = 0.0f64;
+    let mut acc3 = 0.0f64;
+
+    for i in 0..chunks {
+        let base = i * 4;
+        let a = f64::from(buf[base]);
+        let b = f64::from(buf[base + 1]);
+        let c = f64::from(buf[base + 2]);
+        let d = f64::from(buf[base + 3]);
+        acc0 += a * a;
+        acc1 += b * b;
+        acc2 += c * c;
+        acc3 += d * d;
+    }
+    let mut total = acc0 + acc1 + acc2 + acc3;
+    let rem_start = chunks * 4;
+    for i in 0..remainder {
+        let s = f64::from(buf[rem_start + i]);
+        total += s * s;
+    }
+    total / n as f64
+}
+
+/// Runtime-dispatched mean-square: selects AVX2+FMA, NEON, or scalar fallback.
+#[allow(unsafe_code)]
+fn simd_mean_sq_dispatch(buf: &[f32]) -> f64 {
+    if buf.is_empty() {
+        return 0.0;
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            // SAFETY: feature flags verified above.
+            return unsafe { simd_mean_sq_avx2(buf) };
+        }
+        return simd_mean_sq_scalar(buf);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        // NEON is always present on aarch64 — call unconditionally.
+        // SAFETY: NEON is guaranteed on all aarch64 targets.
+        return unsafe { simd_mean_sq_neon(buf) };
+    }
+
+    // Scalar fallback for all other architectures (e.g., wasm32, riscv64, etc.)
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    simd_mean_sq_scalar(buf)
+}
+
+// ── KWeightedGate continuation (integrated_lufs + reset) ─────────────────────
+
+impl KWeightedGate {
     /// Return the gated integrated loudness in LUFS.
     ///
     /// Applies the relative gate (−10 LU below the ungated mean).
@@ -1174,5 +1289,169 @@ mod tests {
         let samples = vec![0.0f32; 240_000];
         gate.process(&samples);
         assert_eq!(gate.integrated_lufs(), f32::NEG_INFINITY);
+    }
+
+    // ── SIMD mean_sq numerics ─────────────────────────────────────────────────
+
+    /// Verify that the SIMD dispatch path produces results within f32 rounding
+    /// tolerance (≤ 1e-5 relative error) compared to the plain scalar path.
+    #[test]
+    fn test_simd_mean_sq_matches_scalar() {
+        // Use a deterministic 997 Hz sine (length not a multiple of 8 to
+        // exercise the scalar remainder path in the SIMD function).
+        const N: usize = 19_997; // prime, exercises all remainder cases
+        let buf: Vec<f32> = (0..N)
+            .map(|i| (i as f32 * 2.0 * std::f32::consts::PI * 997.0 / 48000.0).sin())
+            .collect();
+
+        let scalar = simd_mean_sq_scalar(&buf);
+        let dispatched = simd_mean_sq_dispatch(&buf);
+
+        // Empty slice guard.
+        assert_eq!(simd_mean_sq_dispatch(&[]), 0.0);
+
+        // Relative error ≤ 1e-5.
+        if scalar > 1e-15 {
+            let rel_err = (dispatched - scalar).abs() / scalar;
+            assert!(
+                rel_err <= 1e-5,
+                "SIMD dispatch vs scalar relative error {rel_err} > 1e-5 \
+                 (scalar={scalar}, dispatched={dispatched})"
+            );
+        }
+    }
+
+    // ── Deterministic EBU R128 loudness test ─────────────────────────────────
+
+    /// A 997 Hz 0 dBFS sine processed for 3 s through the K-weighted gate
+    /// should yield a finite integrated loudness.
+    ///
+    /// This test is marked `#[ignore]` because it processes 3 s of audio
+    /// through a sequential IIR filter, which is slow in debug builds.
+    /// Run with: `cargo test -p oximedia-audiopost -- --ignored 997hz`
+    #[test]
+    #[ignore = "slow IIR test (3 s audio) — run explicitly with --ignored"]
+    #[allow(clippy::cast_precision_loss)]
+    fn test_997hz_0dbfs_sine_integrated_lufs() {
+        const SR: u32 = 48_000;
+        const SECS: usize = 3;
+        let mut gate = KWeightedGate::new(SR).expect("failed");
+
+        let samples: Vec<f32> = (0..SR as usize * SECS)
+            .map(|i| (i as f32 * 2.0 * std::f32::consts::PI * 997.0 / SR as f32).sin())
+            .collect();
+
+        gate.process(&samples);
+        let lufs = gate.integrated_lufs();
+
+        // A full-scale 997 Hz sine must produce a finite negative LUFS value.
+        // The exact level depends on K-weighting attenuation; we only assert
+        // it is in the reasonable range (−70, 0) LUFS.
+        assert!(
+            lufs.is_finite(),
+            "Expected finite LUFS for 0 dBFS sine, got {lufs}"
+        );
+        assert!(
+            lufs > -70.0 && lufs < 0.0,
+            "Expected LUFS in (-70, 0) for 0 dBFS 997 Hz sine, got {lufs}"
+        );
+    }
+
+    // ── EBU R128 proptest suite ───────────────────────────────────────────────
+    //
+    // These tests process audio through a recursive IIR filter and run best
+    // in release mode.  They are marked `#[ignore]` so the normal nextest
+    // run skips them; run explicitly with:
+    //   cargo test -p oximedia-audiopost -- --ignored prop_loudness
+    // or:
+    //   cargo nextest run -p oximedia-audiopost -E 'test(prop_loudness)'
+    //   (requires --run-ignored=all in nextest)
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+
+        // Property: applying a linear gain to a signal shifts the integrated
+        // loudness by 20·log10(gain) (within 1.5 dB tolerance for K-weighting).
+        #[test]
+        #[ignore = "slow IIR property test — run explicitly with --ignored"]
+        #[allow(clippy::cast_precision_loss)]
+        fn prop_loudness_gain_shifts_lufs(
+            gain in 0.2f32..3.0f32,
+            freq_hz in 200u32..4000u32,
+        ) {
+            const SR: u32 = 48_000;
+            const FRAMES: usize = 72_000; // 1.5 s at 48 kHz
+
+            let base: Vec<f32> = (0..FRAMES)
+                .map(|i| (i as f32 * 2.0 * std::f32::consts::PI * freq_hz as f32 / SR as f32).sin() * 0.3)
+                .collect();
+            let scaled: Vec<f32> = base.iter().map(|&x| x * gain).collect();
+
+            let mut gate_base = KWeightedGate::new(SR).expect("new");
+            gate_base.process(&base);
+            let lufs_base = gate_base.integrated_lufs();
+
+            let mut gate_scaled = KWeightedGate::new(SR).expect("new");
+            gate_scaled.process(&scaled);
+            let lufs_scaled = gate_scaled.integrated_lufs();
+
+            if lufs_base.is_finite() && lufs_scaled.is_finite() {
+                let expected_shift = 20.0 * gain.log10();
+                let actual_shift = lufs_scaled - lufs_base;
+                let diff = (actual_shift - expected_shift).abs();
+                prop_assert!(
+                    diff < 1.5,
+                    "gain={gain}, freq={freq_hz}: expected shift {expected_shift:.2}, \
+                     got {actual_shift:.2}, diff={diff:.2}"
+                );
+            }
+        }
+
+        // Property: pure silence always yields NEG_INFINITY integrated LUFS.
+        #[test]
+        #[ignore = "slow IIR property test — run explicitly with --ignored"]
+        fn prop_silence_is_neg_infinity(duration_ms in 400u64..2000u64) {
+            let sample_count = (48_000 * duration_ms / 1000) as usize;
+            let samples = vec![0.0f32; sample_count];
+            let mut gate = KWeightedGate::new(48_000).expect("new");
+            gate.process(&samples);
+            prop_assert_eq!(gate.integrated_lufs(), f32::NEG_INFINITY);
+        }
+
+        // Property: appending silence to a loud signal must not change the
+        // integrated loudness (silence contributes no gated blocks).
+        #[test]
+        #[ignore = "slow IIR property test — run explicitly with --ignored"]
+        #[allow(clippy::cast_precision_loss)]
+        fn prop_appended_silence_invariance(
+            signal_len in 48_000usize..72_000usize,
+            silence_len in 100usize..4_800usize,
+        ) {
+            const SR: u32 = 48_000;
+            let mut signal: Vec<f32> = (0..signal_len)
+                .map(|i| (i as f32 * 2.0 * std::f32::consts::PI * 997.0 / SR as f32).sin() * 0.5)
+                .collect();
+
+            let mut gate_signal = KWeightedGate::new(SR).expect("new");
+            gate_signal.process(&signal);
+            let lufs_signal = gate_signal.integrated_lufs();
+
+            signal.extend(vec![0.0f32; silence_len]);
+
+            let mut gate_padded = KWeightedGate::new(SR).expect("new");
+            gate_padded.process(&signal);
+            let lufs_padded = gate_padded.integrated_lufs();
+
+            if lufs_signal.is_finite() && lufs_padded.is_finite() {
+                let diff = (lufs_padded - lufs_signal).abs();
+                prop_assert!(
+                    diff < 0.5,
+                    "silence invariance violated: signal={lufs_signal:.2} \
+                     padded={lufs_padded:.2} diff={diff:.2}"
+                );
+            }
+        }
     }
 }

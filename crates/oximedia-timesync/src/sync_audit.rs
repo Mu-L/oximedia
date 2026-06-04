@@ -1,11 +1,16 @@
-#![allow(dead_code)]
 //! Synchronization audit logging and quality metrics.
 //!
 //! This module records synchronization events, quality snapshots, and alarm
 //! conditions for compliance and diagnostics. It maintains a rolling audit log
 //! with configurable retention.
+//!
+//! File persistence is provided by [`FileAuditLogger`], which writes
+//! JSON-lines format entries and supports size-triggered rotation.
 
 use std::collections::VecDeque;
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Write};
+use std::path::PathBuf;
 
 /// Category of a synchronization audit event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -300,6 +305,147 @@ impl Default for SyncAuditLog {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Persistent file-based audit logger
+// ---------------------------------------------------------------------------
+
+/// A serialisable audit entry suitable for JSON-lines persistence.
+///
+/// This mirrors [`AuditEvent`] but uses only `serde`-friendly primitive types
+/// so it can be written to a file without pulling in `Instant` serialisation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AuditEntry {
+    /// Monotonic sequence number.
+    pub seq: u64,
+    /// Elapsed seconds since the audit log started.
+    pub elapsed_secs: f64,
+    /// Event kind as a string label.
+    pub kind: String,
+    /// Measured offset in nanoseconds.
+    pub offset_ns: f64,
+    /// Optional detail message.
+    pub detail: String,
+}
+
+impl From<&AuditEvent> for AuditEntry {
+    fn from(ev: &AuditEvent) -> Self {
+        Self {
+            seq: ev.seq,
+            elapsed_secs: ev.elapsed_secs,
+            kind: ev.kind.label().to_string(),
+            offset_ns: ev.offset_ns,
+            detail: ev.detail.clone(),
+        }
+    }
+}
+
+/// File-based audit logger that writes one JSON object per line
+/// (JSON-lines / NDJSON format) and rotates when the file exceeds
+/// `max_size_bytes`.
+///
+/// # Rotation
+/// When [`rotate`](FileAuditLogger::rotate) is called (or triggered
+/// automatically when `max_size_bytes` is exceeded after an append), the
+/// current log file is renamed to `<path>.bak`, replacing any previous backup,
+/// and a fresh log file is opened at `<path>`.
+pub struct FileAuditLogger {
+    /// Destination path for the active log.
+    path: PathBuf,
+    /// Size threshold (in bytes) that triggers automatic rotation.
+    max_size_bytes: u64,
+    /// Buffered writer to the active log file.
+    writer: BufWriter<File>,
+    /// Approximate number of bytes written to the current file.
+    bytes_written: u64,
+}
+
+impl FileAuditLogger {
+    /// Opens (or creates) the log file at `path` and prepares for appending.
+    ///
+    /// Returns `Err` if the file cannot be opened or if metadata cannot be
+    /// read to determine the current file size.
+    pub fn new(path: impl Into<PathBuf>, max_size_bytes: u64) -> Result<Self, std::io::Error> {
+        let path = path.into();
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let bytes_written = file.metadata()?.len();
+        let writer = BufWriter::new(file);
+        Ok(Self {
+            path,
+            max_size_bytes,
+            writer,
+            bytes_written,
+        })
+    }
+
+    /// Serialises `entry` as a single JSON line and appends it to the log.
+    ///
+    /// Flushes the internal buffer after every write so that entries are
+    /// durable.  If the file size would exceed `max_size_bytes` after the
+    /// write, [`rotate`](FileAuditLogger::rotate) is called automatically.
+    pub fn append(&mut self, entry: &AuditEntry) -> Result<(), std::io::Error> {
+        let line = serde_json::to_string(entry)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let bytes = line.as_bytes();
+        self.writer.write_all(bytes)?;
+        self.writer.write_all(b"\n")?;
+        self.writer.flush()?;
+        self.bytes_written += bytes.len() as u64 + 1;
+
+        // Auto-rotate when size threshold is exceeded.
+        if self.bytes_written > self.max_size_bytes {
+            self.rotate()?;
+        }
+
+        Ok(())
+    }
+
+    /// Renames the current log file to `<path>.bak` and opens a fresh log at
+    /// `<path>`.
+    ///
+    /// Any existing `.bak` file is silently overwritten.  Returns `Err` if
+    /// the rename or re-open fails.
+    pub fn rotate(&mut self) -> Result<(), std::io::Error> {
+        // Flush before renaming.
+        self.writer.flush()?;
+
+        let mut bak = self.path.clone();
+        let ext = bak
+            .extension()
+            .map(|e| {
+                let mut s = e.to_os_string();
+                s.push(".bak");
+                s
+            })
+            .unwrap_or_else(|| std::ffi::OsString::from("bak"));
+        bak.set_extension(ext);
+
+        std::fs::rename(&self.path, &bak)?;
+
+        // Open a fresh file.
+        let new_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        self.bytes_written = 0;
+        self.writer = BufWriter::new(new_file);
+
+        Ok(())
+    }
+
+    /// Returns the approximate number of bytes written to the current log
+    /// file since it was opened or last rotated.
+    #[must_use]
+    pub fn bytes_written(&self) -> u64 {
+        self.bytes_written
+    }
+
+    /// Returns a reference to the active log file path.
+    #[must_use]
+    pub fn path(&self) -> &PathBuf {
+        &self.path
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,5 +577,131 @@ mod tests {
         log.clear();
         assert!(log.is_empty());
         assert_eq!(log.alarm_count(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // FileAuditLogger tests
+    // -----------------------------------------------------------------------
+
+    fn make_entry(seq: u64) -> AuditEntry {
+        AuditEntry {
+            seq,
+            elapsed_secs: seq as f64 * 0.1,
+            kind: "Lock Acquired".to_string(),
+            offset_ns: seq as f64 * 10.0,
+            detail: format!("entry {seq}"),
+        }
+    }
+
+    #[test]
+    fn test_file_logger_write_100_entries() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_sync_audit_100.jsonl");
+        // Remove any leftover from a previous run.
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let mut logger = FileAuditLogger::new(&path, 1_000_000).expect("should create logger");
+            for i in 0u64..100 {
+                logger
+                    .append(&make_entry(i))
+                    .expect("append should succeed");
+            }
+        }
+
+        // Verify the file contains 100 lines.
+        let content = std::fs::read_to_string(&path).expect("should read log file");
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 100, "should have written 100 lines");
+
+        // Verify each line is valid JSON.
+        for line in &lines {
+            let parsed: serde_json::Value =
+                serde_json::from_str(line).expect("each line should be valid JSON");
+            assert!(parsed.get("seq").is_some(), "entry should have 'seq' field");
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_file_logger_from_audit_event() {
+        // Verify conversion from AuditEvent to AuditEntry.
+        let ev =
+            AuditEvent::new(42, 3.14, AuditEventKind::PhaseStep, 12345.0).with_detail("test step");
+        let entry = AuditEntry::from(&ev);
+        assert_eq!(entry.seq, 42);
+        assert_eq!(entry.kind, "Phase Step");
+        assert_eq!(entry.detail, "test step");
+    }
+
+    #[test]
+    fn test_file_logger_rotation_trigger() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_sync_audit_rotate.jsonl");
+        let bak_path = dir.join("test_sync_audit_rotate.jsonl.bak");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&bak_path);
+
+        // Set a very small threshold so rotation is triggered quickly.
+        let max_bytes: u64 = 200;
+        {
+            let mut logger = FileAuditLogger::new(&path, max_bytes).expect("should create logger");
+            // Write enough entries to exceed the threshold.
+            for i in 0u64..20 {
+                logger
+                    .append(&make_entry(i))
+                    .expect("append should succeed");
+            }
+        }
+
+        // After rotation the .bak file should exist.
+        assert!(bak_path.exists(), "backup file should exist after rotation");
+        // The primary log should also still exist (re-opened after rotate).
+        assert!(path.exists(), "primary log should exist after rotation");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&bak_path);
+    }
+
+    #[test]
+    fn test_file_logger_manual_rotate() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_sync_audit_manual_rotate.jsonl");
+        let bak_path = dir.join("test_sync_audit_manual_rotate.jsonl.bak");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&bak_path);
+
+        {
+            let mut logger = FileAuditLogger::new(&path, 1_000_000).expect("should create logger");
+            for i in 0u64..5 {
+                logger.append(&make_entry(i)).expect("append");
+            }
+            // Manual rotate.
+            logger.rotate().expect("rotate should succeed");
+            // Write more entries after rotation.
+            for i in 5u64..8 {
+                logger.append(&make_entry(i)).expect("append after rotate");
+            }
+        }
+
+        // Backup should contain the first 5 entries.
+        let bak_content = std::fs::read_to_string(&bak_path).expect("bak should be readable");
+        assert_eq!(
+            bak_content.lines().count(),
+            5,
+            "backup should contain 5 pre-rotation entries"
+        );
+
+        // Primary should contain the 3 post-rotation entries.
+        let primary_content = std::fs::read_to_string(&path).expect("primary should be readable");
+        assert_eq!(
+            primary_content.lines().count(),
+            3,
+            "primary should contain 3 post-rotation entries"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&bak_path);
     }
 }

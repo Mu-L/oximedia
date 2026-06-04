@@ -110,11 +110,7 @@ impl Chapter {
 
     /// Total number of chapters including all descendants.
     pub fn total_count(&self) -> usize {
-        1 + self
-            .children
-            .iter()
-            .map(|c| c.total_count())
-            .sum::<usize>()
+        1 + self.children.iter().map(|c| c.total_count()).sum::<usize>()
     }
 
     /// Format start time as HH:MM:SS.mmm string.
@@ -392,10 +388,7 @@ impl ChapterList {
         let toc_entries: Vec<String> = (0..self.chapters.len())
             .map(|i| format!("chp{i}"))
             .collect();
-        fields.push((
-            "CTOC".to_string(),
-            MetadataValue::TextList(toc_entries),
-        ));
+        fields.push(("CTOC".to_string(), MetadataValue::TextList(toc_entries)));
 
         // Each CHAP frame
         for (i, ch) in self.chapters.iter().enumerate() {
@@ -543,10 +536,7 @@ fn serialize_chapter(metadata: &mut Metadata, chapter: &Chapter, prefix: &str) {
         );
     }
     if let Some(ref uid) = chapter.uid {
-        metadata.insert(
-            format!("{prefix}_uid"),
-            MetadataValue::Text(uid.clone()),
-        );
+        metadata.insert(format!("{prefix}_uid"), MetadataValue::Text(uid.clone()));
     }
 
     // Sub-chapters
@@ -565,23 +555,18 @@ fn deserialize_chapter(metadata: &Metadata, prefix: &str) -> Result<Chapter, Err
     let start_ms = metadata
         .get(&format!("{prefix}_start"))
         .and_then(|v| v.as_integer())
-        .ok_or_else(|| {
-            Error::ParseError(format!("Missing {prefix}_start"))
-        })? as u64;
+        .ok_or_else(|| Error::ParseError(format!("Missing {prefix}_start")))?
+        as u64;
 
     let end_ms = metadata
         .get(&format!("{prefix}_end"))
         .and_then(|v| v.as_integer())
-        .ok_or_else(|| {
-            Error::ParseError(format!("Missing {prefix}_end"))
-        })? as u64;
+        .ok_or_else(|| Error::ParseError(format!("Missing {prefix}_end")))? as u64;
 
     let title = metadata
         .get(&format!("{prefix}_title"))
         .and_then(|v| v.as_text())
-        .ok_or_else(|| {
-            Error::ParseError(format!("Missing {prefix}_title"))
-        })?
+        .ok_or_else(|| Error::ParseError(format!("Missing {prefix}_title")))?
         .to_string();
 
     let mut chapter = Chapter::new(start_ms, end_ms, title);
@@ -639,14 +624,10 @@ fn write_matroska_chapter_atom(xml: &mut String, chapter: &Chapter, indent: usiz
         chapter.title
     ));
     if let Some(ref lang) = chapter.language {
-        xml.push_str(&format!(
-            "{pad}    <ChapLanguage>{lang}</ChapLanguage>\n"
-        ));
+        xml.push_str(&format!("{pad}    <ChapLanguage>{lang}</ChapLanguage>\n"));
     }
     if let Some(ref country) = chapter.country {
-        xml.push_str(&format!(
-            "{pad}    <ChapCountry>{country}</ChapCountry>\n"
-        ));
+        xml.push_str(&format!("{pad}    <ChapCountry>{country}</ChapCountry>\n"));
     }
     xml.push_str(&format!("{pad}  </ChapterDisplay>\n"));
 
@@ -876,8 +857,8 @@ mod tests {
         list.add(Chapter::new(60_000, 120_000, "Chapter Two"));
 
         let metadata = list.to_metadata(MetadataFormat::Matroska);
-        let restored = ChapterList::from_metadata(&metadata)
-            .expect("deserialization should succeed");
+        let restored =
+            ChapterList::from_metadata(&metadata).expect("deserialization should succeed");
 
         assert_eq!(restored.len(), 2);
         assert_eq!(restored.edition_uid(), Some("ed-42"));
@@ -902,8 +883,8 @@ mod tests {
         list.add(parent);
 
         let metadata = list.to_metadata(MetadataFormat::Matroska);
-        let restored = ChapterList::from_metadata(&metadata)
-            .expect("deserialization should succeed");
+        let restored =
+            ChapterList::from_metadata(&metadata).expect("deserialization should succeed");
 
         assert_eq!(restored.len(), 1);
         let ch = restored.get(0).expect("chapter 0");
@@ -929,8 +910,7 @@ mod tests {
 
         // Verify first chapter
         let has_intro_title = fields.iter().any(|(k, v)| {
-            k == "CHAP:chp0:title"
-                && matches!(v, MetadataValue::Text(t) if t == "Intro")
+            k == "CHAP:chp0:title" && matches!(v, MetadataValue::Text(t) if t == "Intro")
         });
         assert!(has_intro_title);
     }

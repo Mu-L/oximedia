@@ -32,6 +32,9 @@ bitflags.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
+# Parallel processing
+rayon.workspace = true
+
 # Text processing
 regex = "1.12"
 unicode-segmentation = "1.13"

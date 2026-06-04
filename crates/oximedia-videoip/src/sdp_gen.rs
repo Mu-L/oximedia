@@ -94,7 +94,12 @@ impl Sdp2110Builder {
     /// * `port` – destination UDP port.
     /// * `rate` – frame rate string (e.g. `"29.97"`, `"60"`).
     #[must_use]
-    pub fn video_stream(mut self, ip: impl Into<String>, port: u16, rate: impl Into<String>) -> Self {
+    pub fn video_stream(
+        mut self,
+        ip: impl Into<String>,
+        port: u16,
+        rate: impl Into<String>,
+    ) -> Self {
         self.video_streams.push(VideoStreamDesc {
             dest_ip: ip.into(),
             port,
@@ -140,10 +145,7 @@ impl Sdp2110Builder {
 
         // ── Session-level lines ──────────────────────────────────────────────
         out.push_str("v=0\r\n");
-        out.push_str(&format!(
-            "o={} 0 0 IN IP4 127.0.0.1\r\n",
-            self.originator
-        ));
+        out.push_str(&format!("o={} 0 0 IN IP4 127.0.0.1\r\n", self.originator));
         out.push_str(&format!("s={}\r\n", self.session_name));
         out.push_str("t=0 0\r\n");
 
@@ -154,10 +156,7 @@ impl Sdp2110Builder {
                 v.port, v.payload_type
             ));
             out.push_str(&format!("c=IN IP4 {}\r\n", v.dest_ip));
-            out.push_str(&format!(
-                "a=rtpmap:{} raw/90000\r\n",
-                v.payload_type
-            ));
+            out.push_str(&format!("a=rtpmap:{} raw/90000\r\n", v.payload_type));
             out.push_str(&format!(
                 "a=fmtp:{} sampling=YCbCr-4:2:2; width=1920; height=1080; exactframerate={}\r\n",
                 v.payload_type, v.frame_rate

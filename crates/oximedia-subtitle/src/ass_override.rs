@@ -152,7 +152,10 @@ impl AssColor {
 
     /// Parse from `&HBBGGRR&` or `&HBBGGRR` format.
     fn parse(s: &str) -> SubtitleResult<Self> {
-        let s = s.trim_start_matches('&').trim_start_matches('h').trim_start_matches('H');
+        let s = s
+            .trim_start_matches('&')
+            .trim_start_matches('h')
+            .trim_start_matches('H');
         let s = s.trim_end_matches('&');
 
         // Pad with leading zeros if necessary
@@ -165,7 +168,9 @@ impl AssColor {
         };
 
         if hex.len() < 6 {
-            return Err(SubtitleError::InvalidColor(format!("invalid ASS color: {s}")));
+            return Err(SubtitleError::InvalidColor(format!(
+                "invalid ASS color: {s}"
+            )));
         }
 
         let b = u8::from_str_radix(&hex[0..2], 16)
@@ -372,7 +377,13 @@ impl OverrideTagParser {
         let rest = s.strip_prefix("pos")?;
         let (vals, consumed) = Self::parse_paren_floats(rest)?;
         if vals.len() >= 2 {
-            Some((OverrideTag::Pos { x: vals[0], y: vals[1] }, 3 + consumed))
+            Some((
+                OverrideTag::Pos {
+                    x: vals[0],
+                    y: vals[1],
+                },
+                3 + consumed,
+            ))
         } else {
             None
         }
@@ -404,7 +415,13 @@ impl OverrideTagParser {
         let rest = s.strip_prefix("org")?;
         let (vals, consumed) = Self::parse_paren_floats(rest)?;
         if vals.len() >= 2 {
-            Some((OverrideTag::Org { x: vals[0], y: vals[1] }, 3 + consumed))
+            Some((
+                OverrideTag::Org {
+                    x: vals[0],
+                    y: vals[1],
+                },
+                3 + consumed,
+            ))
         } else {
             None
         }
@@ -617,7 +634,10 @@ impl OverrideTagParser {
         let mut end = 0;
         let bytes = s.as_bytes();
         while end < bytes.len()
-            && (bytes[end] == b'&' || bytes[end] == b'H' || bytes[end] == b'h' || bytes[end].is_ascii_hexdigit())
+            && (bytes[end] == b'&'
+                || bytes[end] == b'H'
+                || bytes[end] == b'h'
+                || bytes[end].is_ascii_hexdigit())
         {
             end += 1;
         }
@@ -742,16 +762,14 @@ mod tests {
 
     #[test]
     fn test_parse_pos() {
-        let tags = OverrideTagParser::parse(r"{\pos(320,240)}Hello")
-            .expect("should parse");
+        let tags = OverrideTagParser::parse(r"{\pos(320,240)}Hello").expect("should parse");
         assert_eq!(tags.len(), 1);
         assert_eq!(tags[0], OverrideTag::Pos { x: 320.0, y: 240.0 });
     }
 
     #[test]
     fn test_parse_move_basic() {
-        let tags = OverrideTagParser::parse(r"{\move(0,0,100,200)}")
-            .expect("should parse");
+        let tags = OverrideTagParser::parse(r"{\move(0,0,100,200)}").expect("should parse");
         assert_eq!(
             tags[0],
             OverrideTag::Move {
@@ -767,8 +785,8 @@ mod tests {
 
     #[test]
     fn test_parse_move_with_timing() {
-        let tags = OverrideTagParser::parse(r"{\move(0,0,100,200,500,1500)}")
-            .expect("should parse");
+        let tags =
+            OverrideTagParser::parse(r"{\move(0,0,100,200,500,1500)}").expect("should parse");
         assert_eq!(
             tags[0],
             OverrideTag::Move {
@@ -784,15 +802,13 @@ mod tests {
 
     #[test]
     fn test_parse_org() {
-        let tags = OverrideTagParser::parse(r"{\org(640,360)}")
-            .expect("should parse");
+        let tags = OverrideTagParser::parse(r"{\org(640,360)}").expect("should parse");
         assert_eq!(tags[0], OverrideTag::Org { x: 640.0, y: 360.0 });
     }
 
     #[test]
     fn test_parse_fad() {
-        let tags = OverrideTagParser::parse(r"{\fad(500,800)}")
-            .expect("should parse");
+        let tags = OverrideTagParser::parse(r"{\fad(500,800)}").expect("should parse");
         assert_eq!(
             tags[0],
             OverrideTag::Fad {
@@ -829,8 +845,7 @@ mod tests {
 
     #[test]
     fn test_parse_font_name_and_size() {
-        let tags = OverrideTagParser::parse(r"{\fnArial\fs48}")
-            .expect("should parse");
+        let tags = OverrideTagParser::parse(r"{\fnArial\fs48}").expect("should parse");
         assert_eq!(tags.len(), 2);
         assert_eq!(tags[0], OverrideTag::FontName("Arial".to_string()));
         assert_eq!(tags[1], OverrideTag::FontSize(48.0));
@@ -838,15 +853,13 @@ mod tests {
 
     #[test]
     fn test_parse_alignment() {
-        let tags = OverrideTagParser::parse(r"{\an8}")
-            .expect("should parse");
+        let tags = OverrideTagParser::parse(r"{\an8}").expect("should parse");
         assert_eq!(tags[0], OverrideTag::Alignment(8));
     }
 
     #[test]
     fn test_parse_colors() {
-        let tags = OverrideTagParser::parse(r"{\c&H00FF00&\3c&HFF0000&}")
-            .expect("should parse");
+        let tags = OverrideTagParser::parse(r"{\c&H00FF00&\3c&HFF0000&}").expect("should parse");
         assert_eq!(tags.len(), 2);
         assert_eq!(
             tags[0],
@@ -860,8 +873,8 @@ mod tests {
 
     #[test]
     fn test_parse_alpha() {
-        let tags = OverrideTagParser::parse(r"{\alpha&H80&\1a&HFF&\4a&H40&}")
-            .expect("should parse");
+        let tags =
+            OverrideTagParser::parse(r"{\alpha&H80&\1a&HFF&\4a&H40&}").expect("should parse");
         assert_eq!(tags.len(), 3);
         assert_eq!(tags[0], OverrideTag::Alpha(0x80));
         assert_eq!(tags[1], OverrideTag::PrimaryAlpha(0xFF));
@@ -870,8 +883,7 @@ mod tests {
 
     #[test]
     fn test_parse_blur_border_shadow() {
-        let tags = OverrideTagParser::parse(r"{\blur2.5\be1\bord3\shad1.5}")
-            .expect("should parse");
+        let tags = OverrideTagParser::parse(r"{\blur2.5\be1\bord3\shad1.5}").expect("should parse");
         assert_eq!(tags.len(), 4);
         assert_eq!(tags[0], OverrideTag::Blur(2.5));
         assert_eq!(tags[1], OverrideTag::BlurEdges(1));
@@ -881,8 +893,7 @@ mod tests {
 
     #[test]
     fn test_parse_rotation_tags() {
-        let tags = OverrideTagParser::parse(r"{\frx30\fry45\frz90}")
-            .expect("should parse");
+        let tags = OverrideTagParser::parse(r"{\frx30\fry45\frz90}").expect("should parse");
         assert_eq!(tags.len(), 3);
         assert_eq!(tags[0], OverrideTag::RotationX(30.0));
         assert_eq!(tags[1], OverrideTag::RotationY(45.0));
@@ -891,8 +902,7 @@ mod tests {
 
     #[test]
     fn test_parse_scale() {
-        let tags = OverrideTagParser::parse(r"{\fscx150\fscy200}")
-            .expect("should parse");
+        let tags = OverrideTagParser::parse(r"{\fscx150\fscy200}").expect("should parse");
         assert_eq!(tags.len(), 2);
         assert_eq!(tags[0], OverrideTag::ScaleX(150.0));
         assert_eq!(tags[1], OverrideTag::ScaleY(200.0));
@@ -900,8 +910,7 @@ mod tests {
 
     #[test]
     fn test_parse_text_style_toggles() {
-        let tags = OverrideTagParser::parse(r"{\b1\i1\u1\s1}")
-            .expect("should parse");
+        let tags = OverrideTagParser::parse(r"{\b1\i1\u1\s1}").expect("should parse");
         assert_eq!(tags.len(), 4);
         assert_eq!(tags[0], OverrideTag::Bold(1));
         assert_eq!(tags[1], OverrideTag::Italic(true));
@@ -911,22 +920,17 @@ mod tests {
 
     #[test]
     fn test_parse_reset() {
-        let tags = OverrideTagParser::parse(r"{\r}")
-            .expect("should parse");
+        let tags = OverrideTagParser::parse(r"{\r}").expect("should parse");
         assert_eq!(tags[0], OverrideTag::Reset(None));
 
-        let tags = OverrideTagParser::parse(r"{\rAlternate}")
-            .expect("should parse");
-        assert_eq!(
-            tags[0],
-            OverrideTag::Reset(Some("Alternate".to_string()))
-        );
+        let tags = OverrideTagParser::parse(r"{\rAlternate}").expect("should parse");
+        assert_eq!(tags[0], OverrideTag::Reset(Some("Alternate".to_string())));
     }
 
     #[test]
     fn test_multiple_blocks() {
-        let tags = OverrideTagParser::parse(r"{\b1}Bold{\b0} Normal{\i1}Italic")
-            .expect("should parse");
+        let tags =
+            OverrideTagParser::parse(r"{\b1}Bold{\b0} Normal{\i1}Italic").expect("should parse");
         assert_eq!(tags.len(), 3);
         assert_eq!(tags[0], OverrideTag::Bold(1));
         assert_eq!(tags[1], OverrideTag::Bold(0));
@@ -936,35 +940,32 @@ mod tests {
     #[test]
     fn test_malformed_recovery() {
         // Unknown tags should be skipped
-        let tags = OverrideTagParser::parse(r"{\xyzgarbage\fs24\b1}")
-            .expect("should parse");
+        let tags = OverrideTagParser::parse(r"{\xyzgarbage\fs24\b1}").expect("should parse");
         assert!(tags.len() >= 2);
-        assert!(tags.iter().any(|t| matches!(t, OverrideTag::FontSize(v) if (*v - 24.0).abs() < f64::EPSILON)));
+        assert!(tags
+            .iter()
+            .any(|t| matches!(t, OverrideTag::FontSize(v) if (*v - 24.0).abs() < f64::EPSILON)));
         assert!(tags.iter().any(|t| matches!(t, OverrideTag::Bold(1))));
     }
 
     #[test]
     fn test_empty_and_no_override() {
-        let tags = OverrideTagParser::parse("No overrides here")
-            .expect("should parse");
+        let tags = OverrideTagParser::parse("No overrides here").expect("should parse");
         assert!(tags.is_empty());
 
-        let tags = OverrideTagParser::parse(r"{}")
-            .expect("should parse");
+        let tags = OverrideTagParser::parse(r"{}").expect("should parse");
         assert!(tags.is_empty());
     }
 
     #[test]
     fn test_bold_weight_700() {
-        let tags = OverrideTagParser::parse(r"{\b700}")
-            .expect("should parse");
+        let tags = OverrideTagParser::parse(r"{\b700}").expect("should parse");
         assert_eq!(tags[0], OverrideTag::Bold(700));
     }
 
     #[test]
     fn test_negative_rotation() {
-        let tags = OverrideTagParser::parse(r"{\frz-45}")
-            .expect("should parse");
+        let tags = OverrideTagParser::parse(r"{\frz-45}").expect("should parse");
         assert_eq!(tags[0], OverrideTag::RotationZ(-45.0));
     }
 }

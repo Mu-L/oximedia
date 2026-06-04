@@ -13,8 +13,8 @@
 - [x] Implement user segment-based recommendations in `personalize` (cluster users into segments) (verified 2026-05-16; src/personalize/segments.rs:21 UserSegment struct, UserSegmenter)
 - [x] Extend `diversity::ensure::DiversityEnforcer` with maximal marginal relevance (MMR) reranking (verified 2026-05-16; src/diversity/ensure.rs:9 MmrReranker, src/diversity/deduplication.rs:64 MaximalMarginalRelevance)
 - [x] Add `impression_tracker` deduplication — never recommend already-seen content
-- [ ] Implement `cold_start` with popularity-based fallback and demographic-based initialization (verified-open 2026-05-16: cold_start.rs exists but popularity-based/demographic init not complete)
-- [ ] Extend `explain::generate` with visual explanation data (feature importance scores) (verified-open 2026-05-16: not yet implemented)
+- [x] Implement `cold_start` with popularity-based fallback and demographic-based initialization (verified 2026-06-01; src/cold_start.rs:209 `resolve_popularity`, :230 `resolve_demographic`, :303 `resolve_hybrid`)
+- [x] Extend `explain::generate` with visual explanation data (feature importance scores) (verified 2026-06-01; src/explain/generate.rs: `ImportanceDirection`, `FeatureImportance`, `decompose_reasons`, `DetailedExplanationGenerator::generate_with_importance`; 4 tests added)
 - [x] Add `ab_test` statistical significance testing (chi-squared, t-test for engagement metrics)
 - [x] Implement rate limiting in `RecommendationEngine` to prevent abuse of recommendation API
 
@@ -31,17 +31,17 @@
 ## Performance
 - [x] Implement approximate nearest neighbor search in `item_similarity` using locality-sensitive hashing (verified 2026-05-16; src/lsh.rs:465 lines)
 - [x] Add `score_cache` with LRU eviction and TTL-based invalidation for hot recommendation paths (verified 2026-05-16; src/score_cache.rs:435 lines)
-- [ ] Optimize `dense_linalg` matrix operations using blocked algorithms for cache efficiency (verified-open 2026-05-16: dense_linalg.rs 266 lines, no blocked algorithms yet)
-- [ ] Pre-compute user embeddings in `collaborative` and cache for sub-millisecond recommendation serving (verified-open 2026-05-16: not yet implemented)
-- [ ] Parallelize `RecommendationEngine::recommend()` strategy evaluation using rayon (verified-open 2026-05-16: not yet implemented)
+- [x] Optimize `dense_linalg` matrix operations using blocked algorithms for cache efficiency (verified 2026-06-01; src/dense_linalg.rs: `TILE=64`, `DenseMatrix::matmul` (cache-blocked GEMM), `DenseMatrix::matmul_parallel` (rayon row-block parallel); 5 tests added)
+- [x] Pre-compute user embeddings in `collaborative` and cache for sub-millisecond recommendation serving (verified 2026-06-01; src/collaborative/matrix.rs: `user_embedding_cache: Option<HashMap<usize, Vec<f32>>>` in `LatentFactorModel`, `precompute_user_embeddings`, `recommend_precomputed`, `recommend_on_demand`; cache cleared on `retrain`; 3 tests added)
+- [x] Parallelize `RecommendationEngine::recommend()` strategy evaluation using rayon (verified 2026-06-01; src/lib.rs:462 `get_hybrid_parallel`, :558 `use rayon::prelude::*`, :571 `par_iter()` across strategies)
 - [x] Implement batch recommendation generation for offline/pre-computation scenarios (verified 2026-05-16; src/batch_recommend.rs:768 lines)
 
 ## Testing
-- [ ] Add offline evaluation tests using precision@k, recall@k, and NDCG metrics
-- [ ] Test `cold_start` behavior for brand-new users with zero interaction history
-- [ ] Add diversity measurement tests — verify `DiversityEnforcer` actually increases category spread
-- [ ] Test `trending::detect` with synthetic view spikes and verify detection latency
-- [ ] Add regression tests for `svd_pp` and `als` with small known-answer datasets
+- [x] Add offline evaluation tests using precision@k, recall@k, and NDCG metrics (verified 2026-06-01; src/evaluation.rs all three metrics with tests at :287-496)
+- [x] Test `cold_start` behavior for brand-new users with zero interaction history (verified 2026-06-01; src/cold_start.rs:433 `test_is_cold_user`, :541 `test_empty_resolver_returns_empty`)
+- [x] Add diversity measurement tests — verify `DiversityEnforcer` actually increases category spread (verified 2026-06-01; src/diversity/ensure.rs:383 `test_enforce_diversity_caps_category`, :428/:436 diversity-score tests)
+- [x] Test `trending::detect` with synthetic view spikes and verify detection latency (verified 2026-06-01; src/trending_detection.rs:332 `test_spike_triggers_viral`, :315/:353 companion tests)
+- [x] Add regression tests for `svd_pp` and `als` with small known-answer datasets (verified 2026-06-01; src/als.rs:762 `test_als_predict_known_pair`; src/svd_pp.rs:553 `test_svdpp_predict_known_pair`)
 
 ## Documentation
 - [ ] Add recommendation algorithm selection guide (when to use content-based vs collaborative vs hybrid)

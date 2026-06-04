@@ -307,6 +307,8 @@ impl Flanger {
 }
 
 impl crate::AudioEffect for Flanger {
+    const EFFECT_ID: &'static str = "flanger";
+
     fn process_sample(&mut self, input: f32) -> f32 {
         self.apply_sample(input)
     }

@@ -107,16 +107,8 @@ impl MsDecoder {
             return Err(MsError::LengthMismatch(mid.len(), side.len()));
         }
 
-        let left: Vec<f32> = mid
-            .iter()
-            .zip(side.iter())
-            .map(|(&m, &s)| m + s)
-            .collect();
-        let right: Vec<f32> = mid
-            .iter()
-            .zip(side.iter())
-            .map(|(&m, &s)| m - s)
-            .collect();
+        let left: Vec<f32> = mid.iter().zip(side.iter()).map(|(&m, &s)| m + s).collect();
+        let right: Vec<f32> = mid.iter().zip(side.iter()).map(|(&m, &s)| m - s).collect();
 
         Ok((left, right))
     }
@@ -348,7 +340,12 @@ mod tests {
         // After width=0: L = mid, R = mid → they must be equal
         for i in 0..512 {
             let diff = (left[i] - right[i]).abs();
-            assert!(diff < 1e-6, "L and R should be equal at {i}: L={} R={}", left[i], right[i]);
+            assert!(
+                diff < 1e-6,
+                "L and R should be equal at {i}: L={} R={}",
+                left[i],
+                right[i]
+            );
         }
     }
 
@@ -376,7 +373,10 @@ mod tests {
     fn correlation_identical_signals_is_one() {
         let sig = sine(440.0, 0.7, 1024, 48_000);
         let corr = MsStereoAnalyzer::correlation(&sig, &sig).expect("ok");
-        assert!((corr - 1.0).abs() < 1e-4, "correlation should be ~1.0, got {corr}");
+        assert!(
+            (corr - 1.0).abs() < 1e-4,
+            "correlation should be ~1.0, got {corr}"
+        );
     }
 
     // ── Correlation: inverted signals → -1.0 ─────────────────────────────
@@ -386,7 +386,10 @@ mod tests {
         let sig = sine(440.0, 0.7, 1024, 48_000);
         let inv: Vec<f32> = sig.iter().map(|&s| -s).collect();
         let corr = MsStereoAnalyzer::correlation(&sig, &inv).expect("ok");
-        assert!((corr + 1.0).abs() < 1e-4, "correlation should be ~-1.0, got {corr}");
+        assert!(
+            (corr + 1.0).abs() < 1e-4,
+            "correlation should be ~-1.0, got {corr}"
+        );
     }
 
     // ── Phase issues detected for inverted signal ─────────────────────────
@@ -405,19 +408,28 @@ mod tests {
     fn no_phase_issues_for_identical_signals() {
         let sig = sine(440.0, 0.7, 1024, 48_000);
         let issues = MsStereoAnalyzer::phase_issues(&sig, &sig).expect("ok");
-        assert!(!issues, "identical signals should not trigger phase issue flag");
+        assert!(
+            !issues,
+            "identical signals should not trigger phase issue flag"
+        );
     }
 
     // ── Error: empty input ────────────────────────────────────────────────
 
     #[test]
     fn encode_empty_returns_error() {
-        assert!(matches!(MsEncoder::encode(&[], &[]), Err(MsError::EmptyInput)));
+        assert!(matches!(
+            MsEncoder::encode(&[], &[]),
+            Err(MsError::EmptyInput)
+        ));
     }
 
     #[test]
     fn decode_empty_returns_error() {
-        assert!(matches!(MsDecoder::decode(&[], &[]), Err(MsError::EmptyInput)));
+        assert!(matches!(
+            MsDecoder::decode(&[], &[]),
+            Err(MsError::EmptyInput)
+        ));
     }
 
     // ── Error: length mismatch ────────────────────────────────────────────
@@ -436,8 +448,14 @@ mod tests {
 
     #[test]
     fn invalid_width_returns_error() {
-        assert!(matches!(MsProcessor::new(-0.1), Err(MsError::InvalidWidth(_))));
-        assert!(matches!(MsProcessor::new(4.1), Err(MsError::InvalidWidth(_))));
+        assert!(matches!(
+            MsProcessor::new(-0.1),
+            Err(MsError::InvalidWidth(_))
+        ));
+        assert!(matches!(
+            MsProcessor::new(4.1),
+            Err(MsError::InvalidWidth(_))
+        ));
     }
 
     // ── Stereo width: mono signal → 0.0 ──────────────────────────────────
@@ -446,7 +464,10 @@ mod tests {
     fn stereo_width_mono_is_zero() {
         let sig = sine(440.0, 0.8, 512, 48_000);
         let width = MsStereoAnalyzer::stereo_width(&sig, &sig).expect("ok");
-        assert!(width < 1e-4, "mono signal should have zero width, got {width}");
+        assert!(
+            width < 1e-4,
+            "mono signal should have zero width, got {width}"
+        );
     }
 
     // ── Stereo width: fully opposed signals → max width ───────────────────
@@ -457,7 +478,10 @@ mod tests {
         let inv: Vec<f32> = sig.iter().map(|&s| -s).collect();
         // L+R = 0 → mid = 0, side = L → width approaches 1.0
         let width = MsStereoAnalyzer::stereo_width(&sig, &inv).expect("ok");
-        assert!(width > 0.9, "fully opposed signals should have high width, got {width}");
+        assert!(
+            width > 0.9,
+            "fully opposed signals should have high width, got {width}"
+        );
     }
 
     // ── MsProcessor: process errors ──────────────────────────────────────

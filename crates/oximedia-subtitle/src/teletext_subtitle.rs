@@ -118,12 +118,7 @@ impl TeletextCell {
 
     /// Create a cell with explicit colour attributes.
     #[must_use]
-    pub fn with_colors(
-        ch: char,
-        fg: TtColor,
-        bg: TtColor,
-        double_height: bool,
-    ) -> Self {
+    pub fn with_colors(ch: char, fg: TtColor, bg: TtColor, double_height: bool) -> Self {
         Self {
             character: ch,
             foreground_color: fg,
@@ -396,7 +391,8 @@ mod tests {
     fn test_page_in_subtitle_range_accepted() {
         // Magazine 8, page 0x88 → decimal 888
         let page = make_page_with_rows(
-            8, 0x88,
+            8,
+            0x88,
             &["", "Foreign dialogue line one", "Foreign dialogue line two"],
         );
         let result = TeletextParser::parse_page(&page);
@@ -447,17 +443,26 @@ mod tests {
         let mut row = TeletextRow::new(1);
         // Mix of double-height and normal cells
         row.cells.push(TeletextCell::with_colors(
-            'H', TtColor::White, TtColor::Black, true,
+            'H',
+            TtColor::White,
+            TtColor::Black,
+            true,
         ));
         row.cells.push(TeletextCell::with_colors(
-            'i', TtColor::White, TtColor::Black, false,
+            'i',
+            TtColor::White,
+            TtColor::Black,
+            false,
         ));
         page.rows.push(row);
 
         let result = TeletextParser::parse_page(&page);
         assert!(result.is_some());
         let sub = result.unwrap();
-        assert_eq!(sub.lines[0], "Hi", "double_height should not alter character extraction");
+        assert_eq!(
+            sub.lines[0], "Hi",
+            "double_height should not alter character extraction"
+        );
     }
 
     // ── TeletextConverter SRT output tests ────────────────────────────────────
@@ -472,8 +477,14 @@ mod tests {
         }];
         let srt = TeletextConverter::to_srt(&subs);
         assert!(srt.contains("1\n"), "SRT must start with sequence number");
-        assert!(srt.contains("00:00:01,000 --> 00:00:04,000"), "SRT timing must be correct");
-        assert!(srt.contains("Hello Teletext"), "SRT must contain subtitle text");
+        assert!(
+            srt.contains("00:00:01,000 --> 00:00:04,000"),
+            "SRT timing must be correct"
+        );
+        assert!(
+            srt.contains("Hello Teletext"),
+            "SRT must contain subtitle text"
+        );
     }
 
     #[test]

@@ -27,9 +27,13 @@ pub fn box_blur(pixels: &mut [u8], width: u32, height: u32, radius: u32) {
     let mut temp = pixels.to_vec();
     for row in 0..h {
         for ch in 0..4usize {
-            horizontal_box_blur_row(&pixels[row * w * 4..row * w * 4 + w * 4],
-                                    &mut temp[row * w * 4..row * w * 4 + w * 4],
-                                    w, ch, r);
+            horizontal_box_blur_row(
+                &pixels[row * w * 4..row * w * 4 + w * 4],
+                &mut temp[row * w * 4..row * w * 4 + w * 4],
+                w,
+                ch,
+                r,
+            );
         }
     }
 
@@ -63,8 +67,15 @@ fn horizontal_box_blur_row(src: &[u8], dst: &mut [u8], width: usize, ch: usize, 
 }
 
 /// Single-column vertical box blur for one channel.
-fn vertical_box_blur_col(src: &[u8], dst: &mut [u8], width: usize, height: usize,
-                          col: usize, ch: usize, radius: usize) {
+fn vertical_box_blur_col(
+    src: &[u8],
+    dst: &mut [u8],
+    width: usize,
+    height: usize,
+    col: usize,
+    ch: usize,
+    radius: usize,
+) {
     if height == 0 {
         return;
     }
@@ -77,11 +88,12 @@ fn vertical_box_blur_col(src: &[u8], dst: &mut [u8], width: usize, height: usize
         sum += src[row * pixel_stride + col * 4 + ch] as u32;
     }
     for y in 0..height {
-        dst[y * pixel_stride + col * 4 + ch] = ((sum + diameter as u32 / 2) / diameter as u32) as u8;
+        dst[y * pixel_stride + col * 4 + ch] =
+            ((sum + diameter as u32 / 2) / diameter as u32) as u8;
         let remove_row = y.saturating_sub(radius);
         let add_row = (y + radius + 1).min(height - 1);
         sum = sum - src[remove_row * pixel_stride + col * 4 + ch] as u32
-                  + src[add_row * pixel_stride + col * 4 + ch] as u32;
+            + src[add_row * pixel_stride + col * 4 + ch] as u32;
     }
 }
 
@@ -102,9 +114,12 @@ pub fn gaussian_blur(pixels: &mut [u8], width: u32, height: u32, sigma: f32) {
     {
         let src_rows: Vec<&[u8]> = pixels.chunks_exact(w * 4).collect();
         let dst_rows: Vec<&mut [u8]> = temp.chunks_exact_mut(w * 4).collect();
-        dst_rows.into_par_iter().zip(src_rows.into_par_iter()).for_each(|(dst_row, src_row)| {
-            gaussian_convolve_h(src_row, dst_row, w, &kernel);
-        });
+        dst_rows
+            .into_par_iter()
+            .zip(src_rows.into_par_iter())
+            .for_each(|(dst_row, src_row)| {
+                gaussian_convolve_h(src_row, dst_row, w, &kernel);
+            });
     }
 
     // Pass 2: vertical — for each column, convolve along height
@@ -148,8 +163,8 @@ fn gaussian_convolve_h(src: &[u8], dst: &mut [u8], width: usize, kernel: &[f32])
         for ch in 0..4usize {
             let mut acc = 0.0f32;
             for (ki, &kw) in kernel.iter().enumerate() {
-                let sx = (x as isize + ki as isize - half as isize)
-                    .clamp(0, (width as isize) - 1) as usize;
+                let sx = (x as isize + ki as isize - half as isize).clamp(0, (width as isize) - 1)
+                    as usize;
                 acc += src[sx * 4 + ch] as f32 * kw;
             }
             dst[x * 4 + ch] = acc.clamp(0.0, 255.0) as u8;
@@ -163,8 +178,8 @@ fn gaussian_sample_1d(signal: &[f32], center: usize, kernel: &[f32]) -> f32 {
     let len = signal.len();
     let mut acc = 0.0f32;
     for (ki, &kw) in kernel.iter().enumerate() {
-        let idx = (center as isize + ki as isize - half as isize)
-            .clamp(0, (len as isize) - 1) as usize;
+        let idx =
+            (center as isize + ki as isize - half as isize).clamp(0, (len as isize) - 1) as usize;
         acc += signal[idx] * kw;
     }
     acc
@@ -175,7 +190,14 @@ fn gaussian_sample_1d(signal: &[f32], center: usize, kernel: &[f32]) -> f32 {
 /// `threshold`: minimum absolute per-channel difference required before sharpening is applied.
 /// `sigma`: standard deviation for the blur (0.0 = no-op).
 /// `amount`: sharpening strength (typical range 0.5–2.0).
-pub fn unsharp_mask(pixels: &mut [u8], width: u32, height: u32, sigma: f32, amount: f32, threshold: u8) {
+pub fn unsharp_mask(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    sigma: f32,
+    amount: f32,
+    threshold: u8,
+) {
     if sigma <= 0.0 || width == 0 || height == 0 {
         return;
     }
@@ -304,11 +326,7 @@ pub fn emboss(pixels: &mut [u8], width: u32, height: u32) {
     let w = width as usize;
     let h = height as usize;
     // Emboss kernel (row-major, 3x3)
-    const KERNEL: [[i32; 3]; 3] = [
-        [-2, -1, 0],
-        [-1,  1, 1],
-        [ 0,  1, 2],
-    ];
+    const KERNEL: [[i32; 3]; 3] = [[-2, -1, 0], [-1, 1, 1], [0, 1, 2]];
 
     let src = pixels.to_vec();
     for y in 0..h {
@@ -374,7 +392,7 @@ mod tests {
         let n = (w * h * 4) as usize;
         let mut buf = vec![0u8; n];
         for i in 0..((w * h) as usize) {
-            buf[i * 4]     = r;
+            buf[i * 4] = r;
             buf[i * 4 + 1] = g;
             buf[i * 4 + 2] = b;
             buf[i * 4 + 3] = a;
@@ -422,7 +440,10 @@ mod tests {
         box_blur(&mut buf, w, h, 2);
         // After blur, the pixel adjacent to center should be non-zero
         let adj_idx = cy * w as usize * 4 + (cx + 1) * 4;
-        assert!(buf[adj_idx] > 0, "Adjacent pixel should be non-zero after blur spread");
+        assert!(
+            buf[adj_idx] > 0,
+            "Adjacent pixel should be non-zero after blur spread"
+        );
         // Far corner should remain dark
         assert_eq!(buf[0], 0, "Far corner should still be zero or very dim");
     }
@@ -459,7 +480,7 @@ mod tests {
         let mut buf = vec![0u8; (w * h * 4) as usize];
         // Randomish pattern
         for i in 0..(w * h) as usize {
-            buf[i * 4]     = ((i * 53 + 17) % 200) as u8;
+            buf[i * 4] = ((i * 53 + 17) % 200) as u8;
             buf[i * 4 + 1] = ((i * 37 + 91) % 200) as u8;
             buf[i * 4 + 2] = ((i * 11 + 43) % 200) as u8;
             buf[i * 4 + 3] = 255;
@@ -485,7 +506,7 @@ mod tests {
         // Draw a horizontal bright line at row h/2
         let mid_row = (h / 2) as usize;
         for x in 0..w as usize {
-            buf[mid_row * w as usize * 4 + x * 4]     = 255;
+            buf[mid_row * w as usize * 4 + x * 4] = 255;
             buf[mid_row * w as usize * 4 + x * 4 + 3] = 255;
         }
         gaussian_blur(&mut buf, w, h, 1.5);
@@ -515,7 +536,10 @@ mod tests {
         dilate_alpha(&mut buf, w, h, 2);
         // Pixels within radius 2 should now have alpha=255
         let adjacent_idx = cy * w as usize * 4 + (cx + 1) * 4 + 3;
-        assert_eq!(buf[adjacent_idx], 255, "Adjacent alpha should be dilated to 255");
+        assert_eq!(
+            buf[adjacent_idx], 255,
+            "Adjacent alpha should be dilated to 255"
+        );
         let far_idx = cy * w as usize * 4 + (cx + 3) * 4 + 3;
         assert_eq!(buf[far_idx], 0, "Pixels outside radius should remain 0");
     }
@@ -541,9 +565,17 @@ mod tests {
         }
         erode_alpha(&mut buf2, w, h, 1);
         // Border of the block (row 2, row 5, col 2, col 5) should now be 0
-        assert_eq!(buf2[2 * w as usize * 4 + 2 * 4 + 3], 0, "Eroded corner should be 0");
+        assert_eq!(
+            buf2[2 * w as usize * 4 + 2 * 4 + 3],
+            0,
+            "Eroded corner should be 0"
+        );
         // Interior (e.g. 3,3) should still be 255
-        assert_eq!(buf2[3 * w as usize * 4 + 3 * 4 + 3], 255, "Interior should remain 255");
+        assert_eq!(
+            buf2[3 * w as usize * 4 + 3 * 4 + 3],
+            255,
+            "Interior should remain 255"
+        );
     }
 
     // ---- dilate then erode ----
@@ -577,7 +609,11 @@ mod tests {
         emboss(&mut buf, w, h);
         // Flat black image → all channels get 0*1 + 128 = 128
         for i in 0..(w * h) as usize {
-            assert_eq!(buf[i * 4], 128, "Red channel should be 128 after emboss of uniform black");
+            assert_eq!(
+                buf[i * 4],
+                128,
+                "Red channel should be 128 after emboss of uniform black"
+            );
             assert_eq!(buf[i * 4 + 1], 128, "Green channel should be 128");
             assert_eq!(buf[i * 4 + 2], 128, "Blue channel should be 128");
             assert_eq!(buf[i * 4 + 3], 255, "Alpha must be unchanged");
@@ -594,13 +630,17 @@ mod tests {
         let mut buf = vec![0u8; (w * h * 4) as usize];
         let cx = 2usize;
         let cy = 2usize;
-        buf[cy * w as usize * 4 + cx * 4]     = 255;
+        buf[cy * w as usize * 4 + cx * 4] = 255;
         buf[cy * w as usize * 4 + cx * 4 + 1] = 255;
         buf[cy * w as usize * 4 + cx * 4 + 2] = 255;
         buf[cy * w as usize * 4 + cx * 4 + 3] = 255;
         median_filter_3x3(&mut buf, w, h);
         // The center outlier should have been replaced by the median (0)
-        assert_eq!(buf[cy * w as usize * 4 + cx * 4], 0, "Single white pixel in black image should be removed by median");
+        assert_eq!(
+            buf[cy * w as usize * 4 + cx * 4],
+            0,
+            "Single white pixel in black image should be removed by median"
+        );
     }
 
     // ---- gaussian_blur large sigma ----
@@ -614,7 +654,10 @@ mod tests {
         gaussian_blur(&mut buf, w, h, 20.0);
         // Result should still be roughly 100 everywhere
         for v in buf.chunks_exact(4).map(|p| p[0]) {
-            assert!((v as i32 - 100).abs() <= 2, "Large sigma blur of uniform should stay uniform, got {v}");
+            assert!(
+                (v as i32 - 100).abs() <= 2,
+                "Large sigma blur of uniform should stay uniform, got {v}"
+            );
         }
     }
 

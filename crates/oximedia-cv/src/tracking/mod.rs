@@ -68,7 +68,9 @@ pub mod assignment;
 pub use feature_tracker::{FeatureTracker, TrackedFeature};
 pub use kalman::KalmanFilter;
 pub use object_tracker::{ObjectTracker, TrackerType};
-pub use optical_flow::{FlowField, FlowMethod, OpticalFlow};
+pub use optical_flow::{
+    compute_lk_bouguet_sparse, FlowField, FlowMethod, LkConfig, LkFlowPoint, OpticalFlow,
+};
 
 // Re-export single object trackers
 pub use csrt::CsrtTracker;

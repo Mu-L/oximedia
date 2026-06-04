@@ -73,6 +73,7 @@ pub mod gpu_bench;
 pub mod hardware_info;
 pub mod historical_db;
 pub mod io_bench;
+pub mod itu_p910;
 pub mod latency;
 pub mod memory;
 pub mod metrics;
@@ -93,6 +94,7 @@ pub mod stats;
 pub mod system_fingerprint;
 pub mod throughput;
 pub mod warmup_strategy;
+pub mod y4m_rw;
 
 use oximedia_core::types::CodecId;
 use serde::{Deserialize, Serialize};

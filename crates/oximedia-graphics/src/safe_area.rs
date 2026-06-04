@@ -90,9 +90,7 @@ impl SafeAreaZone {
     /// Returns an error string if `coverage` is not in (0.0, 1.0].
     pub fn custom(label: impl Into<String>, coverage: f32, color: [u8; 4]) -> Result<Self, String> {
         if !(coverage > 0.0 && coverage <= 1.0) {
-            return Err(format!(
-                "coverage must be in (0.0, 1.0], got {coverage}"
-            ));
+            return Err(format!("coverage must be in (0.0, 1.0], got {coverage}"));
         }
         Ok(Self {
             label: label.into(),
@@ -259,10 +257,7 @@ fn render_zone(data: &mut [u8], w: usize, h: usize, zone: &SafeAreaZone) {
         let shade_color = [zone.color[0], zone.color[1], zone.color[2], shade_a];
         for row in 0..h {
             for col in 0..w {
-                let inside = col >= rx
-                    && col < rx + rw
-                    && row >= ry
-                    && row < ry + rh;
+                let inside = col >= rx && col < rx + rw && row >= ry && row < ry + rh;
                 if !inside {
                     blend_pixel(data, w, col, row, shade_color);
                 }

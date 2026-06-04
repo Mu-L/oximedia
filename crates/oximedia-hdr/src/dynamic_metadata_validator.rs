@@ -244,17 +244,13 @@ impl DynMetaValidator {
         let (lr_x, lr_y) = w.window_lower_right;
         if ul_x >= lr_x {
             out.push(DynMetaFinding::error(
-                format!(
-                    "window x-coordinates: upper_left.x={ul_x} must be < lower_right.x={lr_x}"
-                ),
+                format!("window x-coordinates: upper_left.x={ul_x} must be < lower_right.x={lr_x}"),
                 format!("{prefix}.window_upper_left / window_lower_right"),
             ));
         }
         if ul_y >= lr_y {
             out.push(DynMetaFinding::error(
-                format!(
-                    "window y-coordinates: upper_left.y={ul_y} must be < lower_right.y={lr_y}"
-                ),
+                format!("window y-coordinates: upper_left.y={ul_y} must be < lower_right.y={lr_y}"),
                 format!("{prefix}.window_upper_left / window_lower_right"),
             ));
         }
@@ -352,7 +348,9 @@ impl DynMetaValidator {
 }
 
 /// Convenience: validate and return `Ok(())` if no errors, or `Err(HdrError::MetadataParseError)`.
-pub fn validate_dynamic_metadata(meta: &Hdr10PlusDynamicMetadata) -> Result<DynMetaValidationReport> {
+pub fn validate_dynamic_metadata(
+    meta: &Hdr10PlusDynamicMetadata,
+) -> Result<DynMetaValidationReport> {
     let report = DynMetaValidator::validate(meta);
     if !report.is_valid {
         let msgs: Vec<String> = report.errors().map(|f| f.message.clone()).collect();
@@ -476,7 +474,10 @@ mod tests {
         meta.country_code = 0x99;
         let report = DynMetaValidator::validate(&meta);
         // Should be a warning, not an error — metadata is still structurally valid.
-        assert!(report.is_valid, "Unknown country code should only warn, not error");
+        assert!(
+            report.is_valid,
+            "Unknown country code should only warn, not error"
+        );
         assert!(report.warning_count() >= 1);
     }
 

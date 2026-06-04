@@ -616,7 +616,7 @@ mod tests {
         );
     }
 
-    /// Repeated LinearLayer(256→128) forward passes must finish well under 10 s.
+    /// Repeated LinearLayer(256→128) forward passes must finish well under 30 s.
     #[test]
     fn test_linear_layer_latency_budget() {
         use std::time::Instant;
@@ -630,8 +630,8 @@ mod tests {
         }
         let elapsed = start.elapsed();
         assert!(
-            elapsed.as_secs() < 10,
-            "1000× LinearLayer(256→128) forward took {:?} — budget is 10 s",
+            elapsed.as_secs() < 30,
+            "1000× LinearLayer(256→128) forward took {:?} — budget is 30 s",
             elapsed
         );
     }

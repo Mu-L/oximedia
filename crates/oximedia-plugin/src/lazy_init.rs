@@ -154,13 +154,10 @@ impl LazyPlugin {
 impl CodecPlugin for LazyPlugin {
     fn info(&self) -> CodecPluginInfo {
         // Return the inner plugin's info if available; otherwise a stub.
-        match self.inner.read() {
-            Ok(guard) => {
-                if let Some(ref p) = *guard {
-                    return p.info();
-                }
+        if let Ok(guard) = self.inner.read() {
+            if let Some(ref p) = *guard {
+                return p.info();
             }
-            Err(_) => {}
         }
         CodecPluginInfo {
             name: self.name.clone(),

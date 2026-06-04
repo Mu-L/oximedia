@@ -268,14 +268,7 @@ fn haar_dwt_2d(data: &[f32], w: usize, h: usize) -> (Vec<f32>, Vec<f32>, Vec<f32
 }
 
 /// Inverse 2D Haar DWT.
-fn haar_idwt_2d(
-    ll: &[f32],
-    lh: &[f32],
-    hl: &[f32],
-    hh: &[f32],
-    w: usize,
-    h: usize,
-) -> Vec<f32> {
+fn haar_idwt_2d(ll: &[f32], lh: &[f32], hl: &[f32], hh: &[f32], w: usize, h: usize) -> Vec<f32> {
     let hw = w / 2;
     let mut out = vec![0.0f32; w * h];
 
@@ -358,7 +351,11 @@ fn shuffled_indices(n: usize, seed: u64) -> Vec<usize> {
     if n <= 1 {
         return indices;
     }
-    let mut state = if seed == 0 { 0xDEAD_BEEF_CAFE_1234u64 } else { seed };
+    let mut state = if seed == 0 {
+        0xDEAD_BEEF_CAFE_1234u64
+    } else {
+        seed
+    };
     for i in (1..n).rev() {
         state = xorshift64(state);
         let j = (state as usize) % (i + 1);
@@ -417,7 +414,8 @@ mod tests {
 
     #[test]
     fn test_capacity_calculation() {
-        let embedder = DwtImageEmbedder::new(DwtWatermarkConfig::default()).expect("default embedder creation should succeed");
+        let embedder = DwtImageEmbedder::new(DwtWatermarkConfig::default())
+            .expect("default embedder creation should succeed");
         // 256×256 image → LL sub-band is 128×128 = 16384 coefficients
         assert_eq!(embedder.capacity(256, 256), 16384);
     }
@@ -425,8 +423,11 @@ mod tests {
     #[test]
     fn test_embed_preserves_dimensions() {
         let img = gradient_image(64, 64);
-        let embedder = DwtImageEmbedder::new(DwtWatermarkConfig::default()).expect("default embedder creation should succeed");
-        let watermarked = embedder.embed(&img, b"IMG").expect("embedding IMG should succeed");
+        let embedder = DwtImageEmbedder::new(DwtWatermarkConfig::default())
+            .expect("default embedder creation should succeed");
+        let watermarked = embedder
+            .embed(&img, b"IMG")
+            .expect("embedding IMG should succeed");
         assert_eq!(watermarked.width, 64);
         assert_eq!(watermarked.height, 64);
         assert_eq!(watermarked.data.len(), 64 * 64 * 3);
@@ -440,16 +441,23 @@ mod tests {
             strength: 1.0,
             key: 0xABCD1234,
         };
-        let embedder = DwtImageEmbedder::new(config.clone()).expect("embedder creation should succeed");
+        let embedder =
+            DwtImageEmbedder::new(config.clone()).expect("embedder creation should succeed");
         let detector = DwtImageDetector::new(config).expect("detector creation should succeed");
 
         let payload = b"W";
         let codec = PayloadCodec::new(16, 8).expect("codec creation should succeed");
-        let encoded = codec.encode(payload).expect("payload encoding should succeed");
+        let encoded = codec
+            .encode(payload)
+            .expect("payload encoding should succeed");
         let expected_bits = encoded.len() * 8;
 
-        let watermarked = embedder.embed(&img, payload).expect("embedding should succeed");
-        let extracted = detector.detect(&watermarked, expected_bits).expect("detection should succeed");
+        let watermarked = embedder
+            .embed(&img, payload)
+            .expect("embedding should succeed");
+        let extracted = detector
+            .detect(&watermarked, expected_bits)
+            .expect("detection should succeed");
         assert_eq!(extracted, payload.as_slice());
     }
 
@@ -457,7 +465,8 @@ mod tests {
     fn test_embed_odd_dimensions_returns_error() {
         let data = vec![128u8; 3 * 3 * 3];
         let img = ImageBuffer::new(data, 3, 3).expect("3x3 image buffer should be valid");
-        let embedder = DwtImageEmbedder::new(DwtWatermarkConfig::default()).expect("default embedder should succeed");
+        let embedder = DwtImageEmbedder::new(DwtWatermarkConfig::default())
+            .expect("default embedder should succeed");
         let result = embedder.embed(&img, b"test");
         assert!(result.is_err());
     }
@@ -467,7 +476,8 @@ mod tests {
         // 4×4 image has LL sub-band of 2×2 = 4 coefficients, far too small
         // for a full RS-encoded payload (280 bits).
         let img = gradient_image(4, 4);
-        let embedder = DwtImageEmbedder::new(DwtWatermarkConfig::default()).expect("default embedder should succeed");
+        let embedder = DwtImageEmbedder::new(DwtWatermarkConfig::default())
+            .expect("default embedder should succeed");
         let result = embedder.embed(&img, b"toolong");
         assert!(result.is_err());
     }
@@ -528,8 +538,11 @@ mod tests {
     #[test]
     fn test_embed_changes_image() {
         let img = gradient_image(64, 64);
-        let embedder = DwtImageEmbedder::new(DwtWatermarkConfig::default()).expect("default embedder should succeed");
-        let watermarked = embedder.embed(&img, b"A").expect("embedding A should succeed");
+        let embedder = DwtImageEmbedder::new(DwtWatermarkConfig::default())
+            .expect("default embedder should succeed");
+        let watermarked = embedder
+            .embed(&img, b"A")
+            .expect("embedding A should succeed");
         // At least some pixels should differ.
         assert_ne!(img.data, watermarked.data);
     }

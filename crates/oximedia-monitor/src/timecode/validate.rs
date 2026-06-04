@@ -1,8 +1,8 @@
 //! Timecode continuity validation.
 
 use super::TimecodeValidation;
-use crate::{MonitorError, MonitorResult};
-use oximedia_timecode::{Timecode, FrameRate};
+use crate::MonitorResult;
+use oximedia_timecode::{FrameRate, Timecode};
 
 /// Timecode validator.
 pub struct TimecodeValidator {

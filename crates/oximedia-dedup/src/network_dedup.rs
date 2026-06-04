@@ -105,11 +105,7 @@ impl FileRecord {
     /// BLAKE3 produces 32 bytes → 64 hex characters.
     #[must_use]
     pub fn has_valid_digest(&self) -> bool {
-        self.blake3_hex.len() == 64
-            && self
-                .blake3_hex
-                .chars()
-                .all(|c| c.is_ascii_hexdigit())
+        self.blake3_hex.len() == 64 && self.blake3_hex.chars().all(|c| c.is_ascii_hexdigit())
     }
 
     /// Compute the Hamming distance to another record's perceptual hash.
@@ -319,16 +315,14 @@ impl NetworkDedupEngine {
                 .push((node, rec));
         }
 
-        let mut exact_uris: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut exact_uris: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         for (_digest, records) in &by_digest {
             if records.len() < 2 {
                 continue;
             }
             // Check that at least two *different* nodes are represented.
-            let nodes: std::collections::HashSet<&str> =
-                records.iter().map(|(n, _)| *n).collect();
+            let nodes: std::collections::HashSet<&str> = records.iter().map(|(n, _)| *n).collect();
             if nodes.len() < 2 {
                 continue;
             }
@@ -377,9 +371,7 @@ impl NetworkDedupEngine {
                     continue;
                 }
                 // Duration guard.
-                if let (Some(d1), Some(d2)) =
-                    (rec_i.duration_s, rec_j.duration_s)
-                {
+                if let (Some(d1), Some(d2)) = (rec_i.duration_s, rec_j.duration_s) {
                     if (d1 - d2).abs() > self.config.duration_tolerance_s {
                         continue;
                     }
@@ -477,7 +469,12 @@ mod tests {
 
         let digest = "a".repeat(64);
         let mut ma = NodeManifest::new("node-a".to_string());
-        ma.add_file(make_record("node-a:/movie.mp4", &digest, None, Some(3600.0)));
+        ma.add_file(make_record(
+            "node-a:/movie.mp4",
+            &digest,
+            None,
+            Some(3600.0),
+        ));
 
         let mut mb = NodeManifest::new("node-b".to_string());
         mb.add_file(make_record(
@@ -576,7 +573,10 @@ mod tests {
             .iter()
             .filter(|g| g.method == DuplicateMethod::PerceptualHash)
             .collect();
-        assert!(perceptual.is_empty(), "duration guard should exclude this pair");
+        assert!(
+            perceptual.is_empty(),
+            "duration guard should exclude this pair"
+        );
     }
 
     #[test]
@@ -600,7 +600,7 @@ mod tests {
     fn test_file_record_valid_digest() {
         let good = FileRecord::new(
             "n:/f.mp4".to_string(),
-            "a1b2c3".repeat(10) + "a1b2c3",  // 66 chars — invalid
+            "a1b2c3".repeat(10) + "a1b2c3", // 66 chars — invalid
             None,
             None,
             None,
@@ -608,20 +608,26 @@ mod tests {
         // 66 hex chars is not 64 → invalid.
         assert!(!good.has_valid_digest());
 
-        let valid = FileRecord::new(
-            "n:/f.mp4".to_string(),
-            "0".repeat(64),
-            None,
-            None,
-            None,
-        );
+        let valid = FileRecord::new("n:/f.mp4".to_string(), "0".repeat(64), None, None, None);
         assert!(valid.has_valid_digest());
     }
 
     #[test]
     fn test_phash_distance_calculation() {
-        let a = FileRecord::new("n:/a.mp4".to_string(), "0".repeat(64), Some(0xFF), None, None);
-        let b = FileRecord::new("n:/b.mp4".to_string(), "0".repeat(64), Some(0xFE), None, None);
+        let a = FileRecord::new(
+            "n:/a.mp4".to_string(),
+            "0".repeat(64),
+            Some(0xFF),
+            None,
+            None,
+        );
+        let b = FileRecord::new(
+            "n:/b.mp4".to_string(),
+            "0".repeat(64),
+            Some(0xFE),
+            None,
+            None,
+        );
         // 0xFF ^ 0xFE = 0x01 → 1 bit
         assert_eq!(a.phash_distance(&b), Some(1));
 

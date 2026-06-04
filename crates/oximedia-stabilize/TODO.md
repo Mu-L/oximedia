@@ -17,7 +17,7 @@
 - [x] Extend `path_planner` to support user-defined motion constraints (e.g., lock pan but allow tilt stabilization) (verified 2026-05-16; src/path_planner.rs:84 MotionConstraints, lock_pan:91, lock_tilt:94)
 
 ## New Features
-- [ ] Implement real-time single-pass stabilization mode with bounded look-ahead buffer for live streaming use cases (verified-open 2026-05-16: no streaming single-pass mode found)
+- [x] Implement real-time single-pass stabilization mode with bounded look-ahead buffer for live streaming use cases (implemented 2026-05-30; src/streaming.rs: StreamingStabilizer, StreamingStabConfig, causal moving-average path smoothing, configurable lookahead 0–15 frames, bilinear RGB warp, PSNR >40 dB on static scene; 9 tests)
 - [x] Add `lens_distortion` module for pre-correcting barrel/pincushion distortion before stabilization (verified 2026-05-16; src/lens_distortion.rs:1076 lines)
 - [x] Implement `tripod_mode` that detects static camera and applies stronger smoothing with minimal crop (verified 2026-05-16; src/tripod_mode.rs:1093 lines)
 - [x] Add `roi_stabilization` module for stabilizing a specific region of interest independently from global motion (verified 2026-05-16; src/roi_stabilization.rs:574 lines)
@@ -27,12 +27,12 @@
 - [x] Add export of stabilization data as motion vectors for use in compositing applications (Nuke, Fusion) (verified 2026-05-16; src/motion_vector_export.rs)
 
 ## Performance
-- [ ] Parallelize feature tracking across frame pairs using rayon in `motion::tracker::track`
+- [x] Parallelize feature tracking across frame pairs using rayon in `motion::tracker::track` (already parallel via par_iter in track_features; test_tracker_parallel_correctness added 2026-05-30 verifying deterministic output over 200-feature set)
 - [ ] Implement GPU-accelerated frame warping in `warp::apply` using compute shaders (feature-gated)
-- [ ] Use tile-based processing in `mesh_warp` to improve cache locality for large frames
-- [ ] Add SIMD-accelerated bilinear interpolation in `warp::interpolation` for the hot path
-- [ ] Cache feature descriptors between consecutive frames in `motion::tracker` to reduce redundant computation
-- [ ] Implement progressive processing in `multipass::analyze` that refines estimates incrementally
+- [x] Use tile-based processing in `mesh_warp` to improve cache locality for large frames (mesh_warp_tiled done)
+- [x] Add SIMD-accelerated bilinear interpolation in `warp::interpolation` for the hot path (implemented 2026-05-30; bilinear_sample scalar + bilinear_4x AVX2+SSE4.1 4-pixel SIMD + bilinear_4x safe dispatcher; test_bilinear_simd_matches_scalar verifies scalar==SIMD)
+- [x] Cache feature descriptors between consecutive frames in `motion::tracker` to reduce redundant computation (implemented 2026-05-30; CachedTracker wraps MotionTracker, caches KeyPoint+FeatureDescriptor from curr for use as prev on next call; test_cached_tracker_correctness + test_cached_tracker_reuses_prev_descriptors)
+- [x] Implement progressive processing in `multipass::analyze` that refines estimates incrementally (ProgressiveAnalyzer done)
 
 ## Testing
 - [ ] Add synthetic test sequences with known translation/rotation to verify stabilization accuracy within 0.5px

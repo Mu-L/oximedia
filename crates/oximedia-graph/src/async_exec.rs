@@ -128,11 +128,13 @@ impl AsyncExecutor {
                     Ok(()) => ParallelNodeResult {
                         node_id: nid,
                         success: true,
+                        elapsed: Duration::ZERO,
                         error: None,
                     },
                     Err(e) => ParallelNodeResult {
                         node_id: nid,
                         success: false,
+                        elapsed: Duration::ZERO,
                         error: Some(e),
                     },
                 }
@@ -147,6 +149,7 @@ impl AsyncExecutor {
                     Err(e) => results.push(ParallelNodeResult {
                         node_id: "unknown".to_string(),
                         success: false,
+                        elapsed: Duration::ZERO,
                         error: Some(format!("task panic: {e}")),
                     }),
                 }
@@ -155,20 +158,19 @@ impl AsyncExecutor {
         };
 
         match config.stage_timeout {
-            Some(dur) => timeout(dur, collect_future)
-                .await
-                .unwrap_or_else(|_| {
-                    // Stage timed out: mark remaining nodes as failed.
-                    stage
-                        .nodes
-                        .iter()
-                        .map(|id| ParallelNodeResult {
-                            node_id: id.clone(),
-                            success: false,
-                            error: Some("stage timeout".to_string()),
-                        })
-                        .collect()
-                }),
+            Some(dur) => timeout(dur, collect_future).await.unwrap_or_else(|_| {
+                // Stage timed out: mark remaining nodes as failed.
+                stage
+                    .nodes
+                    .iter()
+                    .map(|id| ParallelNodeResult {
+                        node_id: id.clone(),
+                        success: false,
+                        elapsed: Duration::ZERO,
+                        error: Some("stage timeout".to_string()),
+                    })
+                    .collect()
+            }),
             None => collect_future.await,
         }
     }
@@ -196,10 +198,8 @@ mod tests {
     async fn test_async_all_succeed() {
         let plan = make_plan(vec![vec!["a", "b"], vec!["c"]]);
         let config = AsyncExecutorConfig::default();
-        let (results, stats) = AsyncExecutor::run(&plan, config, |_node_id| async {
-            Ok::<(), String>(())
-        })
-        .await;
+        let (results, stats) =
+            AsyncExecutor::run(&plan, config, |_node_id| async { Ok::<(), String>(()) }).await;
         assert_eq!(results.len(), 3);
         assert!(results.iter().all(|r| r.success));
         assert_eq!(stats.nodes_executed, 3);
@@ -238,9 +238,7 @@ mod tests {
         })
         .await;
         // Second stage should be skipped.
-        assert!(!results
-            .iter()
-            .any(|r| r.node_id == "should-not-run"));
+        assert!(!results.iter().any(|r| r.node_id == "should-not-run"));
         assert_eq!(stats.stages_executed, 1);
     }
 

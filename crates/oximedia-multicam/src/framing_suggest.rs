@@ -11,7 +11,7 @@
 //! 4. **Subject size** — primary subject should fill 15–50% of frame height.
 //! 5. **Centering** — single subject should be horizontally centered or slightly offset.
 
-use crate::{AngleId, Result, MultiCamError};
+use crate::{AngleId, MultiCamError, Result};
 
 // ── Face bounding box ─────────────────────────────────────────────────────────
 
@@ -268,10 +268,7 @@ impl FramingAnalyzer {
     /// Build a human-readable description of the adjustment.
     fn describe_adjustment(&self, face: &FaceBox, adj: &FramingAdjustment) -> String {
         if adj.is_acceptable {
-            return format!(
-                "Framing acceptable (face at {:.2},{:.2})",
-                face.cx, face.cy
-            );
+            return format!("Framing acceptable (face at {:.2},{:.2})", face.cx, face.cy);
         }
         let mut parts = Vec::new();
         if adj.pan_delta.abs() > 0.01 {
@@ -301,7 +298,13 @@ mod tests {
     use super::*;
 
     fn face(cx: f32, cy: f32, w: f32, h: f32) -> FaceBox {
-        FaceBox { cx, cy, w, h, confidence: 0.9 }
+        FaceBox {
+            cx,
+            cy,
+            w,
+            h,
+            confidence: 0.9,
+        }
     }
 
     #[test]
@@ -388,8 +391,20 @@ mod tests {
     #[test]
     fn test_multiple_faces_selects_largest() {
         let analyzer = FramingAnalyzer::default();
-        let small = FaceBox { cx: 0.1, cy: 0.1, w: 0.05, h: 0.05, confidence: 0.9 };
-        let large = FaceBox { cx: 0.67, cy: 0.25, w: 0.25, h: 0.40, confidence: 0.9 };
+        let small = FaceBox {
+            cx: 0.1,
+            cy: 0.1,
+            w: 0.05,
+            h: 0.05,
+            confidence: 0.9,
+        };
+        let large = FaceBox {
+            cx: 0.67,
+            cy: 0.25,
+            w: 0.25,
+            h: 0.40,
+            confidence: 0.9,
+        };
         let suggestion = analyzer
             .analyze(0, 0, vec![small, large])
             .expect("should succeed");

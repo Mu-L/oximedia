@@ -354,7 +354,9 @@ fn lut1d_lookup(input: &[f32], output: &[f32], v: f32) -> f32 {
     }
 
     // Binary search for the enclosing interval.
-    let idx = match input.binary_search_by(|probe| probe.partial_cmp(&v).unwrap_or(std::cmp::Ordering::Less)) {
+    let idx = match input
+        .binary_search_by(|probe| probe.partial_cmp(&v).unwrap_or(std::cmp::Ordering::Less))
+    {
         Ok(exact) => return output[exact],
         Err(pos) => pos, // pos is the index where v would be inserted
     };
@@ -444,9 +446,7 @@ mod tests {
     }
 
     fn approx_eq3(a: (f32, f32, f32), b: (f32, f32, f32), eps: f32) -> bool {
-        approx_eq(a.0, b.0, eps)
-            && approx_eq(a.1, b.1, eps)
-            && approx_eq(a.2, b.2, eps)
+        approx_eq(a.0, b.0, eps) && approx_eq(a.1, b.1, eps) && approx_eq(a.2, b.2, eps)
     }
 
     // ── Identity / empty pipeline ────────────────────────────────────────────
@@ -623,7 +623,10 @@ mod tests {
 
         for &v in &[0.0_f32, 0.3, 0.7, 1.0] {
             let (r, _, _) = pipe.apply(v, 0.0, 0.0);
-            assert!(approx_eq(r, v, 1e-5), "Lut1d identity failed at v={v}: got {r}");
+            assert!(
+                approx_eq(r, v, 1e-5),
+                "Lut1d identity failed at v={v}: got {r}"
+            );
         }
     }
 

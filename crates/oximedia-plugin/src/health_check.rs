@@ -335,9 +335,7 @@ impl PluginHealthMonitor {
     ///
     /// Returns `None` if no probe is registered for the given plugin.
     pub fn status(&self, plugin_id: &str) -> Option<HealthStatus> {
-        self.probes
-            .get(plugin_id)
-            .map(|r| r.record.status())
+        self.probes.get(plugin_id).map(|r| r.record.status())
     }
 
     /// Return `true` if the plugin's current status is [`HealthStatus::Healthy`].
@@ -520,13 +518,9 @@ mod tests {
     fn test_monitor_probe_all() {
         let mut monitor = PluginHealthMonitor::new();
         monitor.register("plugin-a", ProbeConfig::default(), || ProbeOutcome::Ok);
-        monitor.register(
-            "plugin-b",
-            ProbeConfig::default(),
-            || ProbeOutcome::Error {
-                message: "down".to_string(),
-            },
-        );
+        monitor.register("plugin-b", ProbeConfig::default(), || ProbeOutcome::Error {
+            message: "down".to_string(),
+        });
         let ran = monitor.probe_all();
         assert_eq!(ran, 2);
         assert!(monitor.is_healthy("plugin-a"));
@@ -558,13 +552,9 @@ mod tests {
     fn test_failing_plugins() {
         let mut monitor = PluginHealthMonitor::new();
         monitor.register("good", ProbeConfig::default(), || ProbeOutcome::Ok);
-        monitor.register(
-            "bad",
-            ProbeConfig::default(),
-            || ProbeOutcome::Error {
-                message: "x".to_string(),
-            },
-        );
+        monitor.register("bad", ProbeConfig::default(), || ProbeOutcome::Error {
+            message: "x".to_string(),
+        });
         monitor.probe_all();
         let failing = monitor.failing_plugins();
         assert_eq!(failing, vec!["bad"]);
@@ -580,13 +570,9 @@ mod tests {
             window_size: 10,
         };
         let mut monitor = PluginHealthMonitor::new();
-        monitor.register(
-            "p",
-            config,
-            || ProbeOutcome::Error {
-                message: "x".to_string(),
-            },
-        );
+        monitor.register("p", config, || ProbeOutcome::Error {
+            message: "x".to_string(),
+        });
 
         monitor.probe_one("p");
         // Only 1 consecutive failure, threshold is 2 → not yet
@@ -622,7 +608,7 @@ mod tests {
         // unless forced.  Use probe_all first to seed the schedule, then verify run_due_probes
         // won't re-run them immediately.
         let long_interval = ProbeConfig {
-            interval: Duration::from_secs(3600),
+            interval: Duration::from_hours(1),
             ..ProbeConfig::default()
         };
         monitor.register("p", long_interval, || ProbeOutcome::Ok);

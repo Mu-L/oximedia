@@ -129,7 +129,10 @@ impl std::fmt::Display for ProgressError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidPercent(v) => write!(f, "invalid percent value: {v}"),
-            Self::ProgressRegression { previous, attempted } => write!(
+            Self::ProgressRegression {
+                previous,
+                attempted,
+            } => write!(
                 f,
                 "progress regression: attempted {attempted}% but previous was {previous}%"
             ),
@@ -226,9 +229,7 @@ impl JobProgressTracker {
 
         // Update EWMA throughput from the previous sample
         if let Some(prev) = self.samples.back() {
-            let dt = update
-                .timestamp_secs
-                .saturating_sub(prev.timestamp_secs) as f64;
+            let dt = update.timestamp_secs.saturating_sub(prev.timestamp_secs) as f64;
             if dt > 0.0 {
                 let instantaneous = (percent - prev.percent) / dt;
                 let smoothed = match self.ewma_throughput {
@@ -409,7 +410,9 @@ mod tests {
     fn test_first_update_records_correctly() {
         let job_id = JobId::new();
         let mut tracker = JobProgressTracker::new(job_id);
-        tracker.record_progress(make_update(10.0, 5)).expect("should succeed");
+        tracker
+            .record_progress(make_update(10.0, 5))
+            .expect("should succeed");
         assert!((tracker.current_percent() - 10.0).abs() < f64::EPSILON);
     }
 
@@ -417,8 +420,12 @@ mod tests {
     fn test_two_updates_produce_eta() {
         let job_id = JobId::new();
         let mut tracker = JobProgressTracker::new(job_id);
-        tracker.record_progress(make_update(0.0, 0)).expect("first update");
-        tracker.record_progress(make_update(10.0, 10)).expect("second update");
+        tracker
+            .record_progress(make_update(0.0, 0))
+            .expect("first update");
+        tracker
+            .record_progress(make_update(10.0, 10))
+            .expect("second update");
         let snap = tracker.snapshot().expect("snapshot");
         // 10 pct in 10 s → 1 pct/s → 90 s remaining
         assert!(snap.eta_secs.is_some());
@@ -429,9 +436,15 @@ mod tests {
     fn test_ewma_smooths_throughput() {
         let job_id = JobId::new();
         let mut tracker = JobProgressTracker::new(job_id);
-        tracker.record_progress(make_update(0.0, 0)).expect("update 0");
-        tracker.record_progress(make_update(20.0, 10)).expect("update 1"); // 2 pct/s
-        tracker.record_progress(make_update(22.0, 11)).expect("update 2"); // 2 pct/s instant
+        tracker
+            .record_progress(make_update(0.0, 0))
+            .expect("update 0");
+        tracker
+            .record_progress(make_update(20.0, 10))
+            .expect("update 1"); // 2 pct/s
+        tracker
+            .record_progress(make_update(22.0, 11))
+            .expect("update 2"); // 2 pct/s instant
         let snap = tracker.snapshot().expect("snapshot");
         // EWMA should still show > 0 throughput
         assert!(snap.throughput_pct_per_sec.unwrap_or(0.0) > 0.0);
@@ -441,7 +454,9 @@ mod tests {
     fn test_regression_rejected() {
         let job_id = JobId::new();
         let mut tracker = JobProgressTracker::new(job_id);
-        tracker.record_progress(make_update(50.0, 10)).expect("first");
+        tracker
+            .record_progress(make_update(50.0, 10))
+            .expect("first");
         let err = tracker.record_progress(make_update(30.0, 20)).unwrap_err();
         assert!(matches!(err, ProgressError::ProgressRegression { .. }));
     }
@@ -450,7 +465,9 @@ mod tests {
     fn test_nan_rejected() {
         let job_id = JobId::new();
         let mut tracker = JobProgressTracker::new(job_id);
-        let err = tracker.record_progress(make_update(f64::NAN, 1)).unwrap_err();
+        let err = tracker
+            .record_progress(make_update(f64::NAN, 1))
+            .unwrap_err();
         assert!(matches!(err, ProgressError::InvalidPercent(_)));
     }
 
@@ -464,7 +481,9 @@ mod tests {
     fn test_is_complete_at_100() {
         let job_id = JobId::new();
         let mut tracker = JobProgressTracker::new(job_id);
-        tracker.record_progress(make_update(100.0, 60)).expect("complete");
+        tracker
+            .record_progress(make_update(100.0, 60))
+            .expect("complete");
         assert!(tracker.is_complete());
     }
 
@@ -472,7 +491,9 @@ mod tests {
     fn test_reset_clears_state() {
         let job_id = JobId::new();
         let mut tracker = JobProgressTracker::new(job_id);
-        tracker.record_progress(make_update(50.0, 10)).expect("update");
+        tracker
+            .record_progress(make_update(50.0, 10))
+            .expect("update");
         tracker.reset();
         assert!((tracker.current_percent() - 0.0).abs() < f64::EPSILON);
         assert!(tracker.snapshot().is_err());
@@ -482,7 +503,9 @@ mod tests {
     fn test_percent_clamped_above_100() {
         let job_id = JobId::new();
         let mut tracker = JobProgressTracker::new(job_id);
-        tracker.record_progress(make_update(150.0, 10)).expect("over 100");
+        tracker
+            .record_progress(make_update(150.0, 10))
+            .expect("over 100");
         assert!((tracker.current_percent() - 100.0).abs() < f64::EPSILON);
     }
 
@@ -491,8 +514,12 @@ mod tests {
         let registry = FarmProgressRegistry::new();
         let job_id = JobId::new();
         registry.register(job_id);
-        registry.update(&job_id, make_update(0.0, 0)).expect("first");
-        registry.update(&job_id, make_update(25.0, 25)).expect("second");
+        registry
+            .update(&job_id, make_update(0.0, 0))
+            .expect("first");
+        registry
+            .update(&job_id, make_update(25.0, 25))
+            .expect("second");
         let snap = registry.snapshot(&job_id).expect("snap");
         assert!((snap.percent - 25.0).abs() < f64::EPSILON);
         assert_eq!(snap.eta_secs, Some(75));

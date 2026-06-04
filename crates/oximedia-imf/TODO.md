@@ -18,10 +18,15 @@
 - [x] Extend `cpl_validator.rs` with SMPTE ST 2067-2:2020 (latest revision) constraint checks (verified 2026-05-16; src/cpl_validator.rs:317 ST 2067-2:2020 §6.1 edit rates, §6.4 segment/UUID constraints)
 - [x] Add incremental hash computation to `essence_hash.rs` for large MXF files (streaming digest)
 - [x] Implement CPL diff in `cpl_merge.rs` to show what changed between two compositions
-- [ ] Extend `application_profile.rs` with Netflix IMF App 2.1 and Disney DECE profiles (verified-open 2026-05-16: only App2/App2Extended/App4/App5Aces/App6/App7/Iabmm; no Netflix/DECE variants)
+- [x] Extend `application_profile.rs` with Netflix IMF App 2.1 and Disney DECE profiles (done — already implemented; note was stale)
 - [x] Add timeline gap detection and overlap reporting in `imf_timeline.rs` (verified 2026-05-16; src/imf_timeline.rs:52 overlaps fn, validate_timeline gaps/overlaps:198)
-- [ ] Implement `subtitle_resource.rs` support for TTML and WebVTT subtitle formats (verified-open 2026-05-16: subtitle_resource.rs only handles IMSC1 reference, no TTML/WebVTT parse)
-- [ ] Extend `versioning.rs` with automatic version increment and change log generation (verified-open 2026-05-16: no auto_increment or change_log found in versioning.rs)
+- [x] Implement `subtitle_resource.rs` support for TTML and WebVTT subtitle formats (done — already implemented; note was stale)
+- [x] Extend versioning.rs with automatic version increment and change log generation (completed 2026-06-01)
+  - **Goal:** Add `next_version` and `change_log` methods to `VersionChain`.
+  - **Design:** `src/versioning.rs:66` `VersionChain` has `add_version`/`latest`/`full_chain` but no `next_version`/`change_log`. Add `next_version(&self, kind: VersionKind) -> PackageVersion` that increments the appropriate semver component based on `kind`. Add `change_log(&self) -> Vec<VersionChange>` that diffs consecutive `PackageVersion` annotation fields.
+  - **Files:** `src/versioning.rs`, `TODO.md`.
+  - **Tests:** `next_version(Patch)` increments patch; `change_log` over a 3-version chain returns correct diffs.
+  - **Risk:** Define `VersionChange` struct matching the annotation fields available.
 
 ## New Features
 - [x] Add an `imf_builder.rs` high-level API for creating IMF packages from scratch with fluent interface
@@ -36,9 +41,24 @@
 
 ## Performance
 - [x] Add parallel hash verification in `package_validator.rs` using rayon for multi-asset packages
-- [ ] Implement lazy XML parsing in `cpl_parser.rs` (parse only requested sections) (verified-open 2026-05-16: no lazy/on-demand parsing in cpl_parser.rs)
-- [ ] Cache parsed CPL/PKL structures to avoid re-parsing during repeated validation (verified-open 2026-05-16: not yet implemented)
-- [ ] Add streaming XML writing in `xml_util.rs` for large OPL/CPL generation (verified-open 2026-05-16: not yet implemented)
+- [x] Implement lazy XML parsing in cpl_parser.rs (parse only requested sections) (completed 2026-06-01)
+  - **Goal:** Add section-targeted parse entrypoints that skip unrequested XML subtrees.
+  - **Design:** `src/cpl_parser.rs` currently parses the entire CPL XML eagerly. Add `parse_cpl_header`, `parse_reel_list`, `parse_segment_list` entrypoints that use `quick-xml` event skipping to skip unwanted subtrees. `quick-xml` is already a dep.
+  - **Files:** `src/cpl_parser.rs`, `TODO.md`.
+  - **Tests:** lazy header parse == eager parse on the same CPL; reel-list parse skips segment subtree.
+  - **Risk:** `quick-xml` event-skip correctness — test round-trip.
+- [x] Cache parsed CPL/PKL structures to avoid re-parsing during repeated validation (completed 2026-06-01)
+  - **Goal:** Add a parse cache keyed by UUID/path with mtime-based invalidation.
+  - **Design:** Add `CplCache` struct with `HashMap<Uuid, Arc<Cpl>>` + mtime invalidation (`std::fs::metadata`); add `PklCache` similarly. Expose `CplParser::cached(path) -> Result<Arc<Cpl>>`. No new dep — only `std::fs`.
+  - **Files:** `src/cpl_cache.rs` (new), `src/pkl_cache.rs` (new), `src/cpl_parser.rs`, `TODO.md`.
+  - **Tests:** cache hit avoids re-parse (check a hit-count counter); mtime change invalidates the cache; thread-safe (Arc<RwLock> or Mutex).
+  - **Risk:** mtime precision (may be 1s on some filesystems); use file-size as secondary key.
+- [x] Add streaming XML writing in xml_util.rs for large OPL/CPL generation (completed 2026-06-01)
+  - **Goal:** Emit large OPL/CPL XML incrementally without buffering the whole document.
+  - **Design:** `src/xml_util.rs` currently builds full strings. Add `XmlStreamWriter<W: Write>` using `quick-xml::Writer<W>` (already a dep) for streaming OPL/CPL element emission. Expose `write_cpl_streaming<W: Write>` and `write_opl_streaming<W: Write>`.
+  - **Files:** `src/xml_util.rs`, `TODO.md`.
+  - **Tests:** streaming writer output is valid XML parseable back to the same structure as the eager path; streaming to a `Vec<u8>` matches the string-building path byte-for-byte on a reference CPL.
+  - **Risk:** quick-xml Writer API shape — read actual API before implementing.
 
 ## Testing
 - [ ] Add conformance tests with reference IMF packages from the SMPTE IMF plugfest test suite

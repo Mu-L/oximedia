@@ -11,7 +11,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 // ---------------------------------------------------------------------------
 // LatencyThresholds
@@ -31,8 +31,8 @@ pub struct LatencyThresholds {
 impl Default for LatencyThresholds {
     fn default() -> Self {
         Self {
-            warning_ms: 33.3,     // ~1 frame at 30 fps
-            critical_ms: 66.6,    // ~2 frames at 30 fps
+            warning_ms: 33.3,  // ~1 frame at 30 fps
+            critical_ms: 66.6, // ~2 frames at 30 fps
             consecutive_breaches: 3,
         }
     }
@@ -169,7 +169,7 @@ impl LatencyMonitor {
         max_samples: usize,
         thresholds: LatencyThresholds,
     ) -> Self {
-        let cap = max_samples.max(16);
+        let cap = max_samples.max(1);
         Self {
             label: label.into(),
             samples: VecDeque::with_capacity(cap),
@@ -388,6 +388,7 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn test_default_thresholds() {
@@ -458,11 +459,7 @@ mod tests {
 
     #[test]
     fn test_window_eviction() {
-        let mut m = LatencyMonitor::with_config(
-            "evict",
-            4,
-            LatencyThresholds::default(),
-        );
+        let mut m = LatencyMonitor::with_config("evict", 4, LatencyThresholds::default());
         for i in 0..10 {
             m.record(i as f64);
         }

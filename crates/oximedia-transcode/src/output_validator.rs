@@ -413,10 +413,7 @@ impl ValidationReport {
             ("frame_rate", &self.frame_rate),
             ("container", &self.container),
         ];
-        fields
-            .into_iter()
-            .filter(|(_, r)| !r.is_ok())
-            .collect()
+        fields.into_iter().filter(|(_, r)| !r.is_ok()).collect()
     }
 
     /// Returns the number of failing fields.
@@ -470,11 +467,7 @@ impl OutputValidator {
 
     /// Validates `actual` against `spec` and returns a detailed report.
     #[must_use]
-    pub fn validate(
-        &self,
-        spec: &OutputSpec,
-        actual: &ActualOutputProperties,
-    ) -> ValidationReport {
+    pub fn validate(&self, spec: &OutputSpec, actual: &ActualOutputProperties) -> ValidationReport {
         let tol = &self.profile.tolerances;
 
         ValidationReport {

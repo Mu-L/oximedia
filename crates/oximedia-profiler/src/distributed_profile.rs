@@ -124,11 +124,7 @@ pub struct NodeProfile {
 impl NodeProfile {
     /// Creates a new node profile.
     #[must_use]
-    pub fn new(
-        node_id: impl Into<String>,
-        clock_offset_ns: i64,
-        spans: Vec<NodeSpan>,
-    ) -> Self {
+    pub fn new(node_id: impl Into<String>, clock_offset_ns: i64, spans: Vec<NodeSpan>) -> Self {
         Self {
             node_id: node_id.into(),
             clock_offset_ns,
@@ -465,11 +461,7 @@ mod tests {
 
     #[test]
     fn test_negative_offset() {
-        let profile = NodeProfile::new(
-            "n1",
-            -500,
-            vec![NodeSpan::new("work", 1_000, 2_000)],
-        );
+        let profile = NodeProfile::new("n1", -500, vec![NodeSpan::new("work", 1_000, 2_000)]);
         let mut agg = DistributedProfileAggregator::new();
         agg.add_profile(profile);
         let result = agg.aggregate();

@@ -148,32 +148,56 @@ impl Default for WeightConfig {
         // Manifests: very high recency and priority, size is negligible.
         cfg.set_weights(
             CacheMediaType::Manifest,
-            TypeWeights { recency: 0.5, priority: 0.45, size_penalty: 0.05 },
+            TypeWeights {
+                recency: 0.5,
+                priority: 0.45,
+                size_penalty: 0.05,
+            },
         );
         // Thumbnails: moderate priority, low size penalty (they're small).
         cfg.set_weights(
             CacheMediaType::Thumbnail,
-            TypeWeights { recency: 0.4, priority: 0.4, size_penalty: 0.2 },
+            TypeWeights {
+                recency: 0.4,
+                priority: 0.4,
+                size_penalty: 0.2,
+            },
         );
         // Video segments: balanced but with a higher size penalty.
         cfg.set_weights(
             CacheMediaType::VideoSegment,
-            TypeWeights { recency: 0.4, priority: 0.25, size_penalty: 0.35 },
+            TypeWeights {
+                recency: 0.4,
+                priority: 0.25,
+                size_penalty: 0.35,
+            },
         );
         // Audio segments: similar to video but smaller.
         cfg.set_weights(
             CacheMediaType::AudioSegment,
-            TypeWeights { recency: 0.4, priority: 0.3, size_penalty: 0.3 },
+            TypeWeights {
+                recency: 0.4,
+                priority: 0.3,
+                size_penalty: 0.3,
+            },
         );
         // Images: size penalty matters more.
         cfg.set_weights(
             CacheMediaType::Image,
-            TypeWeights { recency: 0.35, priority: 0.25, size_penalty: 0.40 },
+            TypeWeights {
+                recency: 0.35,
+                priority: 0.25,
+                size_penalty: 0.40,
+            },
         );
         // Metadata: tiny; keep for a long time.
         cfg.set_weights(
             CacheMediaType::Metadata,
-            TypeWeights { recency: 0.5, priority: 0.35, size_penalty: 0.15 },
+            TypeWeights {
+                recency: 0.5,
+                priority: 0.35,
+                size_penalty: 0.15,
+            },
         );
         cfg
     }
@@ -532,12 +556,20 @@ mod tests {
         // Manifest: heavily prioritised, low size penalty
         cfg.set_weights(
             CacheMediaType::Manifest,
-            TypeWeights { recency: 0.1, priority: 0.85, size_penalty: 0.05 },
+            TypeWeights {
+                recency: 0.1,
+                priority: 0.85,
+                size_penalty: 0.05,
+            },
         );
         // Generic: low priority weight
         cfg.set_weights(
             CacheMediaType::Generic,
-            TypeWeights { recency: 0.5, priority: 0.05, size_penalty: 0.45 },
+            TypeWeights {
+                recency: 0.5,
+                priority: 0.05,
+                size_penalty: 0.45,
+            },
         );
         let mut cache = WeightedCache::new(2, cfg);
 
@@ -590,7 +622,7 @@ mod tests {
         let _ = cache.get("a"); // hit
         let _ = cache.get("a"); // hit
         let _ = cache.get("b"); // miss
-        // 2 hits / 3 total = 0.666…
+                                // 2 hits / 3 total = 0.666…
         assert!((cache.hit_rate() - 2.0 / 3.0).abs() < 1e-9);
     }
 
@@ -610,7 +642,11 @@ mod tests {
     #[test]
     fn test_validate_rejects_negative_weights() {
         let mut cfg = WeightConfig::new();
-        cfg.default_weights = TypeWeights { recency: -0.1, priority: 0.5, size_penalty: 0.5 };
+        cfg.default_weights = TypeWeights {
+            recency: -0.1,
+            priority: 0.5,
+            size_penalty: 0.5,
+        };
         assert!(cfg.validate().is_err());
     }
 
@@ -620,11 +656,18 @@ mod tests {
         let mut cfg = WeightConfig::new();
         cfg.set_weights(
             CacheMediaType::Image,
-            TypeWeights { recency: 2.0, priority: 2.0, size_penalty: 6.0 },
+            TypeWeights {
+                recency: 2.0,
+                priority: 2.0,
+                size_penalty: 6.0,
+            },
         );
         let w = cfg.weights_for(CacheMediaType::Image);
         let sum = w.recency + w.priority + w.size_penalty;
-        assert!((sum - 1.0).abs() < 1e-9, "weights should normalise to 1.0, got {sum}");
+        assert!(
+            (sum - 1.0).abs() < 1e-9,
+            "weights should normalise to 1.0, got {sum}"
+        );
     }
 
     // 14. clear() resets everything

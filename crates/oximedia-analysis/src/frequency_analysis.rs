@@ -216,20 +216,17 @@ impl FrequencyAnalyzer {
         let dominant = find_dominant_frequency(&spectrum, self.config.frame_rate);
 
         // Harmonic analysis
-        let harmonics = compute_harmonic_analysis(
-            &spectrum,
-            dominant.bin_index,
-            self.config.harmonics,
-        );
+        let harmonics =
+            compute_harmonic_analysis(&spectrum, dominant.bin_index, self.config.harmonics);
 
         // Spectral entropy
         let spectral_entropy = compute_spectral_entropy(&spectrum.power, spectrum.total_power);
 
         // Band powers
-        let low_limit = ((num_bins as f64 * self.config.low_band_fraction) as usize)
-            .clamp(1, num_bins);
-        let mid_limit = ((num_bins as f64 * self.config.mid_band_fraction) as usize)
-            .clamp(low_limit, num_bins);
+        let low_limit =
+            ((num_bins as f64 * self.config.low_band_fraction) as usize).clamp(1, num_bins);
+        let mid_limit =
+            ((num_bins as f64 * self.config.mid_band_fraction) as usize).clamp(low_limit, num_bins);
 
         let (low_pwr, mid_pwr, high_pwr) =
             compute_band_powers(&spectrum.power, low_limit, mid_limit, spectrum.total_power);
@@ -368,16 +365,17 @@ fn find_dominant_frequency(spectrum: &PowerSpectrum, frame_rate: f64) -> Dominan
     let bins = &spectrum.power;
     // Start from bin 1 to skip DC
     let start = if bins.len() > 1 { 1 } else { 0 };
-    let (max_bin, max_power) = bins[start..]
-        .iter()
-        .enumerate()
-        .fold((0usize, 0.0_f64), |(mi, mp), (i, &p)| {
-            if p > mp {
-                (i + start, p)
-            } else {
-                (mi, mp)
-            }
-        });
+    let (max_bin, max_power) =
+        bins[start..]
+            .iter()
+            .enumerate()
+            .fold((0usize, 0.0_f64), |(mi, mp), (i, &p)| {
+                if p > mp {
+                    (i + start, p)
+                } else {
+                    (mi, mp)
+                }
+            });
 
     let n_total = (bins.len() - 1) * 2; // original signal length
     let cpf = if n_total > 0 {

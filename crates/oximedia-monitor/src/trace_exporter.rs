@@ -396,10 +396,7 @@ impl SpanBatch {
     pub fn to_jaeger_batch(&self, service_name: &str, process_tags: &[JaegerTag]) -> JaegerBatch {
         let mut traces: HashMap<String, Vec<&CompletedSpan>> = HashMap::new();
         for span in &self.spans {
-            traces
-                .entry(span.trace_id_hex())
-                .or_default()
-                .push(span);
+            traces.entry(span.trace_id_hex()).or_default().push(span);
         }
 
         let process_id = "p1";
@@ -411,10 +408,8 @@ impl SpanBatch {
         let data: Vec<JaegerTrace> = traces
             .into_iter()
             .map(|(trace_id, spans)| {
-                let jaeger_spans: Vec<JaegerSpan> = spans
-                    .iter()
-                    .map(|s| s.to_jaeger_span(process_id))
-                    .collect();
+                let jaeger_spans: Vec<JaegerSpan> =
+                    spans.iter().map(|s| s.to_jaeger_span(process_id)).collect();
                 let mut processes = HashMap::new();
                 processes.insert(process_id.to_string(), process.clone());
                 JaegerTrace {
@@ -515,9 +510,7 @@ impl SamplingStrategy {
             Self::TailBased {
                 min_latency_us,
                 always_sample_errors,
-            } => {
-                (*always_sample_errors && has_error) || root_latency_us >= *min_latency_us
-            }
+            } => (*always_sample_errors && has_error) || root_latency_us >= *min_latency_us,
             _ => true, // non-tail strategies: already decided at head
         }
     }
@@ -867,10 +860,7 @@ impl SpanCollector {
             .trace_counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        if !self
-            .strategy
-            .should_sample(counter, !success)
-        {
+        if !self.strategy.should_sample(counter, !success) {
             return Ok(());
         }
 
@@ -901,8 +891,7 @@ impl SpanCollector {
                 let has_error = !success;
 
                 if is_root {
-                    let keep = (*always_sample_errors && has_error)
-                        || latency >= *min_latency_us;
+                    let keep = (*always_sample_errors && has_error) || latency >= *min_latency_us;
                     let buffered = self
                         .tail_buffer
                         .lock()
@@ -1073,10 +1062,13 @@ mod tests {
         };
 
         // 16 bytes of 0xAB → 32 hex chars ("ab" repeated 16 times)
-        let expected_trace: String = std::iter::repeat("ab").take(16).collect();
+        let expected_trace: String = "ab".repeat(16);
         assert_eq!(span.trace_id_hex(), expected_trace);
         assert_eq!(span.span_id_hex(), "cdcdcdcdcdcdcdcd");
-        assert_eq!(span.parent_span_id_hex(), Some("efefefefefefefef".to_string()));
+        assert_eq!(
+            span.parent_span_id_hex(),
+            Some("efefefefefefefef".to_string())
+        );
         assert_eq!(span.duration_us(), 1000);
     }
 
@@ -1119,7 +1111,9 @@ mod tests {
             logs: Vec::new(),
         });
 
-        let json = batch.to_json("test-service", &[]).expect("serialise should succeed");
+        let json = batch
+            .to_json("test-service", &[])
+            .expect("serialise should succeed");
         assert!(json.contains("ingest"));
         assert!(json.contains("test-service"));
     }
@@ -1127,8 +1121,10 @@ mod tests {
     #[test]
     fn test_in_memory_sink_export() {
         let sink = InMemorySink::new();
-        sink.export_json(r#"{"data":[]}"#).expect("export should succeed");
-        sink.export_json(r#"{"data":[],"total":0}"#).expect("export should succeed");
+        sink.export_json(r#"{"data":[]}"#)
+            .expect("export should succeed");
+        sink.export_json(r#"{"data":[],"total":0}"#)
+            .expect("export should succeed");
         assert_eq!(sink.len(), 2);
         let drained = sink.drain();
         assert_eq!(drained.len(), 2);
@@ -1183,7 +1179,9 @@ mod tests {
     #[test]
     fn test_sampling_strategy_probabilistic() {
         let s = SamplingStrategy::Probabilistic(0.5);
-        let sampled: u64 = (0u64..10_000).filter(|&i| s.should_sample(i, false)).count() as u64;
+        let sampled: u64 = (0u64..10_000)
+            .filter(|&i| s.should_sample(i, false))
+            .count() as u64;
         // With 50% rate and 10 000 trials we expect ~5 000 sampled.
         assert!((4_000..=6_000).contains(&sampled));
     }
@@ -1215,7 +1213,7 @@ mod tests {
         let exporter = TraceExporter::with_memory_sink(config, sink.clone());
         let collector = SpanCollector::new(
             SamplingStrategy::TailBased {
-                min_latency_us: 500_000,        // 500 ms threshold
+                min_latency_us: 500_000, // 500 ms threshold
                 always_sample_errors: false,
             },
             exporter,

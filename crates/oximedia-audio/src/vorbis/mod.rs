@@ -9,15 +9,17 @@
 //! - [`codebook`] - Codebook structures
 //! - [`floor`] - Floor types
 //! - [`encoder`] - Vorbis encoder
+//! - [`decoder`] - Vorbis decoder (full state machine + audio decode)
 //! - [`bitpack`] - Bitstream packing
 //! - [`mdct`] - MDCT transform
 //! - [`psycho`] - Psychoacoustic model
-//! - [`residue`] - Residue encoding
+//! - [`residue`] - Residue encoding / decoding
 
 #![forbid(unsafe_code)]
 
 pub mod bitpack;
 pub mod codebook;
+pub mod decoder;
 pub mod encoder;
 pub mod floor;
 pub mod header;
@@ -30,42 +32,17 @@ use oximedia_core::{CodecId, SampleFormat};
 
 // Re-export submodule types
 pub use codebook::{Codebook, CodebookEntry, HuffmanTree};
+pub use decoder::VorbisDecoderInner;
 pub use encoder::{QualityMode, VorbisEncoder};
 pub use floor::{Floor, FloorType0, FloorType1};
 pub use header::{CommentHeader, IdentificationHeader, SetupHeader, VorbisHeader};
 
-/// Vorbis decoder state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
-enum DecoderState {
-    /// Waiting for identification header.
-    #[default]
-    WaitingForIdentification,
-    /// Waiting for comment header.
-    WaitingForComment,
-    /// Waiting for setup header.
-    WaitingForSetup,
-    /// Ready to decode audio.
-    Ready,
-    /// Decoder has been flushed.
-    Flushed,
-}
-
 /// Vorbis decoder.
+///
+/// Delegates to [`VorbisDecoderInner`] for all state-machine and
+/// audio-decode logic.
 pub struct VorbisDecoder {
-    #[allow(dead_code)]
-    config: AudioDecoderConfig,
-    sample_rate: u32,
-    channels: u8,
-    flushing: bool,
-    #[allow(dead_code)]
-    state: DecoderState,
-    #[allow(dead_code)]
-    id_header: Option<IdentificationHeader>,
-    #[allow(dead_code)]
-    comment_header: Option<CommentHeader>,
-    #[allow(dead_code)]
-    setup_header: Option<SetupHeader>,
+    inner: VorbisDecoderInner,
 }
 
 impl VorbisDecoder {
@@ -78,16 +55,8 @@ impl VorbisDecoder {
         if config.codec != CodecId::Vorbis {
             return Err(AudioError::InvalidParameter("Expected Vorbis codec".into()));
         }
-        Ok(Self {
-            config: config.clone(),
-            sample_rate: config.sample_rate,
-            channels: config.channels,
-            flushing: false,
-            state: DecoderState::WaitingForIdentification,
-            id_header: None,
-            comment_header: None,
-            setup_header: None,
-        })
+        let inner = VorbisDecoderInner::new(config)?;
+        Ok(Self { inner })
     }
 
     /// Parse Vorbis identification header.
@@ -111,7 +80,7 @@ impl VorbisDecoder {
     /// Check if decoder is ready for audio packets.
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        self.state == DecoderState::Ready
+        self.inner.is_ready()
     }
 }
 
@@ -120,25 +89,20 @@ impl AudioDecoder for VorbisDecoder {
         CodecId::Vorbis
     }
 
-    fn send_packet(&mut self, _data: &[u8], _pts: i64) -> AudioResult<()> {
-        Ok(())
+    fn send_packet(&mut self, data: &[u8], pts: i64) -> AudioResult<()> {
+        self.inner.send_packet(data, pts)
     }
 
     fn receive_frame(&mut self) -> AudioResult<Option<AudioFrame>> {
-        Ok(None)
+        self.inner.receive_frame()
     }
 
     fn flush(&mut self) -> AudioResult<()> {
-        self.flushing = true;
-        Ok(())
+        self.inner.flush()
     }
 
     fn reset(&mut self) {
-        self.flushing = false;
-        self.state = DecoderState::WaitingForIdentification;
-        self.id_header = None;
-        self.comment_header = None;
-        self.setup_header = None;
+        self.inner.reset();
     }
 
     fn output_format(&self) -> Option<SampleFormat> {
@@ -146,11 +110,11 @@ impl AudioDecoder for VorbisDecoder {
     }
 
     fn sample_rate(&self) -> Option<u32> {
-        Some(self.sample_rate)
+        self.inner.sample_rate()
     }
 
     fn channel_layout(&self) -> Option<ChannelLayout> {
-        Some(ChannelLayout::from_count(usize::from(self.channels)))
+        self.inner.channel_layout()
     }
 }
 
@@ -185,8 +149,7 @@ mod tests {
         };
         let mut decoder = VorbisDecoder::new(&config).expect("should succeed");
         decoder.reset();
-        assert!(!decoder.flushing);
-        assert_eq!(decoder.state, DecoderState::WaitingForIdentification);
+        assert!(!decoder.is_ready());
     }
 
     #[test]

@@ -88,13 +88,21 @@ pub struct FrameToken {
 impl FrameToken {
     /// Create a new frame token.
     pub fn new(sequence: u64, pts_us: i64, size: usize) -> Self {
-        Self { sequence, pts_us, size }
+        Self {
+            sequence,
+            pts_us,
+            size,
+        }
     }
 }
 
 impl fmt::Display for FrameToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Frame(seq={}, pts={}us, {}B)", self.sequence, self.pts_us, self.size)
+        write!(
+            f,
+            "Frame(seq={}, pts={}us, {}B)",
+            self.sequence, self.pts_us, self.size
+        )
     }
 }
 
@@ -143,7 +151,7 @@ impl PortBuffer {
     pub fn push(&mut self, token: FrameToken) -> bool {
         if self.max_capacity > 0 && self.queue.len() >= self.max_capacity {
             // For ring buffers, drop the oldest frame
-            if self.strategy == BufferStrategy::Ring { capacity: self.max_capacity } {
+            if matches!(self.strategy, BufferStrategy::Ring { .. }) {
                 self.queue.pop_front();
                 self.dropped += 1;
             } else {
@@ -245,10 +253,19 @@ impl PortBuffer {
 
 impl fmt::Display for PortBuffer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "PortBuffer[{}]: {} ({}/{} frames, {} dropped)",
-            self.label, self.strategy, self.queue.len(),
-            if self.max_capacity > 0 { self.max_capacity.to_string() } else { "inf".to_string() },
-            self.dropped)
+        write!(
+            f,
+            "PortBuffer[{}]: {} ({}/{} frames, {} dropped)",
+            self.label,
+            self.strategy,
+            self.queue.len(),
+            if self.max_capacity > 0 {
+                self.max_capacity.to_string()
+            } else {
+                "inf".to_string()
+            },
+            self.dropped
+        )
     }
 }
 
@@ -265,7 +282,10 @@ mod tests {
     #[test]
     fn test_buffer_strategy_display() {
         assert_eq!(format!("{}", BufferStrategy::Direct), "Direct");
-        assert_eq!(format!("{}", BufferStrategy::Ring { capacity: 8 }), "Ring(8)");
+        assert_eq!(
+            format!("{}", BufferStrategy::Ring { capacity: 8 }),
+            "Ring(8)"
+        );
         assert_eq!(format!("{}", BufferStrategy::Unbounded), "Unbounded");
         assert_eq!(format!("{}", BufferStrategy::DoubleBuffer), "DoubleBuffer");
     }

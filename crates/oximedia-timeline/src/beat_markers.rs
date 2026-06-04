@@ -62,7 +62,12 @@ impl TempoEvent {
     /// Creates a new tempo event.
     #[must_use]
     pub fn new(frame: u64, bpm: f64, beats_per_bar: u32, beat_unit: u32) -> Self {
-        Self { frame, bpm, beats_per_bar, beat_unit }
+        Self {
+            frame,
+            bpm,
+            beats_per_bar,
+            beat_unit,
+        }
     }
 
     /// Returns seconds per beat at this tempo.
@@ -118,8 +123,7 @@ impl TempoMap {
     pub fn frame_of(&self, bar: u32, beat: u32) -> u64 {
         // Simplified: assume constant tempo from start
         let event = &self.events[0];
-        let beats_from_start =
-            (bar as u64 - 1) * event.beats_per_bar as u64 + (beat as u64 - 1);
+        let beats_from_start = (bar as u64 - 1) * event.beats_per_bar as u64 + (beat as u64 - 1);
         let seconds = beats_from_start as f64 * event.seconds_per_beat();
         (seconds * self.fps).round() as u64
     }
@@ -165,8 +169,7 @@ impl TempoMap {
     #[must_use]
     pub fn snap_to_bar(&self, frame: u64) -> u64 {
         let event = self.event_at(frame);
-        let frames_per_bar =
-            (event.seconds_per_bar() * self.fps).round() as u64;
+        let frames_per_bar = (event.seconds_per_bar() * self.fps).round() as u64;
         if frames_per_bar == 0 {
             return frame;
         }

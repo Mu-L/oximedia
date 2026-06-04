@@ -28,31 +28,30 @@ pub fn nlmeans_filter(frame: &VideoFrame, strength: f32) -> DenoiseResult<VideoF
 
     let mut output = frame.clone();
 
-    // Process each plane in parallel
-    output
-        .planes
-        .par_iter_mut()
-        .enumerate()
-        .try_for_each(|(plane_idx, plane)| {
-            let input_plane = &frame.planes[plane_idx];
-            let (width, height) = frame.plane_dimensions(plane_idx);
+    // Scale parameters based on strength
+    let h_param = 10.0 * strength;
+    let patch_size = 7;
+    let search_window = 21;
 
-            // Scale parameters based on strength
-            let h = 10.0 * strength; // Filtering parameter
-            let patch_size = 7;
-            let search_window = 21;
-
-            nlmeans_filter_plane(
-                input_plane.data.as_ref(),
-                &mut plane.data.clone(),
-                width as usize,
-                height as usize,
-                plane.stride,
-                h,
-                patch_size,
-                search_window,
-            )
-        })?;
+    // Process each plane sequentially with explicit write-back.
+    // (Sequential loop avoids potential aliasing with par_iter_mut closures
+    // that capture both `frame` and `output`.)
+    for plane_idx in 0..output.planes.len() {
+        let (width, height) = frame.plane_dimensions(plane_idx);
+        let stride = frame.planes[plane_idx].stride;
+        // Snapshot input so borrow-checker knows input and output are disjoint.
+        let input_snap: Vec<u8> = frame.planes[plane_idx].data.clone();
+        nlmeans_filter_plane(
+            &input_snap,
+            output.planes[plane_idx].data.as_mut_slice(),
+            width as usize,
+            height as usize,
+            stride,
+            h_param,
+            patch_size,
+            search_window,
+        )?;
+    }
 
     Ok(output)
 }
@@ -309,7 +308,7 @@ pub fn fast_nlmeans_filter(frame: &VideoFrame, strength: f32) -> DenoiseResult<V
 
             nlmeans_filter_plane(
                 input_plane.data.as_ref(),
-                &mut plane.data.clone(),
+                plane.data.as_mut(),
                 width as usize,
                 height as usize,
                 plane.stride,

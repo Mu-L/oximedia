@@ -32,5 +32,8 @@ oxiarc-deflate = { workspace = true }  # Pure Rust DEFLATE (COOLJAPAN Policy)
 oxiarc-lz4 = { workspace = true }     # Pure Rust LZ4 (COOLJAPAN Policy)
 weezl = "0.2"  # LZW compression
 
+memmap2.workspace = true
+oxifft.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true

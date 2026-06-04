@@ -575,7 +575,10 @@ mod tests {
         let mut mux = StreamMux::new(MuxStrategy::Primary, 4);
         let id = mux.add_source_with_depth(5, 16);
         for i in 0..16u64 {
-            assert!(mux.push(id, vec![0; 4], i * 1000), "push {i} should succeed");
+            assert!(
+                mux.push(id, vec![0; 4], i * 1000),
+                "push {i} should succeed"
+            );
         }
         // 17th push should fail
         assert!(!mux.push(id, vec![0; 4], 17000));

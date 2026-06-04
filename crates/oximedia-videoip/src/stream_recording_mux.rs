@@ -51,7 +51,10 @@ impl ContainerFormat {
     #[must_use]
     pub fn supports_video_codec(&self, codec: VideoCodecId) -> bool {
         match self {
-            Self::Mkv => matches!(codec, VideoCodecId::Vp9 | VideoCodecId::Av1 | VideoCodecId::Ffv1),
+            Self::Mkv => matches!(
+                codec,
+                VideoCodecId::Vp9 | VideoCodecId::Av1 | VideoCodecId::Ffv1
+            ),
             Self::WebM => matches!(codec, VideoCodecId::Vp9 | VideoCodecId::Av1),
         }
     }
@@ -62,7 +65,10 @@ impl ContainerFormat {
         match self {
             Self::Mkv => matches!(
                 codec,
-                AudioCodecId::Opus | AudioCodecId::Pcm16 | AudioCodecId::Pcm24 | AudioCodecId::Vorbis
+                AudioCodecId::Opus
+                    | AudioCodecId::Pcm16
+                    | AudioCodecId::Pcm24
+                    | AudioCodecId::Vorbis
             ),
             Self::WebM => matches!(codec, AudioCodecId::Opus | AudioCodecId::Vorbis),
         }
@@ -595,7 +601,10 @@ impl StreamRecordingMux {
     /// Finalises the recording, flushes all buffers, and writes the container
     /// footer / seek index.
     pub fn finalise(&mut self) -> RecordingResult<()> {
-        if !matches!(self.state, RecordingState::Recording | RecordingState::Paused) {
+        if !matches!(
+            self.state,
+            RecordingState::Recording | RecordingState::Paused
+        ) {
             return Err(RecordingError::InvalidState {
                 expected: RecordingState::Recording,
                 actual: self.state,
@@ -603,7 +612,12 @@ impl StreamRecordingMux {
         }
 
         // Finalise the last segment.
-        let last_pts = self.tracks.values().map(|t| t.last_pts_us).max().unwrap_or(0);
+        let last_pts = self
+            .tracks
+            .values()
+            .map(|t| t.last_pts_us)
+            .max()
+            .unwrap_or(0);
         self.finish_segment(last_pts);
 
         // Write container footer (seek index placeholder).
@@ -653,13 +667,21 @@ impl StreamRecordingMux {
     /// Returns the output file path with the correct extension.
     #[must_use]
     pub fn output_path_with_ext(&self) -> String {
-        format!("{}{}", self.config.output_path, self.config.format.extension())
+        format!(
+            "{}{}",
+            self.config.output_path,
+            self.config.format.extension()
+        )
     }
 
     /// Returns per-track frame counts as `(track_id, frame_count)` pairs.
     #[must_use]
     pub fn track_frame_counts(&self) -> Vec<(u32, u64)> {
-        let mut counts: Vec<(u32, u64)> = self.tracks.iter().map(|(&id, ts)| (id, ts.frames)).collect();
+        let mut counts: Vec<(u32, u64)> = self
+            .tracks
+            .iter()
+            .map(|(&id, ts)| (id, ts.frames))
+            .collect();
         counts.sort_by_key(|&(id, _)| id);
         counts
     }
@@ -684,7 +706,12 @@ impl StreamRecordingMux {
         // In a real implementation this would close the current file and open
         // a new one with an incremented suffix.  Here we just reset the byte
         // counter and segment state.
-        let last_pts = self.tracks.values().map(|t| t.last_pts_us).max().unwrap_or(0);
+        let last_pts = self
+            .tracks
+            .values()
+            .map(|t| t.last_pts_us)
+            .max()
+            .unwrap_or(0);
         self.finish_segment(last_pts);
         self.stats.files_produced += 1;
         // Reset per-file tracking but keep cumulative stats.
@@ -792,7 +819,10 @@ mod tests {
         // FFV1 is not supported in WebM.
         config.video_tracks[0].codec = VideoCodecId::Ffv1;
         let result = StreamRecordingMux::new(config);
-        assert!(matches!(result, Err(RecordingError::UnsupportedCodec { .. })));
+        assert!(matches!(
+            result,
+            Err(RecordingError::UnsupportedCodec { .. })
+        ));
     }
 
     #[test]
@@ -821,8 +851,10 @@ mod tests {
         // Write 3 video frames and 3 audio frames.
         for i in 0..3 {
             let pts = i * 33_333; // ~30fps
-            mux.write_frame(&make_video_frame(1, pts, i == 0)).expect("video write ok");
-            mux.write_frame(&make_audio_frame(2, pts)).expect("audio write ok");
+            mux.write_frame(&make_video_frame(1, pts, i == 0))
+                .expect("video write ok");
+            mux.write_frame(&make_audio_frame(2, pts))
+                .expect("audio write ok");
         }
 
         assert_eq!(mux.stats().video_frames_written, 3);
@@ -840,12 +872,14 @@ mod tests {
         assert_eq!(mux.state(), RecordingState::Paused);
 
         // Frame while paused should be dropped.
-        mux.write_frame(&make_video_frame(1, 33_333, false)).expect("ok");
+        mux.write_frame(&make_video_frame(1, 33_333, false))
+            .expect("ok");
         assert_eq!(mux.stats().dropped_frames, 1);
         assert_eq!(mux.stats().video_frames_written, 1); // only the pre-pause frame
 
         mux.resume().expect("resume ok");
-        mux.write_frame(&make_video_frame(1, 66_666, false)).expect("ok");
+        mux.write_frame(&make_video_frame(1, 66_666, false))
+            .expect("ok");
         assert_eq!(mux.stats().video_frames_written, 2);
     }
 
@@ -873,7 +907,8 @@ mod tests {
         for i in 0..100 {
             let pts = i * 40_000_i64; // 25fps → 4 seconds total
             let keyframe = i % 25 == 0; // keyframe every 25 frames (every 1s)
-            mux.write_frame(&make_video_frame(1, pts, keyframe)).expect("write ok");
+            mux.write_frame(&make_video_frame(1, pts, keyframe))
+                .expect("write ok");
         }
 
         // Keyframes at pts 0, 1_000_000, 2_000_000, 3_000_000.
@@ -919,7 +954,10 @@ mod tests {
             assert!(result.is_ok(), "frame {i} should succeed with auto-split");
         }
 
-        assert!(mux.stats().files_produced >= 2, "should have split to multiple files");
+        assert!(
+            mux.stats().files_produced >= 2,
+            "should have split to multiple files"
+        );
     }
 
     #[test]
@@ -948,10 +986,12 @@ mod tests {
         let mut mux = StreamRecordingMux::new(simple_config()).expect("config ok");
         mux.start().expect("start ok");
         for i in 0..5 {
-            mux.write_frame(&make_video_frame(1, i * 33_333, i == 0)).expect("ok");
+            mux.write_frame(&make_video_frame(1, i * 33_333, i == 0))
+                .expect("ok");
         }
         for i in 0..3 {
-            mux.write_frame(&make_audio_frame(2, i * 33_333)).expect("ok");
+            mux.write_frame(&make_audio_frame(2, i * 33_333))
+                .expect("ok");
         }
         let counts = mux.track_frame_counts();
         assert_eq!(counts.len(), 2);
@@ -986,7 +1026,8 @@ mod tests {
         let mut mux = StreamRecordingMux::new(simple_config()).expect("config ok");
         mux.start().expect("start ok");
         mux.write_frame(&make_video_frame(1, 0, true)).expect("ok");
-        mux.write_frame(&make_video_frame(1, 2_000_000, false)).expect("ok"); // 2 seconds later
+        mux.write_frame(&make_video_frame(1, 2_000_000, false))
+            .expect("ok"); // 2 seconds later
         let dur = mux.stats().duration_secs;
         assert!(
             (dur - 2.0).abs() < 0.01,
@@ -999,7 +1040,10 @@ mod tests {
         let mut config = simple_config();
         config.audio_tracks[0].codec = AudioCodecId::Pcm24;
         let result = StreamRecordingMux::new(config);
-        assert!(matches!(result, Err(RecordingError::UnsupportedCodec { .. })));
+        assert!(matches!(
+            result,
+            Err(RecordingError::UnsupportedCodec { .. })
+        ));
     }
 
     #[test]

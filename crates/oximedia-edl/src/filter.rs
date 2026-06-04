@@ -44,11 +44,7 @@ impl EdlFilter {
     /// Apply the filter and return owned clones of matching events.
     #[must_use]
     pub fn apply_owned(&self, events: &[EdlEvent]) -> Vec<EdlEvent> {
-        events
-            .iter()
-            .filter(|e| self.matches(e))
-            .cloned()
-            .collect()
+        events.iter().filter(|e| self.matches(e)).cloned().collect()
     }
 
     /// Count events matching all predicates.
@@ -103,8 +99,9 @@ impl EdlFilterBuilder {
     #[must_use]
     pub fn reel_pattern(mut self, pattern: impl Into<String>) -> Self {
         let pat = pattern.into().to_lowercase();
-        self.predicates
-            .push(Box::new(move |e: &EdlEvent| e.reel.to_lowercase().contains(&pat)));
+        self.predicates.push(Box::new(move |e: &EdlEvent| {
+            e.reel.to_lowercase().contains(&pat)
+        }));
         self
     }
 
@@ -187,16 +184,18 @@ impl EdlFilterBuilder {
     /// Filter events with a minimum duration (in frames).
     #[must_use]
     pub fn min_duration_frames(mut self, min_frames: u64) -> Self {
-        self.predicates
-            .push(Box::new(move |e: &EdlEvent| e.duration_frames() >= min_frames));
+        self.predicates.push(Box::new(move |e: &EdlEvent| {
+            e.duration_frames() >= min_frames
+        }));
         self
     }
 
     /// Filter events with a maximum duration (in frames).
     #[must_use]
     pub fn max_duration_frames(mut self, max_frames: u64) -> Self {
-        self.predicates
-            .push(Box::new(move |e: &EdlEvent| e.duration_frames() <= max_frames));
+        self.predicates.push(Box::new(move |e: &EdlEvent| {
+            e.duration_frames() <= max_frames
+        }));
         self
     }
 
@@ -233,8 +232,7 @@ impl EdlFilterBuilder {
     #[must_use]
     pub fn negate_last(mut self) -> Self {
         if let Some(pred) = self.predicates.pop() {
-            self.predicates
-                .push(Box::new(move |e: &EdlEvent| !pred(e)));
+            self.predicates.push(Box::new(move |e: &EdlEvent| !pred(e)));
         }
         self
     }
@@ -313,7 +311,9 @@ mod tests {
     #[test]
     fn test_filter_by_edit_type() {
         let events = sample_events();
-        let filter = EdlFilterBuilder::new().edit_type(EditType::Dissolve).build();
+        let filter = EdlFilterBuilder::new()
+            .edit_type(EditType::Dissolve)
+            .build();
         let matches = filter.apply(&events);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].number, 3);
@@ -384,14 +384,10 @@ mod tests {
     fn test_filter_min_duration() {
         let events = sample_events();
         // Each event is 5 seconds = 125 frames at 25fps
-        let filter = EdlFilterBuilder::new()
-            .min_duration_frames(125)
-            .build();
+        let filter = EdlFilterBuilder::new().min_duration_frames(125).build();
         assert_eq!(filter.count(&events), 5);
 
-        let filter2 = EdlFilterBuilder::new()
-            .min_duration_frames(126)
-            .build();
+        let filter2 = EdlFilterBuilder::new().min_duration_frames(126).build();
         assert_eq!(filter2.count(&events), 0);
     }
 

@@ -176,8 +176,18 @@ impl Scene {
         v3: [f32; 3],
         absorption: f32,
     ) {
-        self.triangles.push(Triangle { v0, v1, v2, absorption });
-        self.triangles.push(Triangle { v0, v1: v2, v2: v3, absorption });
+        self.triangles.push(Triangle {
+            v0,
+            v1,
+            v2,
+            absorption,
+        });
+        self.triangles.push(Triangle {
+            v0,
+            v1: v2,
+            v2: v3,
+            absorption,
+        });
     }
 
     /// Number of triangles in the scene.
@@ -244,7 +254,10 @@ impl RayTracer {
         if direct_dist > 0.0 && direct_dist < max_dist {
             let delay = direct_dist / SPEED_OF_SOUND;
             let energy = 1.0 / (direct_dist.max(0.01) * direct_dist.max(0.01));
-            samples.push(IrSample { delay_s: delay, energy: energy.min(1.0) });
+            samples.push(IrSample {
+                delay_s: delay,
+                energy: energy.min(1.0),
+            });
         }
 
         for dir in &directions {
@@ -390,7 +403,11 @@ fn moller_trumbore(ray: &Ray, tri: &Triangle) -> Option<f32> {
         return None;
     }
     let t = f * dot3(edge2, q);
-    if t > EPSILON { Some(t) } else { None }
+    if t > EPSILON {
+        Some(t)
+    } else {
+        None
+    }
 }
 
 /// Generate N uniformly-distributed directions on a unit sphere (Fibonacci method).
@@ -476,7 +493,11 @@ mod tests {
 
     #[test]
     fn test_trace_empty_scene_returns_direct_sound() {
-        let config = RayTracerConfig { num_rays: 10, listener_radius: 0.5, ..Default::default() };
+        let config = RayTracerConfig {
+            num_rays: 10,
+            listener_radius: 0.5,
+            ..Default::default()
+        };
         let tracer = RayTracer::new(config, Scene::new());
         let ir = tracer.trace([0.0, 0.0, 0.0], [2.0, 0.0, 0.0]);
         assert!(!ir.samples.is_empty(), "Expected direct sound sample");
@@ -484,7 +505,10 @@ mod tests {
 
     #[test]
     fn test_trace_energy_non_negative() {
-        let config = RayTracerConfig { num_rays: 50, ..Default::default() };
+        let config = RayTracerConfig {
+            num_rays: 50,
+            ..Default::default()
+        };
         let mut scene = Scene::new();
         scene.add_triangle(Triangle {
             v0: [0.0, 0.0, 0.0],
@@ -503,8 +527,14 @@ mod tests {
     fn test_ir_to_buffer_length() {
         let ir = ImpulseResponse {
             samples: vec![
-                IrSample { delay_s: 0.01, energy: 0.5 },
-                IrSample { delay_s: 0.05, energy: 0.2 },
+                IrSample {
+                    delay_s: 0.01,
+                    energy: 0.5,
+                },
+                IrSample {
+                    delay_s: 0.05,
+                    energy: 0.2,
+                },
             ],
             rays_traced: 10,
             intersections: 1,
@@ -515,7 +545,11 @@ mod tests {
 
     #[test]
     fn test_ir_samples_sorted_by_delay() {
-        let config = RayTracerConfig { num_rays: 100, listener_radius: 1.0, ..Default::default() };
+        let config = RayTracerConfig {
+            num_rays: 100,
+            listener_radius: 1.0,
+            ..Default::default()
+        };
         let tracer = RayTracer::new(config, Scene::new());
         let ir = tracer.trace([0.0, 0.0, 0.0], [3.0, 0.0, 0.0]);
         for w in ir.samples.windows(2) {

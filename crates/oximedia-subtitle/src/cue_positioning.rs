@@ -60,7 +60,10 @@ impl PositionAnchor {
     /// Returns `true` when the anchor is on the bottom half of the screen.
     #[must_use]
     pub fn is_bottom(&self) -> bool {
-        matches!(self, Self::BottomLeft | Self::BottomCenter | Self::BottomRight)
+        matches!(
+            self,
+            Self::BottomLeft | Self::BottomCenter | Self::BottomRight
+        )
     }
 
     /// Returns `true` when the anchor is on the top half of the screen.
@@ -435,7 +438,7 @@ mod tests {
         assert_eq!(w, 1536);
         assert_eq!(h, 108); // 10% of 1080
         assert_eq!(x, 192); // centered
-        // Bottom-anchored, no margin → y = 1080 - 108 = 972
+                            // Bottom-anchored, no margin → y = 1080 - 108 = 972
         assert_eq!(y, 972);
     }
 
@@ -477,7 +480,7 @@ mod tests {
         assert_eq!(w, 960); // 50% of 1920
         assert_eq!(h, 108);
         assert_eq!(x, 480); // (1920 - 960) / 2
-        // Middle center: y = 540 - 108/2 = 486
+                            // Middle center: y = 540 - 108/2 = 486
         assert_eq!(y, 486);
     }
 
@@ -550,7 +553,10 @@ mod tests {
         // Different start_ms → not compared.
         let cues = vec![(0u64, c1), (5_000u64, c2)];
         let collisions = resolver.detect_collisions(&cues);
-        assert!(collisions.is_empty(), "different start times → no collision check");
+        assert!(
+            collisions.is_empty(),
+            "different start times → no collision check"
+        );
     }
 
     #[test]

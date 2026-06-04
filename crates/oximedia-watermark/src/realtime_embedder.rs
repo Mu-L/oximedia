@@ -49,7 +49,7 @@ use std::collections::VecDeque;
 
 use crate::{
     error::{WatermarkError, WatermarkResult},
-    payload::{generate_pn_sequence, pack_bits, unpack_bits, PayloadCodec},
+    payload::{generate_pn_sequence, unpack_bits, PayloadCodec},
 };
 
 // ---------------------------------------------------------------------------
@@ -188,8 +188,7 @@ impl RealtimeEmbedder {
     ///
     /// Returns [`WatermarkError`] if the RS codec cannot be initialised.
     pub fn new(config: RealtimeEmbedderConfig, sample_rate: u32) -> WatermarkResult<Self> {
-        let codec =
-            PayloadCodec::new(config.rs_data_shards, config.rs_parity_shards)?;
+        let codec = PayloadCodec::new(config.rs_data_shards, config.rs_parity_shards)?;
 
         // Pre-generate a PN sequence of `chip_rate` chips — one per sample of
         // a single bit's worth of audio.

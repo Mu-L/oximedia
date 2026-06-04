@@ -9,10 +9,10 @@
 
 ## Enhancements
 - [x] mp4-muxer — muxer exists at mux/mp4/ (5 files: basic.rs, simple.rs, mod.rs, facade.rs, writer.rs); fMP4 fragmented mode tracked by Wave 3 Slice D
-- [ ] Extend `demux/matroska/parser.rs` with full support for Matroska v4 elements (Block Addition Mappings) (verified-open 2026-05-16: Wave 4 added BlockAdditionMapping emit but full parser coverage not complete)
-- [ ] Add sample-accurate seeking in `seek.rs` for all container formats (not just keyframe-based) (verified-open 2026-05-16: Wave 4 extended MKV+MP4+AVI but seek.rs generic abstraction is partial)
+- [x] Extend `demux/matroska/parser.rs` with full support for Matroska v4 elements (Block Addition Mappings) (Wave 14: block-level BlockMore/BlockAdditional parsing + BlockAddIdType registry — matroska_v4.rs parse_block_additions/parse_block_more + parser.rs parse_block_group BLOCK_ADDITIONS arm + Block.block_additions field)
+- [x] Add sample-accurate seeking in `seek.rs` for all container formats (not just keyframe-based) (SampleAccurateSeeker done)
 - [x] Extend `metadata/editor.rs` with batch tag operations (copy all tags between files)
-- [ ] Improve `streaming/mux.rs` with CMAF low-latency chunked transfer encoding (verified-open 2026-05-16: CMAF chunked in fragment/ but streaming/mux.rs not updated)
+- [x] Improve `streaming/mux.rs` with CMAF low-latency chunked transfer encoding (verified: streaming/mux.rs:376:CmafChunkMode, :384:LowLatencyChunked, :395:CmafChunkedConfig, push_sample)
 - [x] Add edit list support in `edit_list.rs` for gapless audio and trimmed video playback (verified 2026-05-16; src/demux/mp4/boxes.rs:550 gapless elst parse, preroll_samples:636; src/edit/list.rs:75 EditList)
 - [x] Extend `demux/mpegts/` with SCTE-35 ad insertion marker parsing and mux emission
 - [x] Add `container_probe.rs` detailed stream analysis (bitrate distribution, keyframe interval) (verified 2026-05-16; src/container_probe.rs:probe_detailed — DetailedStreamStats with bitrate/keyframe histograms, percentile stats)
@@ -32,6 +32,11 @@
 - [x] seek-sample-accurate-all: extend MKV pattern to MP4 (stss+stts+ctts) + AVI (idx1/super-index) — Wave 4 Slice D
 - [x] cmaf-ll-chunked: CmafChunkedMode with moof+mdat per chunk, styp=cmfl, prft boxes — Wave 4 Slice D
 
+## 0.1.8 Wave 6 — 2026-05-29
+- [x] Split mp4/writer.rs (1985 lines — near policy limit) via splitrs (Slice A, 2026-05-29) (verified 2026-05-29; split complete, all sub-modules < 2000 lines; mod.rs 1219, boxes.rs 362, fragment.rs 154, sample_table.rs 145, types.rs 240; 1372 tests pass, 0 warnings)
+  - **Goal:** Module directory mux/mp4/writer/ preserving full public API; no file >= 2000 lines
+  - **Files:** crates/oximedia-container/src/mux/mp4/writer.rs → writer/{mod,boxes,fragment,sample_table,types}.rs
+
 ## Wave 5 Progress (2026-04-18)
 - [x] scte35-parse-emit: `parse_splice_info_section()` free function + `emit_time_signal/splice_null/splice_insert` — demux/mpegts/scte35 + mux/mpegts/scte35, re-exported from crate root — Wave 5 Slice D
 - [x] metadata-batch: `BatchMetadataUpdate` builder + `BatchResult` in `metadata/batch.rs`, re-exported from crate root — Wave 5 Slice D
@@ -48,11 +53,11 @@
 - [x] Add MKV attachment extraction and insertion CLI in `attach/matroska.rs` (verified 2026-05-16; src/attach/matroska.rs:270 lines)
 
 ## Performance
-- [ ] Implement buffered async I/O in `demux/buffer.rs` with configurable read-ahead size
-- [ ] Add memory-mapped I/O option for large file demuxing via `mmap` feature gate
-- [ ] Optimize EBML variable-length integer parsing in `demux/matroska/ebml.rs` with lookup tables
-- [ ] Cache cluster/cue positions in `cue/` for faster random-access seeking in Matroska
-- [ ] Parallelize mux writing in `mux/matroska/writer.rs` for multi-stream interleaving
+- [x] Implement buffered async I/O in `demux/buffer.rs` with configurable read-ahead size (ReadAheadBuffer done)
+- [x] Add memory-mapped I/O option for large file demuxing via `mmap` feature gate (MmapDemuxSource done)
+- [x] Optimize EBML variable-length integer parsing in `demux/matroska/ebml.rs` with lookup tables (verified: ebml.rs:VINT_LEN_TABLE+VINT_MASK_TABLE)
+- [x] Cache cluster/cue positions in `cue/` for faster random-access seeking in Matroska (verified: cue/cache.rs:54:CuePositionCache, find_cluster_before, BTreeMap)
+- [x] Parallelize mux writing in `mux/matroska/writer.rs` for multi-stream interleaving (verified: mux/matroska/interleave.rs:thread::scope parallel encode, sort-by-pts)
 - [ ] Optimize `pts_dts.rs` timestamp rewriting with batch processing
 
 ## Testing

@@ -140,6 +140,8 @@ pub struct ProxyWorkerPool {
     total_completed: u64,
     /// Total jobs rejected (queue full).
     total_rejected: u64,
+    /// Set to `true` after `drain_all()` — no new jobs are accepted.
+    draining: bool,
 }
 
 impl ProxyWorkerPool {
@@ -153,6 +155,7 @@ impl ProxyWorkerPool {
             total_submitted: 0,
             total_completed: 0,
             total_rejected: 0,
+            draining: false,
         }
     }
 
@@ -163,7 +166,16 @@ impl ProxyWorkerPool {
     }
 
     /// Submit a job. Returns `true` if accepted (assigned or queued).
+    ///
+    /// Returns `false` if the pool is draining (after [`drain_all`](Self::drain_all))
+    /// or if the queue is at maximum capacity.
     pub fn submit(&mut self, job: ProxyJob) -> bool {
+        // Refuse new submissions while draining.
+        if self.draining {
+            self.total_rejected += 1;
+            return false;
+        }
+
         self.total_submitted += 1;
 
         // Try to assign directly to an idle worker
@@ -250,6 +262,9 @@ impl ProxyWorkerPool {
         for w in &mut self.workers {
             w.drain();
         }
+        // After draining, seal the queue so no new jobs are accepted.
+        self.queue.clear();
+        self.draining = true;
     }
 
     /// Get a reference to a worker by index.
@@ -334,7 +349,12 @@ mod tests {
         let done = pool.complete_job(0, Duration::from_secs(1));
         assert_eq!(done, Some(1));
         // Worker should now be busy with job 2
-        assert_eq!(pool.worker(0).expect("should succeed in test").current_job(), Some(2));
+        assert_eq!(
+            pool.worker(0)
+                .expect("should succeed in test")
+                .current_job(),
+            Some(2)
+        );
     }
 
     #[test]

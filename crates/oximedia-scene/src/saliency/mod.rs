@@ -9,5 +9,8 @@ pub mod detect;
 pub mod temporal;
 
 pub use attention::{AttentionMap, AttentionPredictor};
-pub use detect::{SaliencyDetector, SaliencyMap};
+pub use detect::{
+    SaliencyDetector, SaliencyMap, SpectralSaliencyComputer, SpectralSaliencyDetector,
+};
+pub use temporal::{temporal_saliency, TemporalSaliencyAccumulator, TemporalSaliencyFnConfig};
 pub use temporal::{TemporalSaliencyConfig, TemporalSaliencyDetector, TemporalSaliencyMap};

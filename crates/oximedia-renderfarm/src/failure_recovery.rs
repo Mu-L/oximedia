@@ -262,6 +262,117 @@ pub enum RecoveryAction {
     Cancel,
     /// Send an alert with the given message (for human review).
     Alert(String),
+    /// Retry a specific chunk/tile instead of the entire frame.
+    RetryChunk(ChunkId),
+}
+
+// ---------------------------------------------------------------------------
+// ChunkId / ChunkRetryState / ChunkRetryManager
+// ---------------------------------------------------------------------------
+
+/// Identifies a single rendered tile/chunk within a tiled frame.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ChunkId {
+    /// The frame this chunk belongs to.
+    pub frame_id: u64,
+    /// Index of this tile within the frame's tile grid.
+    pub tile_index: u32,
+    /// Pixel region this tile covers: (x, y, width, height).
+    pub tile_region: (u32, u32, u32, u32),
+}
+
+impl ChunkId {
+    /// Create a new chunk identifier.
+    pub fn new(frame_id: u64, tile_index: u32, tile_region: (u32, u32, u32, u32)) -> Self {
+        Self {
+            frame_id,
+            tile_index,
+            tile_region,
+        }
+    }
+}
+
+/// Tracks retry state for a single in-flight chunk.
+#[derive(Debug, Clone)]
+pub struct ChunkRetryState {
+    /// The chunk being retried.
+    pub chunk: ChunkId,
+    /// Current attempt number (1-based; incremented on each failure).
+    pub attempt: u32,
+    /// Maximum allowed attempts before giving up.
+    pub max_attempts: u32,
+}
+
+/// Manages fine-grained chunk-level retry state for tiled frame rendering.
+///
+/// Instead of retrying an entire frame when one tile fails, the manager
+/// tracks individual tile outcomes and only re-dispatches failed tiles.
+pub struct ChunkRetryManager {
+    /// In-flight chunks: (frame_id, tile_index) -> ChunkRetryState.
+    pending: HashMap<(u64, u32), ChunkRetryState>,
+    /// Default maximum retry attempts for new chunks.
+    max_attempts: u32,
+}
+
+impl ChunkRetryManager {
+    /// Create a new manager with the given default max attempts.
+    pub fn new(max_attempts: u32) -> Self {
+        Self {
+            pending: HashMap::new(),
+            max_attempts,
+        }
+    }
+
+    /// Called when a chunk fails. Returns the retry state if retries remain,
+    /// or `None` if the chunk has exhausted its allowed attempts.
+    ///
+    /// Internally increments the attempt counter. The first call for a chunk
+    /// initialises it with `attempt = 1`; once `attempt >= max_attempts` the
+    /// chunk is considered permanently failed and `None` is returned.
+    pub fn on_chunk_failure(&mut self, chunk: ChunkId) -> Option<ChunkRetryState> {
+        let key = (chunk.frame_id, chunk.tile_index);
+        let max = self.max_attempts;
+        let state = self.pending.entry(key).or_insert_with(|| ChunkRetryState {
+            chunk: chunk.clone(),
+            attempt: 0,
+            max_attempts: max,
+        });
+        state.attempt += 1;
+        if state.attempt < state.max_attempts {
+            Some(state.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Called when a chunk succeeds; removes it from the pending map.
+    pub fn on_chunk_success(&mut self, frame_id: u64, tile_index: u32) {
+        self.pending.remove(&(frame_id, tile_index));
+    }
+
+    /// Returns all pending retry states for a given frame.
+    pub fn pending_chunks_for_frame(&self, frame_id: u64) -> Vec<&ChunkRetryState> {
+        self.pending
+            .iter()
+            .filter(|((fid, _), _)| *fid == frame_id)
+            .map(|(_, state)| state)
+            .collect()
+    }
+
+    /// Returns `true` if no chunks for `frame_id` remain pending.
+    ///
+    /// `total_tiles` is accepted for API symmetry and guards against the
+    /// degenerate case of a zero-tile frame (which can never be complete).
+    pub fn is_frame_complete(&self, frame_id: u64, total_tiles: u32) -> bool {
+        if total_tiles == 0 {
+            return false;
+        }
+        self.pending
+            .keys()
+            .filter(|(fid, _)| *fid == frame_id)
+            .count()
+            == 0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -634,5 +745,66 @@ mod tests {
         // Large attempt should not panic
         let v = exponential_backoff_ms(63, 1, u64::MAX);
         assert!(v > 0);
+    }
+
+    // --- ChunkRetryManager ---
+
+    #[test]
+    fn test_chunk_retry_manager_retry_within_limit() {
+        let mut mgr = ChunkRetryManager::new(3);
+        let chunk = ChunkId::new(1, 0, (0, 0, 256, 256));
+        let state = mgr.on_chunk_failure(chunk.clone());
+        assert!(state.is_some());
+        let s = state.expect("state present");
+        assert_eq!(s.attempt, 1);
+    }
+
+    #[test]
+    fn test_chunk_retry_manager_exhausted() {
+        let mut mgr = ChunkRetryManager::new(2);
+        let chunk = ChunkId::new(1, 0, (0, 0, 256, 256));
+        mgr.on_chunk_failure(chunk.clone()); // attempt 1
+        let result = mgr.on_chunk_failure(chunk.clone()); // attempt 2 = max
+        assert!(result.is_none(), "should be exhausted at max_attempts");
+    }
+
+    #[test]
+    fn test_chunk_retry_manager_success_removes() {
+        let mut mgr = ChunkRetryManager::new(3);
+        let chunk = ChunkId::new(2, 5, (512, 0, 256, 256));
+        mgr.on_chunk_failure(chunk.clone());
+        mgr.on_chunk_success(2, 5);
+        assert!(mgr.pending_chunks_for_frame(2).is_empty());
+    }
+
+    #[test]
+    fn test_chunk_retry_manager_pending_for_frame() {
+        let mut mgr = ChunkRetryManager::new(5);
+        mgr.on_chunk_failure(ChunkId::new(10, 0, (0, 0, 128, 128)));
+        mgr.on_chunk_failure(ChunkId::new(10, 1, (128, 0, 128, 128)));
+        mgr.on_chunk_failure(ChunkId::new(11, 0, (0, 0, 128, 128)));
+        let pending = mgr.pending_chunks_for_frame(10);
+        assert_eq!(pending.len(), 2);
+    }
+
+    #[test]
+    fn test_chunk_retry_manager_frame_complete_no_pending() {
+        let mgr = ChunkRetryManager::new(3);
+        // No pending chunks and total_tiles > 0 → complete
+        assert!(mgr.is_frame_complete(99, 4));
+    }
+
+    #[test]
+    fn test_chunk_retry_manager_frame_not_complete_with_pending() {
+        let mut mgr = ChunkRetryManager::new(5);
+        mgr.on_chunk_failure(ChunkId::new(7, 0, (0, 0, 64, 64)));
+        assert!(!mgr.is_frame_complete(7, 4));
+    }
+
+    #[test]
+    fn test_chunk_retry_manager_zero_tiles_not_complete() {
+        let mgr = ChunkRetryManager::new(3);
+        // total_tiles == 0 → never complete
+        assert!(!mgr.is_frame_complete(99, 0));
     }
 }

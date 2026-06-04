@@ -193,14 +193,8 @@ impl BitrateAnalyzer {
         let sum: f64 = values.iter().sum();
         let mean = sum / count as f64;
 
-        let min = values
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min);
-        let max = values
-            .iter()
-            .copied()
-            .fold(f64::NEG_INFINITY, f64::max);
+        let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
 
         let variance = if count >= MIN_SAMPLES_FOR_STATS {
             values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (count - 1) as f64
@@ -238,10 +232,18 @@ impl BitrateAnalyzer {
     /// Compute separate statistics for keyframes and non-keyframes.
     #[allow(clippy::cast_precision_loss)]
     pub fn compute_keyframe_stats(&self) -> (BitrateStats, BitrateStats) {
-        let keyframes: Vec<BitrateSample> =
-            self.samples.iter().filter(|s| s.is_keyframe).copied().collect();
-        let non_keyframes: Vec<BitrateSample> =
-            self.samples.iter().filter(|s| !s.is_keyframe).copied().collect();
+        let keyframes: Vec<BitrateSample> = self
+            .samples
+            .iter()
+            .filter(|s| s.is_keyframe)
+            .copied()
+            .collect();
+        let non_keyframes: Vec<BitrateSample> = self
+            .samples
+            .iter()
+            .filter(|s| !s.is_keyframe)
+            .copied()
+            .collect();
 
         let kf_analyzer = {
             let mut a = BitrateAnalyzer::with_defaults();
@@ -472,13 +474,22 @@ mod tests {
         for i in 0..50 {
             analyzer.add_sample(make_sample(i, 1000.0, false));
         }
-        assert_eq!(analyzer.classify_variability(), BitrateVariability::Constant);
+        assert_eq!(
+            analyzer.classify_variability(),
+            BitrateVariability::Constant
+        );
     }
 
     #[test]
     fn test_variability_description() {
-        assert_eq!(BitrateVariability::Constant.description(), "constant (CBR-like)");
-        assert_eq!(BitrateVariability::Extreme.description(), "extreme (potential encoding issues)");
+        assert_eq!(
+            BitrateVariability::Constant.description(),
+            "constant (CBR-like)"
+        );
+        assert_eq!(
+            BitrateVariability::Extreme.description(),
+            "extreme (potential encoding issues)"
+        );
     }
 
     #[test]

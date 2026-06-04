@@ -6,12 +6,15 @@
 use super::{LiveStream, MediaPacket, MediaType, StreamRegistry};
 use crate::error::{NetError, NetResult};
 use crate::rtmp::{RtmpServer, RtmpServerConfig};
+use crate::srt::{SrtConfig, SrtListener};
 use bytes::Bytes;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 /// Ingest source type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,6 +220,11 @@ pub struct IngestServer {
 
     /// RTMP server.
     rtmp_server: Option<Arc<RtmpServer>>,
+
+    /// Background SRT accept-loop task handle (set when SRT ingest is
+    /// enabled).  Stored so `stop()` can `abort()` the loop instead of
+    /// letting it linger until process exit.
+    srt_accept_task: RwLock<Option<JoinHandle<NetResult<()>>>>,
 }
 
 impl IngestServer {
@@ -228,6 +236,7 @@ impl IngestServer {
             registry,
             sessions: RwLock::new(HashMap::new()),
             rtmp_server: None,
+            srt_accept_task: RwLock::new(None),
         }
     }
 
@@ -282,9 +291,24 @@ impl IngestServer {
     }
 
     /// Starts SRT ingest.
+    ///
+    /// Spawns a background task that drives [`SrtListener::accept`] in a
+    /// loop on [`IngestConfig::srt_bind_addr`].  Each successful
+    /// handshake is dispatched into [`Self::handle_accepted_srt_session`]
+    /// which registers an [`IngestSession`] in the parent server's
+    /// session map.
+    ///
+    /// Returns immediately after the task is spawned.  Errors from the
+    /// initial accept attempt are surfaced via the [`JoinHandle`] stored
+    /// in `self.srt_accept_task`.
     async fn start_srt_ingest(&self) -> NetResult<()> {
-        // SRT ingest implementation
-        // This would start an SRT server and handle incoming streams
+        let bind_addr = self.config.srt_bind_addr;
+        let registry = Arc::clone(&self.registry);
+
+        let task: JoinHandle<NetResult<()>> =
+            tokio::spawn(async move { run_srt_accept_loop(bind_addr, registry).await });
+
+        *self.srt_accept_task.write() = Some(task);
         Ok(())
     }
 
@@ -366,11 +390,93 @@ impl IngestServer {
 
     /// Stops the ingest server.
     pub fn stop(&self) {
+        // Abort the SRT accept loop if it is still running.
+        if let Some(handle) = self.srt_accept_task.write().take() {
+            handle.abort();
+        }
         let sessions = self.sessions.read();
         for session in sessions.values() {
             session.stop();
         }
     }
+}
+
+/// Background SRT accept loop driven from [`IngestServer::start_srt_ingest`].
+///
+/// Iterates [`SrtListener::accept`] forever; for every accepted
+/// connection it registers an entry in `registry` so the rest of the live
+/// pipeline can pick the stream up.  Transient handshake errors are
+/// logged with [`tracing::warn`] and the loop continues.
+async fn run_srt_accept_loop(
+    bind_addr: SocketAddr,
+    registry: Arc<StreamRegistry>,
+) -> NetResult<()> {
+    loop {
+        let listener = SrtListener::new(bind_addr, SrtConfig::default());
+        match listener.accept().await {
+            Ok(receiver) => {
+                let peer = receiver.peer_addr();
+                let stream_key = format!("srt-{}", peer);
+                let app = "srt".to_string();
+                match registry.register_stream(&stream_key, &app) {
+                    Ok(live_stream) => {
+                        let session = Arc::new(IngestSession::new(
+                            format!("srt_{stream_key}"),
+                            IngestSource::Srt,
+                            stream_key,
+                            app,
+                            live_stream,
+                        ));
+                        session.set_state(IngestSessionState::Active);
+                        tokio::spawn(forward_srt_payload(receiver, session));
+                    }
+                    Err(e) => {
+                        eprintln!("SRT stream registry rejected stream: {e}; dropping connection");
+                    }
+                }
+            }
+            Err(NetError::Io(e))
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                eprintln!("Fatal SRT bind error: {e}; terminating accept loop");
+                return Err(NetError::Io(e));
+            }
+            Err(e) => {
+                eprintln!("SRT accept transient error: {e}; retrying");
+                // Brief back-off so a flapping peer doesn't spin the loop.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+}
+
+/// Forwards raw SRT payload bytes from a freshly accepted receiver into
+/// the live-stream pipeline.  Each payload chunk becomes a metadata
+/// [`MediaPacket`] keyed by the session's `bytes_ingested` counter so the
+/// upper layers can decode framing themselves.
+async fn forward_srt_payload(receiver: crate::srt::SrtReceiver, session: Arc<IngestSession>) {
+    let mut buf = vec![0u8; 1500];
+    loop {
+        match receiver.recv(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                let data = Bytes::copy_from_slice(&buf[..n]);
+                let pkt = MediaPacket::new(MediaType::Metadata, session.bytes_ingested(), data);
+                if session.ingest_packet(pkt).is_err() {
+                    break;
+                }
+            }
+            Err(NetError::Eof) => break,
+            Err(e) => {
+                eprintln!("SRT recv error: {e}; closing forwarder");
+                break;
+            }
+        }
+    }
+    session.stop();
 }
 
 /// Custom RTMP authentication handler for ingest.

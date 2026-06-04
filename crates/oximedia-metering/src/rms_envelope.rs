@@ -220,9 +220,7 @@ impl RmsEnvelopeFollower {
 
     /// Get peak RMS seen for a channel (linear scale).
     pub fn peak_rms_linear(&self, channel: usize) -> f64 {
-        self.channel_states
-            .get(channel)
-            .map_or(0.0, |s| s.peak_rms)
+        self.channel_states.get(channel).map_or(0.0, |s| s.peak_rms)
     }
 
     /// Get peak RMS for a channel in dBFS.
@@ -326,7 +324,10 @@ mod tests {
         }
         let rms = follower.rms_linear(0);
         // DC 0.5 -> RMS should approach 0.5
-        assert!((rms - 0.5).abs() < 0.1, "RMS for DC 0.5 should be near 0.5, got {rms}");
+        assert!(
+            (rms - 0.5).abs() < 0.1,
+            "RMS for DC 0.5 should be near 0.5, got {rms}"
+        );
     }
 
     #[test]
@@ -343,7 +344,10 @@ mod tests {
         }
         let peak = follower.peak_rms_linear(0);
         let current = follower.rms_linear(0);
-        assert!(peak > current, "Peak should be higher than current after going quiet");
+        assert!(
+            peak > current,
+            "Peak should be higher than current after going quiet"
+        );
     }
 
     #[test]
@@ -383,7 +387,10 @@ mod tests {
         follower.process_interleaved(&samples);
         let max = follower.max_rms_linear();
         let left = follower.rms_linear(0);
-        assert!((max - left).abs() < 0.01, "Max should match the louder channel");
+        assert!(
+            (max - left).abs() < 0.01,
+            "Max should match the louder channel"
+        );
     }
 
     #[test]
@@ -410,7 +417,10 @@ mod tests {
         follower.process_interleaved(&vec![1.0; 5000]);
         let dbfs = follower.rms_dbfs(0);
         // Should be close to 0 dBFS
-        assert!(dbfs > -3.0, "Full-scale DC should be near 0 dBFS, got {dbfs}");
+        assert!(
+            dbfs > -3.0,
+            "Full-scale DC should be near 0 dBFS, got {dbfs}"
+        );
     }
 
     #[test]

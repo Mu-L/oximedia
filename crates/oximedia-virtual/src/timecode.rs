@@ -215,13 +215,8 @@ impl Timecode {
             // except every 10th minute.
             let d = 2u64; // frames dropped per minute
             let total_minutes = 60 * h + m;
-            let drop_frames =
-                d * (total_minutes - total_minutes / 10);
-            fps * 3600 * h
-                + fps * 60 * m
-                + fps * s
-                + f
-                - drop_frames
+            let drop_frames = d * (total_minutes - total_minutes / 10);
+            fps * 3600 * h + fps * 60 * m + fps * s + f - drop_frames
         } else {
             fps * 3600 * h + fps * 60 * m + fps * s + f
         }
@@ -336,9 +331,8 @@ impl Timecode {
             )));
         }
         let parse_u8 = |p: &str| -> Result<u8, TimecodeError> {
-            p.parse::<u8>().map_err(|_| {
-                TimecodeError::ParseError(format!("cannot parse `{p}` as u8"))
-            })
+            p.parse::<u8>()
+                .map_err(|_| TimecodeError::ParseError(format!("cannot parse `{p}` as u8")))
         };
         let hh = parse_u8(parts[0])?;
         let mm = parse_u8(parts[1])?;

@@ -107,11 +107,7 @@ impl EtaSmoother for RollingEtaSmoother {
         if self.window.len() < self.min_samples {
             return None;
         }
-        let total_nanos: u128 = self
-            .window
-            .iter()
-            .map(|d| d.as_nanos())
-            .sum();
+        let total_nanos: u128 = self.window.iter().map(|d| d.as_nanos()).sum();
         let avg_nanos = total_nanos / self.window.len() as u128;
         Some(Duration::from_nanos(avg_nanos as u64))
     }
@@ -160,7 +156,11 @@ impl ExponentialEtaSmoother {
     #[must_use]
     pub fn new(alpha: f64) -> Self {
         let alpha = alpha.clamp(1e-6, 1.0);
-        Self { alpha, smoothed_nanos: None, count: 0 }
+        Self {
+            alpha,
+            smoothed_nanos: None,
+            count: 0,
+        }
     }
 
     /// Returns the smoothing factor.
@@ -172,8 +172,7 @@ impl ExponentialEtaSmoother {
     /// Returns the current smoothed ETA as a raw `f64` in seconds, or `None`.
     #[must_use]
     pub fn smoothed_seconds(&self) -> Option<f64> {
-        self.smoothed_nanos
-            .map(|n| n / 1_000_000_000.0)
+        self.smoothed_nanos.map(|n| n / 1_000_000_000.0)
     }
 }
 
@@ -188,8 +187,7 @@ impl EtaSmoother for ExponentialEtaSmoother {
     }
 
     fn smoothed_eta(&self) -> Option<Duration> {
-        self.smoothed_nanos
-            .map(|n| Duration::from_nanos(n as u64))
+        self.smoothed_nanos.map(|n| Duration::from_nanos(n as u64))
     }
 
     fn reset(&mut self) {
@@ -472,7 +470,7 @@ mod tests {
         let mut tracker = SmoothedProgressTracker::new(smoother, 1000);
         let eta1 = tracker.update(1_000_000_000, 100); // 1 s elapsed, 100/1000 done
         let eta2 = tracker.update(2_000_000_000, 500); // 2 s elapsed, 500/1000 done
-        // eta2 should reflect faster progress → smaller ETA
+                                                       // eta2 should reflect faster progress → smaller ETA
         if let (Some(e1), Some(e2)) = (eta1, eta2) {
             assert!(e2 < e1, "ETA should decrease as more work is done");
         }

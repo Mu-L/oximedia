@@ -2,6 +2,12 @@
 //!
 //! This module provides scene detection using histogram comparison methods.
 //! It supports both RGB and HSV color spaces and various comparison metrics.
+//!
+//! [`ColorHistogram::compute_rgb`] uses rayon parallel reduction for large
+//! frames: each thread accumulates its own bin array and they are merged at
+//! the end.  The result is bit-exact with the serial path.
+
+use rayon::prelude::*;
 
 use crate::error::{CvError, CvResult};
 use crate::image::Histogram;
@@ -73,6 +79,11 @@ impl ColorHistogram {
     }
 
     /// Compute histogram from RGB frame data.
+    ///
+    /// For large frames the pixel array is split across rayon threads, each
+    /// of which builds its own `[u64; bins * 3]` accumulator; the per-thread
+    /// results are reduced by element-wise addition.  The final counts are
+    /// truncated back to `u32`, matching the serial result exactly.
     pub fn compute_rgb(data: &[u8], width: u32, height: u32, bins: usize) -> CvResult<Self> {
         if width == 0 || height == 0 {
             return Err(CvError::invalid_dimensions(width, height));
@@ -83,19 +94,71 @@ impl ColorHistogram {
             return Err(CvError::insufficient_data(expected_size, data.len()));
         }
 
+        let bin_scale = bins as f64 / 256.0;
+        let bins3 = bins * 3;
+
+        // Parallel reduce: each rayon thread accumulates into its own flat
+        // `[u64; bins*3]` array (layout: r[0..bins] | g[bins..2*bins] | b[2*bins..3*bins]).
+        let flat: Vec<u64> = data[..expected_size]
+            .par_chunks(3)
+            .fold(
+                || vec![0u64; bins3],
+                |mut acc, chunk| {
+                    let r_bin = ((chunk[0] as f64 * bin_scale) as usize).min(bins - 1);
+                    let g_bin = ((chunk[1] as f64 * bin_scale) as usize).min(bins - 1);
+                    let b_bin = ((chunk[2] as f64 * bin_scale) as usize).min(bins - 1);
+                    acc[r_bin] += 1;
+                    acc[bins + g_bin] += 1;
+                    acc[2 * bins + b_bin] += 1;
+                    acc
+                },
+            )
+            .reduce(
+                || vec![0u64; bins3],
+                |mut a, b| {
+                    for (av, bv) in a.iter_mut().zip(b.iter()) {
+                        *av += bv;
+                    }
+                    a
+                },
+            );
+
+        let mut hist = Self::new(bins);
+        for i in 0..bins {
+            hist.r[i] = flat[i] as u32;
+            hist.g[i] = flat[bins + i] as u32;
+            hist.b[i] = flat[2 * bins + i] as u32;
+        }
+
+        Ok(hist)
+    }
+
+    /// Serial (single-threaded) reference path — used in tests to verify
+    /// bit-exactness of the parallel implementation.
+    #[cfg(test)]
+    pub(crate) fn compute_rgb_serial(
+        data: &[u8],
+        width: u32,
+        height: u32,
+        bins: usize,
+    ) -> CvResult<Self> {
+        if width == 0 || height == 0 {
+            return Err(CvError::invalid_dimensions(width, height));
+        }
+        let expected_size = (width * height * 3) as usize;
+        if data.len() < expected_size {
+            return Err(CvError::insufficient_data(expected_size, data.len()));
+        }
         let mut hist = Self::new(bins);
         let bin_scale = bins as f64 / 256.0;
-
-        for chunk in data.chunks_exact(3) {
+        for chunk in data[..expected_size].chunks_exact(3) {
             let r_bin = ((chunk[0] as f64 * bin_scale) as usize).min(bins - 1);
             let g_bin = ((chunk[1] as f64 * bin_scale) as usize).min(bins - 1);
             let b_bin = ((chunk[2] as f64 * bin_scale) as usize).min(bins - 1);
-
             hist.r[r_bin] += 1;
             hist.g[g_bin] += 1;
             hist.b[b_bin] += 1;
         }
-
         Ok(hist)
     }
 
@@ -550,5 +613,93 @@ pub fn compute_average_brightness(frame: &VideoFrame) -> CvResult<f64> {
             Ok(sum as f64 / pixels)
         }
         _ => Err(CvError::unsupported_format(format!("{:?}", frame.format))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Solid red 100×100 image: all R-channel pixels = 255, G = 0, B = 0.
+    ///
+    /// With 256 bins:
+    /// - R bin 255 must hold exactly `pixels` counts; all other R bins are zero.
+    /// - G bin 0 must hold exactly `pixels` counts (G=0 maps to bin 0); all other G bins are zero.
+    /// - B bin 0 must hold exactly `pixels` counts (B=0 maps to bin 0); all other B bins are zero.
+    #[test]
+    fn test_compute_rgb_solid_red_analytic() {
+        let w = 100u32;
+        let h = 100u32;
+        let pixels = (w * h) as usize;
+        // Solid red: [255, 0, 0] repeated
+        let data: Vec<u8> = (0..pixels).flat_map(|_| [255u8, 0u8, 0u8]).collect();
+        let hist =
+            ColorHistogram::compute_rgb(&data, w, h, 256).expect("compute_rgb should succeed");
+
+        // R: all pixels map to bin 255
+        assert_eq!(
+            hist.r[255], pixels as u32,
+            "r[255] should equal pixel count"
+        );
+        for (i, &v) in hist.r.iter().enumerate() {
+            if i != 255 {
+                assert_eq!(v, 0, "r[{i}] should be zero");
+            }
+        }
+        // G: all pixels map to bin 0 (value 0 → bin 0)
+        assert_eq!(hist.g[0], pixels as u32, "g[0] should equal pixel count");
+        for (i, &v) in hist.g.iter().enumerate() {
+            if i != 0 {
+                assert_eq!(v, 0, "g[{i}] should be zero");
+            }
+        }
+        // B: all pixels map to bin 0 (value 0 → bin 0)
+        assert_eq!(hist.b[0], pixels as u32, "b[0] should equal pixel count");
+        for (i, &v) in hist.b.iter().enumerate() {
+            if i != 0 {
+                assert_eq!(v, 0, "b[{i}] should be zero");
+            }
+        }
+    }
+
+    /// Parallel and serial paths must be bit-exact on a 1920×1080 pseudo-random frame.
+    #[test]
+    fn test_compute_rgb_parallel_matches_serial_1920x1080() {
+        let w = 1920u32;
+        let h = 1080u32;
+        let pixels = (w * h) as usize;
+        // Deterministic pseudo-random data via a simple LCG
+        let mut v = 12345u32;
+        let data: Vec<u8> = (0..pixels * 3)
+            .map(|_| {
+                v = v.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (v >> 24) as u8
+            })
+            .collect();
+
+        let parallel = ColorHistogram::compute_rgb(&data, w, h, 64).expect("parallel compute_rgb");
+        let serial =
+            ColorHistogram::compute_rgb_serial(&data, w, h, 64).expect("serial compute_rgb");
+
+        assert_eq!(parallel.r, serial.r, "R histogram mismatch");
+        assert_eq!(parallel.g, serial.g, "G histogram mismatch");
+        assert_eq!(parallel.b, serial.b, "B histogram mismatch");
+    }
+
+    /// Verify total bin counts equal pixel count (conservation).
+    #[test]
+    fn test_compute_rgb_bin_conservation() {
+        let w = 64u32;
+        let h = 64u32;
+        let pixels = (w * h) as usize;
+        let data: Vec<u8> = (0..pixels * 3).map(|i| (i % 256) as u8).collect();
+        let hist =
+            ColorHistogram::compute_rgb(&data, w, h, 64).expect("compute_rgb should succeed");
+        let total_r: u32 = hist.r.iter().sum();
+        let total_g: u32 = hist.g.iter().sum();
+        let total_b: u32 = hist.b.iter().sum();
+        assert_eq!(total_r, pixels as u32);
+        assert_eq!(total_g, pixels as u32);
+        assert_eq!(total_b, pixels as u32);
     }
 }

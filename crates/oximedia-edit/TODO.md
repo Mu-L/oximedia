@@ -13,7 +13,7 @@
 ## Enhancements
 - [x] Add multi-cam editing support with sync point alignment across tracks (verified 2026-05-16; src/multicam.rs:96 CameraAngle, SyncPoint:53, 1135 lines)
 - [x] Implement proxy workflow in `render.rs` (low-res editing, full-res export) (verified 2026-05-16; src/proxy.rs:162 ProxyManager, ProxyWorkflowConfig:339, 1277 lines)
-- [ ] Enhance `history.rs` undo/redo with branching history tree (not just linear stack) (verified-open 2026-05-16: no branch/fork in history.rs)
+- [x] Enhance `history.rs` undo/redo with branching history tree (not just linear stack) (verified 2026-06-01; src/history.rs:289 BranchingHistory<T> fully implemented)
 - [x] Add magnetic timeline snapping in `timeline.rs` for clip alignment
       — `snap_engine: Option<MagneticSnapEngine>` on Timeline; `with_magnetic_snap()` builder; snap applied in `move_clip` before link cascade; 6 tests
 - [ ] Improve `transition.rs` with GPU-accelerated transition rendering via oximedia-gpu (verified-open 2026-05-16: no GPU path in transition.rs)
@@ -43,11 +43,17 @@
 ## Performance
 - [x] Add frame cache in `render.rs` to avoid re-decoding unchanged frames
       — `RawFrameCache` (HashMap<u64,Vec<u8>>, max 32 frames, LRU eviction) added to `render.rs`
-- [ ] Implement predictive pre-fetch for frames near playhead position
+- [x] Implement predictive pre-fetch for frames near playhead position (verified 2026-06-01; src/frame_prefetch.rs PrefetchEngine fully implemented, registered in lib.rs)
 - [x] Optimize `clip.rs` clip lookup with interval tree for O(log n) time-position queries
       — `IntervalTree` with `query_point`/`query_range`/`nearest_edge` in `interval_tree.rs`
-- [ ] Add parallel track rendering in `TimelineRenderer` using rayon
-- [ ] Implement incremental render (only re-render changed regions of timeline)
+- [x] Add parallel track rendering in `TimelineRenderer` using rayon (verified 2026-06-01; src/parallel_render.rs render_tracks_parallel fully implemented, registered in lib.rs)
+- [x] Implement incremental render (only re-render changed regions of timeline) (verified 2026-06-01)
+  - `dirty_regions: Vec<DirtyRegion>` + `prefetch: PrefetchEngine` + `use_parallel: bool` added to `TimelineRenderer`
+  - `mark_dirty` / `clear_dirty` / `force_full_redraw` / `is_position_dirty` API on `TimelineRenderer`
+  - `render_video_at` skips positions outside dirty regions; parallel path via `render_video_at_parallel` → `render_tracks_parallel`
+  - `render_frame_at` calls `self.prefetch.update(position)` after every render
+  - `#![allow(dead_code)]` removed from `frame_prefetch.rs`; both modules fully wired
+  - 17 new tests: 5 in `tests/renderer_unit.rs` (sync unit), 6 in `tests/incremental_render.rs` (async integration); 0 warnings
 
 ## Testing
 - [x] Add round-trip test: create timeline -> export -> reimport -> verify identical structure

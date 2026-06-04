@@ -175,10 +175,8 @@ impl Segmenter {
 
         // ── Step 2: classify each frame ──────────────────────────────────────
         let silence_threshold = 0.005_f32;
-        let (mut frame_labels, mut frame_confidences) = (
-            Vec::with_capacity(n),
-            Vec::with_capacity(n),
-        );
+        let (mut frame_labels, mut frame_confidences) =
+            (Vec::with_capacity(n), Vec::with_capacity(n));
 
         for i in 0..n {
             let (label, conf) = classify_frame(
@@ -199,7 +197,9 @@ impl Segmenter {
             } else {
                 0.0
             };
-            let flux_norm = (frame_flux[i] / (frame_flux.iter().cloned().fold(f32::EPSILON, f32::max))).min(1.0);
+            let flux_norm = (frame_flux[i]
+                / (frame_flux.iter().cloned().fold(f32::EPSILON, f32::max)))
+            .min(1.0);
             novelty[i] = label_change * 0.6 + flux_norm * 0.4;
         }
 
@@ -228,8 +228,10 @@ impl Segmenter {
             let seg_end = w[1];
 
             // Majority vote for content type in this segment
-            let (content_type, confidence) =
-                majority_vote(&frame_labels[seg_start..seg_end], &frame_confidences[seg_start..seg_end]);
+            let (content_type, confidence) = majority_vote(
+                &frame_labels[seg_start..seg_end],
+                &frame_confidences[seg_start..seg_end],
+            );
 
             segments.push(AudioSegment {
                 start_time: seg_start as f32 * hop_duration,
@@ -251,20 +253,23 @@ impl Segmenter {
 // ── internal helpers ─────────────────────────────────────────────────────────
 
 /// Classify a single frame into silence/speech/music/unknown.
-fn classify_frame(
-    rms: f32,
-    zcr: f32,
-    flatness: f32,
-    silence_threshold: f32,
-) -> (ContentType, f32) {
+fn classify_frame(rms: f32, zcr: f32, flatness: f32, silence_threshold: f32) -> (ContentType, f32) {
     if rms < silence_threshold {
         return (ContentType::Silence, 0.9);
     }
 
     // Speech features: moderate-to-high ZCR, moderate flatness
     let speech_score = {
-        let zcr_score = if (0.05..=0.45).contains(&zcr) { 1.0_f32 } else { 0.3 };
-        let flat_score = if (0.1..=0.6).contains(&flatness) { 1.0 } else { 0.4 };
+        let zcr_score = if (0.05..=0.45).contains(&zcr) {
+            1.0_f32
+        } else {
+            0.3
+        };
+        let flat_score = if (0.1..=0.6).contains(&flatness) {
+            1.0
+        } else {
+            0.4
+        };
         (zcr_score + flat_score) / 2.0
     };
 
@@ -364,9 +369,9 @@ mod tests {
 
         let sr = 44100.0;
         let mut samples = Vec::new();
-        samples.extend(make_silence(22050));  // 0.5 s silence
-        samples.extend(make_sine(440.0, 44100, sr));  // 1 s music
-        samples.extend(make_noise(22050));   // 0.5 s noise/speech
+        samples.extend(make_silence(22050)); // 0.5 s silence
+        samples.extend(make_sine(440.0, 44100, sr)); // 1 s music
+        samples.extend(make_noise(22050)); // 0.5 s noise/speech
 
         let result = segmenter.segment(&samples, sr);
         assert!(result.is_ok(), "Segmentation should succeed");
@@ -387,8 +392,8 @@ mod tests {
 
     #[test]
     fn test_classify_music() {
-        // Low ZCR, low flatness → music
-        let (ct, _) = classify_frame(0.5, 0.05, 0.1, 0.005);
+        // Clearly low ZCR, clearly low flatness → music (flatness < 0.1, zcr < 0.05)
+        let (ct, _) = classify_frame(0.5, 0.02, 0.05, 0.005);
         assert_eq!(ct, ContentType::Music);
     }
 

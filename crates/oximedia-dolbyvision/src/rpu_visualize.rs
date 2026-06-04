@@ -129,8 +129,8 @@ impl RpuPlotter {
         let sample = |vals: &[f64]| -> Vec<f64> {
             (0..w)
                 .map(|col| {
-                    let idx = (col as f64 * (vals.len() as f64 - 1.0) / (w as f64 - 1.0))
-                        .round() as usize;
+                    let idx = (col as f64 * (vals.len() as f64 - 1.0) / (w as f64 - 1.0)).round()
+                        as usize;
                     vals.get(idx).copied().unwrap_or(0.0)
                 })
                 .collect()
@@ -166,10 +166,7 @@ impl RpuPlotter {
         }
 
         let mut out = String::new();
-        out.push_str(&format!(
-            "┌─ L1 Luminance (PQ) — {} frames ─\n",
-            rpus.len()
-        ));
+        out.push_str(&format!("┌─ L1 Luminance (PQ) — {} frames ─\n", rpus.len()));
 
         for (row_idx, row) in grid.iter().enumerate() {
             let pq_label = global_max * (1.0 - row_idx as f64 / (h as f64 - 1.0));
@@ -304,9 +301,7 @@ impl RpuPlotter {
                     .level1
                     .as_ref()
                     .map(|l| (l.min_pq, l.avg_pq, l.max_pq))
-                    .map(|(a, b, c)| {
-                        (a.to_string(), b.to_string(), c.to_string())
-                    })
+                    .map(|(a, b, c)| (a.to_string(), b.to_string(), c.to_string()))
                     .unwrap_or_else(|| ("-".to_owned(), "-".to_owned(), "-".to_owned()));
 
                 let flags = format!(
@@ -380,10 +375,7 @@ impl RpuPlotter {
             let hi = (i + 1) * 4096 / bins - 1;
             let bar_len = (count * bar_width) / max_count;
             let bar: String = "█".repeat(bar_len);
-            out.push_str(&format!(
-                "{:4}-{:4}  {:6}  {}\n",
-                lo, hi, count, bar
-            ));
+            out.push_str(&format!("{:4}-{:4}  {:6}  {}\n", lo, hi, count, bar));
         }
 
         out
@@ -526,9 +518,7 @@ mod tests {
 
     #[test]
     fn test_detect_luminance_jumps() {
-        let mut rpus: Vec<_> = (0..10)
-            .map(|_| make_rpu_with_l1(0, 1000, 3000))
-            .collect();
+        let mut rpus: Vec<_> = (0..10).map(|_| make_rpu_with_l1(0, 1000, 3000)).collect();
         // Sharp jump at frame 5: avg goes from 1000 to 3500 (+2500), then back to 1000 (-2500)
         rpus[5].level1 = Some(Level1Metadata {
             min_pq: 0,

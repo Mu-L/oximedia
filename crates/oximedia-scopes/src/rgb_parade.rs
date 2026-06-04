@@ -211,9 +211,7 @@ impl RgbParade {
     /// Returns `true` if any channel has clipping pixels (value ≥ 252).
     #[must_use]
     pub fn has_clipping(&self) -> bool {
-        self.red.clipping_count > 0
-            || self.green.clipping_count > 0
-            || self.blue.clipping_count > 0
+        self.red.clipping_count > 0 || self.green.clipping_count > 0 || self.blue.clipping_count > 0
     }
 
     /// Returns the channel with the most clipping pixels (0=R, 1=G, 2=B),
@@ -302,10 +300,8 @@ pub fn render_rgb_parade(
                     let src_a = color[3] as f64 * brightness as f64 / 255.0 / 255.0;
                     let dst_a = 1.0 - src_a;
                     buf[idx] = (color[0] as f64 * src_a + buf[idx] as f64 * dst_a) as u8;
-                    buf[idx + 1] =
-                        (color[1] as f64 * src_a + buf[idx + 1] as f64 * dst_a) as u8;
-                    buf[idx + 2] =
-                        (color[2] as f64 * src_a + buf[idx + 2] as f64 * dst_a) as u8;
+                    buf[idx + 1] = (color[1] as f64 * src_a + buf[idx + 1] as f64 * dst_a) as u8;
+                    buf[idx + 2] = (color[2] as f64 * src_a + buf[idx + 2] as f64 * dst_a) as u8;
                     buf[idx + 3] = 255;
                 }
             }
@@ -334,7 +330,9 @@ pub fn render_rgb_parade(
         let pct_marks = [0u32, 25, 50, 75, 100];
         for &pct in &pct_marks {
             // pct = 0 → y = out_h-1 (bottom), pct = 100 → y = 0 (top)
-            let y = out_h.saturating_sub(1).saturating_sub(pct as usize * (out_h - 1) / 100);
+            let y = out_h
+                .saturating_sub(1)
+                .saturating_sub(pct as usize * (out_h - 1) / 100);
             for px in 0..out_w {
                 let idx = (y * out_w + px) * 4;
                 if idx + 3 < buf.len() {
@@ -394,7 +392,10 @@ mod tests {
         let wf = ChannelWaveform::build(&frame, 4, 4, 0, 4);
         // Total across all columns for value 200
         let total_200: u32 = wf.columns.iter().map(|c| c[200]).sum();
-        assert_eq!(total_200, 16, "expected 16 pixels at red=200, got {total_200}");
+        assert_eq!(
+            total_200, 16,
+            "expected 16 pixels at red=200, got {total_200}"
+        );
     }
 
     #[test]
@@ -449,10 +450,7 @@ mod tests {
         let wf = ChannelWaveform::build(&frame, 4, 4, 0, 4);
         for col in 0..4 {
             let mean = wf.column_mean(col).expect("should be Some");
-            assert!(
-                (mean - 128.0).abs() < 1.0,
-                "col {col} mean={mean}"
-            );
+            assert!((mean - 128.0).abs() < 1.0, "col {col} mean={mean}");
         }
     }
 

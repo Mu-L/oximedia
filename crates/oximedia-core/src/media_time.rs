@@ -666,3 +666,177 @@ mod tests_pts_media_time {
         assert_eq!(TB_1K.den, 1_000);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Bitrate / duration / size estimation utilities
+// ---------------------------------------------------------------------------
+
+/// Constant: nanoseconds per second.
+const NS_PER_SEC: u64 = 1_000_000_000;
+
+/// Estimates bitrate in bits per second from a byte count and a duration.
+///
+/// `duration_ns` must be non-zero; returns `None` otherwise.  All arithmetic
+/// is checked so `None` is returned on overflow rather than panicking.
+///
+/// # Formula
+///
+/// ```text
+/// bitrate_bps = bytes * 8 * 1_000_000_000 / duration_ns
+/// ```
+///
+/// # Examples
+///
+/// ```
+/// use oximedia_core::media_time::estimate_bitrate_bps;
+///
+/// // 100 KB in exactly 1 second → 800 kbps
+/// let bps = estimate_bitrate_bps(100_000, 1_000_000_000).unwrap();
+/// assert_eq!(bps, 800_000);
+/// ```
+#[must_use]
+pub fn estimate_bitrate_bps(bytes: u64, duration_ns: u64) -> Option<u64> {
+    if duration_ns == 0 {
+        return None;
+    }
+    // Use u128 to avoid overflow in the intermediate product
+    let bits_ns = (bytes as u128)
+        .checked_mul(8)?
+        .checked_mul(NS_PER_SEC as u128)?;
+    let bps = bits_ns.checked_div(duration_ns as u128)?;
+    // Downcast back to u64 — if it overflows u64 the result is None
+    u64::try_from(bps).ok()
+}
+
+/// Estimates total file size in bytes for a given bitrate and duration.
+///
+/// Returns `None` on overflow or if `bitrate_bps` is zero.
+///
+/// # Formula
+///
+/// ```text
+/// size_bytes = bitrate_bps * duration_ns / (8 * 1_000_000_000)
+/// ```
+///
+/// # Examples
+///
+/// ```
+/// use oximedia_core::media_time::estimate_size_bytes;
+///
+/// // 1 Mbps × 8 seconds = 1 MB
+/// let bytes = estimate_size_bytes(1_000_000, 8_000_000_000).unwrap();
+/// assert_eq!(bytes, 1_000_000);
+/// ```
+#[must_use]
+pub fn estimate_size_bytes(bitrate_bps: u64, duration_ns: u64) -> Option<u64> {
+    if bitrate_bps == 0 {
+        return None;
+    }
+    let divisor = (8u128).checked_mul(NS_PER_SEC as u128)?;
+    let numerator = (bitrate_bps as u128).checked_mul(duration_ns as u128)?;
+    let size = numerator.checked_div(divisor)?;
+    u64::try_from(size).ok()
+}
+
+/// Estimates duration in nanoseconds for a given file size and bitrate.
+///
+/// `bitrate_bps` must be non-zero; returns `None` otherwise.  All arithmetic
+/// is checked so `None` is returned on overflow rather than panicking.
+///
+/// # Formula
+///
+/// ```text
+/// duration_ns = bytes * 8 * 1_000_000_000 / bitrate_bps
+/// ```
+///
+/// # Examples
+///
+/// ```
+/// use oximedia_core::media_time::estimate_duration_ns;
+///
+/// // 100 KB at 800 kbps → exactly 1 second
+/// let ns = estimate_duration_ns(100_000, 800_000).unwrap();
+/// assert_eq!(ns, 1_000_000_000);
+/// ```
+#[must_use]
+pub fn estimate_duration_ns(bytes: u64, bitrate_bps: u64) -> Option<u64> {
+    if bitrate_bps == 0 {
+        return None;
+    }
+    let bits_ns = (bytes as u128)
+        .checked_mul(8)?
+        .checked_mul(NS_PER_SEC as u128)?;
+    let duration = bits_ns.checked_div(bitrate_bps as u128)?;
+    u64::try_from(duration).ok()
+}
+
+// ---------------------------------------------------------------------------
+// Tests — estimation utilities
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests_estimation {
+    use super::*;
+
+    /// 100 KB in exactly 1 second → 800 kbps; verify round-trip with
+    /// `estimate_duration_ns`.
+    #[test]
+    fn test_bitrate_roundtrip() {
+        let bytes: u64 = 100_000;
+        let duration_ns: u64 = 1_000_000_000; // 1 second
+
+        let bps = estimate_bitrate_bps(bytes, duration_ns).expect("should not overflow");
+        assert_eq!(bps, 800_000, "100 KB in 1 s = 800 kbps");
+
+        // Round-trip: recover duration from the computed bitrate
+        let recovered_ns =
+            estimate_duration_ns(bytes, bps).expect("round-trip should not overflow");
+        assert_eq!(
+            recovered_ns, duration_ns,
+            "round-trip duration must match original"
+        );
+    }
+
+    /// 1 Mbps × 8 seconds = 1 000 000 bytes.
+    #[test]
+    fn test_size_estimate() {
+        let bitrate_bps: u64 = 1_000_000;
+        let duration_ns: u64 = 8_000_000_000; // 8 seconds
+
+        let size = estimate_size_bytes(bitrate_bps, duration_ns).expect("should not overflow");
+        assert_eq!(size, 1_000_000, "1 Mbps × 8 s = 1 000 000 bytes");
+    }
+
+    /// Extremely large inputs must not panic — they return `None` on overflow.
+    #[test]
+    fn test_estimation_overflow_safe() {
+        // bytes = u64::MAX, duration = 1 ns → intermediate product overflows
+        // (u64::MAX * 8 overflows u128 when multiplied by 1e9 further on)
+        // At minimum, the function must not panic.
+        let _ = estimate_bitrate_bps(u64::MAX, 1);
+
+        // bitrate = u64::MAX, duration = u64::MAX → numerator overflows u128
+        let _ = estimate_size_bytes(u64::MAX, u64::MAX);
+
+        // bytes = u64::MAX, bitrate = 1 → intermediate u128 may still fit,
+        // but the final u64 cast may fail; must not panic.
+        let _ = estimate_duration_ns(u64::MAX, 1);
+    }
+
+    /// Zero denominators must return `None`, not panic.
+    #[test]
+    fn test_estimation_zero_denominator() {
+        assert!(
+            estimate_bitrate_bps(1_000, 0).is_none(),
+            "duration=0 must return None"
+        );
+        assert!(
+            estimate_duration_ns(1_000, 0).is_none(),
+            "bitrate=0 must return None"
+        );
+        assert!(
+            estimate_size_bytes(0, 1_000_000_000).is_none(),
+            "bitrate=0 must return None from estimate_size_bytes"
+        );
+    }
+}

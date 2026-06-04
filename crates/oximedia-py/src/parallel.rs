@@ -60,7 +60,10 @@ fn fnv1a_64(data: &[u8]) -> u64 {
 /// across platforms.  For cryptographic needs use SHA-256 instead.
 #[pyfunction]
 pub fn compute_checksums(_py: Python<'_>, data: Vec<Vec<u8>>) -> PyResult<Vec<u64>> {
-    let checksums = data.iter().map(|chunk| fnv1a_64(chunk)).collect::<Vec<u64>>();
+    let checksums = data
+        .iter()
+        .map(|chunk| fnv1a_64(chunk))
+        .collect::<Vec<u64>>();
     Ok(checksums)
 }
 

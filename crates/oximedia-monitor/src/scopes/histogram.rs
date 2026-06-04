@@ -1,6 +1,6 @@
 //! Histogram monitor implementation.
 
-use crate::{MonitorError, MonitorResult};
+use crate::MonitorResult;
 use oximedia_scopes::ScopeConfig;
 use serde::{Deserialize, Serialize};
 
@@ -87,9 +87,8 @@ impl HistogramMonitor {
                     blue_hist[b as usize] += 1;
 
                     // Calculate luma
-                    let luma = 0.2126 * f32::from(r)
-                        + 0.7152 * f32::from(g)
-                        + 0.0722 * f32::from(b);
+                    let luma =
+                        0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b);
 
                     #[allow(clippy::cast_possible_truncation)]
                     #[allow(clippy::cast_sign_loss)]

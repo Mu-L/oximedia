@@ -4,7 +4,7 @@ use crate::error::{AccessError, AccessResult};
 use crate::tts::TtsConfig;
 use bytes::Bytes;
 use oximedia_audio::frame::AudioBuffer;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 /// Maximum number of entries in the TTS cache.
 const TTS_CACHE_MAX_SIZE: usize = 256;
@@ -199,6 +199,100 @@ impl Default for TextToSpeech {
     }
 }
 
+// ─── Standalone TTS Synthesis Cache ─────────────────────────────────────────
+
+/// A simple LRU-style cache for raw TTS synthesis results.
+///
+/// Keys on `(text, voice_id)` pairs and stores the synthesized audio as raw
+/// bytes (`Vec<u8>`).  When the cache is full the oldest-inserted entry is
+/// evicted (FIFO order), keeping memory consumption bounded.
+///
+/// # Example
+///
+/// ```rust
+/// use oximedia_access::tts::synthesize::TtsSynthesisCache;
+///
+/// let mut cache = TtsSynthesisCache::new(128);
+/// cache.insert("Hello".to_string(), "en-US-Neural".to_string(), vec![0u8; 64]);
+/// assert!(cache.get("Hello", "en-US-Neural").is_some());
+/// ```
+pub struct TtsSynthesisCache {
+    /// Key → synthesized audio bytes.
+    map: HashMap<(String, String), Vec<u8>>,
+    /// Insertion-order queue for eviction (FIFO LRU approximation).
+    order: VecDeque<(String, String)>,
+    /// Maximum number of entries before eviction.
+    capacity: usize,
+}
+
+impl TtsSynthesisCache {
+    /// Create a new cache with the given capacity.
+    ///
+    /// A capacity of 0 is silently promoted to 1 to avoid degenerate behaviour.
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+            capacity: capacity.max(1),
+        }
+    }
+
+    /// Look up a cached synthesis result by text and voice identifier.
+    ///
+    /// Returns `Some(&audio_bytes)` on a hit, `None` on a miss.
+    #[must_use]
+    pub fn get(&self, text: &str, voice_id: &str) -> Option<&Vec<u8>> {
+        self.map.get(&(text.to_string(), voice_id.to_string()))
+    }
+
+    /// Insert a synthesis result into the cache.
+    ///
+    /// If the cache is at capacity the oldest entry is evicted before the new
+    /// entry is stored.  If `(text, voice_id)` already exists its value is
+    /// overwritten in place (no duplicate in the eviction queue).
+    pub fn insert(&mut self, text: String, voice_id: String, audio: Vec<u8>) {
+        use std::collections::hash_map::Entry;
+        let key = (text, voice_id);
+        if let Entry::Occupied(mut e) = self.map.entry(key.clone()) {
+            // Update existing — just overwrite the bytes, keep queue order.
+            e.insert(audio);
+            return;
+        }
+        if self.map.len() >= self.capacity {
+            if let Some(evict) = self.order.pop_front() {
+                self.map.remove(&evict);
+            }
+        }
+        self.map.insert(key.clone(), audio);
+        self.order.push_back(key);
+    }
+
+    /// Number of entries currently stored.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    /// Whether the cache holds no entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    /// Remove all entries.
+    pub fn clear(&mut self) {
+        self.map.clear();
+        self.order.clear();
+    }
+
+    /// The maximum number of entries this cache will hold before eviction.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,5 +423,58 @@ mod tests {
         let stats = tts.cache_stats();
         assert_eq!(stats.hits, 2);
         assert_eq!(stats.misses, 2);
+    }
+
+    // ─── TtsSynthesisCache tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_tts_cache_hit() {
+        let mut cache = TtsSynthesisCache::new(16);
+        let audio = vec![1u8, 2u8, 3u8, 4u8];
+        cache.insert(
+            "Hello".to_string(),
+            "en-US-Neural".to_string(),
+            audio.clone(),
+        );
+        let result = cache.get("Hello", "en-US-Neural");
+        assert!(result.is_some(), "expected a cache hit");
+        assert_eq!(result.expect("should hit"), &audio);
+    }
+
+    #[test]
+    fn test_tts_cache_miss() {
+        let cache = TtsSynthesisCache::new(16);
+        let result = cache.get("Unseen text", "en-US-Neural");
+        assert!(result.is_none(), "expected a cache miss for unseen key");
+    }
+
+    #[test]
+    fn test_tts_cache_eviction() {
+        let capacity = 4usize;
+        let mut cache = TtsSynthesisCache::new(capacity);
+        // Fill to capacity; the earliest entry has key ("entry-0", "voice")
+        for i in 0..capacity {
+            cache.insert(format!("entry-{i}"), "voice".to_string(), vec![i as u8]);
+        }
+        assert_eq!(cache.len(), capacity);
+        // Insert one more — should evict "entry-0"
+        cache.insert(
+            "entry-overflow".to_string(),
+            "voice".to_string(),
+            vec![99u8],
+        );
+        assert_eq!(
+            cache.len(),
+            capacity,
+            "cache size must remain at capacity after eviction"
+        );
+        assert!(
+            cache.get("entry-0", "voice").is_none(),
+            "earliest entry must have been evicted"
+        );
+        assert!(
+            cache.get("entry-overflow", "voice").is_some(),
+            "newly inserted entry must be present"
+        );
     }
 }

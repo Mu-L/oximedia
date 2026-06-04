@@ -68,11 +68,11 @@ impl QualityLevel {
     /// low-latency, uncompressed-friendly nature of the protocol.
     pub fn target_bps(&self) -> u64 {
         match self {
-            Self::UltraLow => 2_000_000,   //   2 Mbps  (360p)
-            Self::Low => 8_000_000,         //   8 Mbps  (540p)
-            Self::Medium => 20_000_000,     //  20 Mbps  (720p)
-            Self::High => 50_000_000,       //  50 Mbps  (1080p)
-            Self::Ultra => 150_000_000,     // 150 Mbps  (4K)
+            Self::UltraLow => 2_000_000, //   2 Mbps  (360p)
+            Self::Low => 8_000_000,      //   8 Mbps  (540p)
+            Self::Medium => 20_000_000,  //  20 Mbps  (720p)
+            Self::High => 50_000_000,    //  50 Mbps  (1080p)
+            Self::Ultra => 150_000_000,  // 150 Mbps  (4K)
         }
     }
 
@@ -147,8 +147,7 @@ impl BandwidthProber {
             return;
         }
 
-        let measured_bps = (bytes_sent.saturating_mul(8)).saturating_mul(1_000_000)
-            / duration_us;
+        let measured_bps = (bytes_sent.saturating_mul(8)).saturating_mul(1_000_000) / duration_us;
 
         let packet_loss_rate = if total_packets > 0 {
             (losses as f32) / (total_packets as f32)
@@ -213,8 +212,7 @@ impl BandwidthProber {
     /// which provides headroom for short-term fluctuations and protocol
     /// overhead.
     pub fn recommend_quality(&self) -> QualityLevel {
-        let effective_bps =
-            (self.estimate_bps() as f64 * self.config.safety_margin as f64) as u64;
+        let effective_bps = (self.estimate_bps() as f64 * self.config.safety_margin as f64) as u64;
         QualityLevel::from_bps(effective_bps)
     }
 
@@ -580,7 +578,7 @@ mod tests {
     fn quality_level_clone_and_copy() {
         let level = QualityLevel::High;
         let copied = level;
-        let cloned = level.clone();
+        let cloned = level;
         assert_eq!(level, copied);
         assert_eq!(level, cloned);
     }

@@ -236,13 +236,7 @@ impl GlyphAtlas {
     }
 
     /// Convenience helper: add an ASCII character template from a binary slice.
-    pub fn add_ascii_template(
-        &mut self,
-        ch: char,
-        binary: &[u8],
-        width: usize,
-        height: usize,
-    ) {
+    pub fn add_ascii_template(&mut self, ch: char, binary: &[u8], width: usize, height: usize) {
         self.add(GlyphTemplate::new(ch, binary, width, height));
     }
 
@@ -445,9 +439,7 @@ fn detect_subtitle_row_band(binary: &BitmapImage) -> (usize, usize) {
     let mut best_count = 0usize;
 
     for row in start_row..h {
-        let count = (0..w)
-            .filter(|&c| binary.pixel(c, row) != 0)
-            .count();
+        let count = (0..w).filter(|&c| binary.pixel(c, row) != 0).count();
         if count > best_count {
             best_count = count;
             best_row = row;
@@ -460,9 +452,7 @@ fn detect_subtitle_row_band(binary: &BitmapImage) -> (usize, usize) {
     let mut bottom = best_row;
 
     while top > 0 {
-        let count = (0..w)
-            .filter(|&c| binary.pixel(c, top - 1) != 0)
-            .count();
+        let count = (0..w).filter(|&c| binary.pixel(c, top - 1) != 0).count();
         if count >= threshold {
             top -= 1;
         } else {
@@ -470,9 +460,7 @@ fn detect_subtitle_row_band(binary: &BitmapImage) -> (usize, usize) {
         }
     }
     while bottom + 1 < h {
-        let count = (0..w)
-            .filter(|&c| binary.pixel(c, bottom + 1) != 0)
-            .count();
+        let count = (0..w).filter(|&c| binary.pixel(c, bottom + 1) != 0).count();
         if count >= threshold {
             bottom += 1;
         } else {
@@ -578,23 +566,13 @@ mod tests {
 
     // A minimal 5×7 binary glyph for 'I' (vertical bar)
     const GLYPH_I: &[u8] = &[
-        1, 1, 1, 1, 1,
-        0, 0, 1, 0, 0,
-        0, 0, 1, 0, 0,
-        0, 0, 1, 0, 0,
-        0, 0, 1, 0, 0,
-        0, 0, 1, 0, 0,
+        1, 1, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0,
         1, 1, 1, 1, 1,
     ];
 
     // A minimal 5×7 binary glyph for 'H'
     const GLYPH_H: &[u8] = &[
-        1, 0, 0, 0, 1,
-        1, 0, 0, 0, 1,
-        1, 0, 0, 0, 1,
-        1, 1, 1, 1, 1,
-        1, 0, 0, 0, 1,
-        1, 0, 0, 0, 1,
+        1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1,
         1, 0, 0, 0, 1,
     ];
 
@@ -606,7 +584,15 @@ mod tests {
     }
 
     /// Render a single glyph into a wider bitmap at a given x offset.
-    fn render_glyph_at(pixels: &mut [u8], img_w: usize, glyph: &[u8], gx: usize, gy: usize, gw: usize, gh: usize) {
+    fn render_glyph_at(
+        pixels: &mut [u8],
+        img_w: usize,
+        glyph: &[u8],
+        gx: usize,
+        gy: usize,
+        gw: usize,
+        gh: usize,
+    ) {
         for row in 0..gh {
             for col in 0..gw {
                 pixels[(gy + row) * img_w + (gx + col)] = glyph[row * gw + col] * 255;
@@ -669,7 +655,10 @@ mod tests {
         // Inverted patch → NCC should be very negative
         let patch: Vec<f32> = vec![0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0];
         let score = tmpl.ncc_score(&patch);
-        assert!(score < 0.0, "NCC of opposite should be negative, got {score}");
+        assert!(
+            score < 0.0,
+            "NCC of opposite should be negative, got {score}"
+        );
     }
 
     #[test]
@@ -740,7 +729,11 @@ mod tests {
         let img_h = 7;
         let mut pixels = vec![0u8; img_w * img_h];
         render_glyph_at(&mut pixels, img_w, GLYPH_I, 0, 0, 5, 7);
-        let img = BitmapImage { pixels, width: img_w, height: img_h };
+        let img = BitmapImage {
+            pixels,
+            width: img_w,
+            height: img_h,
+        };
 
         let text = ocr.extract_text(&img, 0.5);
         assert!(text.contains('I'), "expected 'I', got: {text:?}");
@@ -756,7 +749,11 @@ mod tests {
         let mut pixels = vec![0u8; img_w * img_h];
         render_glyph_at(&mut pixels, img_w, GLYPH_H, 0, 0, 5, 7);
         render_glyph_at(&mut pixels, img_w, GLYPH_I, 7, 0, 5, 7);
-        let img = BitmapImage { pixels, width: img_w, height: img_h };
+        let img = BitmapImage {
+            pixels,
+            width: img_w,
+            height: img_h,
+        };
 
         let text = ocr.extract_text(&img, 0.5);
         assert!(text.contains('H'), "expected 'H', got: {text:?}");

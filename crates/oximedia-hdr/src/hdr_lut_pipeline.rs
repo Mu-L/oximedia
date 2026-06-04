@@ -227,7 +227,7 @@ impl HdrLutPipeline {
     /// Returns [`HdrError::GamutConversionError`] if the slice length is not a
     /// multiple of 3, or propagates any per-pixel error.
     pub fn apply_frame(&self, pixels: &mut [f32]) -> Result<()> {
-        if pixels.len() % 3 != 0 {
+        if !pixels.len().is_multiple_of(3) {
             return Err(HdrError::GamutConversionError(
                 "pixel slice length is not a multiple of 3".into(),
             ));
@@ -353,8 +353,8 @@ mod tests {
         let lut = HdrLutStage::identity(LutSize::S33);
         let out = lut.apply_trilinear(0.5, 0.5, 0.5).unwrap();
         // Trilinear on identity should recover 0.5 very closely
-        for ch in 0..3 {
-            assert!((out[ch] - 0.5).abs() < 1e-4, "ch {}: {}", ch, out[ch]);
+        for (ch, &val) in out.iter().enumerate() {
+            assert!((val - 0.5).abs() < 1e-4, "ch {}: {}", ch, val);
         }
     }
 
@@ -371,8 +371,8 @@ mod tests {
         let data = vec![[0.5f32, 0.5f32, 0.5f32]; n];
         let lut = HdrLutStage::from_slice(LutSize::S17, &data).unwrap();
         let out = lut.apply_trilinear(0.3, 0.6, 0.9).unwrap();
-        for ch in 0..3 {
-            assert!((out[ch] - 0.5).abs() < 1e-5);
+        for &val in &out {
+            assert!((val - 0.5).abs() < 1e-5);
         }
     }
 
@@ -420,8 +420,8 @@ mod tests {
         pipeline.push(HdrLutStage::identity(LutSize::S33));
         let baked = pipeline.bake_to_33().unwrap();
         let out = baked.apply_trilinear(0.5, 0.5, 0.5).unwrap();
-        for ch in 0..3 {
-            assert!((out[ch] - 0.5).abs() < 1e-4);
+        for &val in &out {
+            assert!((val - 0.5).abs() < 1e-4);
         }
     }
 
@@ -433,8 +433,8 @@ mod tests {
         assert!((out[0] - 1.0).abs() < 1e-5);
         // Half-grey boosted to 1.0
         let out = lut.apply_trilinear(0.5, 0.5, 0.5).unwrap();
-        for ch in 0..3 {
-            assert!((out[ch] - 1.0).abs() < 0.1, "ch {}: {}", ch, out[ch]);
+        for (ch, &val) in out.iter().enumerate() {
+            assert!((val - 1.0).abs() < 0.1, "ch {}: {}", ch, val);
         }
     }
 
@@ -443,8 +443,8 @@ mod tests {
         // Pure grey should be unchanged regardless of saturation
         let lut = make_saturation_lut(LutSize::S17, 0.0);
         let out = lut.apply_trilinear(0.5, 0.5, 0.5).unwrap();
-        for ch in 0..3 {
-            assert!((out[ch] - 0.5).abs() < 1e-3, "ch {}: {}", ch, out[ch]);
+        for (ch, &val) in out.iter().enumerate() {
+            assert!((val - 0.5).abs() < 1e-3, "ch {}: {}", ch, val);
         }
     }
 

@@ -54,12 +54,12 @@
 - [x] Add a `trash_bin.rs` module with soft-delete and configurable auto-purge (verified 2026-05-16; src/trash_bin.rs:458 lines)
 
 ## Performance
-- [ ] Add Tantivy index warming on startup in `search_index.rs` for faster first-query response
+- [x] Add Tantivy index warming on startup in `search_index.rs` for faster first-query response (verified 2026-06-01; src/search_index.rs TantivySearchIndex::warm + src/search.rs SearchEngine::warm called from new())
 - [ ] Implement connection pool tuning in `database.rs` based on concurrent request load
 - [ ] Add Redis-based caching layer for frequently accessed assets and search results
 - [ ] Optimize `folder_hierarchy.rs` tree queries with materialized path or nested set model
-- [ ] Add batch database operations in `asset.rs` for bulk metadata updates (reduce round-trips)
-- [ ] Implement incremental search index updates in `search_index.rs` instead of full reindex
+- [x] Add batch database operations in `asset.rs` for bulk metadata updates (reduce round-trips) (verified 2026-06-01; src/asset.rs:590 batch_update_metadata, :721 batch_set_status, :771 batch_upsert_custom_fields)
+- [x] Implement incremental search index updates in `search_index.rs` instead of full reindex (verified 2026-06-01; src/search_index.rs TantivySearchIndex::add_document, update_document, delete_document)
 
 ## Testing
 - [x] Add storage_glue integration tests for MamStorage URI dispatch and round-trip ops (completed 2026-05-05)

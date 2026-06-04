@@ -27,14 +27,20 @@
 //! assert_eq!(req.source_path, "photo.jpg");
 //! ```
 
+pub mod animation;
+pub mod batch_transform;
 pub mod blur_region;
+pub mod compose;
 pub mod face_detect;
 pub mod image_analysis;
+pub mod inverse;
 pub mod metrics;
 pub mod negotiation;
+pub mod origin_fetch;
 pub mod parser;
 pub mod processor;
 pub mod quality;
+pub mod response_cache;
 pub mod responsive;
 pub mod security;
 pub mod transform;

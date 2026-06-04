@@ -142,12 +142,7 @@ impl IldCompensation {
     /// - `azimuth_deg`: source azimuth in degrees (positive = left).
     /// - `hrtf_distance_m`: HRTF reference distance (m).
     /// - `head_radius_m`: head radius model (default ≈ 0.0875 m).
-    fn new(
-        distance_m: f32,
-        azimuth_deg: f32,
-        hrtf_distance_m: f32,
-        head_radius_m: f32,
-    ) -> Self {
+    fn new(distance_m: f32, azimuth_deg: f32, hrtf_distance_m: f32, head_radius_m: f32) -> Self {
         let az = azimuth_deg.to_radians();
         // Approximate distance from source to left/right ears using law of cosines.
         // Left ear at (+head_radius, 0), right ear at (−head_radius, 0) in a 2D head model.
@@ -230,7 +225,13 @@ impl NearFieldCompensator {
         azimuth_deg: f32,
         sample_rate: u32,
     ) -> Result<Self, SpatialError> {
-        Self::with_head_radius(source_distance_m, hrtf_distance_m, azimuth_deg, sample_rate, 0.0875)
+        Self::with_head_radius(
+            source_distance_m,
+            hrtf_distance_m,
+            azimuth_deg,
+            sample_rate,
+            0.0875,
+        )
     }
 
     /// Construct with an explicit head radius model.
@@ -270,10 +271,8 @@ impl NearFieldCompensator {
             )));
         }
 
-        let shelf_left =
-            ProximityShelf::new(source_distance_m, hrtf_distance_m, sample_rate);
-        let shelf_right =
-            ProximityShelf::new(source_distance_m, hrtf_distance_m, sample_rate);
+        let shelf_left = ProximityShelf::new(source_distance_m, hrtf_distance_m, sample_rate);
+        let shelf_right = ProximityShelf::new(source_distance_m, hrtf_distance_m, sample_rate);
         let ild = IldCompensation::new(
             source_distance_m,
             azimuth_deg,
@@ -598,7 +597,10 @@ mod tests {
     fn test_near_field_boost_db_low_freq() {
         // At 10 Hz, a 0.25 m source should have a large boost (>> 0 dB).
         let boost = near_field_boost_db(0.25, 10.0).expect("boost calculation should succeed");
-        assert!(boost > 5.0, "Low-frequency boost should be significant: {boost} dB");
+        assert!(
+            boost > 5.0,
+            "Low-frequency boost should be significant: {boost} dB"
+        );
     }
 
     #[test]

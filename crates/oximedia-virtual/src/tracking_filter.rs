@@ -680,7 +680,10 @@ mod tests {
             confidence: 1.0,
         };
         let out = f.filter(&frame);
-        assert_eq!(out.position, frame.position, "first frame must pass through");
+        assert_eq!(
+            out.position, frame.position,
+            "first frame must pass through"
+        );
     }
 
     #[test]
@@ -806,9 +809,7 @@ mod tests {
             "expected 5.0, got {}",
             report.rms_position_jitter
         );
-        assert!(
-            (report.max_position_jitter - 5.0).abs() < 1e-4
-        );
+        assert!((report.max_position_jitter - 5.0).abs() < 1e-4);
     }
 
     #[test]

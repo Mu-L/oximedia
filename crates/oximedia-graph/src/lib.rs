@@ -108,10 +108,27 @@ pub mod node_cache;
 // Graph DSL parser
 pub mod dsl;
 
+// Lock-free SPSC ring buffer and typed channel split
+pub mod async_exec;
+pub mod graph_evaluator;
+pub mod graph_rewrite;
+pub mod lock_free_ring;
+pub mod node_priority;
+pub mod port_buffer;
+
+// Dynamic graph reconfiguration (hot-swap nodes)
+pub mod hot_swap;
+
 // Re-export commonly used items
 pub use context::{GraphContext, ProcessingStats};
 pub use error::{GraphError, GraphResult};
-pub use frame::{FilterFrame, FramePool, FrameRef};
+pub use frame::{
+    simd_copy_frame, FilterFrame, FramePool, FramePoolConfig, FrameRef, SharedFrame, ZeroCopyPort,
+};
 pub use graph::{FilterGraph, GraphBuilder};
+pub use graph_stats::{LatencyHistogram, NodeLatencyStats};
+pub use lock_free_ring::{spsc_channel, SpscConsumer, SpscProducer, SpscRingBuffer};
 pub use node::{Node, NodeConfig, NodeId, NodeState, NodeType};
 pub use port::{Connection, InputPort, OutputPort, PortFormat, PortId, PortType};
+pub use processing_graph::RetryPolicy;
+pub use topological::{CycleError, FastTopoSorter};

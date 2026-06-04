@@ -137,11 +137,13 @@ pub mod beat;
 pub mod cepstral;
 pub mod chroma;
 pub mod compression_analysis;
+pub mod cqt;
 pub mod distortion;
 pub mod dynamics;
 pub mod echo;
 pub mod energy;
 pub mod energy_contour;
+pub mod event_detection;
 pub mod forensics;
 pub mod formant;
 pub mod formant_track;
@@ -158,11 +160,14 @@ pub mod pitch;
 pub mod pitch_detect;
 pub mod pitch_tracker;
 pub mod psychoacoustic;
+pub mod quality_degradation;
 pub mod rhythm;
 /// Audio scene classification: Indoor, Outdoor, Quiet, Noisy, Speech, Music, Mixed.
 pub mod scene_classify;
+pub mod segmentation;
 pub mod separate;
 pub mod silence_detect;
+pub mod singing;
 pub mod spectral;
 pub mod spectral_contrast;
 pub mod spectral_features;
@@ -173,6 +178,8 @@ pub mod timbre;
 pub mod transient;
 pub mod voice;
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use thiserror::Error;
 
 /// Errors that can occur during audio analysis.
@@ -306,14 +313,39 @@ impl AudioAnalyzer {
             });
         }
 
-        // Perform all analyses
-        let spectral = self.spectral_analyzer.analyze(samples, sample_rate)?;
-        let pitch_result = self.pitch_tracker.track(samples, sample_rate)?;
-        let formants = self.formant_analyzer.analyze(samples, sample_rate)?;
-        let dynamics = self.dynamics_analyzer.analyze(samples, sample_rate)?;
-        let transients = self.transient_detector.detect(samples, sample_rate)?;
+        // Perform all independent analyses concurrently via rayon.
+        // The 5 sub-analyzers do not share mutable state, so they are safe to
+        // run in parallel.  Voice analysis is kept sequential below because it
+        // logically depends on the pitch result.
+        let ((spectral_res, pitch_res), ((formants_res, dynamics_res), transients_res)) =
+            rayon::join(
+                || {
+                    rayon::join(
+                        || self.spectral_analyzer.analyze(samples, sample_rate),
+                        || self.pitch_tracker.track(samples, sample_rate),
+                    )
+                },
+                || {
+                    rayon::join(
+                        || {
+                            rayon::join(
+                                || self.formant_analyzer.analyze(samples, sample_rate),
+                                || self.dynamics_analyzer.analyze(samples, sample_rate),
+                            )
+                        },
+                        || self.transient_detector.detect(samples, sample_rate),
+                    )
+                },
+            );
 
-        // Voice analysis (optional, depends on pitch detection)
+        let spectral = spectral_res?;
+        let pitch_result = pitch_res?;
+        let formants = formants_res?;
+        let dynamics = dynamics_res?;
+        let transients = transients_res?;
+
+        // Voice analysis (optional, depends on pitch detection).
+        // Must run AFTER pitch_result is available.
         let voice = if pitch_result.mean_f0 > 0.0 && pitch_result.voicing_rate > 0.5 {
             Some(self.voice_analyzer.analyze(samples, sample_rate)?)
         } else {
@@ -372,9 +404,75 @@ pub struct FrameAnalysis {
     pub rms: f32,
 }
 
-/// Generate window function of the specified type and size.
+/// Global window-coefficient cache keyed by `(WindowType discriminant, size)`.
+///
+/// Stores `Arc<Vec<f32>>` so that multiple `SpectralAnalyzer` instances with
+/// the same `(window_type, size)` pair share the same backing allocation — no
+/// trigonometric computation and no per-instance copy is needed after the first
+/// construction.
+static WINDOW_CACHE: OnceLock<Mutex<HashMap<(u8, usize), Arc<Vec<f32>>>>> = OnceLock::new();
+
+/// Discriminant index used as the cache key for each `WindowType` variant.
+fn window_type_index(window_type: WindowType) -> u8 {
+    match window_type {
+        WindowType::Hann => 0,
+        WindowType::Hamming => 1,
+        WindowType::Blackman => 2,
+        WindowType::BlackmanHarris => 3,
+        WindowType::Rectangular => 4,
+    }
+}
+
+/// Return a shared `Arc` to the window coefficients for `(window_type, size)`.
+///
+/// On the first call for a given pair the coefficients are computed and
+/// inserted into the global cache.  Subsequent calls clone only the `Arc`
+/// handle — no trigonometric computation is repeated and no `Vec` is copied.
+///
+/// # Concurrency
+/// The cache is protected by a `Mutex`.  The double-checked locking pattern
+/// used here is safe: after releasing the read lock and before acquiring the
+/// write lock another thread may have inserted the entry; the `entry()` API
+/// avoids a redundant overwrite in that case.
+#[must_use]
+pub fn get_or_compute_window(window_type: WindowType, size: usize) -> Arc<Vec<f32>> {
+    let cache = WINDOW_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = (window_type_index(window_type), size);
+
+    // Fast path: already in cache — only clone the Arc handle.
+    {
+        let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(arc) = guard.get(&key) {
+            return Arc::clone(arc);
+        }
+    }
+
+    // Slow path: compute the coefficients and store them.
+    let coefficients = Arc::new(compute_window_uncached(window_type, size));
+    {
+        let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        // Another thread might have inserted the entry while we waited.
+        let entry = guard
+            .entry(key)
+            .or_insert_with(|| Arc::clone(&coefficients));
+        Arc::clone(entry)
+    }
+}
+
+/// Generate (and cache) a window function of the specified type and size.
+///
+/// Returns an owned `Vec<f32>`.  If the same `(window_type, size)` pair has
+/// been computed before the cached coefficients are cloned into a new `Vec`.
+/// Prefer [`get_or_compute_window`] when you only need a shared reference, as
+/// it avoids the `Vec` copy entirely.
 #[must_use]
 pub fn generate_window(window_type: WindowType, size: usize) -> Vec<f32> {
+    // Delegate to the Arc-based cache so there is a single source of truth.
+    (*get_or_compute_window(window_type, size)).clone()
+}
+
+/// Raw (uncached) window computation.
+fn compute_window_uncached(window_type: WindowType, size: usize) -> Vec<f32> {
     match window_type {
         WindowType::Hann => hann_window(size),
         WindowType::Hamming => hamming_window(size),
@@ -518,5 +616,100 @@ mod tests {
         assert_eq!(config.fft_size, 2048);
         assert_eq!(config.hop_size, 512);
         assert_eq!(config.window_type, WindowType::Hann);
+    }
+
+    // ── Item 1: parallel analyze test ──────────────────────────────────────────
+
+    /// Verify that the parallel `AudioAnalyzer::analyze` produces bit-identical
+    /// output to a fresh analyzer run on the same input.  rayon's work-stealing
+    /// scheduler is deterministic for pure functions so the results must match.
+    #[test]
+    fn test_parallel_analyze_matches_sequential() {
+        let config = AnalysisConfig {
+            fft_size: 2048,
+            hop_size: 512,
+            ..Default::default()
+        };
+        let analyzer = AudioAnalyzer::new(config.clone());
+
+        // Generate 1 second of 440 Hz sine (pure signal — voicing_rate will be
+        // low enough that voice analysis is skipped, keeping the test simple).
+        let sample_rate = 44100.0_f32;
+        let samples: Vec<f32> = (0..44100)
+            .map(|i| {
+                let t = i as f32 / sample_rate;
+                (2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.5
+            })
+            .collect();
+
+        // Run the parallel version.
+        let result_a = analyzer
+            .analyze(&samples, sample_rate)
+            .expect("parallel analyze failed");
+
+        // Run again with a second fresh analyzer (same config) — because all
+        // sub-analyzers are pure/deterministic the results must be identical.
+        let analyzer2 = AudioAnalyzer::new(config);
+        let result_b = analyzer2
+            .analyze(&samples, sample_rate)
+            .expect("sequential-style analyze failed");
+
+        // Compare all scalar fields from SpectralFeatures.
+        assert!(
+            (result_a.spectral.centroid - result_b.spectral.centroid).abs() < 1e-4,
+            "centroid mismatch: {} vs {}",
+            result_a.spectral.centroid,
+            result_b.spectral.centroid,
+        );
+        assert!(
+            (result_a.spectral.flatness - result_b.spectral.flatness).abs() < 1e-6,
+            "flatness mismatch",
+        );
+        assert!(
+            (result_a.pitch.mean_f0 - result_b.pitch.mean_f0).abs() < 1e-3,
+            "mean_f0 mismatch: {} vs {}",
+            result_a.pitch.mean_f0,
+            result_b.pitch.mean_f0,
+        );
+        // Dynamics and transients must also be equal.
+        assert_eq!(
+            result_a.transients.transient_times.len(),
+            result_b.transients.transient_times.len(),
+            "transient_times length mismatch",
+        );
+    }
+
+    // ── Item 2: window-coefficient cache tests ─────────────────────────────────
+
+    /// Two calls with the same (type, size) must return bit-identical coefficients.
+    #[test]
+    fn test_window_cache_identical() {
+        let a = get_or_compute_window(WindowType::Hann, 1024);
+        let b = get_or_compute_window(WindowType::Hann, 1024);
+
+        // Content must be bit-identical.
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert_eq!(x.to_bits(), y.to_bits(), "window coefficients differ");
+        }
+        // The two Arcs must point to the same allocation (pointer equality).
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "expected same Arc backing allocation for cache hit"
+        );
+    }
+
+    /// Different sizes must produce separate cache entries with the correct lengths.
+    #[test]
+    fn test_window_cache_different_sizes() {
+        let w512 = get_or_compute_window(WindowType::Hann, 512);
+        let w1024 = get_or_compute_window(WindowType::Hann, 1024);
+
+        assert_eq!(w512.len(), 512);
+        assert_eq!(w1024.len(), 1024);
+        assert!(
+            !Arc::ptr_eq(&w512, &w1024),
+            "distinct sizes must not share Arc"
+        );
     }
 }

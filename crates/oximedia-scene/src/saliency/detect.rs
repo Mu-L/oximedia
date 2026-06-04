@@ -258,6 +258,67 @@ impl SpectralSaliencyDetector {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SpectralSaliencyComputer — thin pre-allocated wrapper for frame-by-frame use
+// ---------------------------------------------------------------------------
+
+/// Simplified spectral saliency computer with pre-allocated scratch buffers.
+///
+/// Intended for repeated single-channel (grayscale, `u8`) input — avoids
+/// per-call heap allocation by holding the internal working buffers across
+/// calls.  The internal resolution is fixed at construction time (default
+/// 64 × 64 downsampled work area) and the output is upsampled back to the
+/// original `(width, height)` dimensions.
+///
+/// For RGB input use [`SpectralSaliencyDetector`] directly.
+pub struct SpectralSaliencyComputer {
+    /// Underlying detector that owns the pre-allocated buffers.
+    inner: SpectralSaliencyDetector,
+    /// Source image width (pixels).
+    width: usize,
+    /// Source image height (pixels).
+    height: usize,
+}
+
+impl SpectralSaliencyComputer {
+    /// Create a new computer fixed to the given `(width, height)` dimensions.
+    ///
+    /// The internal work resolution is `min(width, 64) × min(height, 64)` to
+    /// keep the computation fast while retaining spatial structure.
+    #[must_use]
+    pub fn new(width: usize, height: usize) -> Self {
+        let ww = width.min(64).max(4);
+        let wh = height.min(64).max(4);
+        Self {
+            inner: SpectralSaliencyDetector::new(ww, wh, 8),
+            width,
+            height,
+        }
+    }
+
+    /// Compute a spectral-residual saliency map for a single grayscale frame.
+    ///
+    /// * `frame` — grayscale pixel data (`u8`), exactly `width × height` bytes
+    ///   (row-major).  If the slice length does not match, an all-zeros map is
+    ///   returned.
+    ///
+    /// Returns a `Vec<f32>` of length `width * height` with values in `[0, 1]`.
+    pub fn compute(&mut self, frame: &[u8]) -> Vec<f32> {
+        let expected = self.width * self.height;
+        if frame.len() != expected {
+            return vec![0.0_f32; expected];
+        }
+        // Convert grayscale to 3-channel RGB (replicate channel) so the inner
+        // detector can consume it — this avoids duplicating the spatial-residual
+        // logic while keeping a clean single-channel public API.
+        let rgb: Vec<u8> = frame.iter().flat_map(|&v| [v, v, v]).collect();
+        match self.inner.detect(&rgb, self.width, self.height) {
+            Ok(map) => map.data,
+            Err(_) => vec![0.0_f32; expected],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,5 +418,32 @@ mod tests {
         let frame2 = vec![200u8; w * h * 3];
         assert!(detector.detect(&frame1, w, h).is_ok());
         assert!(detector.detect(&frame2, w, h).is_ok());
+    }
+
+    // --- SpectralSaliencyComputer tests ---
+
+    #[test]
+    fn test_spectral_saliency_computer_reuse() {
+        let w = 80;
+        let h = 60;
+        let mut computer = SpectralSaliencyComputer::new(w, h);
+        let frame: Vec<u8> = (0..w * h).map(|i| (i % 256) as u8).collect();
+        let r1 = computer.compute(&frame);
+        let r2 = computer.compute(&frame);
+        assert_eq!(r1, r2, "same input must yield same output on reuse");
+    }
+
+    #[test]
+    fn test_spectral_saliency_computer_dimensions() {
+        let w = 120;
+        let h = 90;
+        let mut computer = SpectralSaliencyComputer::new(w, h);
+        let frame = vec![128u8; w * h];
+        let result = computer.compute(&frame);
+        assert_eq!(
+            result.len(),
+            w * h,
+            "output length must equal width * height"
+        );
     }
 }

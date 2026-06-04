@@ -8,13 +8,13 @@
 //!
 //! # Design
 //!
-//! - [`WarmingConfig`] — tuning parameters (top-K queries, TTL, concurrency).
-//! - [`QueryFrequencyTracker`] — records how many times each query has been
+//! - `WarmingConfig` — tuning parameters (top-K queries, TTL, concurrency).
+//! - `QueryFrequencyTracker` — records how many times each query has been
 //!   executed so that the warmer knows which queries to pre-heat.
-//! - [`WarmResultEntry`] — a cached result set with an expiry timestamp.
-//! - [`IndexWarmer`] — orchestrates warm-up by replaying popular queries
-//!   against a [`SearchIndex`] and storing results.
-//! - [`WarmingStats`] — runtime metrics (hits, misses, evictions).
+//! - `WarmResultEntry` — a cached result set with an expiry timestamp.
+//! - `IndexWarmer` — orchestrates warm-up by replaying popular queries
+//!   against a `SearchIndex` and storing results.
+//! - `WarmingStats` — runtime metrics (hits, misses, evictions).
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -78,17 +78,17 @@ impl QueryFrequencyTracker {
     /// Return the execution count for `query`.
     #[must_use]
     pub fn count(&self, query: &str) -> u64 {
-        self.counts.get(&Self::normalize(query)).copied().unwrap_or(0)
+        self.counts
+            .get(&Self::normalize(query))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Return the top `n` queries by execution count, sorted descending.
     #[must_use]
     pub fn top_queries(&self, n: usize) -> Vec<(String, u64)> {
-        let mut pairs: Vec<(String, u64)> = self
-            .counts
-            .iter()
-            .map(|(k, &v)| (k.clone(), v))
-            .collect();
+        let mut pairs: Vec<(String, u64)> =
+            self.counts.iter().map(|(k, &v)| (k.clone(), v)).collect();
         pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         pairs.truncate(n);
         pairs
@@ -107,7 +107,11 @@ impl QueryFrequencyTracker {
 
     /// Normalise a query string: lowercase and collapse whitespace.
     fn normalize(query: &str) -> String {
-        query.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+        query
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
     }
 }
 
@@ -245,7 +249,8 @@ impl IndexWarmer {
                 .map(|(doc, _)| doc.id.clone())
                 .collect();
             let top_score = results.first().map(|(_, s)| *s).unwrap_or(0.0);
-            let entry = WarmResultEntry::new(key.clone(), document_ids, top_score, self.config.entry_ttl);
+            let entry =
+                WarmResultEntry::new(key.clone(), document_ids, top_score, self.config.entry_ttl);
             self.cache.insert(key, entry);
             warmed += 1;
         }
@@ -256,7 +261,11 @@ impl IndexWarmer {
 
     /// Warm based on the top-K queries observed by `tracker`, applying the
     /// configured `min_query_frequency` threshold.
-    pub fn warm_from_tracker(&mut self, tracker: &QueryFrequencyTracker, index: &SearchIndex) -> usize {
+    pub fn warm_from_tracker(
+        &mut self,
+        tracker: &QueryFrequencyTracker,
+        index: &SearchIndex,
+    ) -> usize {
         let candidates: Vec<String> = tracker
             .top_queries(self.config.top_k_queries)
             .into_iter()
@@ -333,7 +342,11 @@ impl IndexWarmer {
 
     /// Normalise a raw query into a cache key.
     fn cache_key(query: &str) -> String {
-        query.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+        query
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
     }
 }
 
@@ -354,7 +367,10 @@ impl WarmupPlan {
     /// Create a new plan with the given seed queries.
     #[must_use]
     pub fn new(seed_queries: Vec<String>, include_top_k: bool) -> Self {
-        Self { seed_queries, include_top_k }
+        Self {
+            seed_queries,
+            include_top_k,
+        }
     }
 
     /// Execute this plan against `warmer`, `tracker`, and `index`.
@@ -391,13 +407,23 @@ mod tests {
         idx.add(doc1);
 
         let mut doc2 = AssetDocument::new("doc-2");
-        doc2.add_field(IndexedField::new("title", "Sports Highlights 2024", 2.0, true));
+        doc2.add_field(IndexedField::new(
+            "title",
+            "Sports Highlights 2024",
+            2.0,
+            true,
+        ));
         doc2.add_field(IndexedField::new("tags", "sports football", 1.0, true));
         idx.add(doc2);
 
         let mut doc3 = AssetDocument::new("doc-3");
         doc3.add_field(IndexedField::new("title", "Budget Report", 2.0, true));
-        doc3.add_field(IndexedField::new("tags", "finance business news", 1.0, true));
+        doc3.add_field(IndexedField::new(
+            "tags",
+            "finance business news",
+            1.0,
+            true,
+        ));
         idx.add(doc3);
 
         idx
@@ -427,8 +453,12 @@ mod tests {
     #[test]
     fn test_tracker_top_queries_order() {
         let mut t = QueryFrequencyTracker::new();
-        for _ in 0..5 { t.record("sports"); }
-        for _ in 0..3 { t.record("news"); }
+        for _ in 0..5 {
+            t.record("sports");
+        }
+        for _ in 0..3 {
+            t.record("news");
+        }
         t.record("finance");
         let top = t.top_queries(2);
         assert_eq!(top.len(), 2);
@@ -516,7 +546,7 @@ mod tests {
         let index = build_index();
         let mut warmer = IndexWarmer::with_defaults();
         warmer.warm(&["news".to_string()], &index);
-        warmer.lookup("news");  // hit
+        warmer.lookup("news"); // hit
         warmer.lookup("cooking"); // miss
         let stats = warmer.stats();
         assert_eq!(stats.hits, 1);
@@ -564,9 +594,13 @@ mod tests {
         });
         let mut tracker = QueryFrequencyTracker::new();
         // Record "news" only 3 times — below threshold of 5
-        for _ in 0..3 { tracker.record("news"); }
+        for _ in 0..3 {
+            tracker.record("news");
+        }
         // Record "sports" 6 times — above threshold
-        for _ in 0..6 { tracker.record("sports"); }
+        for _ in 0..6 {
+            tracker.record("sports");
+        }
 
         let warmed = warmer.warm_from_tracker(&tracker, &index);
         // Only "sports" qualifies

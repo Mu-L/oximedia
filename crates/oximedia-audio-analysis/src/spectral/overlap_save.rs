@@ -113,10 +113,7 @@ impl OverlapSaveAnalyzer {
             let fft_out = oxifft::fft(&windowed);
             let half = self.fft_size / 2 + 1;
 
-            let magnitude: Vec<f32> = fft_out[..half]
-                .iter()
-                .map(|c| c.norm() as f32)
-                .collect();
+            let magnitude: Vec<f32> = fft_out[..half].iter().map(|c| c.norm() as f32).collect();
 
             let power: Vec<f32> = magnitude.iter().map(|&m| m * m).collect();
 
@@ -153,10 +150,7 @@ impl OverlapSaveAnalyzer {
 /// # Errors
 ///
 /// Returns an error if the configuration is invalid.
-pub fn overlap_save_power_envelope(
-    samples: &[f32],
-    config: &AnalysisConfig,
-) -> Result<Vec<f32>> {
+pub fn overlap_save_power_envelope(samples: &[f32], config: &AnalysisConfig) -> Result<Vec<f32>> {
     let mut ola = OverlapSaveAnalyzer::default_50pct(config)?;
     let blocks = ola.process(samples)?;
     Ok(blocks
@@ -171,10 +165,7 @@ pub fn overlap_save_power_envelope(
 /// # Errors
 ///
 /// Returns an error if the configuration is invalid.
-pub fn overlap_save_spectra(
-    samples: &[f32],
-    config: &AnalysisConfig,
-) -> Result<Vec<Vec<f32>>> {
+pub fn overlap_save_spectra(samples: &[f32], config: &AnalysisConfig) -> Result<Vec<Vec<f32>>> {
     let mut ola = OverlapSaveAnalyzer::default_50pct(config)?;
     let blocks = ola.process(samples)?;
     Ok(blocks.into_iter().map(|b| b.magnitude).collect())
@@ -208,16 +199,17 @@ mod tests {
     fn test_overlap_save_produces_blocks_for_long_signal() {
         let cfg = make_config(256);
         let step = 128;
-        let mut ola =
-            OverlapSaveAnalyzer::new(&cfg, step).expect("valid config");
+        let mut ola = OverlapSaveAnalyzer::new(&cfg, step).expect("valid config");
 
         // 1024 samples → 8 complete steps → 8 blocks.
-        let signal: Vec<f32> = (0..1024)
-            .map(|i| (i as f32 * 0.01).sin())
-            .collect();
+        let signal: Vec<f32> = (0..1024).map(|i| (i as f32 * 0.01).sin()).collect();
 
         let blocks = ola.process(&signal).expect("process should succeed");
-        assert_eq!(blocks.len(), 8, "expected 8 blocks for 1024 samples / step 128");
+        assert_eq!(
+            blocks.len(),
+            8,
+            "expected 8 blocks for 1024 samples / step 128"
+        );
 
         // Each block must have the correct spectrum length.
         for block in &blocks {

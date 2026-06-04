@@ -70,10 +70,7 @@ impl BrandingZone {
     pub fn is_bug_zone(&self) -> bool {
         matches!(
             self,
-            Self::BugTopLeft
-                | Self::BugTopRight
-                | Self::BugBottomLeft
-                | Self::BugBottomRight
+            Self::BugTopLeft | Self::BugTopRight | Self::BugBottomLeft | Self::BugBottomRight
         )
     }
 
@@ -177,7 +174,10 @@ pub enum InserterError {
     /// End frame is before start frame.
     InvalidFrameRange { start: u64, end: u64 },
     /// Zone conflict: policy prevents the slot from being scheduled.
-    ZoneConflict { zone: BrandingZone, existing_slot_id: u32 },
+    ZoneConflict {
+        zone: BrandingZone,
+        existing_slot_id: u32,
+    },
 }
 
 impl std::fmt::Display for InserterError {
@@ -188,8 +188,14 @@ impl std::fmt::Display for InserterError {
             Self::InvalidFrameRange { start, end } => {
                 write!(f, "end frame {end} is before start frame {start}")
             }
-            Self::ZoneConflict { zone, existing_slot_id } => {
-                write!(f, "zone {zone:?} already occupied by slot {existing_slot_id}")
+            Self::ZoneConflict {
+                zone,
+                existing_slot_id,
+            } => {
+                write!(
+                    f,
+                    "zone {zone:?} already occupied by slot {existing_slot_id}"
+                )
             }
         }
     }
@@ -261,7 +267,10 @@ impl BrandingInserter {
     /// If the slot is currently active, a [`BrandingEventKind::Deactivate`]
     /// event is emitted.
     pub fn cancel(&mut self, slot_id: u32) -> Result<Vec<BrandingEvent>, InserterError> {
-        let slot = self.slots.remove(&slot_id).ok_or(InserterError::SlotNotFound(slot_id))?;
+        let slot = self
+            .slots
+            .remove(&slot_id)
+            .ok_or(InserterError::SlotNotFound(slot_id))?;
         let mut events = Vec::new();
 
         // Check if active in any zone
@@ -361,9 +370,8 @@ impl BrandingInserter {
                             events.push(ev);
                         }
                         InsertionPolicy::PriorityWins => {
-                            let existing_priority = conflict.and_then(|eid| {
-                                self.slots.get(&eid).map(|s| s.priority)
-                            });
+                            let existing_priority =
+                                conflict.and_then(|eid| self.slots.get(&eid).map(|s| s.priority));
                             let should_activate = match existing_priority {
                                 None => true,
                                 Some(ep) => slot.priority > ep,
@@ -463,10 +471,7 @@ impl BrandingInserter {
     // ── Internal helpers ──────────────────────────────────────────────────────
 
     fn mark_active(&mut self, slot_id: u32, zone: BrandingZone) {
-        self.active_by_zone
-            .entry(zone)
-            .or_default()
-            .push(slot_id);
+        self.active_by_zone.entry(zone).or_default().push(slot_id);
     }
 
     fn unmark_active(&mut self, slot_id: u32, zone: BrandingZone) {
@@ -570,14 +575,16 @@ mod tests {
     fn test_schedule_and_count() {
         let mut ins = BrandingInserter::new(InsertionPolicy::AllowOverlap);
         ins.schedule(bug_slot(1, 0, None, 5)).expect("schedule");
-        ins.schedule(bug_slot(2, 100, Some(200), 3)).expect("schedule");
+        ins.schedule(bug_slot(2, 100, Some(200), 3))
+            .expect("schedule");
         assert_eq!(ins.scheduled_count(), 2);
     }
 
     #[test]
     fn test_schedule_duplicate_id_error() {
         let mut ins = BrandingInserter::new(InsertionPolicy::AllowOverlap);
-        ins.schedule(bug_slot(1, 0, None, 5)).expect("first schedule");
+        ins.schedule(bug_slot(1, 0, None, 5))
+            .expect("first schedule");
         let result = ins.schedule(bug_slot(1, 50, None, 3));
         assert!(matches!(result, Err(InserterError::DuplicateSlotId(1))));
     }
@@ -589,7 +596,10 @@ mod tests {
         slot.end_frame = Some(100);
         slot.start_frame = 200;
         let result = ins.schedule(slot);
-        assert!(matches!(result, Err(InserterError::InvalidFrameRange { .. })));
+        assert!(matches!(
+            result,
+            Err(InserterError::InvalidFrameRange { .. })
+        ));
     }
 
     #[test]
@@ -598,7 +608,9 @@ mod tests {
         ins.schedule(bug_slot(1, 0, None, 5)).expect("schedule");
         ins.advance_to_frame(0); // activates slot 1
         let events = ins.cancel(1).expect("cancel");
-        assert!(events.iter().any(|e| e.kind == BrandingEventKind::Deactivate));
+        assert!(events
+            .iter()
+            .any(|e| e.kind == BrandingEventKind::Deactivate));
     }
 
     #[test]
@@ -626,19 +638,27 @@ mod tests {
         ins.schedule(bug_slot(1, 0, Some(50), 5)).expect("schedule");
         ins.advance_to_frame(0); // activate
         let events = ins.advance_to_frame(50); // should deactivate
-        assert!(events.iter().any(|e| e.kind == BrandingEventKind::Deactivate && e.slot_id == 1));
+        assert!(events
+            .iter()
+            .any(|e| e.kind == BrandingEventKind::Deactivate && e.slot_id == 1));
     }
 
     #[test]
     fn test_replace_policy_supersedes_existing() {
         let mut ins = BrandingInserter::new(InsertionPolicy::ReplaceOnConflict);
-        ins.schedule(bug_slot(1, 0, None, 3)).expect("schedule low-prio");
-        ins.schedule(bug_slot(2, 50, None, 5)).expect("schedule high-prio");
+        ins.schedule(bug_slot(1, 0, None, 3))
+            .expect("schedule low-prio");
+        ins.schedule(bug_slot(2, 50, None, 5))
+            .expect("schedule high-prio");
         ins.advance_to_frame(0); // activate slot 1
         let events = ins.advance_to_frame(50);
         // Slot 1 should be superseded, slot 2 should be activated
-        let superseded = events.iter().any(|e| e.slot_id == 1 && e.kind == BrandingEventKind::Superseded);
-        let activated = events.iter().any(|e| e.slot_id == 2 && e.kind == BrandingEventKind::Activate);
+        let superseded = events
+            .iter()
+            .any(|e| e.slot_id == 1 && e.kind == BrandingEventKind::Superseded);
+        let activated = events
+            .iter()
+            .any(|e| e.slot_id == 2 && e.kind == BrandingEventKind::Activate);
         assert!(superseded, "slot 1 should be superseded");
         assert!(activated, "slot 2 should be activated");
     }
@@ -646,12 +666,16 @@ mod tests {
     #[test]
     fn test_priority_policy_lower_priority_blocked() {
         let mut ins = BrandingInserter::new(InsertionPolicy::PriorityWins);
-        ins.schedule(bug_slot(1, 0, None, 10)).expect("schedule high-prio");
-        ins.schedule(bug_slot(2, 50, None, 3)).expect("schedule low-prio");
+        ins.schedule(bug_slot(1, 0, None, 10))
+            .expect("schedule high-prio");
+        ins.schedule(bug_slot(2, 50, None, 3))
+            .expect("schedule low-prio");
         ins.advance_to_frame(0); // activate high-priority slot 1
         let events = ins.advance_to_frame(50);
         // Low-priority slot 2 should NOT produce an Activate event
-        let low_activated = events.iter().any(|e| e.slot_id == 2 && e.kind == BrandingEventKind::Activate);
+        let low_activated = events
+            .iter()
+            .any(|e| e.slot_id == 2 && e.kind == BrandingEventKind::Activate);
         assert!(!low_activated, "low-priority slot should be blocked");
     }
 
@@ -670,7 +694,8 @@ mod tests {
     fn test_slots_in_zone_query() {
         let mut ins = BrandingInserter::new(InsertionPolicy::AllowOverlap);
         ins.schedule(bug_slot(1, 0, None, 5)).expect("slot 1");
-        ins.schedule(bug_slot(2, 100, Some(200), 3)).expect("slot 2");
+        ins.schedule(bug_slot(2, 100, Some(200), 3))
+            .expect("slot 2");
         ins.schedule(lower_third_slot(3, 0, None, 5)).expect("lt");
         let bug_slots = ins.slots_in_zone(BrandingZone::BugTopRight);
         assert_eq!(bug_slots.len(), 2);
@@ -680,7 +705,7 @@ mod tests {
     fn test_event_log_accumulates() {
         let mut ins = BrandingInserter::new(InsertionPolicy::AllowOverlap);
         ins.schedule(bug_slot(1, 0, Some(50), 5)).expect("schedule");
-        ins.advance_to_frame(0);  // activate → 1 event
+        ins.advance_to_frame(0); // activate → 1 event
         ins.advance_to_frame(50); // deactivate → 1 event
         assert_eq!(ins.event_log().len(), 2);
     }

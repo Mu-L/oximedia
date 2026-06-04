@@ -181,12 +181,13 @@ impl AutoLevel {
         };
 
         // --- RMS estimation (exponentially weighted power) ---
-        self.rms_power = self.rms_coeff * self.rms_power + (1.0 - self.rms_coeff) * analyse * analyse;
+        self.rms_power =
+            self.rms_coeff * self.rms_power + (1.0 - self.rms_coeff) * analyse * analyse;
         let rms = self.rms_power.sqrt().max(1e-10);
 
         // --- Target gain ---
-        let target_gain = (self.config.target_rms / rms)
-            .clamp(self.config.min_gain, self.config.max_gain);
+        let target_gain =
+            (self.config.target_rms / rms).clamp(self.config.min_gain, self.config.max_gain);
 
         // --- Smooth gain with attack/release ---
         let coeff = if target_gain < self.current_gain {
@@ -309,7 +310,12 @@ impl AutoLevel {
 mod tests {
     use super::*;
 
-    fn sine_wave(frequency_hz: f32, amplitude: f32, num_samples: usize, sample_rate: u32) -> Vec<f32> {
+    fn sine_wave(
+        frequency_hz: f32,
+        amplitude: f32,
+        num_samples: usize,
+        sample_rate: u32,
+    ) -> Vec<f32> {
         (0..num_samples)
             .map(|i| {
                 (i as f32 * frequency_hz * std::f32::consts::TAU / sample_rate as f32).sin()
@@ -363,10 +369,7 @@ mod tests {
         let input = vec![0.0_f32; 2048];
         let output = al.process_block(&input);
         for &v in &output {
-            assert!(
-                v.abs() <= 5.0 + 1e-4,
-                "output exceeds max_gain: {v}"
-            );
+            assert!(v.abs() <= 5.0 + 1e-4, "output exceeds max_gain: {v}");
         }
     }
 

@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Wave 20: Speech-clarity DSP (biquad peaking + DRC + band-pass), contrast LUT SIMD (oximedia-access)
+- Wave 20: Tiled cache-blocked scaling `scale_tiled()` + `scale_reference()` bit-exact oracle (oximedia-scaling)
+- Wave 20: DataCite 4.x DOI emitter/parser, PBCore 2.1 crosswalk, `MigrationTriggerPolicy` (oximedia-archive-pro)
+- Wave 20: `batch_conform()` multi-EDL timeline merge, `ProxyDbExport`/`import_with_rebase()` (oximedia-proxy)
+- Wave 20: `SegmentPlan` + `encode_segments_parallel()` rayon-based parallel encoding (oximedia-convert)
+- Wave 20: rFFT phase-correlation via `oxifft::rfft`/`irfft` (oximedia-align)
+- Wave 20: `AnalysisScale {Full,Half,Quarter}` + `downsample_box_luma()` (oximedia-analysis)
+- Waves 12–19: SILK LTP coarse-to-fine + contour RD + fractional-lag; CDN R-tree geo-routing; compat-ffmpeg splitrs + 67 tests; core SIMD pixel conversion + work-stealing WorkQueue + AlignedVec; VMAF/SSIM/temporal-PSNR quality metrics; NDI FramePool + parallel SpeedHQ; denoise deep-image-prior; timecode 47.952/120fps + Manchester SIMD; bloom-filter conform matching; EDL lazy parse + SmallVec; buffer-pool pressure callbacks + media-time estimation; face blur/obscurity detection; histogram cache; parallel sub-analyzers; FunDSP adapter; IMF versioning + lazy CPL; multicam angle-score cache; timeline asymmetric transitions; batch QC early-term + frame cache; incremental render + prefetch; pilot-tone + Wiener SIMD; bandwidth trigger + FEC XOR SIMD; farm heartbeat batch; scene/playout classification temporal
+
+### Fixed
+- SILK NSQ 440 Hz SNR thresholds corrected to match actual round-trip floor (~5.20 dB)
+- proxy_sync.rs dead-code silencers removed
+
+## [0.1.8] - 2026-06-02
+
+### Added
 - `oximedia-repair`: mmap-backed `deep_scan` (memmap2, ≥4 MiB threshold with streaming fallback for smaller files), mtime-aware `detection_cache` (parking_lot `RwLock` short-circuit), and full `fix_issue` dispatcher wired to `conceal`, `partial`, `container_migrate`, and `codec_probe` submodules.
 - `oximedia-neural`: `onnx` Cargo feature gate; new `OnnxBackend` struct (`load`, `run` with `HashMap<String, Tensor>` API) backed by `oxionnx`.
 - `oximedia-audio`: `compute_log_mel_spectrogram` (STFT → Hann window → MelScale filterbank → log) added to the `spectrum` module.
@@ -401,7 +417,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `oximedia-wasm` — WebAssembly bindings
 - `oximedia-cli` — command-line interface
 
-[Unreleased]: https://github.com/cool-japan/oximedia/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/cool-japan/oximedia/compare/v0.1.8...HEAD
 [0.1.2]: https://github.com/cool-japan/oximedia/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/cool-japan/oximedia/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/cool-japan/oximedia/releases/tag/v0.1.0

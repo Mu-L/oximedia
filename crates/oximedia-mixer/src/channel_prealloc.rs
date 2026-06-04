@@ -482,9 +482,12 @@ mod tests {
 
         // Remove channel 0; its buffer should be inaccessible.
         slab.remove_channel(s0);
-        assert!(slab.buffer(s0).is_none(), "removed channel should be inaccessible");
+        assert!(
+            slab.buffer(s0).is_none(),
+            "removed channel should be inaccessible"
+        );
         assert_eq!(slab.channel_count(), 1);
-        drop(s1);
+        let _ = s1;
     }
 
     #[test]

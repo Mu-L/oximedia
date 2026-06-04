@@ -180,11 +180,7 @@ impl RoiStabilizer {
     ///
     /// - [`StabilizeError::EmptyFrameSequence`] – `frames` is empty.
     /// - [`StabilizeError::InvalidParameter`] – the ROI does not overlap any frame.
-    pub fn stabilize(
-        &self,
-        frames: &[Frame],
-        roi: Roi,
-    ) -> StabilizeResult<Vec<RoiTransform>> {
+    pub fn stabilize(&self, frames: &[Frame], roi: Roi) -> StabilizeResult<Vec<RoiTransform>> {
         if frames.is_empty() {
             return Err(StabilizeError::EmptyFrameSequence);
         }
@@ -198,11 +194,7 @@ impl RoiStabilizer {
         self.stabilize_internal(frames, roi)
     }
 
-    fn stabilize_internal(
-        &self,
-        frames: &[Frame],
-        roi: Roi,
-    ) -> StabilizeResult<Vec<RoiTransform>> {
+    fn stabilize_internal(&self, frames: &[Frame], roi: Roi) -> StabilizeResult<Vec<RoiTransform>> {
         let n = frames.len();
         // Cumulative raw translations in the ROI coordinate system.
         let mut raw_dx = vec![0.0f64; n];
@@ -291,15 +283,7 @@ impl RoiStabilizer {
                         {
                             continue;
                         }
-                        let score = self.ssd(
-                            prev,
-                            curr,
-                            r,
-                            c,
-                            nr as usize,
-                            nc as usize,
-                            win,
-                        );
+                        let score = self.ssd(prev, curr, r, c, nr as usize, nc as usize, win);
                         if score < best_score {
                             best_score = score;
                             best_dr = dr;
@@ -366,9 +350,13 @@ impl RoiStabilizer {
         let mut gy = Array2::zeros((h, w));
         for r in 1..(h - 1) {
             for c in 1..(w - 1) {
-                let p = |dr: i32, dc: i32| image[[(r as i32 + dr) as usize, (c as i32 + dc) as usize]] as f64;
-                gx[[r, c]] = -p(-1, -1) + p(-1, 1) - 2.0 * p(0, -1) + 2.0 * p(0, 1) - p(1, -1) + p(1, 1);
-                gy[[r, c]] = -p(-1, -1) - 2.0 * p(-1, 0) - p(-1, 1) + p(1, -1) + 2.0 * p(1, 0) + p(1, 1);
+                let p = |dr: i32, dc: i32| {
+                    image[[(r as i32 + dr) as usize, (c as i32 + dc) as usize]] as f64
+                };
+                gx[[r, c]] =
+                    -p(-1, -1) + p(-1, 1) - 2.0 * p(0, -1) + 2.0 * p(0, 1) - p(1, -1) + p(1, 1);
+                gy[[r, c]] =
+                    -p(-1, -1) - 2.0 * p(-1, 0) - p(-1, 1) + p(1, -1) + 2.0 * p(1, 0) + p(1, 1);
             }
         }
 
@@ -529,7 +517,9 @@ mod tests {
         let config = RoiStabilizeConfig::default();
         let stabilizer = RoiStabilizer::new(config);
         let roi = Roi::new(0, 0, 200, 200).expect("valid"); // larger than frame
-        let frames: Vec<Frame> = (0..3).map(|i| make_frame(100, 100, i as f64, 100)).collect();
+        let frames: Vec<Frame> = (0..3)
+            .map(|i| make_frame(100, 100, i as f64, 100))
+            .collect();
         let result = stabilizer.stabilize(&frames, roi);
         // Should succeed after clamping.
         assert!(result.is_ok());

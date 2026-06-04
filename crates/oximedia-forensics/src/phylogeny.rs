@@ -316,11 +316,22 @@ impl PhylogenyTree {
         let mut out = String::from("digraph phylogeny {\n  rankdir=TB;\n");
         for node in &self.nodes {
             let label = node.label.replace('"', "'");
-            let marker = if node.index == self.root { " [shape=box,style=filled,fillcolor=gold]" } else { "" };
-            out.push_str(&format!("  n{} [label=\"{}\"]{};\n", node.index, label, marker));
+            let marker = if node.index == self.root {
+                " [shape=box,style=filled,fillcolor=gold]"
+            } else {
+                ""
+            };
+            out.push_str(&format!(
+                "  n{} [label=\"{}\"]{};\n",
+                node.index, label, marker
+            ));
         }
         for edge in &self.edges {
-            let style = if edge.is_destructive { " [style=dashed]" } else { "" };
+            let style = if edge.is_destructive {
+                " [style=dashed]"
+            } else {
+                ""
+            };
             out.push_str(&format!(
                 "  n{} -> n{} [label=\"{:.2}\"]{};\n",
                 edge.parent, edge.child, edge.similarity, style,
@@ -441,13 +452,11 @@ impl PhylogenyAnalyzer {
 
         for _ in 0..n {
             // Pick the non-tree node with highest best_sim.
-            let u = (0..n)
-                .filter(|&i| !in_tree[i])
-                .max_by(|&a, &b| {
-                    best_sim[a]
-                        .partial_cmp(&best_sim[b])
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
+            let u = (0..n).filter(|&i| !in_tree[i]).max_by(|&a, &b| {
+                best_sim[a]
+                    .partial_cmp(&best_sim[b])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
 
             let u = match u {
                 Some(idx) => idx,
@@ -557,7 +566,10 @@ mod tests {
         let a = make_node("a", 0, 0, 0);
         let b = make_node("b", 255, 255, 255);
         let mse = a.mse_against(&b);
-        assert!(mse > 0.9, "all-black vs all-white should have high MSE, got {mse}");
+        assert!(
+            mse > 0.9,
+            "all-black vs all-white should have high MSE, got {mse}"
+        );
     }
 
     #[test]
@@ -579,7 +591,10 @@ mod tests {
         let a = make_node("a", 0, 0, 0);
         let b = make_node("b", 255, 255, 255);
         let sim = a.similarity_against(&b);
-        assert!(sim < 0.5, "opposite images should have low similarity, got {sim}");
+        assert!(
+            sim < 0.5,
+            "opposite images should have low similarity, got {sim}"
+        );
     }
 
     // ----- PhylogenyAnalyzer tests ------------------------------------------
@@ -658,7 +673,10 @@ mod tests {
         ];
         let tree = analyzer.build_tree(nodes).expect("tree");
         let dot = tree.to_dot();
-        assert!(dot.contains("digraph phylogeny"), "should contain digraph header");
+        assert!(
+            dot.contains("digraph phylogeny"),
+            "should contain digraph header"
+        );
         assert!(dot.contains("original.jpg"));
         assert!(dot.contains("edited.jpg"));
     }
@@ -673,7 +691,7 @@ mod tests {
         let analyzer = PhylogenyAnalyzer::new();
         let matrix = analyzer.similarity_matrix(&nodes);
         assert_eq!(matrix.len(), 3); // pairs (0,1), (0,2), (1,2)
-        // All scores should be in [0,1].
+                                     // All scores should be in [0,1].
         for &sim in matrix.values() {
             assert!((0.0..=1.0).contains(&sim), "score out of range: {sim}");
         }
@@ -696,10 +714,7 @@ mod tests {
     #[test]
     fn test_parent_child_query() {
         let analyzer = PhylogenyAnalyzer::new();
-        let nodes = vec![
-            make_node("a", 100, 100, 100),
-            make_node("b", 110, 110, 110),
-        ];
+        let nodes = vec![make_node("a", 100, 100, 100), make_node("b", 110, 110, 110)];
         let tree = analyzer.build_tree(nodes).expect("tree");
         let child_idx = if tree.root == 0 { 1 } else { 0 };
         let parent = tree.parent_of(child_idx);
@@ -712,6 +727,9 @@ mod tests {
         let n = make_node("a", 128, 64, 200);
         let hist = n.luma_histogram_8bin();
         let sum: f64 = hist.iter().sum();
-        assert!((sum - 1.0).abs() < 1e-10, "histogram must sum to 1.0, got {sum}");
+        assert!(
+            (sum - 1.0).abs() < 1e-10,
+            "histogram must sum to 1.0, got {sum}"
+        );
     }
 }

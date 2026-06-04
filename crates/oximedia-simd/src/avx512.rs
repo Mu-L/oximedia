@@ -42,6 +42,7 @@ pub fn bgra_to_rgba_scalar(src: &[u8], dst: &mut [u8]) {
 /// available (detected via `is_x86_feature_detected!`).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw")]
+#[allow(clippy::cast_ptr_alignment)]
 pub unsafe fn bgra_to_rgba_avx512(src: &[u8], dst: &mut [u8]) {
     use std::arch::x86_64::*;
 
@@ -78,12 +79,12 @@ pub unsafe fn bgra_to_rgba_avx512(src: &[u8], dst: &mut [u8]) {
     }
 
     // SAFETY: avx512f,avx512bw ensured by caller and target_feature gate.
-    let shuffle_mask = _mm512_loadu_si512(mask_arr.as_ptr() as *const __m512i);
+    let shuffle_mask = _mm512_loadu_si512(mask_arr.as_ptr().cast::<__m512i>());
 
     let mut i = 0usize;
     while i < simd_pixels {
-        let src_ptr = src.as_ptr().add(i * 4) as *const __m512i;
-        let dst_ptr = dst.as_mut_ptr().add(i * 4) as *mut __m512i;
+        let src_ptr = src.as_ptr().add(i * 4).cast::<__m512i>();
+        let dst_ptr = dst.as_mut_ptr().add(i * 4).cast::<__m512i>();
 
         // SAFETY: bounds guaranteed by simd_pixels calculation and slice validity.
         let data = _mm512_loadu_si512(src_ptr);
@@ -179,7 +180,7 @@ pub unsafe fn scale_i16_avx512(samples: &mut [i16], gain: f32) {
 
         // SAFETY: bounds guaranteed by simd_len.
         // Load 16 × i16 → __m256i.
-        let i16_vec = _mm256_loadu_epi16(ptr as *const i16);
+        let i16_vec = _mm256_loadu_epi16(ptr.cast_const());
         // Sign-extend 16 × i16 → 16 × i32 in __m512i.
         let i32_vec = _mm512_cvtepi16_epi32(i16_vec);
         // Convert 16 × i32 → 16 × f32.
@@ -723,6 +724,7 @@ fn rgba_to_yuv420_scalar(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
 /// Caller must ensure `avx512f` CPU feature is available.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
+#[allow(clippy::cast_ptr_alignment)]
 unsafe fn rgba_to_yuv420_avx512_inner(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
     use std::arch::x86_64::*;
 
@@ -780,7 +782,7 @@ unsafe fn rgba_to_yuv420_avx512_inner(rgba: &[u8], width: u32, height: u32) -> V
         // Convert f32 → u8 via i32, truncating (floor) to match the scalar >>8 path.
         let yi32 = _mm512_cvttps_epi32(vy);
         let mut y_arr = [0i32; 16];
-        _mm512_storeu_si512(y_arr.as_mut_ptr() as *mut __m512i, yi32);
+        _mm512_storeu_si512(y_arr.as_mut_ptr().cast::<__m512i>(), yi32);
         for k in 0..16usize {
             y_plane[i + k] = y_arr[k].clamp(16, 235) as u8;
         }
@@ -1115,6 +1117,7 @@ unsafe fn sad_vnni_4x4_inner(src1: &[u8], src2: &[u8], stride1: usize, stride2: 
 /// Caller must guarantee `avx512f` and `avx512vnni` CPU features are present.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512vnni")]
+#[allow(clippy::cast_ptr_alignment)]
 unsafe fn sad_vnni_8x8_inner(src1: &[u8], src2: &[u8], stride1: usize, stride2: usize) -> u32 {
     use std::arch::x86_64::*;
 
@@ -1271,6 +1274,7 @@ fn sad_block_scalar(src: &[u8], candidate: &[u8], stride: usize, block_size: usi
 /// Caller must guarantee `avx512f` and `avx512bw` CPU features are present.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw")]
+#[allow(clippy::cast_ptr_alignment)]
 unsafe fn sad_parallel_4way_inner(
     src: &[u8],
     candidates: &[&[u8]; 4],

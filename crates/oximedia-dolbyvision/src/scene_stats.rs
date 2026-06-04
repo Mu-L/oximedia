@@ -77,8 +77,7 @@ impl DvSceneStats {
         if self.frame_count == 0 {
             return (0, 0, 0);
         }
-        let avg_mid =
-            ((self.mid_sum + self.frame_count / 2) / self.frame_count).min(4095) as u16;
+        let avg_mid = ((self.mid_sum + self.frame_count / 2) / self.frame_count).min(4095) as u16;
         let scene_min = if self.scene_min == u16::MAX {
             0
         } else {

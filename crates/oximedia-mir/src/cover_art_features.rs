@@ -45,10 +45,7 @@ use std::f64::consts::LN_2;
 #[allow(missing_docs)]
 pub enum CoverArtError {
     /// Buffer length does not match `width * height * channels`.
-    BufferSizeMismatch {
-        expected: usize,
-        actual: usize,
-    },
+    BufferSizeMismatch { expected: usize, actual: usize },
     /// Unsupported number of channels (only 3 = RGB and 4 = RGBA are supported).
     UnsupportedChannels(u8),
     /// Image is too small for meaningful analysis.
@@ -342,7 +339,11 @@ fn median_cut(colors: &[RgbColor], num_colors: usize) -> Vec<DominantColor> {
         .collect();
 
     // Sort by descending fraction
-    result.sort_by(|a, b| b.fraction.partial_cmp(&a.fraction).unwrap_or(std::cmp::Ordering::Equal));
+    result.sort_by(|a, b| {
+        b.fraction
+            .partial_cmp(&a.fraction)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     result
 }
 
@@ -393,10 +394,10 @@ fn sobel_edge_density(gray: &[f64], width: usize, height: usize) -> f64 {
                 gray[ry * width + rx]
             };
             // Sobel kernels
-            let gx = -get(-1, -1) + get(-1, 1) - 2.0 * get(0, -1) + 2.0 * get(0, 1)
-                - get(1, -1)
+            let gx = -get(-1, -1) + get(-1, 1) - 2.0 * get(0, -1) + 2.0 * get(0, 1) - get(1, -1)
                 + get(1, 1);
-            let gy = -get(-1, -1) - 2.0 * get(-1, 0) - get(-1, 1) + get(1, -1)
+            let gy = -get(-1, -1) - 2.0 * get(-1, 0) - get(-1, 1)
+                + get(1, -1)
                 + 2.0 * get(1, 0)
                 + get(1, 1);
             total_grad += (gx * gx + gy * gy).sqrt();
@@ -420,7 +421,8 @@ fn dct2_block(block: &[f64], size: usize) -> Vec<f64> {
         for k in 0..n {
             let mut sum = 0.0_f64;
             for i in 0..n {
-                let angle = std::f64::consts::PI * k as f64 * (2.0 * i as f64 + 1.0) / (2.0 * n as f64);
+                let angle =
+                    std::f64::consts::PI * k as f64 * (2.0 * i as f64 + 1.0) / (2.0 * n as f64);
                 sum += block[row * n + i] * angle.cos();
             }
             let scale = if k == 0 {
@@ -438,7 +440,8 @@ fn dct2_block(block: &[f64], size: usize) -> Vec<f64> {
         for k in 0..n {
             let mut sum = 0.0_f64;
             for i in 0..n {
-                let angle = std::f64::consts::PI * k as f64 * (2.0 * i as f64 + 1.0) / (2.0 * n as f64);
+                let angle =
+                    std::f64::consts::PI * k as f64 * (2.0 * i as f64 + 1.0) / (2.0 * n as f64);
                 sum += row_dct[i * n + col] * angle.cos();
             }
             let scale = if k == 0 {
@@ -564,8 +567,7 @@ impl CoverArtAnalyzer {
         let bc_result = Self::analyze_brightness_contrast(&rgb_pixels);
 
         // ── Complexity ────────────────────────────────────────────────────
-        let complexity =
-            self.analyze_complexity(&rgb_pixels, width as usize, height as usize);
+        let complexity = self.analyze_complexity(&rgb_pixels, width as usize, height as usize);
 
         Ok(CoverArtFeatures {
             dominant_colors: dc_result,
@@ -607,7 +609,11 @@ impl CoverArtAnalyzer {
         let n = lumas.len() as f64;
 
         let mean_brightness = lumas.iter().sum::<f64>() / n;
-        let variance = lumas.iter().map(|&l| (l - mean_brightness).powi(2)).sum::<f64>() / n;
+        let variance = lumas
+            .iter()
+            .map(|&l| (l - mean_brightness).powi(2))
+            .sum::<f64>()
+            / n;
         let rms_contrast = variance.sqrt();
 
         let min_brightness = lumas.iter().copied().fold(f64::INFINITY, f64::min);
@@ -641,8 +647,7 @@ impl CoverArtAnalyzer {
         let color_entropy_nats = self.compute_color_entropy(rgb_pixels);
 
         // Spatial frequency via DCT blocks
-        let sf_score =
-            spatial_frequency_score(&gray, width, height, self.config.dct_block_size);
+        let sf_score = spatial_frequency_score(&gray, width, height, self.config.dct_block_size);
 
         // Weighted combination: edge 40%, color entropy 30%, spatial freq 30%
         let max_entropy = (self.config.hue_histogram_bins as f64).ln();
@@ -726,7 +731,9 @@ mod tests {
         let pixels = solid_rgb(255, 255, 255, 16, 16);
         let config = CoverArtConfig::default();
         let analyzer = CoverArtAnalyzer::new(config);
-        let result = analyzer.analyze(&pixels, 16, 16, 3).expect("should succeed");
+        let result = analyzer
+            .analyze(&pixels, 16, 16, 3)
+            .expect("should succeed");
         assert!(
             (result.brightness_contrast.mean_brightness - 1.0).abs() < 1e-6,
             "expected brightness=1.0, got {:.6}",
@@ -739,7 +746,9 @@ mod tests {
         let pixels = solid_rgb(0, 0, 0, 16, 16);
         let config = CoverArtConfig::default();
         let analyzer = CoverArtAnalyzer::new(config);
-        let result = analyzer.analyze(&pixels, 16, 16, 3).expect("should succeed");
+        let result = analyzer
+            .analyze(&pixels, 16, 16, 3)
+            .expect("should succeed");
         assert!(
             result.brightness_contrast.mean_brightness < 1e-6,
             "expected brightness≈0, got {:.6}",
@@ -752,7 +761,9 @@ mod tests {
         let pixels = solid_rgb(128, 128, 128, 16, 16);
         let config = CoverArtConfig::default();
         let analyzer = CoverArtAnalyzer::new(config);
-        let result = analyzer.analyze(&pixels, 16, 16, 3).expect("should succeed");
+        let result = analyzer
+            .analyze(&pixels, 16, 16, 3)
+            .expect("should succeed");
         assert!(
             result.brightness_contrast.rms_contrast < 1e-6,
             "expected zero contrast for solid image, got {:.6}",
@@ -790,7 +801,9 @@ mod tests {
         let pixels = solid_rgb(100, 150, 200, 16, 16);
         let config = CoverArtConfig::default();
         let analyzer = CoverArtAnalyzer::new(config);
-        let result = analyzer.analyze(&pixels, 16, 16, 3).expect("should succeed");
+        let result = analyzer
+            .analyze(&pixels, 16, 16, 3)
+            .expect("should succeed");
         assert!(
             result.complexity.edge_density < 1e-6,
             "solid image should have no edges, got {:.6}",
@@ -803,7 +816,9 @@ mod tests {
         let pixels = solid_rgb(200, 50, 50, 16, 16);
         let config = CoverArtConfig::default();
         let analyzer = CoverArtAnalyzer::new(config);
-        let result = analyzer.analyze(&pixels, 16, 16, 3).expect("should succeed");
+        let result = analyzer
+            .analyze(&pixels, 16, 16, 3)
+            .expect("should succeed");
         assert!(
             !result.dominant_colors.colors.is_empty(),
             "should have at least one dominant color"

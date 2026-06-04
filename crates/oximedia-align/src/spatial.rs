@@ -2,7 +2,7 @@
 //!
 //! This module provides tools for aligning images geometrically:
 //!
-//! - Homography estimation
+//! - Homography estimation (serial and parallel RANSAC)
 //! - Perspective transformation
 //! - RANSAC for robust fitting
 //! - Affine transformation
@@ -10,6 +10,8 @@
 use crate::features::MatchPair;
 use crate::{AlignError, AlignResult, Point2D};
 use nalgebra::{Matrix3, Vector3};
+use rayon::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// 3x3 homography matrix for perspective transformation
 #[derive(Debug, Clone)]
@@ -101,7 +103,16 @@ impl HomographyEstimator {
         Self { config }
     }
 
-    /// Estimate homography from matched points using RANSAC
+    /// Estimate homography from matched points using parallel RANSAC.
+    ///
+    /// Divides `max_iterations` into batches of `BATCH_SIZE = 64`. Each batch
+    /// runs in parallel via `rayon`, with a shared `AtomicUsize` tracking the
+    /// global best inlier count for advisory early exit.
+    ///
+    /// Each parallel iteration uses a deterministic per-iteration seeded RNG
+    /// (xorshift64), so results are reproducible for a given configuration
+    /// though not necessarily identical to the serial path (they may be
+    /// equal-or-better, which is the desired property).
     ///
     /// # Errors
     /// Returns error if insufficient matches or estimation fails
@@ -113,31 +124,68 @@ impl HomographyEstimator {
             ));
         }
 
-        let mut best_inliers = Vec::new();
-        let mut best_homography = None;
-        let mut best_inlier_count = 0;
+        const BATCH_SIZE: usize = 64;
+        let early_exit_threshold = self.config.min_inliers.max(matches.len() * 80 / 100);
+        let num_batches = self.config.max_iterations.div_ceil(BATCH_SIZE);
 
-        // RANSAC iterations
-        for _ in 0..self.config.max_iterations {
-            // Sample 4 random matches
-            let sample = self.sample_matches(matches, 4);
+        // Shared advisory best-inlier counter for early-exit across batches.
+        let global_best_count = AtomicUsize::new(0);
 
-            // Estimate homography from 4 points
-            if let Ok(h) = self.estimate_from_4_points(&sample) {
-                // Count inliers
-                let inliers = self.find_inliers(&h, matches);
-                let inlier_count = inliers.iter().filter(|&&x| x).count();
+        let mut best_inliers: Vec<bool> = Vec::new();
+        let mut best_homography: Option<Homography> = None;
+        let mut best_inlier_count = 0usize;
 
+        'outer: for batch_idx in 0..num_batches {
+            // Advisory soft early exit — load with Relaxed; this is a hint only.
+            if global_best_count.load(Ordering::Relaxed) >= early_exit_threshold {
+                break 'outer;
+            }
+
+            let start_iter = batch_idx * BATCH_SIZE;
+            let end_iter = (start_iter + BATCH_SIZE).min(self.config.max_iterations);
+            let batch_len = end_iter - start_iter;
+
+            // Run each iteration in the batch in parallel.
+            // Each thread gets a deterministic seed from the global iteration index.
+            let batch_results: Vec<Option<(Homography, Vec<bool>, usize)>> = (0..batch_len)
+                .into_par_iter()
+                .map(|iter_in_batch| {
+                    // Advisory soft exit — Relaxed is fine; correctness not at stake.
+                    if global_best_count.load(Ordering::Relaxed) >= early_exit_threshold {
+                        return None;
+                    }
+
+                    let global_iter = start_iter + iter_in_batch;
+                    // Seeded deterministic sampling per iteration using xorshift64.
+                    let sample = self.sample_matches_seeded(matches, 4, global_iter as u64);
+
+                    let h = self.estimate_from_4_points(&sample).ok()?;
+                    let inliers = self.find_inliers(&h, matches);
+                    let inlier_count = inliers.iter().filter(|&&x| x).count();
+
+                    // Update global advisory counter (Relaxed: may be stale, that is fine).
+                    let prev = global_best_count.load(Ordering::Relaxed);
+                    if inlier_count > prev {
+                        global_best_count.fetch_max(inlier_count, Ordering::Relaxed);
+                    }
+
+                    Some((h, inliers, inlier_count))
+                })
+                .collect();
+
+            // Reduce: find the best result in this batch and merge with global best.
+            for result in batch_results.into_iter().flatten() {
+                let (h, inliers, inlier_count) = result;
                 if inlier_count > best_inlier_count {
                     best_inlier_count = inlier_count;
                     best_inliers = inliers;
                     best_homography = Some(h);
-
-                    // Early termination if we have enough inliers
-                    if inlier_count >= self.config.min_inliers.max(matches.len() * 80 / 100) {
-                        break;
-                    }
                 }
+            }
+
+            // Hard post-batch early exit check.
+            if best_inlier_count >= early_exit_threshold {
+                break 'outer;
             }
         }
 
@@ -164,13 +212,96 @@ impl HomographyEstimator {
         Ok((refined, best_inliers))
     }
 
-    /// Sample N random matches
-    fn sample_matches(&self, matches: &[MatchPair], n: usize) -> Vec<MatchPair> {
-        // Simple deterministic sampling (in production, use proper PRNG)
-        let step = matches.len() / n;
-        (0..n)
-            .map(|i| matches[(i * step) % matches.len()].clone())
-            .collect()
+    /// Estimate homography using the original sequential RANSAC.
+    ///
+    /// This is kept as a reference implementation for tests and benchmarks.
+    /// Production callers should prefer `estimate` (parallel version).
+    ///
+    /// # Errors
+    /// Returns error if insufficient matches or estimation fails
+    pub fn estimate_serial(&self, matches: &[MatchPair]) -> AlignResult<(Homography, Vec<bool>)> {
+        if matches.len() < 4 {
+            return Err(AlignError::InsufficientData(
+                "Need at least 4 matches for homography".to_string(),
+            ));
+        }
+
+        let mut best_inliers = Vec::new();
+        let mut best_homography = None;
+        let mut best_inlier_count = 0;
+        let early_exit_threshold = self.config.min_inliers.max(matches.len() * 80 / 100);
+
+        for iter in 0..self.config.max_iterations {
+            let sample = self.sample_matches_seeded(matches, 4, iter as u64);
+
+            if let Ok(h) = self.estimate_from_4_points(&sample) {
+                let inliers = self.find_inliers(&h, matches);
+                let inlier_count = inliers.iter().filter(|&&x| x).count();
+
+                if inlier_count > best_inlier_count {
+                    best_inlier_count = inlier_count;
+                    best_inliers = inliers;
+                    best_homography = Some(h);
+
+                    if inlier_count >= early_exit_threshold {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if best_inlier_count < self.config.min_inliers {
+            return Err(AlignError::NoSolution(format!(
+                "Insufficient inliers: {} < {}",
+                best_inlier_count, self.config.min_inliers
+            )));
+        }
+
+        let homography = best_homography
+            .ok_or_else(|| AlignError::NoSolution("No valid homography found".to_string()))?;
+
+        let inlier_matches: Vec<&MatchPair> = matches
+            .iter()
+            .zip(&best_inliers)
+            .filter(|(_, &is_inlier)| is_inlier)
+            .map(|(m, _)| m)
+            .collect();
+
+        let refined = self.refine_homography(&homography, &inlier_matches)?;
+
+        Ok((refined, best_inliers))
+    }
+
+    /// Sample N random matches using a deterministic xorshift64 PRNG seeded by
+    /// `seed`. Produces a distinct sample for each unique seed value, enabling
+    /// parallel iterations without shared state.
+    fn sample_matches_seeded(&self, matches: &[MatchPair], n: usize, seed: u64) -> Vec<MatchPair> {
+        let pool = matches.len();
+        debug_assert!(pool >= n, "cannot sample {n} from {pool} matches");
+
+        // xorshift64 — fast, non-crypto, reproducible per seed.
+        let mut state = seed ^ 0x9e37_79b9_7f4a_7c15;
+        if state == 0 {
+            state = 0xdead_beef_cafe_babe;
+        }
+
+        let xorshift64 = |s: &mut u64| -> u64 {
+            *s ^= *s << 13;
+            *s ^= *s >> 7;
+            *s ^= *s << 17;
+            *s
+        };
+
+        let mut indices = Vec::with_capacity(n);
+        while indices.len() < n {
+            let r = xorshift64(&mut state);
+            let idx = (r as usize) % pool;
+            if !indices.contains(&idx) {
+                indices.push(idx);
+            }
+        }
+
+        indices.iter().map(|&i| matches[i].clone()).collect()
     }
 
     /// Estimate homography from 4 or more point correspondences using DLT.
@@ -1307,6 +1438,83 @@ mod tests {
         assert!(
             err_after <= err_before + 0.1,
             "WLS should improve or maintain: before={err_before:.4}, after={err_after:.4}"
+        );
+    }
+
+    /// Parallel RANSAC produces an equal-or-better inlier count than serial.
+    ///
+    /// 50 point correspondences following an identity transform are generated;
+    /// 10 of them are replaced with random outliers (20% noise).  Both the
+    /// parallel `estimate` and the serial `estimate_serial` are run with
+    /// identical configuration.  The parallel result must have an inlier count
+    /// >= the serial result — it is allowed to find a strictly better result.
+    #[test]
+    fn test_parallel_ransac_inliers_ge_serial() {
+        use crate::Point2D;
+
+        let n_clean = 40usize;
+        let n_outlier = 10usize;
+
+        // Ground-truth: small rotation + translation.
+        let angle = 5.0_f64.to_radians();
+        let (cos_a, sin_a) = (angle.cos(), angle.sin());
+        let tx = 8.0_f64;
+        let ty = -4.0_f64;
+
+        // A simple LCG for deterministic "random" outlier positions.
+        let lcg = |s: &mut u64| -> f64 {
+            *s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (*s >> 33) as f64 / (u32::MAX as f64)
+        };
+        let mut lcg_state = 0xABCD_1234_u64;
+
+        let mut matches: Vec<MatchPair> = (0..n_clean)
+            .map(|i| {
+                let x = (i as f64 * 17.3) % 200.0 + 10.0;
+                let y = (i as f64 * 31.7) % 200.0 + 10.0;
+                let xp = cos_a * x - sin_a * y + tx;
+                let yp = sin_a * x + cos_a * y + ty;
+                MatchPair::new(i, i, 0, Point2D::new(x, y), Point2D::new(xp, yp))
+            })
+            .collect();
+
+        // Inject outliers with random destination points.
+        for i in 0..n_outlier {
+            let x = lcg(&mut lcg_state) * 200.0 + 10.0;
+            let y = lcg(&mut lcg_state) * 200.0 + 10.0;
+            let xp = lcg(&mut lcg_state) * 200.0 + 10.0;
+            let yp = lcg(&mut lcg_state) * 200.0 + 10.0;
+            matches.push(MatchPair::new(
+                n_clean + i,
+                n_clean + i,
+                100,
+                Point2D::new(x, y),
+                Point2D::new(xp, yp),
+            ));
+        }
+
+        let config = RansacConfig {
+            threshold: 2.0,
+            max_iterations: 500,
+            min_inliers: 8,
+        };
+        let estimator = HomographyEstimator::new(config);
+
+        let serial_result = estimator
+            .estimate_serial(&matches)
+            .expect("serial RANSAC should find a solution");
+        let parallel_result = estimator
+            .estimate(&matches)
+            .expect("parallel RANSAC should find a solution");
+
+        let serial_inliers = serial_result.1.iter().filter(|&&b| b).count();
+        let parallel_inliers = parallel_result.1.iter().filter(|&&b| b).count();
+
+        assert!(
+            parallel_inliers >= serial_inliers,
+            "parallel inliers ({parallel_inliers}) should be >= serial inliers ({serial_inliers})"
         );
     }
 

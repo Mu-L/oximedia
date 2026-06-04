@@ -174,6 +174,125 @@ impl BatchProcessor {
 
         self.process_batch(jobs).await
     }
+
+    /// Process a batch of [`crate::pipeline::ConversionJob`]s in parallel with
+    /// configurable concurrency.
+    ///
+    /// Uses `std::thread::spawn` with a counting semaphore so no async runtime
+    /// is required.  Each job runs a lightweight stub that validates paths;
+    /// a full encode pipeline would be wired here in production.
+    ///
+    /// When `config.fail_fast` is `true` the result list is truncated at the
+    /// first failure (remaining threads are joined first to avoid leaks).
+    pub fn process_parallel(
+        &self,
+        jobs: Vec<crate::pipeline::ConversionJob>,
+        config: BatchConfig,
+    ) -> Vec<BatchResult> {
+        use std::sync::{mpsc, Arc, Condvar, Mutex};
+
+        let max_concurrent = config.max_concurrent.max(1);
+        let (tx, rx) = mpsc::channel::<BatchResult>();
+        let permits = Arc::new((Mutex::new(max_concurrent), Condvar::new()));
+
+        let mut handles: Vec<std::thread::JoinHandle<()>> = Vec::with_capacity(jobs.len());
+
+        for job in jobs {
+            // Acquire a permit.
+            {
+                let (lock, cvar) = &*permits;
+                let mut available = lock.lock().unwrap_or_else(|p| p.into_inner());
+                while *available == 0 {
+                    available = cvar.wait(available).unwrap_or_else(|p| p.into_inner());
+                }
+                *available -= 1;
+            }
+
+            let tx_clone = tx.clone();
+            let permits_clone = Arc::clone(&permits);
+            let job_id = job.id.clone();
+            let input = job.input.clone();
+            let output = job.output.clone();
+
+            let handle = std::thread::spawn(move || {
+                let result = run_batch_job_sync(&job_id, &input, &output);
+                let _ = tx_clone.send(result);
+                // Release the permit.
+                let (lock, cvar) = &*permits_clone;
+                let mut available = lock.lock().unwrap_or_else(|p| p.into_inner());
+                *available += 1;
+                cvar.notify_one();
+            });
+
+            handles.push(handle);
+        }
+
+        drop(tx); // close channel when all workers finish
+
+        let mut results: Vec<BatchResult> = rx.iter().collect();
+        for h in handles {
+            let _ = h.join();
+        }
+
+        results.sort_by(|a, b| a.job_id.cmp(&b.job_id));
+
+        if config.fail_fast {
+            if let Some(pos) = results.iter().position(|r| r.error.is_some()) {
+                results.truncate(pos + 1);
+            }
+        }
+
+        results
+    }
+}
+
+/// Execute a single conversion job synchronously (stub).
+fn run_batch_job_sync(job_id: &str, input: &Path, _output: &Path) -> BatchResult {
+    if input.as_os_str().is_empty() {
+        return BatchResult {
+            job_id: job_id.to_string(),
+            error: Some("empty input path".to_string()),
+        };
+    }
+    BatchResult {
+        job_id: job_id.to_string(),
+        error: None,
+    }
+}
+
+/// Configuration for the `process_parallel` batch API.
+#[derive(Debug, Clone)]
+pub struct BatchConfig {
+    /// Maximum number of jobs running concurrently.
+    pub max_concurrent: usize,
+    /// Stop on the first failed job.
+    pub fail_fast: bool,
+}
+
+impl Default for BatchConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent: num_cpus(),
+            fail_fast: false,
+        }
+    }
+}
+
+/// Result of a single job from `process_parallel`.
+#[derive(Debug, Clone)]
+pub struct BatchResult {
+    /// Job identifier (mirrors [`crate::pipeline::ConversionJob::id`]).
+    pub job_id: String,
+    /// Error message if the job failed, `None` on success.
+    pub error: Option<String>,
+}
+
+impl BatchResult {
+    /// Returns `true` if the job completed without error.
+    #[must_use]
+    pub fn is_success(&self) -> bool {
+        self.error.is_none()
+    }
 }
 
 impl Default for BatchProcessor {
@@ -313,5 +432,78 @@ mod tests {
             failed: vec![],
         };
         assert_eq!(report.success_rate(), 0.0);
+    }
+
+    // ── process_parallel tests ────────────────────────────────────────────────
+
+    fn make_job(input: &str, output: &str) -> crate::pipeline::ConversionJob {
+        use crate::formats::ContainerFormat;
+        use crate::pipeline::JobPriority;
+        use std::collections::HashMap;
+        crate::pipeline::ConversionJob::new(
+            std::path::PathBuf::from(input),
+            std::path::PathBuf::from(output),
+            ContainerFormat::Matroska,
+            None,
+            None,
+            None,
+            HashMap::new(),
+            JobPriority::Normal,
+        )
+    }
+
+    #[test]
+    fn test_process_parallel_four_jobs_max_two_concurrent() {
+        let processor = BatchProcessor::new();
+        let jobs = vec![
+            make_job("/tmp/a.mkv", "/tmp/out_a.mkv"),
+            make_job("/tmp/b.mkv", "/tmp/out_b.mkv"),
+            make_job("/tmp/c.mkv", "/tmp/out_c.mkv"),
+            make_job("/tmp/d.mkv", "/tmp/out_d.mkv"),
+        ];
+        let config = BatchConfig {
+            max_concurrent: 2,
+            fail_fast: false,
+        };
+        let results = processor.process_parallel(jobs, config);
+        assert_eq!(results.len(), 4, "all 4 jobs should complete");
+        for r in &results {
+            assert!(
+                r.is_success(),
+                "job {} should succeed: {:?}",
+                r.job_id,
+                r.error
+            );
+        }
+    }
+
+    #[test]
+    fn test_process_parallel_empty_jobs() {
+        let processor = BatchProcessor::new();
+        let config = BatchConfig::default();
+        let results = processor.process_parallel(vec![], config);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_batch_config_default() {
+        let config = BatchConfig::default();
+        assert!(config.max_concurrent > 0);
+        assert!(!config.fail_fast);
+    }
+
+    #[test]
+    fn test_batch_result_is_success() {
+        let ok = BatchResult {
+            job_id: "j1".to_string(),
+            error: None,
+        };
+        assert!(ok.is_success());
+
+        let fail = BatchResult {
+            job_id: "j2".to_string(),
+            error: Some("err".to_string()),
+        };
+        assert!(!fail.is_success());
     }
 }

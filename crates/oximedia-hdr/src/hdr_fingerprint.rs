@@ -238,7 +238,7 @@ mod tests {
         let w = 64usize;
         let h = 64usize;
         let mut pixels = Vec::with_capacity(w * h * 3);
-        for row in 0..h {
+        for _row in 0..h {
             for col in 0..w {
                 let v = col as f32 / (w - 1) as f32;
                 pixels.push(v);

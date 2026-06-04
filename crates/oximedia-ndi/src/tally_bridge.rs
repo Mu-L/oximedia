@@ -258,23 +258,19 @@ impl MultiSourceTallyAggregator {
     /// Register a source with a given priority.
     ///
     /// Returns `Err` if the source registry is full.
-    pub fn register(
-        &mut self,
-        source: &str,
-        priority: TallySourcePriority,
-    ) -> Result<(), String> {
-        if !self.sources.contains_key(source)
-            && self.sources.len() >= self.config.max_sources
-        {
+    pub fn register(&mut self, source: &str, priority: TallySourcePriority) -> Result<(), String> {
+        if !self.sources.contains_key(source) && self.sources.len() >= self.config.max_sources {
             return Err(format!(
                 "tally bridge: source registry full ({} sources)",
                 self.config.max_sources
             ));
         }
-        self.sources.entry(source.to_string()).or_insert(SourceEntry {
-            state: GenericTallyState::Off,
-            priority,
-        });
+        self.sources
+            .entry(source.to_string())
+            .or_insert(SourceEntry {
+                state: GenericTallyState::Off,
+                priority,
+            });
         Ok(())
     }
 
@@ -287,11 +283,7 @@ impl MultiSourceTallyAggregator {
     ///
     /// Records a [`TallyBridgeEvent`] if the state actually changed.
     /// Returns `Err` if the source is not registered.
-    pub fn update(
-        &mut self,
-        source: &str,
-        new_state: GenericTallyState,
-    ) -> Result<(), String> {
+    pub fn update(&mut self, source: &str, new_state: GenericTallyState) -> Result<(), String> {
         let entry = self
             .sources
             .get_mut(source)
@@ -456,7 +448,10 @@ mod tests {
         assert_eq!(GenericTallyState::Off.label(), "Off");
         assert_eq!(GenericTallyState::Program.label(), "Program");
         assert_eq!(GenericTallyState::Preview.label(), "Preview");
-        assert_eq!(GenericTallyState::ProgramAndPreview.label(), "Program+Preview");
+        assert_eq!(
+            GenericTallyState::ProgramAndPreview.label(),
+            "Program+Preview"
+        );
     }
 
     // ── TallyBridgeMapping ────────────────────────────────────────────────────
@@ -491,10 +486,22 @@ mod tests {
 
     #[test]
     fn test_mapping_known_bytes() {
-        assert_eq!(TallyBridgeMapping::from_ndi_byte(0x00), GenericTallyState::Off);
-        assert_eq!(TallyBridgeMapping::from_ndi_byte(0x01), GenericTallyState::Program);
-        assert_eq!(TallyBridgeMapping::from_ndi_byte(0x02), GenericTallyState::Preview);
-        assert_eq!(TallyBridgeMapping::from_ndi_byte(0x03), GenericTallyState::ProgramAndPreview);
+        assert_eq!(
+            TallyBridgeMapping::from_ndi_byte(0x00),
+            GenericTallyState::Off
+        );
+        assert_eq!(
+            TallyBridgeMapping::from_ndi_byte(0x01),
+            GenericTallyState::Program
+        );
+        assert_eq!(
+            TallyBridgeMapping::from_ndi_byte(0x02),
+            GenericTallyState::Preview
+        );
+        assert_eq!(
+            TallyBridgeMapping::from_ndi_byte(0x03),
+            GenericTallyState::ProgramAndPreview
+        );
     }
 
     // ── MultiSourceTallyAggregator ────────────────────────────────────────────

@@ -112,10 +112,7 @@ impl DrcLimiter {
             }
 
             // Output the oldest sample from the delay line with gain applied.
-            let delayed = self
-                .delay_buf
-                .pop_front()
-                .unwrap_or(0.0);
+            let delayed = self.delay_buf.pop_front().unwrap_or(0.0);
             *sample = delayed * self.current_gain;
         }
     }
@@ -155,13 +152,12 @@ mod tests {
         // Process a long quiet signal. Verify all outputs are below the
         // threshold (gain should remain near 1.0).
         let mut limiter = DrcLimiter::new(0.9, 4);
-        let mut samples: Vec<f32> = (0..128).map(|i| if i % 2 == 0 { 0.1 } else { -0.1 }).collect();
+        let mut samples: Vec<f32> = (0..128)
+            .map(|i| if i % 2 == 0 { 0.1 } else { -0.1 })
+            .collect();
         limiter.process(&mut samples);
         for &s in &samples {
-            assert!(
-                s.abs() <= 0.15,
-                "quiet signal should not be amplified: {s}"
-            );
+            assert!(s.abs() <= 0.15, "quiet signal should not be amplified: {s}");
         }
     }
 

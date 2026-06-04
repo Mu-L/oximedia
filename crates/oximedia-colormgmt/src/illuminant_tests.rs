@@ -113,12 +113,22 @@ mod tests {
 
     #[test]
     fn test_bradford_d50_d65_round_trip() {
-        assert_round_trip(&d50(), &d65(), AdaptationMethod::Bradford, "Bradford D50→D65");
+        assert_round_trip(
+            &d50(),
+            &d65(),
+            AdaptationMethod::Bradford,
+            "Bradford D50→D65",
+        );
     }
 
     #[test]
     fn test_bradford_d65_d50_round_trip() {
-        assert_round_trip(&d65(), &d50(), AdaptationMethod::Bradford, "Bradford D65→D50");
+        assert_round_trip(
+            &d65(),
+            &d50(),
+            AdaptationMethod::Bradford,
+            "Bradford D65→D50",
+        );
     }
 
     #[test]
@@ -211,8 +221,7 @@ mod tests {
 
     #[test]
     fn test_bradford_identity_d65_to_d65() {
-        let mat =
-            compute_adaptation_matrix(&d65(), &d65(), AdaptationMethod::Bradford);
+        let mat = compute_adaptation_matrix(&d65(), &d65(), AdaptationMethod::Bradford);
         let original = test_xyz();
         let result = adapt_xyz(original, &mat);
         assert!(

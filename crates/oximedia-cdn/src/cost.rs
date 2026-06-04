@@ -1,6 +1,6 @@
 //! CDN cost analytics.
 //!
-//! [`CdnCostAnalytics`] records data transfer events per CDN provider and
+//! `CdnCostAnalytics` records data transfer events per CDN provider and
 //! accumulates the total dollar cost based on configurable per-GB pricing.
 
 use std::collections::HashMap;
@@ -75,10 +75,7 @@ impl CdnCostAnalytics {
 
     /// Total bytes transferred for a specific provider.
     pub fn bytes_for(&self, cdn: &str) -> u64 {
-        self.providers
-            .get(cdn)
-            .map(|s| s.total_bytes)
-            .unwrap_or(0)
+        self.providers.get(cdn).map(|s| s.total_bytes).unwrap_or(0)
     }
 
     /// Number of distinct CDN providers tracked.

@@ -53,9 +53,7 @@ mod duration_micros {
         dur.as_micros().serialize(s)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        d: D,
-    ) -> std::result::Result<Duration, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Duration, D::Error> {
         let micros = u128::deserialize(d)?;
         Ok(Duration::from_micros(micros as u64))
     }
@@ -344,9 +342,7 @@ impl ProfilingSession {
 /// metric variants.  Returns `0.0` for text metrics.
 fn numeric_delta_pct(baseline: &SessionMetric, current: &SessionMetric) -> f64 {
     let (b, c) = match (baseline, current) {
-        (SessionMetric::Count(b), SessionMetric::Count(c)) => {
-            (*b as f64, *c as f64)
-        }
+        (SessionMetric::Count(b), SessionMetric::Count(c)) => (*b as f64, *c as f64),
         (SessionMetric::Rate(b), SessionMetric::Rate(c)) => (*b, *c),
         (SessionMetric::Duration(b), SessionMetric::Duration(c)) => {
             (b.as_secs_f64(), c.as_secs_f64())
@@ -507,13 +503,13 @@ mod tests {
     #[test]
     fn test_json_roundtrip_duration_metric() {
         let mut s = ProfilingSession::new("dur");
-        s.record_metric(
-            "t",
-            SessionMetric::Duration(Duration::from_millis(42)),
-        );
+        s.record_metric("t", SessionMetric::Duration(Duration::from_millis(42)));
         let json = s.to_json().expect("should succeed in test");
         let back = ProfilingSession::from_json(&json).expect("should succeed in test");
-        assert_eq!(back.metric("t"), Some(&SessionMetric::Duration(Duration::from_millis(42))));
+        assert_eq!(
+            back.metric("t"),
+            Some(&SessionMetric::Duration(Duration::from_millis(42)))
+        );
     }
 
     #[test]
@@ -581,9 +577,6 @@ mod tests {
         assert!(SessionMetric::Percentage(75.5)
             .to_string()
             .contains("75.50"));
-        assert_eq!(
-            SessionMetric::Text("hi".to_string()).to_string(),
-            "hi"
-        );
+        assert_eq!(SessionMetric::Text("hi".to_string()).to_string(), "hi");
     }
 }

@@ -1,12 +1,27 @@
-#![allow(dead_code)]
 //! Subtitle and timed-text resource management for IMF packages.
 //!
 //! IMF packages may include IMSC1 (TTML-based) subtitle tracks as separate
 //! essence files. This module provides structures for managing subtitle resources
 //! within an IMF composition, including timing, language mapping, and validation.
+//!
+//! # TTML / WebVTT parsing
+//!
+//! Two lightweight parsers are included:
+//! - [`parse_ttml`] — parses a TTML/IMSC1 XML document and extracts [`TtmlCue`] entries
+//! - [`parse_webvtt`] — parses a WebVTT text document and extracts [`TtmlCue`] entries
+//!
+//! Both parsers share the same output type so downstream code can work with either
+//! subtitle format uniformly.
 
 use std::collections::HashMap;
 use std::fmt;
+use std::time::Duration;
+
+use quick_xml::events::Event;
+use quick_xml::reader::Reader;
+use quick_xml::XmlVersion;
+
+use crate::ImfError;
 
 /// Subtitle format type within an IMF package.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -282,6 +297,464 @@ impl Default for SubtitleResourceManager {
     }
 }
 
+// ---- TTML / WebVTT cue types and parsers ----
+
+/// Style attributes extracted from a TTML `<style>` or inline `tts:*` attributes.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TtmlStyle {
+    /// Font size in pixels (or em-equivalent), if present.
+    pub font_size: Option<f32>,
+    /// RGB text colour encoded as `[R, G, B]` bytes, if present.
+    pub color: Option<[u8; 3]>,
+    /// Whether italic style is applied.
+    pub italic: bool,
+}
+
+/// A single timed text cue, compatible with both TTML and WebVTT origins.
+///
+/// When parsed from TTML the `id` field is taken from the `xml:id` attribute of
+/// the `<p>` element (or an empty string when absent). When parsed from WebVTT the
+/// optional cue identifier line is used.
+#[derive(Debug, Clone)]
+pub struct TtmlCue {
+    /// Presentation start time.
+    pub begin: Duration,
+    /// Presentation end time.
+    pub end: Duration,
+    /// Cue identifier (may be empty).
+    pub id: String,
+    /// Plain text content (HTML/TTML markup stripped).
+    pub text: String,
+    /// Optional style information extracted from inline attributes.
+    pub style: Option<TtmlStyle>,
+}
+
+/// Parse a TTML/IMSC1 XML document (as raw bytes) into a sequence of [`TtmlCue`]s.
+///
+/// Only a minimal subset of the TTML specification is supported: `<p>` elements
+/// anywhere inside the document tree with `begin`, `end`, and optional `xml:id`
+/// attributes. The `tts:color`, `tts:fontSize`, and `tts:fontStyle` attributes are
+/// parsed for basic style support.
+///
+/// # Errors
+/// Returns [`ImfError::XmlError`] when the document is not well-formed XML, or
+/// [`ImfError::InvalidStructure`] for unrecognisable timestamp syntax.
+pub fn parse_ttml(xml_bytes: &[u8]) -> Result<Vec<TtmlCue>, ImfError> {
+    let mut reader = Reader::from_reader(xml_bytes);
+    reader.config_mut().trim_text(true);
+
+    let mut cues: Vec<TtmlCue> = Vec::new();
+    // Whether we are currently inside a <p> element collecting text.
+    let mut in_paragraph = false;
+    let mut current_begin: Option<Duration> = None;
+    let mut current_end: Option<Duration> = None;
+    let mut current_id = String::new();
+    let mut current_text = String::new();
+    let mut current_style: Option<TtmlStyle> = None;
+    // Nesting depth inside a <p> element (for <span> children etc.)
+    let mut para_depth: u32 = 0;
+
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) => {
+                let qname = e.name();
+                let local_name = local_name_of(qname.as_ref());
+                if local_name == "p" && !in_paragraph {
+                    // Parse begin/end/xml:id/style from <p> attributes
+                    let (begin_ts, end_ts, id_attr, style, has_style) =
+                        parse_p_attributes(e.attributes())?;
+
+                    if let (Some(b), Some(ev)) = (begin_ts, end_ts) {
+                        current_begin = Some(b);
+                        current_end = Some(ev);
+                        current_id = id_attr;
+                        current_text.clear();
+                        current_style = if has_style { Some(style) } else { None };
+                        in_paragraph = true;
+                        para_depth = 1;
+                    }
+                } else if in_paragraph {
+                    para_depth += 1;
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                let qname = e.name();
+                let local_name = local_name_of(qname.as_ref());
+                if in_paragraph {
+                    para_depth -= 1;
+                    if para_depth == 0 {
+                        // Closing </p>
+                        let begin = current_begin.take().unwrap_or(Duration::ZERO);
+                        let end = current_end.take().unwrap_or(Duration::ZERO);
+                        cues.push(TtmlCue {
+                            begin,
+                            end,
+                            id: std::mem::take(&mut current_id),
+                            text: current_text.trim().to_string(),
+                            style: current_style.take(),
+                        });
+                        in_paragraph = false;
+                    } else if local_name == "br" {
+                        // Handle explicit </br> (unusual but valid)
+                        current_text.push('\n');
+                    }
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                let qname = e.name();
+                let local_name = local_name_of(qname.as_ref());
+                if in_paragraph {
+                    // Self-closing tags inside <p>, e.g. <br/>
+                    if local_name == "br" {
+                        current_text.push('\n');
+                    }
+                } else if local_name == "p" {
+                    // Self-closing <p begin=... end=.../> (empty cue)
+                    let (begin_ts, end_ts, id_attr, _, _) = parse_p_attributes(e.attributes())?;
+                    if let (Some(b), Some(ev)) = (begin_ts, end_ts) {
+                        cues.push(TtmlCue {
+                            begin: b,
+                            end: ev,
+                            id: id_attr,
+                            text: String::new(),
+                            style: None,
+                        });
+                    }
+                }
+            }
+            Ok(Event::Text(ref t)) => {
+                if in_paragraph {
+                    let text = t.decode().map_err(|e| ImfError::XmlError(e.to_string()))?;
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        if !current_text.is_empty() {
+                            current_text.push(' ');
+                        }
+                        current_text.push_str(trimmed);
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(ImfError::XmlError(e.to_string())),
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    Ok(cues)
+}
+
+/// Parse TTML `<p>` element attributes into timing, id, and style fields.
+///
+/// Returns `(begin, end, xml_id, style, has_style_attr)`.
+fn parse_p_attributes(
+    attributes: quick_xml::events::attributes::Attributes<'_>,
+) -> Result<(Option<Duration>, Option<Duration>, String, TtmlStyle, bool), ImfError> {
+    let mut begin_ts: Option<Duration> = None;
+    let mut end_ts: Option<Duration> = None;
+    let mut id_attr = String::new();
+    let mut style = TtmlStyle::default();
+    let mut has_style = false;
+
+    for attr_result in attributes {
+        let attr = attr_result.map_err(|e| ImfError::XmlError(e.to_string()))?;
+        let key_bytes = attr.key.as_ref();
+        let key = std::str::from_utf8(key_bytes).map_err(|e| ImfError::XmlError(e.to_string()))?;
+        let value = attr
+            .normalized_value(XmlVersion::Implicit1_0)
+            .map_err(|e| ImfError::XmlError(e.to_string()))?;
+
+        match key {
+            "begin" => {
+                begin_ts = Some(parse_ttml_timestamp(value.as_ref())?);
+            }
+            "end" => {
+                end_ts = Some(parse_ttml_timestamp(value.as_ref())?);
+            }
+            "xml:id" | "id" => {
+                id_attr = value.into_owned();
+            }
+            "tts:color" => {
+                if let Some(rgb) = parse_ttml_color(value.as_ref()) {
+                    style.color = Some(rgb);
+                    has_style = true;
+                }
+            }
+            "tts:fontSize" => {
+                // Strip unit suffix before parsing: "18px" → 18.0, "80%" → 80.0
+                let numeric = value
+                    .trim_end_matches("px")
+                    .trim_end_matches("em")
+                    .trim_end_matches('%');
+                if let Ok(fs) = numeric.parse::<f32>() {
+                    style.font_size = Some(fs);
+                    has_style = true;
+                }
+            }
+            "tts:fontStyle" => {
+                if value.as_ref() == "italic" {
+                    style.italic = true;
+                    has_style = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok((begin_ts, end_ts, id_attr, style, has_style))
+}
+
+/// Parse a WebVTT text document into a sequence of [`TtmlCue`]s.
+///
+/// Supports:
+/// - The mandatory `WEBVTT` header line
+/// - Optional cue ID lines (any line not containing `-->`)
+/// - Cue timing lines in the format `HH:MM:SS.mmm --> HH:MM:SS.mmm`
+/// - Multi-line cue text, terminated by a blank line
+///
+/// Style/positioning metadata after the `-->` timing is silently ignored.
+///
+/// # Errors
+/// Returns [`ImfError::InvalidStructure`] for malformed timestamp syntax.
+pub fn parse_webvtt(text: &str) -> Result<Vec<TtmlCue>, ImfError> {
+    let mut cues: Vec<TtmlCue> = Vec::new();
+    let mut lines = text.lines().peekable();
+
+    // Verify WEBVTT header
+    match lines.next() {
+        Some(header) if header.starts_with("WEBVTT") => {}
+        Some(other) => {
+            return Err(ImfError::InvalidStructure(format!(
+                "WebVTT document must start with 'WEBVTT', got: {other:?}"
+            )));
+        }
+        None => return Ok(cues), // empty document
+    }
+
+    // Skip the rest of the header block (until first blank line)
+    for line in lines.by_ref() {
+        if line.trim().is_empty() {
+            break;
+        }
+    }
+
+    // Parse cue blocks.
+    // Each iteration scans ahead for the next timing line, then collects cue text.
+    loop {
+        // Scan forward for a timing line, recording an optional cue ID.
+        // Returns None when the input is exhausted.
+        let timing = find_next_webvtt_timing(&mut lines)?;
+        let (begin, end, candidate_id) = match timing {
+            Some(t) => t,
+            None => break,
+        };
+
+        // Collect cue text lines until a blank line or end of input.
+        let mut text_lines: Vec<String> = Vec::new();
+        loop {
+            match lines.peek() {
+                None => break,
+                Some(l) if l.trim().is_empty() => {
+                    let _ = lines.next(); // consume the blank line
+                    break;
+                }
+                Some(_) => {
+                    if let Some(l) = lines.next() {
+                        text_lines.push(l.to_string());
+                    }
+                }
+            }
+        }
+
+        cues.push(TtmlCue {
+            begin,
+            end,
+            id: candidate_id.unwrap_or_default(),
+            text: text_lines.join("\n"),
+            style: None,
+        });
+    }
+
+    Ok(cues)
+}
+
+/// Advance `lines` until a WebVTT timing line (`-->`) is found.
+///
+/// Returns `Some((begin, end, cue_id))` when a timing line is located, or
+/// `None` when the iterator is exhausted without finding one.
+/// A non-timing, non-blank line immediately before a timing line is treated
+/// as the cue identifier.
+fn find_next_webvtt_timing(
+    lines: &mut std::iter::Peekable<std::str::Lines<'_>>,
+) -> Result<Option<(Duration, Duration, Option<String>)>, ImfError> {
+    let mut candidate_id: Option<String> = None;
+
+    loop {
+        match lines.next() {
+            None => return Ok(None),
+            Some(line) if line.trim().is_empty() => {
+                // Blank line resets any pending cue ID
+                candidate_id = None;
+            }
+            Some(line) if line.contains("-->") => {
+                let (begin, end) = parse_webvtt_timing_line(line)?;
+                return Ok(Some((begin, end, candidate_id)));
+            }
+            Some(line) => {
+                // Non-blank, non-timing line: treat as a potential cue identifier
+                candidate_id = Some(line.trim().to_string());
+            }
+        }
+    }
+}
+
+/// Extract the local XML element name, stripping any namespace prefix.
+///
+/// For example `ttml:p` → `p`, `p` → `p`.
+fn local_name_of(qualified: &[u8]) -> &str {
+    let s = std::str::from_utf8(qualified).unwrap_or("");
+    // quick-xml returns the local name (without prefix) from `name()`.
+    // The colon check is a safety net for implementations that may include the prefix.
+    match s.rfind(':') {
+        Some(pos) => &s[pos + 1..],
+        None => s,
+    }
+}
+
+/// Parse a TTML clock-value timestamp string into a [`Duration`].
+///
+/// Supports the following TTML time expression formats (TTML 1.0 §7.4.1):
+/// - `HH:MM:SS` — hours, minutes, seconds
+/// - `HH:MM:SS.mmm` — with fractional seconds (millisecond precision)
+/// - `S.mmm` — plain seconds with optional fraction (no colons)
+///
+/// SMPTE timecode format `HH:MM:SS:FF` is handled by treating the frames
+/// component as sub-second (assuming 30 fps as a safe default).
+///
+/// # Errors
+/// Returns [`ImfError::InvalidStructure`] for values that cannot be parsed.
+fn parse_ttml_timestamp(s: &str) -> Result<Duration, ImfError> {
+    let s = s.trim();
+
+    // Count colons to determine format
+    let colon_count = s.bytes().filter(|&b| b == b':').count();
+
+    if colon_count >= 2 {
+        // HH:MM:SS or HH:MM:SS.mmm or HH:MM:SS:FF
+        let parts: Vec<&str> = s.splitn(4, ':').collect();
+        let hours: u64 = parts[0].parse().map_err(|_| {
+            ImfError::InvalidStructure(format!("Invalid TTML timestamp hours: {s}"))
+        })?;
+        let minutes: u64 = parts[1].parse().map_err(|_| {
+            ImfError::InvalidStructure(format!("Invalid TTML timestamp minutes: {s}"))
+        })?;
+        // parts[2] may be "SS" or "SS.mmm"
+        let (secs, millis) = parse_seconds_fraction(parts[2], s)?;
+        let total_millis = hours * 3_600_000 + minutes * 60_000 + secs * 1000 + millis;
+
+        // If there is a 4th part it is frames (SMPTE timecode) — approximate at 30 fps
+        let frame_millis = if parts.len() == 4 {
+            let frames: u64 = parts[3].parse().map_err(|_| {
+                ImfError::InvalidStructure(format!("Invalid TTML timestamp frames: {s}"))
+            })?;
+            (frames * 1000) / 30
+        } else {
+            0
+        };
+
+        Ok(Duration::from_millis(total_millis + frame_millis))
+    } else if colon_count == 1 {
+        // MM:SS or MM:SS.mmm (WebVTT short form — should not appear in TTML but be lenient)
+        let parts: Vec<&str> = s.splitn(2, ':').collect();
+        let minutes: u64 = parts[0].parse().map_err(|_| {
+            ImfError::InvalidStructure(format!("Invalid TTML timestamp minutes: {s}"))
+        })?;
+        let (secs, millis) = parse_seconds_fraction(parts[1], s)?;
+        let total_millis = minutes * 60_000 + secs * 1000 + millis;
+        Ok(Duration::from_millis(total_millis))
+    } else {
+        // Plain seconds: S or S.mmm
+        let (secs, millis) = parse_seconds_fraction(s, s)?;
+        Ok(Duration::from_millis(secs * 1000 + millis))
+    }
+}
+
+/// Split `"SS"` or `"SS.mmm"` into `(seconds, milliseconds)`.
+fn parse_seconds_fraction(s: &str, context: &str) -> Result<(u64, u64), ImfError> {
+    let err =
+        || ImfError::InvalidStructure(format!("Invalid seconds value in timestamp: {context}"));
+    if let Some((sec_str, frac_str)) = s.split_once('.') {
+        let secs: u64 = sec_str.parse().map_err(|_| err())?;
+        // Normalise fraction to milliseconds (pad/truncate to 3 digits)
+        let millis = normalise_fraction_to_millis(frac_str)?;
+        Ok((secs, millis))
+    } else {
+        let secs: u64 = s.trim().parse().map_err(|_| err())?;
+        Ok((secs, 0))
+    }
+}
+
+/// Normalise a decimal fraction string (e.g. `"5"`, `"50"`, `"500"`, `"5000"`) to
+/// an integer number of **milliseconds**.
+///
+/// - `"5"`   → 500 ms  (pad right to 3 digits: "500")
+/// - `"50"`  → 500 ms  ("500")
+/// - `"500"` → 500 ms  (exact)
+/// - `"5000"` → 500 ms  (truncate to 3 digits)
+fn normalise_fraction_to_millis(frac: &str) -> Result<u64, ImfError> {
+    // Truncate or pad to exactly 3 digits
+    let padded: String = if frac.len() >= 3 {
+        frac[..3].to_string()
+    } else {
+        format!("{:0<3}", frac)
+    };
+    padded
+        .parse()
+        .map_err(|_| ImfError::InvalidStructure(format!("Invalid fractional seconds: {frac}")))
+}
+
+/// Parse a WebVTT timing line of the form `HH:MM:SS.mmm --> HH:MM:SS.mmm [settings]`.
+///
+/// The optional settings portion after the second timestamp is silently discarded.
+fn parse_webvtt_timing_line(line: &str) -> Result<(Duration, Duration), ImfError> {
+    let err = || ImfError::InvalidStructure(format!("Invalid WebVTT timing line: {line}"));
+    let (begin_part, rest) = line.split_once("-->").ok_or_else(err)?;
+    // The rest may have trailing settings like `align:start position:10%`
+    let end_part = rest.split_whitespace().next().ok_or_else(err)?;
+    let begin = parse_ttml_timestamp(begin_part.trim())?;
+    let end = parse_ttml_timestamp(end_part.trim())?;
+    Ok((begin, end))
+}
+
+/// Parse a TTML `tts:color` attribute value into an RGB byte triple.
+///
+/// Supports:
+/// - Named colours: `white`, `black`, `yellow`, `red`, `green`, `blue`, `cyan`, `magenta`
+/// - Hex colours: `#RRGGBB` or `#RRGGBBAA` (alpha channel is ignored)
+fn parse_ttml_color(s: &str) -> Option<[u8; 3]> {
+    let s = s.trim().to_lowercase();
+    match s.as_str() {
+        "white" => Some([255, 255, 255]),
+        "black" => Some([0, 0, 0]),
+        "yellow" => Some([255, 255, 0]),
+        "red" => Some([255, 0, 0]),
+        "green" => Some([0, 128, 0]),
+        "lime" => Some([0, 255, 0]),
+        "blue" => Some([0, 0, 255]),
+        "cyan" => Some([0, 255, 255]),
+        "magenta" => Some([255, 0, 255]),
+        _ if s.starts_with('#') && (s.len() == 7 || s.len() == 9) => {
+            let hex = &s[1..];
+            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+            Some([r, g, b])
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,5 +895,238 @@ mod tests {
         let tr = SubtitleTimeRange::new(0, 100, 0, 1);
         assert_eq!(tr.duration_seconds(), 0.0);
         assert_eq!(tr.entry_point_seconds(), 0.0);
+    }
+
+    // ---- TTML / WebVTT parser tests ----
+
+    /// Minimal valid 2-cue TTML document
+    const TTML_BASIC: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<tt xmlns="http://www.w3.org/ns/ttml">
+  <body>
+    <div>
+      <p begin="00:00:01.000" end="00:00:03.000" xml:id="c1">Hello world</p>
+      <p begin="00:00:05.500" end="00:00:08.000" xml:id="c2">Second cue</p>
+    </div>
+  </body>
+</tt>"#;
+
+    #[test]
+    fn test_parse_ttml_basic() {
+        let cues = parse_ttml(TTML_BASIC.as_bytes()).expect("parse_ttml should succeed");
+        assert_eq!(cues.len(), 2, "Expected 2 cues, got {}", cues.len());
+
+        let c1 = &cues[0];
+        assert_eq!(c1.id, "c1");
+        assert_eq!(c1.text, "Hello world");
+        assert_eq!(c1.begin, Duration::from_secs(1));
+        assert_eq!(c1.end, Duration::from_secs(3));
+
+        let c2 = &cues[1];
+        assert_eq!(c2.id, "c2");
+        assert_eq!(c2.text, "Second cue");
+        assert_eq!(c2.begin, Duration::from_millis(5_500));
+        assert_eq!(c2.end, Duration::from_secs(8));
+    }
+
+    #[test]
+    fn test_parse_empty_ttml() {
+        let empty_ttml = r#"<?xml version="1.0"?>
+<tt xmlns="http://www.w3.org/ns/ttml"><body><div></div></body></tt>"#;
+        let cues =
+            parse_ttml(empty_ttml.as_bytes()).expect("parse_ttml on empty doc should succeed");
+        assert!(cues.is_empty(), "Empty TTML document should yield no cues");
+    }
+
+    #[test]
+    fn test_parse_ttml_style() {
+        let ttml_with_style = r##"<?xml version="1.0"?>
+<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling">
+  <body>
+    <div>
+      <p begin="00:00:01.000" end="00:00:02.000" xml:id="s1"
+         tts:color="yellow" tts:fontSize="18px" tts:fontStyle="italic">Styled cue</p>
+    </div>
+  </body>
+</tt>"##;
+        let cues = parse_ttml(ttml_with_style.as_bytes()).expect("should parse styled TTML");
+        assert_eq!(cues.len(), 1);
+        let style = cues[0].style.as_ref().expect("style should be present");
+        assert_eq!(
+            style.color,
+            Some([255, 255, 0]),
+            "yellow should decode to [255,255,0]"
+        );
+        assert!(style.italic, "italic style should be true");
+        assert!(style.font_size.is_some(), "font_size should be parsed");
+        let fs = style
+            .font_size
+            .expect("font_size should be Some after parsing tts:fontSize");
+        assert!((fs - 18.0).abs() < 0.01, "font_size should be ~18.0");
+    }
+
+    #[test]
+    fn test_parse_ttml_hex_color() {
+        let ttml = r##"<?xml version="1.0"?>
+<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling">
+  <body>
+    <div>
+      <p begin="00:00:01.000" end="00:00:02.000" xml:id="h1"
+         tts:color="#FF8000">Orange cue</p>
+    </div>
+  </body>
+</tt>"##;
+        let cues = parse_ttml(ttml.as_bytes()).expect("should parse hex-color TTML");
+        let style = cues[0].style.as_ref().expect("style should be present");
+        assert_eq!(style.color, Some([0xFF, 0x80, 0x00]));
+    }
+
+    #[test]
+    fn test_parse_ttml_fractional_seconds() {
+        // Plain fractional second timestamps (no colons)
+        let ttml = r#"<?xml version="1.0"?>
+<tt xmlns="http://www.w3.org/ns/ttml">
+  <body><div>
+    <p begin="3.5" end="7.25" xml:id="f1">Fractional</p>
+  </div></body>
+</tt>"#;
+        let cues = parse_ttml(ttml.as_bytes()).expect("should parse fractional-second TTML");
+        assert_eq!(cues[0].begin, Duration::from_millis(3_500));
+        assert_eq!(cues[0].end, Duration::from_millis(7_250));
+    }
+
+    // ---- WebVTT tests ----
+
+    const VTT_BASIC: &str = "WEBVTT\n\n\
+c1\n\
+00:00:01.000 --> 00:00:03.000\n\
+Hello world\n\
+\n\
+c2\n\
+00:00:05.500 --> 00:00:08.000\n\
+Second cue\n";
+
+    #[test]
+    fn test_parse_webvtt_basic() {
+        let cues = parse_webvtt(VTT_BASIC).expect("parse_webvtt should succeed");
+        assert_eq!(cues.len(), 2, "Expected 2 cues, got {}", cues.len());
+
+        assert_eq!(cues[0].id, "c1");
+        assert_eq!(cues[0].text, "Hello world");
+        assert_eq!(cues[0].begin, Duration::from_secs(1));
+        assert_eq!(cues[0].end, Duration::from_secs(3));
+
+        assert_eq!(cues[1].id, "c2");
+        assert_eq!(cues[1].text, "Second cue");
+        assert_eq!(cues[1].begin, Duration::from_millis(5_500));
+        assert_eq!(cues[1].end, Duration::from_secs(8));
+    }
+
+    #[test]
+    fn test_parse_webvtt_no_cue_ids() {
+        let vtt = "WEBVTT\n\n\
+00:00:01.000 --> 00:00:02.000\n\
+Line one\n\
+\n\
+00:00:03.000 --> 00:00:04.000\n\
+Line two\n";
+        let cues = parse_webvtt(vtt).expect("should parse VTT without cue IDs");
+        assert_eq!(cues.len(), 2);
+        assert!(
+            cues[0].id.is_empty(),
+            "id should be empty when not provided"
+        );
+        assert_eq!(cues[0].text, "Line one");
+    }
+
+    #[test]
+    fn test_parse_webvtt_multiline_cue_text() {
+        let vtt = "WEBVTT\n\n\
+00:00:01.000 --> 00:00:05.000\n\
+First line\n\
+Second line\n\
+Third line\n";
+        let cues = parse_webvtt(vtt).expect("should parse multi-line VTT cue");
+        assert_eq!(cues.len(), 1);
+        assert!(
+            cues[0].text.contains("First line"),
+            "text must contain first line"
+        );
+        assert!(
+            cues[0].text.contains("Second line"),
+            "text must contain second line"
+        );
+        assert!(
+            cues[0].text.contains("Third line"),
+            "text must contain third line"
+        );
+    }
+
+    #[test]
+    fn test_parse_webvtt_with_settings() {
+        // Timing line with position/align settings — must be silently ignored
+        let vtt = "WEBVTT\n\n\
+00:00:01.000 --> 00:00:02.000 align:start position:10%\n\
+Positioned cue\n";
+        let cues = parse_webvtt(vtt).expect("should parse VTT with cue settings");
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].begin, Duration::from_secs(1));
+        assert_eq!(cues[0].text, "Positioned cue");
+    }
+
+    #[test]
+    fn test_parse_webvtt_empty() {
+        let vtt = "WEBVTT\n\n";
+        let cues = parse_webvtt(vtt).expect("empty WebVTT should succeed");
+        assert!(cues.is_empty());
+    }
+
+    #[test]
+    fn test_parse_webvtt_invalid_header() {
+        let result = parse_webvtt("NOTWEBVTT\n\ncue text\n");
+        assert!(
+            result.is_err(),
+            "Non-WEBVTT document should return an error"
+        );
+    }
+
+    #[test]
+    fn test_ttml_timestamp_hours() {
+        // 1 hour, 30 minutes, 45 seconds, 500 ms
+        let d = parse_ttml_timestamp("01:30:45.500").expect("valid timestamp");
+        let expected_ms = 1 * 3_600_000 + 30 * 60_000 + 45 * 1000 + 500;
+        assert_eq!(d, Duration::from_millis(expected_ms));
+    }
+
+    #[test]
+    fn test_ttml_timestamp_plain_seconds() {
+        let d = parse_ttml_timestamp("12.345").expect("plain seconds");
+        assert_eq!(d, Duration::from_millis(12_345));
+    }
+
+    #[test]
+    fn test_normalise_fraction_padding() {
+        // "5" → 500ms (left-aligned, pad right)
+        let d = parse_ttml_timestamp("00:00:01.5").expect("fraction pad");
+        assert_eq!(d, Duration::from_millis(1_500));
+    }
+
+    #[test]
+    fn test_ttml_color_named() {
+        assert_eq!(parse_ttml_color("white"), Some([255, 255, 255]));
+        assert_eq!(parse_ttml_color("BLACK"), Some([0, 0, 0]));
+        assert_eq!(parse_ttml_color("Yellow"), Some([255, 255, 0]));
+    }
+
+    #[test]
+    fn test_ttml_color_hex() {
+        assert_eq!(parse_ttml_color("#ff0000"), Some([255, 0, 0]));
+        // With alpha channel (#RRGGBBAA) — alpha ignored
+        assert_eq!(parse_ttml_color("#00FF00FF"), Some([0, 255, 0]));
+    }
+
+    #[test]
+    fn test_ttml_color_unknown() {
+        assert_eq!(parse_ttml_color("chartreuse"), None);
+        assert_eq!(parse_ttml_color("#GG0000"), None);
     }
 }

@@ -286,13 +286,7 @@ impl RetroFilmEffect {
     /// `nx`, `ny`: normalised pixel position in [0, 1].
     /// `rgba`: original pixel.
     /// `rng`: LCG instance for grain.
-    fn process_pixel(
-        &self,
-        rgba: [u8; 4],
-        nx: f32,
-        ny: f32,
-        rng: &mut Lcg,
-    ) -> [u8; 4] {
+    fn process_pixel(&self, rgba: [u8; 4], nx: f32, ny: f32, rng: &mut Lcg) -> [u8; 4] {
         let cfg = &self.config;
 
         // --- Step 1: linearise to [0, 1] ---
@@ -534,9 +528,7 @@ mod tests {
         let mut fx = RetroFilmEffect::from_preset(RetroFilmPreset::Sepia);
         let input = Frame::new(32, 32).expect("frame");
         let mut output = Frame::new(16, 16).expect("frame");
-        assert!(fx
-            .apply(&input, &mut output, &EffectParams::new())
-            .is_err());
+        assert!(fx.apply(&input, &mut output, &EffectParams::new()).is_err());
     }
 
     #[test]

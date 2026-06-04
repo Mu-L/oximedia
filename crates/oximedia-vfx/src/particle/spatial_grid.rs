@@ -99,7 +99,6 @@ impl SpatialGrid {
         let min_cy = self.world_to_cell(y - r);
         let max_cy = self.world_to_cell(y + r);
 
-        let r2 = r * r;
         let mut result = Vec::new();
 
         for cy in min_cy..=max_cy {
@@ -226,7 +225,10 @@ mod tests {
         let result = g.query_radius_exact(50.0, 50.0, 10.0, &positions);
         assert!(result.contains(&0));
         assert!(result.contains(&1));
-        assert!(!result.contains(&2), "62 should be outside radius 10: {result:?}");
+        assert!(
+            !result.contains(&2),
+            "62 should be outside radius 10: {result:?}"
+        );
     }
 
     #[test]

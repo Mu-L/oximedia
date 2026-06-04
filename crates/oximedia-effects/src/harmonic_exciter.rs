@@ -207,6 +207,8 @@ impl HarmonicExciter {
 }
 
 impl crate::AudioEffect for HarmonicExciter {
+    const EFFECT_ID: &'static str = "harmonic_exciter";
+
     fn process_sample(&mut self, input: f32) -> f32 {
         self.process_sample(input)
     }

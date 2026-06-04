@@ -517,8 +517,7 @@ mod tests {
     #[test]
     fn test_config_builder() {
         let dir = std::env::temp_dir().join("oximedia-ndi-rec-out");
-        let cfg = RecordingConfig::with_dir(dir.clone())
-            .segment(SegmentPolicy::MaxFrames(100));
+        let cfg = RecordingConfig::with_dir(dir.clone()).segment(SegmentPolicy::MaxFrames(100));
         assert_eq!(cfg.output_dir, dir);
         assert!(matches!(cfg.segment_policy, SegmentPolicy::MaxFrames(100)));
     }

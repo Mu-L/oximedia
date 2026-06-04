@@ -1,15 +1,13 @@
 //! High-level asset relationship graph for the MAM system.
 //!
-//! Provides [`AssetRelationship`], a simple directed edge between two assets
+//! Provides `AssetRelationship`, a simple directed edge between two assets
 //! identified by `u64` IDs with a free-form `rel_type` label, and
-//! [`RelationshipGraph`] which stores and queries these edges.
+//! `RelationshipGraph` which stores and queries these edges.
 //!
 //! This complements the more detailed [`crate::asset_relations`] module
 //! (which uses typed [`crate::asset_relations::RelationKind`] variants) with a
 //! lighter string-keyed API suitable for dynamic or plugin-defined relationship
 //! types.
-
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 

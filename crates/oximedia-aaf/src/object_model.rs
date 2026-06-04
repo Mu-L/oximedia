@@ -65,6 +65,16 @@ impl Default for Header {
     }
 }
 
+/// A locator entry storing an additional file-system path for a mob.
+///
+/// Source mobs may carry multiple locators (e.g. primary path + NFS mirror).
+/// The [`crate::relink`] module uses these to update paths when media is moved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MobLocator {
+    /// The file-system or URI path for this locator.
+    pub path: String,
+}
+
 /// AAF Mob (Master, Source, or Composition)
 #[derive(Debug, Clone)]
 pub struct Mob {
@@ -84,6 +94,10 @@ pub struct Mob {
     pub comments: HashMap<String, String>,
     /// Attributes
     pub attributes: HashMap<String, PropertyValue>,
+    /// Primary source file path (used by source mobs)
+    source_path: Option<String>,
+    /// Additional locator paths
+    locators: Vec<MobLocator>,
 }
 
 impl Mob {
@@ -99,6 +113,8 @@ impl Mob {
             modified_time: None,
             comments: HashMap::new(),
             attributes: HashMap::new(),
+            source_path: None,
+            locators: Vec::new(),
         }
     }
 
@@ -160,6 +176,33 @@ impl Mob {
     /// Add a slot
     pub fn add_slot(&mut self, slot: MobSlot) {
         self.slots.push(slot);
+    }
+
+    /// Get the primary source-file path, if set.
+    #[must_use]
+    pub fn source_path(&self) -> Option<&str> {
+        self.source_path.as_deref()
+    }
+
+    /// Set the primary source-file path.
+    pub fn set_source_path(&mut self, path: &str) {
+        self.source_path = Some(path.to_string());
+    }
+
+    /// Get all locator entries.
+    #[must_use]
+    pub fn locators(&self) -> &[MobLocator] {
+        &self.locators
+    }
+
+    /// Get a mutable reference to the locator list.
+    pub fn locators_mut(&mut self) -> &mut Vec<MobLocator> {
+        &mut self.locators
+    }
+
+    /// Append a locator entry.
+    pub fn add_locator(&mut self, locator: MobLocator) {
+        self.locators.push(locator);
     }
 }
 

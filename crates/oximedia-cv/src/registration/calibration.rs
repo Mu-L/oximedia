@@ -217,7 +217,7 @@ impl LensCorrector {
         let lut = self
             .lut
             .as_ref()
-            .ok_or_else(|| CvError::computation("LUT not built"))?;
+            .ok_or_else(|| CvError::matrix_error("LUT not built"))?;
 
         let mut output = vec![0u8; expected];
         let w = width as usize;
@@ -276,7 +276,7 @@ pub fn estimate_distortion_from_lines(
     intrinsics: &CameraIntrinsics,
 ) -> CvResult<DistortionCoefficients> {
     if line_points.len() < 2 {
-        return Err(CvError::computation(
+        return Err(CvError::matrix_error(
             "need at least 2 line groups for distortion estimation",
         ));
     }

@@ -136,7 +136,7 @@ impl TrimMetadata {
         buf
     }
 
-    /// Deserialise a trim metadata block from bytes produced by [`to_bytes`].
+    /// Deserialise a trim metadata block from bytes produced by `to_bytes`.
     ///
     /// # Errors
     ///

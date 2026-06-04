@@ -179,9 +179,9 @@ impl IiifManifest {
     ///
     /// Returns an error if the file cannot be written.
     pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
-        let json = self.to_json().map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-        })?;
+        let json = self
+            .to_json()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
         std::fs::write(path, json)
     }
 }
@@ -400,11 +400,8 @@ mod tests {
 
     #[test]
     fn test_manifest_json_contains_context() {
-        let manifest = IiifManifestBuilder::new(
-            "https://example.org/iiif/manifest/1",
-            "Test Film",
-        )
-        .build();
+        let manifest =
+            IiifManifestBuilder::new("https://example.org/iiif/manifest/1", "Test Film").build();
         let json = manifest.to_json().expect("json");
         assert!(json.contains(IIIF_CONTEXT));
         assert!(json.contains("Manifest"));
@@ -412,18 +409,15 @@ mod tests {
 
     #[test]
     fn test_manifest_with_image_canvas() {
-        let manifest = IiifManifestBuilder::new(
-            "https://example.org/iiif/m/1",
-            "Film Still",
-        )
-        .add_image_canvas(
-            "https://example.org/images/still001.tif",
-            "image/tiff",
-            3840,
-            2160,
-            Some("Frame 1"),
-        )
-        .build();
+        let manifest = IiifManifestBuilder::new("https://example.org/iiif/m/1", "Film Still")
+            .add_image_canvas(
+                "https://example.org/images/still001.tif",
+                "image/tiff",
+                3840,
+                2160,
+                Some("Frame 1"),
+            )
+            .build();
 
         assert_eq!(manifest.items.len(), 1);
         let canvas = &manifest.items[0];
@@ -434,18 +428,15 @@ mod tests {
 
     #[test]
     fn test_manifest_with_av_canvas() {
-        let manifest = IiifManifestBuilder::new(
-            "https://example.org/iiif/m/2",
-            "News Broadcast",
-        )
-        .add_av_canvas(
-            "https://example.org/media/news.mkv",
-            "Video",
-            "video/x-matroska",
-            1800.0,
-            Some("Main Programme"),
-        )
-        .build();
+        let manifest = IiifManifestBuilder::new("https://example.org/iiif/m/2", "News Broadcast")
+            .add_av_canvas(
+                "https://example.org/media/news.mkv",
+                "Video",
+                "video/x-matroska",
+                1800.0,
+                Some("Main Programme"),
+            )
+            .build();
 
         assert_eq!(manifest.items.len(), 1);
         let canvas = &manifest.items[0];
@@ -477,8 +468,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().expect("temp dir");
         let path = tmp.path().join("manifest.json");
 
-        let manifest = IiifManifestBuilder::new("https://example.org/iiif/m/5", "Test")
-            .build();
+        let manifest = IiifManifestBuilder::new("https://example.org/iiif/m/5", "Test").build();
         manifest.save(&path).expect("save");
         assert!(path.exists());
         let content = std::fs::read_to_string(&path).expect("read");
@@ -488,13 +478,19 @@ mod tests {
     #[test]
     fn test_language_map_plain() {
         let lm = LanguageMap::plain("Hello");
-        assert_eq!(lm.0.get("none").and_then(|v| v.first()).map(String::as_str), Some("Hello"));
+        assert_eq!(
+            lm.0.get("none").and_then(|v| v.first()).map(String::as_str),
+            Some("Hello")
+        );
     }
 
     #[test]
     fn test_language_map_with_lang() {
         let lm = LanguageMap::with_lang("en", "Hello");
-        assert_eq!(lm.0.get("en").and_then(|v| v.first()).map(String::as_str), Some("Hello"));
+        assert_eq!(
+            lm.0.get("en").and_then(|v| v.first()).map(String::as_str),
+            Some("Hello")
+        );
     }
 
     #[test]

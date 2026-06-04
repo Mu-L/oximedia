@@ -11,8 +11,6 @@
 //! For full-frame and system-gamma-adjusted conversions see
 //! [`crate::pq_hlg_convert`] and [`crate::hlg_advanced`].
 
-#![allow(dead_code)]
-
 use crate::transfer_function::{hlg_eotf, pq_oetf};
 use crate::HdrError;
 
@@ -47,15 +45,13 @@ pub fn hlg_to_pq(hlg: f32) -> Result<f32, HdrError> {
     }
 
     // Step 1 — HLG EOTF: HLG signal → scene-linear [0, 1] (1 000 nit reference)
-    let scene_linear = hlg_eotf(hlg as f64)
-        .map_err(|_| HdrError::InvalidLuminance(hlg))?;
+    let scene_linear = hlg_eotf(hlg as f64).map_err(|_| HdrError::InvalidLuminance(hlg))?;
 
     // Step 2 — Scale 1 000 nit → 10 000 nit normalisation (÷ 10)
     let pq_linear = scene_linear / 10.0;
 
     // Step 3 — PQ OETF: scene-linear → PQ signal [0, 1]
-    let pq_signal = pq_oetf(pq_linear)
-        .map_err(|_| HdrError::InvalidLuminance(pq_linear as f32))?;
+    let pq_signal = pq_oetf(pq_linear).map_err(|_| HdrError::InvalidLuminance(pq_linear as f32))?;
 
     Ok(pq_signal as f32)
 }
@@ -79,7 +75,10 @@ mod tests {
     #[test]
     fn test_hlg_to_pq_zero_is_zero() {
         let pq = hlg_to_pq(0.0).expect("valid");
-        assert!(pq.abs() < 1e-3, "hlg=0 should produce near-zero PQ, got {pq}");
+        assert!(
+            pq.abs() < 1e-3,
+            "hlg=0 should produce near-zero PQ, got {pq}"
+        );
     }
 
     #[test]
@@ -91,7 +90,10 @@ mod tests {
     #[test]
     fn test_hlg_to_pq_mid_range() {
         let pq = hlg_to_pq(0.5).expect("valid");
-        assert!(pq > 0.0 && pq < 1.0, "mid-range PQ should be in (0,1), got {pq}");
+        assert!(
+            pq > 0.0 && pq < 1.0,
+            "mid-range PQ should be in (0,1), got {pq}"
+        );
     }
 
     #[test]
@@ -100,7 +102,10 @@ mod tests {
         let mut prev = -1.0f32;
         for &v in &values {
             let pq = hlg_to_pq(v).expect("valid");
-            assert!(pq >= prev, "not monotonic at hlg={v}: pq={pq} < prev={prev}");
+            assert!(
+                pq >= prev,
+                "not monotonic at hlg={v}: pq={pq} < prev={prev}"
+            );
             prev = pq;
         }
     }

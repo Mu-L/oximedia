@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! # Signal Chain
 //!
 //! Models the ordered processing chain that a video/audio signal passes
@@ -46,6 +45,11 @@ pub struct ChainStage {
     pub bypassed: bool,
     /// Arbitrary key/value parameters for the stage processor.
     pub params: Vec<(String, String)>,
+    /// Accumulated nanosecond durations for each invocation of `process`.
+    ///
+    /// Each call to [`ChainStage::record_process_ns`] appends one sample.
+    /// Access the average via [`ChainStage::avg_ns`].
+    pub timing_ns: Vec<u64>,
 }
 
 impl ChainStage {
@@ -57,7 +61,33 @@ impl ChainStage {
             kind,
             bypassed: false,
             params: Vec::new(),
+            timing_ns: Vec::new(),
         }
+    }
+
+    /// Record a process call duration in nanoseconds.
+    ///
+    /// Typically called by the processing harness immediately after the stage's
+    /// work completes:
+    ///
+    /// ```rust,ignore
+    /// let start = std::time::Instant::now();
+    /// // … do work …
+    /// stage.record_process_ns(start.elapsed().as_nanos() as u64);
+    /// ```
+    pub fn record_process_ns(&mut self, elapsed_ns: u64) {
+        self.timing_ns.push(elapsed_ns);
+    }
+
+    /// Return the average nanoseconds per process call, or `0` if no calls
+    /// have been recorded yet.
+    #[must_use]
+    pub fn avg_ns(&self) -> u64 {
+        if self.timing_ns.is_empty() {
+            return 0;
+        }
+        let sum: u64 = self.timing_ns.iter().sum();
+        sum / self.timing_ns.len() as u64
     }
 
     /// Set a parameter value, overwriting any existing value for this key.
@@ -222,6 +252,50 @@ impl SignalChain {
     /// Return all stages in order.
     pub fn stages(&self) -> impl Iterator<Item = &ChainStage> {
         self.stages.iter()
+    }
+
+    /// Return a mutable iterator over all stages.
+    pub fn stages_mut(&mut self) -> impl Iterator<Item = &mut ChainStage> {
+        self.stages.iter_mut()
+    }
+
+    /// Simulate processing one "frame" through the chain.
+    ///
+    /// For each non-bypassed stage this records a zero-duration process call
+    /// (the stage performs no real work — use [`ChainStage::record_process_ns`]
+    /// directly when integrating with real processors).  The method is
+    /// primarily useful for testing the timing infrastructure.
+    pub fn process_noop(&mut self) {
+        for stage in self.stages.iter_mut() {
+            if !stage.bypassed {
+                let start = std::time::Instant::now();
+                // No-op processing body.
+                let elapsed = start.elapsed().as_nanos() as u64;
+                stage.record_process_ns(elapsed);
+            }
+        }
+    }
+
+    /// Return `(stage_name, avg_ns)` for every stage in chain order.
+    ///
+    /// Stages with no recorded calls return an average of `0`.
+    #[must_use]
+    pub fn timing_report(&self) -> Vec<(String, u64)> {
+        self.stages
+            .iter()
+            .map(|s| (s.name.clone(), s.avg_ns()))
+            .collect()
+    }
+
+    /// Return `true` if the sum of all per-stage average nanosecond costs fits
+    /// within `budget_ns`.
+    ///
+    /// A trivial chain where no stage has yet been processed will return `true`
+    /// because the total is `0`.
+    #[must_use]
+    pub fn check_budget_ns(&self, budget_ns: u64) -> bool {
+        let total: u64 = self.stages.iter().map(|s| s.avg_ns()).sum();
+        total <= budget_ns
     }
 
     // ── private helpers ──────────────────────────────────────────────────────
@@ -427,5 +501,73 @@ mod tests {
     fn test_chain_len() {
         let (c, _, _) = build_valid_chain();
         assert_eq!(c.len(), 2);
+    }
+
+    // ── Timing harness tests ─────────────────────────────────────────────────
+
+    /// `timing_report` must return exactly one entry per stage.
+    #[test]
+    fn test_timing_report_has_one_entry_per_stage() {
+        let mut c = SignalChain::new();
+        c.push("In", StageKind::Input).expect("push input");
+        c.push("ColorCorrect", StageKind::VideoProcess)
+            .expect("push video");
+        c.push("Out", StageKind::Output).expect("push output");
+
+        let report = c.timing_report();
+        assert_eq!(
+            report.len(),
+            3,
+            "timing_report must return one entry per stage; got {report:?}"
+        );
+        assert_eq!(report[0].0, "In");
+        assert_eq!(report[1].0, "ColorCorrect");
+        assert_eq!(report[2].0, "Out");
+    }
+
+    /// A trivial no-op chain (zero processing time per stage) must fit within
+    /// a one-60fps-frame budget of 16 666 666 ns.
+    #[test]
+    fn test_check_budget_passes_trivial_chain() {
+        let mut c = SignalChain::new();
+        c.push("In", StageKind::Input).expect("push input");
+        c.push("Out", StageKind::Output).expect("push output");
+
+        // Run one no-op process pass so timing is recorded.
+        c.process_noop();
+
+        // 16.666 ms == one frame at 60 fps.
+        const BUDGET_60FPS_NS: u64 = 16_666_666;
+        assert!(
+            c.check_budget_ns(BUDGET_60FPS_NS),
+            "no-op chain must fit within 60fps frame budget"
+        );
+    }
+
+    /// Injecting synthetic large timing values into stages must cause the
+    /// budget check to return false.
+    #[test]
+    fn test_check_budget_fails_slow_chain() {
+        let mut c = SignalChain::new();
+        c.push("In", StageKind::Input).expect("push input");
+        c.push("SlowProcess", StageKind::VideoProcess)
+            .expect("push video");
+        c.push("Out", StageKind::Output).expect("push output");
+
+        // Inject a synthetic 20 ms (20_000_000 ns) measurement directly into
+        // the SlowProcess stage to simulate a slow processor without actually
+        // sleeping.
+        for stage in c.stages_mut() {
+            if stage.name == "SlowProcess" {
+                stage.record_process_ns(20_000_000); // 20 ms
+            }
+        }
+
+        // Budget: 16.666 ms.  Total is 20 ms → must exceed budget.
+        const BUDGET_60FPS_NS: u64 = 16_666_666;
+        assert!(
+            !c.check_budget_ns(BUDGET_60FPS_NS),
+            "20 ms stage must exceed 60fps frame budget"
+        );
     }
 }

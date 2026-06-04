@@ -362,7 +362,10 @@ mod tests {
         ct.add_keyframe(0.5, 75.0, EasingFunction::Linear);
         // After adding keyframe, cache is invalidated
         let v = ct.evaluate(0.5).expect("value");
-        assert!((v - 75.0).abs() < 1.0, "should be ~75 after new keyframe, got {v}");
+        assert!(
+            (v - 75.0).abs() < 1.0,
+            "should be ~75 after new keyframe, got {v}"
+        );
     }
 
     #[test]

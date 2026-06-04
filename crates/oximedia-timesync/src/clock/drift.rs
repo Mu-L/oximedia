@@ -278,6 +278,153 @@ impl Default for DriftEstimator {
 }
 
 // ---------------------------------------------------------------------------
+// AllanVarianceEstimator
+// ---------------------------------------------------------------------------
+
+/// Standalone Allan variance estimator for oscillator stability characterisation.
+///
+/// Accepts phase observations (in nanoseconds) and computes both the standard
+/// (non-overlapping) and overlapping Allan variance as defined in IEEE Std 1139
+/// and ITU-T G.810.
+///
+/// # Algorithm (standard AVAR)
+/// Given N phase samples x[0..N-1] spaced by nominal τ samples apart:
+///
+/// ```text
+///                      1
+///  AVAR(τ) = ─────────────────── · Σᵢ (x[i+2] − 2·x[i+1] + x[i])²
+///             2·(N − 2)
+/// ```
+///
+/// For the **overlapping** variant the sum runs over all valid `i` for a
+/// chosen averaging factor m:
+///
+/// ```text
+///                           1
+///  OAVAR(τ=m) = ───────────────────── · Σᵢ (x[i+2m] − 2·x[i+m] + x[i])²
+///                2·m²·(N − 2m)
+/// ```
+///
+/// (The m² factor normalises out the averaging time so the result retains
+/// units of (s/s)² rather than (ns)².)
+pub struct AllanVarianceEstimator {
+    /// Stored phase observations in nanoseconds, oldest-first.
+    samples: VecDeque<f64>,
+    /// Maximum number of retained samples.
+    max_samples: usize,
+}
+
+impl AllanVarianceEstimator {
+    /// Creates a new estimator that retains up to `max_samples` phase
+    /// observations.  At least 3 samples are required for any computation;
+    /// `max_samples` is clamped to a minimum of 4.
+    #[must_use]
+    pub fn new(max_samples: usize) -> Self {
+        Self {
+            samples: VecDeque::new(),
+            max_samples: max_samples.max(4),
+        }
+    }
+
+    /// Appends a new phase observation `phase_ns` (in nanoseconds) to the
+    /// estimator, evicting the oldest sample when the capacity is reached.
+    pub fn add_sample(&mut self, phase_ns: f64) {
+        self.samples.push_back(phase_ns);
+        while self.samples.len() > self.max_samples {
+            self.samples.pop_front();
+        }
+    }
+
+    /// Returns the number of phase samples currently held.
+    #[must_use]
+    pub fn sample_count(&self) -> usize {
+        self.samples.len()
+    }
+
+    /// Computes the **standard** (non-overlapping) Allan variance for a given
+    /// averaging interval expressed in samples (`tau_samples`).
+    ///
+    /// The formula applied is the three-sample second difference:
+    ///
+    /// ```text
+    /// AVAR(τ) = 1/(2·(N−2)) · Σᵢ (x[i+2] − 2·x[i+1] + x[i])²
+    /// ```
+    ///
+    /// The result is in units of ns² (normalised by the count only; the
+    /// caller is responsible for further normalisation by τ² if the
+    /// fractional-frequency Allan variance is desired).
+    ///
+    /// Returns `None` when fewer than 3 samples are available or when
+    /// `tau_samples` would make the sum degenerate.
+    #[must_use]
+    pub fn allan_variance(&self, tau_samples: usize) -> Option<f64> {
+        let n = self.samples.len();
+        // Require tau ≥ 1 and at least 2*tau+1 samples so the sum has ≥ 1 term.
+        if tau_samples == 0 || n < 2 * tau_samples + 1 {
+            return None;
+        }
+        let m = tau_samples;
+        let count = n - 2 * m;
+        if count == 0 {
+            return None;
+        }
+
+        // Convert the deque to a slice-friendly vec.
+        let x: Vec<f64> = self.samples.iter().copied().collect();
+
+        let sum: f64 = (0..count)
+            .map(|i| {
+                let diff = x[i + 2 * m] - 2.0 * x[i + m] + x[i];
+                diff * diff
+            })
+            .sum();
+
+        Some(sum / (2.0 * count as f64))
+    }
+
+    /// Computes the **overlapping** Allan variance for averaging interval
+    /// `tau_samples`.
+    ///
+    /// The overlapping estimator makes use of all possible sub-sequences of
+    /// length 2m+1, giving lower statistical uncertainty than the standard
+    /// estimator for the same data record.
+    ///
+    /// Formula:
+    ///
+    /// ```text
+    ///                              1
+    /// OAVAR(τ=m) = ─────────────────────── · Σᵢ (x[i+2m] − 2·x[i+m] + x[i])²
+    ///               2·m²·(N − 2m)
+    /// ```
+    ///
+    /// Returns `None` when there is insufficient data.
+    #[must_use]
+    pub fn overlapping_allan_variance(&self, tau_samples: usize) -> Option<f64> {
+        let n = self.samples.len();
+        if tau_samples == 0 || n < 2 * tau_samples + 1 {
+            return None;
+        }
+        let m = tau_samples;
+        let count = n - 2 * m;
+        if count == 0 {
+            return None;
+        }
+
+        let x: Vec<f64> = self.samples.iter().copied().collect();
+
+        let sum: f64 = (0..count)
+            .map(|i| {
+                let diff = x[i + 2 * m] - 2.0 * x[i + m] + x[i];
+                diff * diff
+            })
+            .sum();
+
+        let m2 = (m * m) as f64;
+        Some(sum / (2.0 * m2 * count as f64))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -471,6 +618,112 @@ mod tests {
         assert!(
             d.is_finite() && d >= 0.0,
             "ADEV should be finite non-negative"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AllanVarianceEstimator tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_avar_estimator_insufficient_data() {
+        let mut est = AllanVarianceEstimator::new(64);
+        // 0 samples: no variance.
+        assert!(est.allan_variance(1).is_none());
+        est.add_sample(0.0);
+        est.add_sample(1.0);
+        // 2 samples, tau=1 → need 2*1+1 = 3 samples.
+        assert!(est.allan_variance(1).is_none());
+        assert!(est.overlapping_allan_variance(1).is_none());
+    }
+
+    #[test]
+    fn test_avar_estimator_capacity_eviction() {
+        let mut est = AllanVarianceEstimator::new(4);
+        for i in 0u32..10 {
+            est.add_sample(i as f64 * 100.0);
+        }
+        assert_eq!(est.sample_count(), 4, "should cap at max_samples");
+    }
+
+    #[test]
+    fn test_avar_estimator_constant_phase_is_zero() {
+        // Constant phase → all second differences are zero → AVAR = 0.
+        let mut est = AllanVarianceEstimator::new(64);
+        for _ in 0..30 {
+            est.add_sample(1_000_000.0); // 1 ms constant offset
+        }
+        let avar = est.allan_variance(1).expect("should compute AVAR");
+        assert!(avar < 1e-10, "constant phase → AVAR ≈ 0, got {avar}");
+        let oavar = est
+            .overlapping_allan_variance(1)
+            .expect("OAVAR should compute");
+        assert!(oavar < 1e-10, "constant phase → OAVAR ≈ 0, got {oavar}");
+    }
+
+    #[test]
+    fn test_avar_estimator_white_phase_noise_slope() {
+        // For white phase noise AVAR ∝ 1/τ² in the time-domain sense.
+        // In our sample-count convention (no τ² normalisation) AVAR(tau=m) should
+        // decrease as m increases for a white-noise-like signal.
+        // We verify AVAR(1) > AVAR(2) for N=64 pseudo-random samples.
+        // Use a deterministic pseudo-random sequence (Lehmer LCG) for reproducibility.
+        let mut est = AllanVarianceEstimator::new(128);
+        let mut v: f64 = 0.0;
+        // Simulate white phase noise: independent increments, zero mean.
+        for i in 0u64..64 {
+            // Simple deterministic alternating noise: ±500 ns pattern.
+            let noise = if i % 2 == 0 { 500.0 } else { -500.0 };
+            v += noise;
+            est.add_sample(v);
+        }
+        let avar1 = est.allan_variance(1).expect("AVAR(1)");
+        let avar2 = est.allan_variance(2).expect("AVAR(2)");
+        // Both should be finite and positive for non-trivial data.
+        assert!(
+            avar1.is_finite() && avar1 > 0.0,
+            "AVAR(1) should be positive"
+        );
+        assert!(
+            avar2.is_finite() && avar2 >= 0.0,
+            "AVAR(2) should be non-negative"
+        );
+    }
+
+    #[test]
+    fn test_avar_estimator_white_freq_noise_flat() {
+        // For white frequency noise (linear phase ramp with constant slope)
+        // the standard second-difference is zero after one level of differencing.
+        // AVAR(tau=1) of a linear ramp x[i] = a*i is:
+        //   second_diff = a*(i+2) - 2*a*(i+1) + a*i = 0  → AVAR = 0.
+        let mut est = AllanVarianceEstimator::new(128);
+        let slope = 10.0_f64; // 10 ns/sample constant frequency offset
+        for i in 0i64..50 {
+            est.add_sample(slope * i as f64);
+        }
+        let avar = est.allan_variance(1).expect("AVAR(1) for linear ramp");
+        assert!(
+            avar < 1e-6,
+            "linear ramp (white freq noise) should give AVAR ≈ 0, got {avar}"
+        );
+    }
+
+    #[test]
+    fn test_overlapping_avar_matches_standard_at_tau1() {
+        // At tau=1 both formulas are identical (m=1, normalisation differs only
+        // by 1/m²=1).  We verify they match to floating-point precision.
+        let mut est = AllanVarianceEstimator::new(64);
+        for i in 0u32..40 {
+            est.add_sample(i as f64 * 37.5 + (i % 3) as f64 * 200.0);
+        }
+        let std = est.allan_variance(1).expect("standard AVAR");
+        let ovl = est.overlapping_allan_variance(1).expect("overlapping AVAR");
+        // At m=1 the standard formula gives sum/(2*(N-2)) and the overlapping gives
+        // sum/(2*1²*(N-2)), so they are numerically equal.
+        let rel = (std - ovl).abs() / (std + 1e-30);
+        assert!(
+            rel < 1e-10,
+            "std and overlapping AVAR should match at tau=1"
         );
     }
 }

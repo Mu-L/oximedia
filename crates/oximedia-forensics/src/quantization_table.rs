@@ -16,16 +16,16 @@
 
 /// Standard JPEG luminance quantization table at quality 50 (ITU-T T.81 Annex K).
 pub const STANDARD_LUMINANCE_Q50: [u16; 64] = [
-    16, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55, 14, 13, 16, 24, 40, 57, 69,
-    56, 14, 17, 22, 29, 51, 87, 80, 62, 18, 22, 37, 56, 68, 109, 103, 77, 24, 35, 55, 64, 81,
-    104, 113, 92, 49, 64, 78, 87, 103, 121, 120, 101, 72, 92, 95, 98, 112, 100, 103, 99,
+    16, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55, 14, 13, 16, 24, 40, 57, 69, 56,
+    14, 17, 22, 29, 51, 87, 80, 62, 18, 22, 37, 56, 68, 109, 103, 77, 24, 35, 55, 64, 81, 104, 113,
+    92, 49, 64, 78, 87, 103, 121, 120, 101, 72, 92, 95, 98, 112, 100, 103, 99,
 ];
 
 /// Standard JPEG chrominance quantization table at quality 50.
 pub const STANDARD_CHROMINANCE_Q50: [u16; 64] = [
-    17, 18, 24, 47, 99, 99, 99, 99, 18, 21, 26, 66, 99, 99, 99, 99, 24, 26, 56, 99, 99, 99, 99,
-    99, 47, 66, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
-    99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+    17, 18, 24, 47, 99, 99, 99, 99, 18, 21, 26, 66, 99, 99, 99, 99, 24, 26, 56, 99, 99, 99, 99, 99,
+    47, 66, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+    99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
 ];
 
 /// An 8x8 quantization table stored in row-major (raster scan) order.
@@ -90,11 +90,7 @@ impl QuantTable {
     /// Returns 1.0 for identical tables and approaches 0.0 for very different tables.
     #[allow(clippy::cast_precision_loss)]
     pub fn similarity(&self, other: &Self) -> f64 {
-        let diff_sum: f64 = self
-            .abs_diff(other)
-            .iter()
-            .map(|&d| f64::from(d))
-            .sum();
+        let diff_sum: f64 = self.abs_diff(other).iter().map(|&d| f64::from(d)).sum();
         let max_sum: f64 = self
             .values
             .iter()
@@ -299,7 +295,11 @@ mod tests {
         for i in 0..64 {
             let expected = STANDARD_LUMINANCE_Q50[i];
             let diff = t.values[i].abs_diff(expected);
-            assert!(diff <= 1, "index {i}: got {} expected {expected}", t.values[i]);
+            assert!(
+                diff <= 1,
+                "index {i}: got {} expected {expected}",
+                t.values[i]
+            );
         }
     }
 

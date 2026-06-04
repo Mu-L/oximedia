@@ -265,7 +265,11 @@ impl BandwidthShaper {
     /// Submits a packet for shaping.
     ///
     /// Returns the admission decision.
-    pub fn submit_packet(&mut self, stream_id: &str, packet: Vec<u8>) -> ShaperResult<AdmissionDecision> {
+    pub fn submit_packet(
+        &mut self,
+        stream_id: &str,
+        packet: Vec<u8>,
+    ) -> ShaperResult<AdmissionDecision> {
         let byte_count = packet.len() as u64;
 
         // Check aggregate limit.
@@ -294,8 +298,7 @@ impl BandwidthShaper {
         if admitted {
             stream.stats.packets_admitted += 1;
             stream.stats.bytes_admitted += byte_count;
-            self.current_aggregate_bps =
-                self.current_aggregate_bps.saturating_add(byte_count * 8);
+            self.current_aggregate_bps = self.current_aggregate_bps.saturating_add(byte_count * 8);
             Ok(AdmissionDecision::Admitted)
         } else {
             match stream.config.policy {
@@ -338,7 +341,9 @@ impl BandwidthShaper {
         let mut ids: Vec<String> = self.streams.keys().cloned().collect();
         // Sort by priority (lower number = higher priority).
         ids.sort_by_key(|id| {
-            self.streams.get(id).map_or(u8::MAX, |s| s.config.priority.0)
+            self.streams
+                .get(id)
+                .map_or(u8::MAX, |s| s.config.priority.0)
         });
 
         for id in ids {
@@ -351,7 +356,9 @@ impl BandwidthShaper {
                 let byte_count = pkt.data.len() as u64;
                 if stream.bucket.consume(byte_count) {
                     // SAFETY: we just checked `front()` returned `Some`, so `pop_front()` is guaranteed.
-                    let Some(pkt) = stream.queue.pop_front() else { break };
+                    let Some(pkt) = stream.queue.pop_front() else {
+                        break;
+                    };
                     stream.stats.packets_admitted += 1;
                     stream.stats.bytes_admitted += byte_count;
                     ready.push((id.clone(), pkt.data));
@@ -538,7 +545,7 @@ impl BandwidthShaper {
             .or_insert_with(|| SimpleStream::new(rate_bps, burst_bytes));
     }
 
-    /// Removes a stream added via [`add_stream`].
+    /// Removes a stream added via `add_stream`.
     pub fn remove_stream(&mut self, stream_id: &str) {
         self.simple_streams.remove(stream_id);
     }
@@ -576,12 +583,10 @@ impl BandwidthShaper {
     }
 
     /// Returns a snapshot of statistics for `stream_id`, or `None` if the
-    /// stream is not registered via [`add_stream`].
+    /// stream is not registered via `add_stream`.
     #[must_use]
     pub fn stats(&self, stream_id: &str) -> Option<ShaperStats> {
-        self.simple_streams
-            .get(stream_id)
-            .map(|s| s.stats.clone())
+        self.simple_streams.get(stream_id).map(|s| s.stats.clone())
     }
 }
 
@@ -691,9 +696,7 @@ mod tests {
         shaper
             .register_stream("cam1", default_config(1000))
             .expect("stream not yet registered");
-        shaper
-            .update_rate("cam1", 2000)
-            .expect("stream exists");
+        shaper.update_rate("cam1", 2000).expect("stream exists");
         let stats = shaper.stream_stats("cam1");
         assert!(stats.is_ok());
     }
@@ -731,9 +734,7 @@ mod tests {
             .register_stream("b", default_config(1000))
             .expect("stream b not yet registered");
         assert_eq!(shaper.stream_count(), 2);
-        shaper
-            .unregister_stream("a")
-            .expect("stream a exists");
+        shaper.unregister_stream("a").expect("stream a exists");
         assert_eq!(shaper.stream_count(), 1);
     }
 
@@ -743,7 +744,7 @@ mod tests {
     #[test]
     fn test_token_refill_rate() {
         let mut bucket = RateLimiter::new_bucket(1_000, 2_000); // 1 KB/s, 2 KB burst
-        // Drain all tokens.
+                                                                // Drain all tokens.
         bucket.tokens = 0.0;
         bucket.last_refill_us = 0;
         // Advance 1 second → should refill 1_000 bytes.
@@ -759,7 +760,7 @@ mod tests {
     #[test]
     fn test_burst_allowed() {
         let mut bucket = RateLimiter::new_bucket(100, 10_000); // 100 B/s, 10 KB burst
-        // Bucket starts full at 10_000.
+                                                               // Bucket starts full at 10_000.
         assert!(bucket.try_consume(10_000, 0), "burst should be allowed");
         assert!(!bucket.try_consume(1, 0), "no tokens left after burst");
     }
@@ -769,7 +770,7 @@ mod tests {
     fn test_sustained_rate_limited() {
         let rate = 1_000_u64; // 1 KB/s
         let mut bucket = RateLimiter::new_bucket(rate, rate); // 1 s burst = rate bytes
-        // Consume entire burst.
+                                                              // Consume entire burst.
         assert!(bucket.try_consume(rate, 0));
         // Immediately: no tokens remaining.
         assert!(!bucket.try_consume(1, 0));

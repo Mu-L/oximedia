@@ -62,6 +62,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+/// Adaptive watermark embedding with strength feedback control.
+pub mod adaptive_wm;
 pub mod attacks;
 pub mod audio_watermark;
 /// Bark scale psychoacoustic masking with critical band analysis.
@@ -69,18 +71,27 @@ pub mod bark_masking;
 /// Batch watermark embedding for processing multiple audio segments.
 pub mod batch_embed;
 pub mod bit_packing;
+/// Watermark capacity estimation for different audio parameters.
+pub mod capacity_calc;
 pub mod chain_of_custody;
 pub mod dct_watermark;
 pub mod detection_map;
 pub mod detector;
 pub mod echo;
 pub mod error;
+pub mod fingerprint_watermark;
 pub mod forensic;
 pub mod forensic_watermark;
+/// Forensic watermarking for leak detection and content tracing.
+pub mod forensic_wm;
 pub mod fragile;
+/// Frequency-domain watermark embedding using DFT magnitude modulation.
+pub mod freq_watermark;
 /// Gold code sequence generator for spread spectrum watermarking.
 pub mod gold_code;
 /// Invisible watermark embedding using frequency-domain manipulation.
+/// Image watermarking using spatial and frequency domain techniques.
+pub mod image_watermark;
 pub mod invisible_wm;
 /// Cryptographic key scheduling and rotation for watermark keys.
 pub mod key_schedule;
@@ -88,6 +99,8 @@ pub mod lsb;
 /// Unified media watermarking coordinating audio and video watermark pipelines.
 pub mod media_watermark;
 pub mod metrics;
+/// Multi-layer watermarking combining multiple embedding techniques.
+pub mod multi_layer_watermark;
 /// Multi-channel watermarking (stereo, 5.1, 7.1) with multiple embedding strategies.
 pub mod multichannel;
 pub mod patchwork;
@@ -96,21 +109,33 @@ pub mod payload_encoder;
 /// Perceptual hashing for audio watermark integrity verification.
 pub mod perceptual_hash;
 pub mod phase;
+/// PN (pseudorandom noise) sequence cache for spread-spectrum watermarking.
+pub mod pn_cache;
 pub mod psychoacoustic;
 pub mod qim;
 pub mod qr_watermark;
+/// Real-time watermark embedder with streaming buffer support.
+pub mod realtime_embedder;
 pub mod robust;
 pub mod robustness;
 /// Comprehensive robustness testing suite for watermark survival analysis.
 pub mod robustness_suite;
+/// Robustness testing for common attack scenarios.
+pub mod robustness_test;
 pub mod spatial_watermark;
 pub mod spread_spectrum;
 pub mod ss_audio_wm;
 pub mod steganography;
+/// Temporal watermarking using inter-frame variation patterns.
+pub mod temporal_watermark;
 /// Frame-level video watermark embedding and detection.
 pub mod video_watermark;
 pub mod visible;
 pub mod visible_watermark;
+/// Watermark analysis and quality assessment tools.
+pub mod watermark_analyzer;
+/// Watermark comparison utilities for evaluating embedding results.
+pub mod watermark_comparator;
 pub mod watermark_database;
 pub mod watermark_robustness;
 /// Multi-algorithm watermark detection pipeline.

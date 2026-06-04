@@ -749,7 +749,11 @@ mod tests {
         // A linear model with few synthetic patches has limited accuracy;
         // 10 dE tolerance is acceptable for this first-order approximation.
         let paper_white = model.predict([0.0, 0.0, 0.0, 0.0]);
-        assert!((paper_white[0] - 100.0).abs() < 10.0, "L={}", paper_white[0]);
+        assert!(
+            (paper_white[0] - 100.0).abs() < 10.0,
+            "L={}",
+            paper_white[0]
+        );
     }
 
     #[test]
@@ -766,7 +770,9 @@ mod tests {
         let mut calibrator = PrinterCalibrator::new(PrinterCalibratorConfig::default());
         calibrator.fit(&patches).expect("fit ok");
 
-        let lab = calibrator.predict_lab([0.0, 0.0, 0.0, 0.0]).expect("predict ok");
+        let lab = calibrator
+            .predict_lab([0.0, 0.0, 0.0, 0.0])
+            .expect("predict ok");
         assert!((lab[0] - 100.0).abs() < 10.0, "L={}", lab[0]);
     }
 

@@ -7,6 +7,7 @@
 #![allow(dead_code)]
 
 use crate::bitrate_controller::FrameType;
+use crate::hdr_masking::{HdrMaskingConfig, TransferFunction};
 
 /// Perceptual weighting parameters for the HVS model.
 #[derive(Debug, Clone)]
@@ -145,6 +146,48 @@ impl PsychovisualQp {
 
         let adjusted = base_qp as i16 + delta as i16 + type_offset as i16;
         adjusted.clamp(0, 51) as u8
+    }
+
+    /// Adjust `base_qp` incorporating both HVS psychovisual masking and HDR
+    /// transfer-function-aware luminance masking.
+    ///
+    /// This composes two independent QP deltas:
+    /// 1. The standard psychovisual delta from `PsychovisualQp::adjust`.
+    /// 2. An HDR luminance masking delta from `hdr_masking::hdr_qp_offset`.
+    ///
+    /// The combined delta is clamped to a valid QP range `[0, 51]`.
+    ///
+    /// # Parameters
+    ///
+    /// - `base_qp`    — baseline QP value (0–51).
+    /// - `jnd`        — local JND threshold from `JndMap::compute`.
+    /// - `frame_type` — I/P/B frame type.
+    /// - `luma_code`  — raw luma code word for the block (10-bit = 0–1023).
+    /// - `bit_depth`  — bit depth of the luma signal (typically 10 for HDR).
+    /// - `tf`         — transfer function (Sdr / Pq / Hlg).
+    ///
+    /// Returns the adjusted QP value clamped to `[0, 51]`.
+    #[must_use]
+    pub fn compute_hdr_qp(
+        base_qp: u8,
+        jnd: f32,
+        frame_type: FrameType,
+        luma_code: u16,
+        bit_depth: u8,
+        tf: TransferFunction,
+    ) -> u8 {
+        // Step 1: apply standard psychovisual masking.
+        let psycho_qp = Self::adjust(base_qp, jnd, frame_type) as i16;
+
+        // Step 2: compute HDR luminance masking delta.
+        let hdr_config = HdrMaskingConfig {
+            tf,
+            ..HdrMaskingConfig::default()
+        };
+        let hdr_delta = crate::hdr_masking::hdr_qp_offset(luma_code, bit_depth, &hdr_config);
+
+        // Step 3: compose and clamp.
+        (psycho_qp + hdr_delta as i16).clamp(0, 51) as u8
     }
 }
 
@@ -348,5 +391,71 @@ mod tests {
     fn test_jnd_empty_frame() {
         let jnd = JndMap::compute(&[], 0, 0);
         assert!(jnd.is_empty());
+    }
+
+    // ── compute_hdr_qp tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_compute_hdr_qp_pq_highlight_raises_qp() {
+        // At full-brightness PQ code, HDR masking should push QP up relative to base.
+        let base_qp = 26u8;
+        let jnd_mid = 20.0f32;
+        let qp_shadow = PsychovisualQp::compute_hdr_qp(
+            base_qp,
+            jnd_mid,
+            FrameType::P,
+            0, // code 0 → deepest shadow
+            10,
+            TransferFunction::Pq,
+        );
+        let qp_highlight = PsychovisualQp::compute_hdr_qp(
+            base_qp,
+            jnd_mid,
+            FrameType::P,
+            1023, // code 1023 → full brightness
+            10,
+            TransferFunction::Pq,
+        );
+        assert!(
+            qp_highlight > qp_shadow,
+            "PQ highlight QP ({qp_highlight}) should exceed shadow QP ({qp_shadow})"
+        );
+    }
+
+    #[test]
+    fn test_compute_hdr_qp_clamped_to_valid_range() {
+        // Result must always be in [0, 51].
+        for &luma_code in &[0u16, 511, 512, 1023] {
+            for &tf in &[
+                TransferFunction::Pq,
+                TransferFunction::Hlg,
+                TransferFunction::Sdr,
+            ] {
+                let qp = PsychovisualQp::compute_hdr_qp(26, 15.0, FrameType::P, luma_code, 10, tf);
+                assert!(qp <= 51, "QP {qp} exceeds 51 for luma_code={luma_code}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_compute_hdr_qp_sdr_equals_adjust() {
+        // For SDR at a mid-code (127/255 ≈ 0.5), HDR delta ≈ 0, so result ≈ adjust().
+        let base_qp = 26u8;
+        let jnd = 20.0f32;
+        let sdr_qp = PsychovisualQp::compute_hdr_qp(
+            base_qp,
+            jnd,
+            FrameType::P,
+            127, // ≈ midpoint for 8-bit
+            8,
+            TransferFunction::Sdr,
+        );
+        let plain_qp = PsychovisualQp::adjust(base_qp, jnd, FrameType::P);
+        // Should be close (within ±1) since HDR delta at mid-code is small.
+        let diff = (sdr_qp as i16 - plain_qp as i16).abs();
+        assert!(
+            diff <= 1,
+            "SDR compute_hdr_qp ({sdr_qp}) should be near adjust ({plain_qp})"
+        );
     }
 }

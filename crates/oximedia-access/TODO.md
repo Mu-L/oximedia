@@ -31,14 +31,22 @@
 - [x] Implement audio spatializer for accessibility (directional cues for visually impaired users) (verified 2026-05-16; src/spatial_accessibility.rs 637 lines)
 - [x] Add cognitive load assessment for media content complexity
 - [x] Implement auto-generated image alt-text from visual features in `media_alt_text` (verified 2026-05-16; src/auto_alt_text.rs 748 lines)
-- [ ] Add braille display output format support in `screen_reader` (verified-open 2026-05-16: no braille*.rs module in access sources; screen_reader has no braille output)
+- [x] Add braille display output format support in `screen_reader` (render()+render_grid() added to BrailleDisplay; 2 tests: test_braille_render_basic, test_braille_render_grid)
 
 ## Performance
-- [ ] Cache TTS synthesis results in `tts/synthesize` for repeated text segments
-- [ ] Implement incremental STT processing in `stt` (process audio chunks, not entire files)
+- [x] Cache TTS synthesis results in `tts/synthesize` for repeated text segments (TtsSynthesisCache: HashMap+VecDeque LRU, keyed (text,voice_id)→Vec<u8>; 3 tests: hit/miss/eviction)
+- [x] Implement incremental STT processing in `stt` (process audio chunks, not entire files) (done — IncrementalSttProcessor at src/tts/transcribe.rs)
 - [ ] Add parallel compliance checking across multiple media files in `compliance`
-- [ ] Optimize `audio/clarity` enhancement pipeline with pre-computed filter coefficients
-- [ ] Use SIMD for contrast enhancement calculations in `visual/contrast`
+- [x] Optimize `audio/clarity` enhancement pipeline with pre-computed filter coefficients
+  - **Goal:** Replace `enhance()`/`enhance_speech()` clone-stubs with real DSP: speech-band biquad peaking boost + downward DRC for `enhance`, 4th-order Butterworth band-pass (300–3400 Hz) for `enhance_speech`. Wire existing dead-code helpers (`calculate_snr`, `speech_clarity_index`, `estimate_sti`) into post-enhancement metric. (Wave 20 Slice A, 2026-06-02)
+  - **Design:** RBJ biquad Direct-Form-I peaking filter; DRC with envelope follower (attack/release); `enhance` = DRC → peaking boost → soft-clip guard; `enhance_speech` = cascaded biquads 300–3400 Hz. Remove `#[allow(dead_code)]` once helpers are called.
+  - **Files:** `src/audio/clarity.rs`, `TODO.md`
+  - **Tests:** DC/silence in → silence out; 2 kHz tone boosted vs 200 Hz; compressor reduces loud transient; `enhance_speech` attenuates 50 Hz rumble; sample count preserved; bounded output energy.
+- [x] Use SIMD for contrast enhancement calculations in `visual/contrast`
+  - **Goal:** Add AVX2/NEON/scalar SIMD to the per-pixel enhancement loop in `src/visual/contrast.rs` (currently no SIMD). (Wave 20 Slice A, 2026-06-02)
+  - **Design:** Vectorize gain/offset/gamma map via `is_x86_feature_detected!`/`cfg(target_arch)` dispatch; gamma via 256-entry LUT for bit-exactness; SIMD path ≡ scalar path within ≤1 LSB.
+  - **Files:** `src/visual/contrast.rs`, `TODO.md`
+  - **Tests:** SIMD == scalar within ≤1 LSB on random image.
 
 ## Testing
 - [ ] Add end-to-end test: generate captions -> style -> render -> verify positioning

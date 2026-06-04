@@ -331,7 +331,6 @@ mod tests {
     use crate::transition::Transition;
     use crate::types::{Duration, Position};
     use oximedia_core::Rational;
-    use std::path::PathBuf;
 
     fn create_test_timeline() -> Timeline {
         Timeline::new("Test Project", Rational::new(24, 1), 48000).expect("should succeed in test")

@@ -401,14 +401,17 @@ impl AutoEditor {
 
     /// Score scenes for importance.
     ///
+    /// Takes `&mut self` because the underlying [`SceneScorer`] maintains an
+    /// internal feature cache that is populated lazily on each call.
+    ///
     /// # Errors
     ///
     /// Returns an error if scoring fails.
     pub fn score_scenes(
-        &self,
+        &mut self,
         scene_data: &[(Timestamp, Timestamp, SceneFeatures)],
     ) -> AutoResult<Vec<ScoredScene>> {
-        scoring::batch_score_scenes(&self.scorer, scene_data)
+        scoring::batch_score_scenes(&mut self.scorer, scene_data)
     }
 
     /// Generate an interest curve from scored scenes.

@@ -109,6 +109,7 @@ pub mod optical_flow_field;
 pub mod panorama_stitch;
 pub mod pose_estimation;
 pub mod quality;
+pub mod registration;
 pub mod scale;
 pub mod scene;
 pub mod segmentation;

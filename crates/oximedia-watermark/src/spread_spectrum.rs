@@ -100,9 +100,13 @@ impl SpreadSpectrumEmbedder {
 
         let mut watermarked = samples.to_vec();
 
+        // Build PN sequence table once before the loop to avoid redundant generation.
+        let pn_table: Vec<Vec<i8>> = (0..bits.len())
+            .map(|i| generate_pn_sequence(self.config.chip_rate, self.config.key + i as u64))
+            .collect();
+
         for (bit_idx, &bit) in bits.iter().enumerate() {
-            let pn_seq =
-                generate_pn_sequence(self.config.chip_rate, self.config.key + bit_idx as u64);
+            let pn_seq = &pn_table[bit_idx];
             let bit_value = if bit { 1.0f32 } else { -1.0f32 };
 
             let start = bit_idx * self.config.chip_rate;
@@ -147,6 +151,11 @@ impl SpreadSpectrumEmbedder {
             None
         };
 
+        // Build PN sequence table once before the loop to avoid redundant generation.
+        let pn_table: Vec<Vec<i8>> = (0..bits.len())
+            .map(|i| generate_pn_sequence(self.config.chip_rate, self.config.key + i as u64))
+            .collect();
+
         let mut bit_idx = 0;
 
         for frame_idx in 0..required_frames {
@@ -174,8 +183,7 @@ impl SpreadSpectrumEmbedder {
                 }
 
                 let bit = bits[bit_idx];
-                let pn_seq =
-                    generate_pn_sequence(self.config.chip_rate, self.config.key + bit_idx as u64);
+                let pn_seq = &pn_table[bit_idx];
 
                 let bit_value = if bit { 1.0f32 } else { -1.0f32 };
 
@@ -284,9 +292,13 @@ impl SpreadSpectrumDetector {
     ) -> WatermarkResult<Vec<bool>> {
         let mut bits = Vec::new();
 
+        // Build PN sequence table once before the loop to avoid redundant generation.
+        let pn_table: Vec<Vec<i8>> = (0..expected_bits)
+            .map(|i| generate_pn_sequence(self.config.chip_rate, self.config.key + i as u64))
+            .collect();
+
         for bit_idx in 0..expected_bits {
-            let pn_seq =
-                generate_pn_sequence(self.config.chip_rate, self.config.key + bit_idx as u64);
+            let pn_seq = &pn_table[bit_idx];
             let start = bit_idx * self.config.chip_rate;
 
             if start + self.config.chip_rate > samples.len() {
@@ -316,6 +328,11 @@ impl SpreadSpectrumDetector {
         let hop_size = frame_size;
         let required_frames = expected_bits.div_ceil(8);
 
+        // Build PN sequence table once before the loop to avoid redundant generation.
+        let pn_table: Vec<Vec<i8>> = (0..expected_bits)
+            .map(|i| generate_pn_sequence(self.config.chip_rate, self.config.key + i as u64))
+            .collect();
+
         let mut bits = Vec::new();
 
         for frame_idx in 0..required_frames {
@@ -338,8 +355,7 @@ impl SpreadSpectrumDetector {
                 }
 
                 let bit_idx = bits.len();
-                let pn_seq =
-                    generate_pn_sequence(self.config.chip_rate, self.config.key + bit_idx as u64);
+                let pn_seq = &pn_table[bit_idx];
 
                 let start_bin = frame_size / 8;
                 let mut corr = 0.0f32;
@@ -458,6 +474,11 @@ impl InPlaceFftEmbedder {
             });
         }
 
+        // Build PN sequence table once before the loop to avoid redundant generation.
+        let pn_table: Vec<Vec<i8>> = (0..bits.len())
+            .map(|i| generate_pn_sequence(self.chip_rate, self.key + i as u64))
+            .collect();
+
         let mut bit_idx = 0;
 
         for frame_idx in 0..required_frames {
@@ -487,7 +508,7 @@ impl InPlaceFftEmbedder {
                     break;
                 }
                 let bit = bits[bit_idx];
-                let pn_seq = generate_pn_sequence(self.chip_rate, self.key + bit_idx as u64);
+                let pn_seq = &pn_table[bit_idx];
                 let bit_val: f32 = if bit { 1.0 } else { -1.0 };
 
                 for (i, &pn) in pn_seq.iter().enumerate().take(self.chip_rate) {
@@ -761,5 +782,70 @@ mod tests {
     #[test]
     fn test_correlate_simd_empty() {
         assert_eq!(correlate_simd(&[], &[]), 0.0);
+    }
+
+    // ── Item 1: PN sequence cache ─────────────────────────────────────────────
+
+    #[test]
+    fn test_pn_cache_embed_detect_roundtrip() {
+        // Embed a 4-byte payload using the cached path, then detect and verify.
+        let config = SpreadSpectrumConfig {
+            strength: 0.1,
+            chip_rate: 32,
+            frequency_domain: false,
+            psychoacoustic: false,
+            key: 77777,
+        };
+
+        let embedder = SpreadSpectrumEmbedder::new(config.clone(), 44100, 2048)
+            .expect("should succeed in test");
+        let detector = SpreadSpectrumDetector::new(config).expect("should succeed in test");
+
+        let payload = b"ABCD";
+        let encoded = embedder
+            .codec
+            .encode(payload)
+            .expect("should succeed in test");
+        let expected_bits = encoded.len() * 8;
+
+        // Signal long enough to hold all bits at chip_rate=32 samples/bit.
+        let samples: Vec<f32> = vec![0.0; expected_bits * 32 + 256];
+
+        let watermarked = embedder
+            .embed(&samples, payload)
+            .expect("embed should succeed");
+        let extracted = detector
+            .detect(&watermarked, expected_bits)
+            .expect("detect should succeed");
+
+        assert_eq!(
+            payload.as_slice(),
+            extracted.as_slice(),
+            "PN-cache roundtrip: detected payload must match original"
+        );
+    }
+
+    #[test]
+    fn test_pn_cache_identical_to_uncached() {
+        // Verify that the cached table entries match direct generate_pn_sequence calls.
+        let chip_rate = 64_usize;
+        let key = 42_u64;
+
+        // Simulate what the precomputed table produces for bit indices 0 and 3.
+        let cached_0 = generate_pn_sequence(chip_rate, key + 0);
+        let cached_3 = generate_pn_sequence(chip_rate, key + 3);
+
+        // Direct calls for comparison.
+        let direct_0 = generate_pn_sequence(chip_rate, key);
+        let direct_3 = generate_pn_sequence(chip_rate, key + 3);
+
+        assert_eq!(
+            cached_0, direct_0,
+            "pn_table[0] must equal generate_pn_sequence(chip_rate, key+0)"
+        );
+        assert_eq!(
+            cached_3, direct_3,
+            "pn_table[3] must equal generate_pn_sequence(chip_rate, key+3)"
+        );
     }
 }

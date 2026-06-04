@@ -79,7 +79,7 @@ impl Default for PoolConfig {
             max_connections: 5,
             min_idle: 1,
             connect_timeout_ms: 5_000,
-            idle_timeout_ms: 600_000,  // 10 min
+            idle_timeout_ms: 600_000,   // 10 min
             max_lifetime_ms: 3_600_000, // 1 h
             test_before_acquire: false,
             max_waiting: 32,
@@ -430,10 +430,7 @@ mod tests {
 
     #[test]
     fn test_config_validate_min_idle_exceeds_max() {
-        let cfg = PoolConfig::builder()
-            .max_connections(3)
-            .min_idle(5)
-            .build();
+        let cfg = PoolConfig::builder().max_connections(3).min_idle(5).build();
         assert!(cfg.validate().is_err());
     }
 
@@ -456,8 +453,8 @@ mod tests {
     #[test]
     fn test_config_is_saturated() {
         let cfg = PoolConfig::builder().max_connections(10).build();
-        assert!(!cfg.is_saturated(8));  // 80% — not saturated
-        assert!(cfg.is_saturated(9));   // 90% — saturated
+        assert!(!cfg.is_saturated(8)); // 80% — not saturated
+        assert!(cfg.is_saturated(9)); // 90% — saturated
     }
 
     // ── PoolHealth ──
@@ -544,7 +541,9 @@ mod tests {
         let mut monitor = PoolMonitor::new(PoolConfig::default());
         monitor.record_snapshot(healthy_snapshot(3, 5), 100);
         // active=3, max=5 → 60%
-        let u = monitor.current_utilisation().expect("utilisation should be Some");
+        let u = monitor
+            .current_utilisation()
+            .expect("utilisation should be Some");
         assert!((u - 0.6).abs() < 1e-9);
     }
 

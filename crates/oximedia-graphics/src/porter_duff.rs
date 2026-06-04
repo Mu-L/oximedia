@@ -142,7 +142,12 @@ pub fn from_premul(p: PremulPixel) -> [u8; 4] {
     }
     let inv_a = 1.0 / p.a;
     let to_u8 = |v: f32| -> u8 { (v * inv_a * 255.0).round().clamp(0.0, 255.0) as u8 };
-    [to_u8(p.r), to_u8(p.g), to_u8(p.b), (p.a * 255.0).round() as u8]
+    [
+        to_u8(p.r),
+        to_u8(p.g),
+        to_u8(p.b),
+        (p.a * 255.0).round() as u8,
+    ]
 }
 
 // ─── Deterministic hash helper ────────────────────────────────────────────────
@@ -152,7 +157,9 @@ pub fn from_premul(p: PremulPixel) -> [u8; 4] {
 /// `rand` crate dependency in the hot compositing path.
 #[inline]
 fn position_hash(x: u32, y: u32, seed: u32) -> u32 {
-    let mut h = x.wrapping_mul(2246822519).wrapping_add(y.wrapping_mul(3266489917));
+    let mut h = x
+        .wrapping_mul(2246822519)
+        .wrapping_add(y.wrapping_mul(3266489917));
     h = h.wrapping_add(seed);
     h ^= h >> 16;
     h = h.wrapping_mul(0x45d9f3b);
@@ -333,13 +340,7 @@ pub fn composite_layer(
 /// # Panics
 ///
 /// Panics if either slice is shorter than `width * height * 4` bytes.
-pub fn composite_layer_into(
-    src: &[u8],
-    dst: &mut [u8],
-    width: u32,
-    height: u32,
-    op: PorterDuffOp,
-) {
+pub fn composite_layer_into(src: &[u8], dst: &mut [u8], width: u32, height: u32, op: PorterDuffOp) {
     let pixel_count = (width as usize) * (height as usize);
     assert!(
         src.len() >= pixel_count * 4,
@@ -430,7 +431,11 @@ mod tests {
         let src = opaque(0.8, 0.5, 0.2);
         let dst = opaque(0.3, 0.7, 0.1);
         let out = composite_pixel(src, dst, PorterDuffOp::Clear);
-        assert!(pixel_approx_eq(out, PremulPixel::zero()), "Clear must yield zero: {:?}", out);
+        assert!(
+            pixel_approx_eq(out, PremulPixel::zero()),
+            "Clear must yield zero: {:?}",
+            out
+        );
     }
 
     // ── 2. Src ───────────────────────────────────────────────────────────────
@@ -440,7 +445,11 @@ mod tests {
         let src = opaque(0.8, 0.5, 0.2);
         let dst = opaque(0.3, 0.7, 0.1);
         let out = composite_pixel(src, dst, PorterDuffOp::Src);
-        assert!(pixel_approx_eq(out, src), "Src must equal source: {:?}", out);
+        assert!(
+            pixel_approx_eq(out, src),
+            "Src must equal source: {:?}",
+            out
+        );
     }
 
     // ── 3. Dst ───────────────────────────────────────────────────────────────
@@ -450,7 +459,11 @@ mod tests {
         let src = opaque(0.8, 0.5, 0.2);
         let dst = opaque(0.3, 0.7, 0.1);
         let out = composite_pixel(src, dst, PorterDuffOp::Dst);
-        assert!(pixel_approx_eq(out, dst), "Dst must equal destination: {:?}", out);
+        assert!(
+            pixel_approx_eq(out, dst),
+            "Dst must equal destination: {:?}",
+            out
+        );
     }
 
     // ── 4. SrcOver — opaque src ───────────────────────────────────────────────
@@ -462,7 +475,11 @@ mod tests {
         let dst = opaque(0.0, 1.0, 0.0); // green
         let out = composite_pixel(src, dst, PorterDuffOp::SrcOver);
         // αo = 1*1 + 1*(1-1) = 1; Co = Cs*1 + Cd*0 = Cs
-        assert!(pixel_approx_eq(out, src), "Opaque SrcOver must show only source: {:?}", out);
+        assert!(
+            pixel_approx_eq(out, src),
+            "Opaque SrcOver must show only source: {:?}",
+            out
+        );
     }
 
     // ── 5. SrcOver — transparent src ─────────────────────────────────────────
@@ -529,8 +546,16 @@ mod tests {
         assert!(out.g <= 1.0, "Plus g should be ≤ 1.0: {}", out.g);
         assert!(out.b <= 1.0, "Plus b should be ≤ 1.0: {}", out.b);
         assert!(out.a <= 1.0, "Plus a should be ≤ 1.0: {}", out.a);
-        assert!(approx_eq(out.r, 1.0), "r = min(0.8+0.7, 1.0) = 1.0, got {}", out.r);
-        assert!(approx_eq(out.a, 1.0), "a = min(1+1, 1.0) = 1.0, got {}", out.a);
+        assert!(
+            approx_eq(out.r, 1.0),
+            "r = min(0.8+0.7, 1.0) = 1.0, got {}",
+            out.r
+        );
+        assert!(
+            approx_eq(out.a, 1.0),
+            "a = min(1+1, 1.0) = 1.0, got {}",
+            out.a
+        );
     }
 
     // ── 9. SrcIn + SrcOut complement ─────────────────────────────────────────
@@ -545,7 +570,7 @@ mod tests {
         let src = semi(0.6, 0.3, 0.9, 0.7);
         let dst = semi(0.2, 0.8, 0.4, 0.5);
 
-        let in_px  = composite_pixel(src, dst, PorterDuffOp::SrcIn);
+        let in_px = composite_pixel(src, dst, PorterDuffOp::SrcIn);
         let out_px = composite_pixel(src, dst, PorterDuffOp::SrcOut);
         let sum = PremulPixel {
             r: in_px.r + out_px.r,
@@ -578,9 +603,9 @@ mod tests {
 
         for i in 0..(w * h) as usize {
             let base = i * 4;
-            assert_eq!(out[base],     255, "pixel {i}: red channel should be 255");
-            assert_eq!(out[base + 1], 0,   "pixel {i}: green channel should be 0");
-            assert_eq!(out[base + 2], 0,   "pixel {i}: blue channel should be 0");
+            assert_eq!(out[base], 255, "pixel {i}: red channel should be 255");
+            assert_eq!(out[base + 1], 0, "pixel {i}: green channel should be 0");
+            assert_eq!(out[base + 2], 0, "pixel {i}: blue channel should be 0");
             assert_eq!(out[base + 3], 255, "pixel {i}: alpha should be 255");
         }
     }
@@ -591,12 +616,12 @@ mod tests {
     fn test_to_from_premul_roundtrip() {
         // Cover a spread of alpha values including fully transparent/opaque.
         let test_cases: &[[u8; 4]] = &[
-            [255, 128, 64,  255],
-            [200, 100, 50,  128],
-            [100,  50, 25,   64],
-            [  0,   0,  0,    0],
+            [255, 128, 64, 255],
+            [200, 100, 50, 128],
+            [100, 50, 25, 64],
+            [0, 0, 0, 0],
             [255, 255, 255, 255],
-            [ 10,  20, 30,  200],
+            [10, 20, 30, 200],
         ];
 
         for &rgba in test_cases {
@@ -631,12 +656,26 @@ mod tests {
         // Premultiplied:
         //   src = (0.8, 0.4, 0.2, 0.8)
         //   dst = (0.3, 0.6, 0.15, 0.6)
-        let src = PremulPixel { r: 0.8, g: 0.4, b: 0.2, a: 0.8 };
-        let dst = PremulPixel { r: 0.3, g: 0.6, b: 0.15, a: 0.6 };
+        let src = PremulPixel {
+            r: 0.8,
+            g: 0.4,
+            b: 0.2,
+            a: 0.8,
+        };
+        let dst = PremulPixel {
+            r: 0.3,
+            g: 0.6,
+            b: 0.15,
+            a: 0.6,
+        };
 
         // ── Clear ──────────────────────────────────────────────────────────
         let out = composite_pixel(src, dst, PorterDuffOp::Clear);
-        assert!(pixel_approx_eq(out, PremulPixel::zero()), "Clear: {:?}", out);
+        assert!(
+            pixel_approx_eq(out, PremulPixel::zero()),
+            "Clear: {:?}",
+            out
+        );
 
         // ── Src ───────────────────────────────────────────────────────────
         let out = composite_pixel(src, dst, PorterDuffOp::Src);
@@ -651,7 +690,11 @@ mod tests {
         // αo = 0.8 + 0.6*0.2 = 0.92
         // ro = 0.8 + 0.3*0.2 = 0.86
         let out = composite_pixel(src, dst, PorterDuffOp::SrcOver);
-        assert!(approx_eq(out.a, 0.8 + 0.6 * 0.2), "SrcOver alpha: {}", out.a);
+        assert!(
+            approx_eq(out.a, 0.8 + 0.6 * 0.2),
+            "SrcOver alpha: {}",
+            out.a
+        );
         assert!(approx_eq(out.r, 0.8 + 0.3 * 0.2), "SrcOver red: {}", out.r);
 
         // ── DstOver ───────────────────────────────────────────────────────
@@ -659,7 +702,11 @@ mod tests {
         // αo = 0.8*0.4 + 0.6 = 0.92
         // ro = 0.8*0.4 + 0.3 = 0.62
         let out = composite_pixel(src, dst, PorterDuffOp::DstOver);
-        assert!(approx_eq(out.a, 0.8 * 0.4 + 0.6), "DstOver alpha: {}", out.a);
+        assert!(
+            approx_eq(out.a, 0.8 * 0.4 + 0.6),
+            "DstOver alpha: {}",
+            out.a
+        );
         assert!(approx_eq(out.r, 0.8 * 0.4 + 0.3), "DstOver red: {}", out.r);
 
         // ── SrcIn ─────────────────────────────────────────────────────────
@@ -696,24 +743,48 @@ mod tests {
         // αo = 0.8*0.6 + 0.6*0.2 = 0.48 + 0.12 = 0.60
         // ro = 0.8*0.6 + 0.3*0.2 = 0.48 + 0.06 = 0.54
         let out = composite_pixel(src, dst, PorterDuffOp::SrcAtop);
-        assert!(approx_eq(out.a, 0.8 * 0.6 + 0.6 * 0.2), "SrcAtop alpha: {}", out.a);
-        assert!(approx_eq(out.r, 0.8 * 0.6 + 0.3 * 0.2), "SrcAtop red: {}", out.r);
+        assert!(
+            approx_eq(out.a, 0.8 * 0.6 + 0.6 * 0.2),
+            "SrcAtop alpha: {}",
+            out.a
+        );
+        assert!(
+            approx_eq(out.r, 0.8 * 0.6 + 0.3 * 0.2),
+            "SrcAtop red: {}",
+            out.r
+        );
 
         // ── DstAtop ───────────────────────────────────────────────────────
         // Fs=1-0.6=0.4, Fd=αs=0.8
         // αo = 0.8*0.4 + 0.6*0.8 = 0.32 + 0.48 = 0.80
         // ro = 0.8*0.4 + 0.3*0.8 = 0.32 + 0.24 = 0.56
         let out = composite_pixel(src, dst, PorterDuffOp::DstAtop);
-        assert!(approx_eq(out.a, 0.8 * 0.4 + 0.6 * 0.8), "DstAtop alpha: {}", out.a);
-        assert!(approx_eq(out.r, 0.8 * 0.4 + 0.3 * 0.8), "DstAtop red: {}", out.r);
+        assert!(
+            approx_eq(out.a, 0.8 * 0.4 + 0.6 * 0.8),
+            "DstAtop alpha: {}",
+            out.a
+        );
+        assert!(
+            approx_eq(out.r, 0.8 * 0.4 + 0.3 * 0.8),
+            "DstAtop red: {}",
+            out.r
+        );
 
         // ── Xor ───────────────────────────────────────────────────────────
         // Fs=1-0.6=0.4, Fd=1-0.8=0.2
         // αo = 0.8*0.4 + 0.6*0.2 = 0.32 + 0.12 = 0.44
         // ro = 0.8*0.4 + 0.3*0.2 = 0.32 + 0.06 = 0.38
         let out = composite_pixel(src, dst, PorterDuffOp::Xor);
-        assert!(approx_eq(out.a, 0.8 * 0.4 + 0.6 * 0.2), "Xor alpha: {}", out.a);
-        assert!(approx_eq(out.r, 0.8 * 0.4 + 0.3 * 0.2), "Xor red: {}", out.r);
+        assert!(
+            approx_eq(out.a, 0.8 * 0.4 + 0.6 * 0.2),
+            "Xor alpha: {}",
+            out.a
+        );
+        assert!(
+            approx_eq(out.r, 0.8 * 0.4 + 0.3 * 0.2),
+            "Xor red: {}",
+            out.r
+        );
 
         // ── Plus ──────────────────────────────────────────────────────────
         // Fs=1, Fd=1 — clamped
@@ -729,8 +800,16 @@ mod tests {
         // verify that the result is either src or dst colour (after normalisation)
         // and that the alpha channel is non-negative and ≤ 1.
         let out = composite_pixel(src, dst, PorterDuffOp::Dissolve);
-        assert!(out.a >= 0.0 && out.a <= 1.0, "Dissolve alpha out of range: {}", out.a);
-        assert!(out.r >= 0.0 && out.r <= 1.0, "Dissolve red out of range: {}", out.r);
+        assert!(
+            out.a >= 0.0 && out.a <= 1.0,
+            "Dissolve alpha out of range: {}",
+            out.a
+        );
+        assert!(
+            out.r >= 0.0 && out.r <= 1.0,
+            "Dissolve red out of range: {}",
+            out.r
+        );
     }
 
     // ── composite_layer_into ─────────────────────────────────────────────────
@@ -757,7 +836,10 @@ mod tests {
         let mut dst_mut = dst.clone();
         composite_layer_into(&src, &mut dst_mut, w, h, PorterDuffOp::SrcOver);
 
-        assert_eq!(expected, dst_mut, "in-place and allocating versions must produce identical output");
+        assert_eq!(
+            expected, dst_mut,
+            "in-place and allocating versions must produce identical output"
+        );
     }
 
     // ── Dissolve statistical property ────────────────────────────────────────
@@ -788,7 +870,7 @@ mod tests {
                 // The output colour must match src colour (normalised).
                 let back = from_premul(out);
                 assert_eq!(back[0], 255, "Dissolve αs=1 must pick src red at ({x},{y})");
-                assert_eq!(back[1], 0,   "Dissolve αs=1 must pick src green at ({x},{y})");
+                assert_eq!(back[1], 0, "Dissolve αs=1 must pick src green at ({x},{y})");
             }
         }
     }
@@ -801,7 +883,7 @@ mod tests {
         let src = semi(0.4, 0.8, 0.3, 0.6);
         let dst = semi(0.7, 0.2, 0.5, 0.8);
 
-        let in_px  = composite_pixel(src, dst, PorterDuffOp::DstIn);
+        let in_px = composite_pixel(src, dst, PorterDuffOp::DstIn);
         let out_px = composite_pixel(src, dst, PorterDuffOp::DstOut);
         let sum = PremulPixel {
             r: in_px.r + out_px.r,

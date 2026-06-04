@@ -109,6 +109,8 @@ pub mod detectors;
 pub mod dolby_vision_qc;
 pub mod file_qc;
 pub mod report;
+/// Dolby Vision RPU metadata validation: profile/level compliance and backward compatibility.
+pub mod rpu_validation;
 pub mod rules;
 pub mod video;
 pub mod video_quality_metrics;
@@ -126,6 +128,8 @@ pub mod examples;
 pub mod format;
 /// File-format quality control: container structure and codec compatibility.
 pub mod format_qc;
+/// Per-frame LRU cache to share decoded frames across multiple QC rules in one run.
+pub mod frame_cache;
 /// HDR quality control: PQ/HLG metadata, peak brightness, and gamut validation.
 pub mod hdr_qc;
 pub mod profiles;
@@ -272,6 +276,64 @@ impl QualityControl {
         report.set_validation_duration(duration);
 
         Ok(report)
+    }
+
+    /// Validates a file, stopping after the first rule that produces a
+    /// [`Severity::Error`] or [`Severity::Critical`] result when
+    /// `abort_on_critical` is `true`.
+    ///
+    /// When `abort_on_critical` is `false` this method behaves identically to
+    /// [`validate`](Self::validate).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read or parsed.
+    pub fn validate_with_abort(
+        &self,
+        file_path: &str,
+        abort_on_critical: bool,
+    ) -> OxiResult<(QcReport, usize)> {
+        let start_time = Instant::now();
+        let context = self.probe_file(file_path)?;
+        let mut report = QcReport::new(file_path);
+        let mut rules_run = 0usize;
+
+        for rule in &self.rules {
+            if !rule.is_applicable(&context) {
+                continue;
+            }
+            rules_run += 1;
+            let results = match rule.check(&context) {
+                Ok(r) => r,
+                Err(e) => {
+                    let result = rules::CheckResult::fail(
+                        rule.name().to_string(),
+                        rules::Severity::Error,
+                        format!("Rule execution failed: {e}"),
+                    );
+                    vec![result]
+                }
+            };
+
+            // Check for error/critical before adding to report.
+            let has_critical = abort_on_critical
+                && results.iter().any(|r| {
+                    matches!(
+                        r.severity,
+                        rules::Severity::Error | rules::Severity::Critical
+                    )
+                });
+
+            report.add_results(results);
+
+            if has_critical {
+                break;
+            }
+        }
+
+        let duration = start_time.elapsed().as_secs_f64();
+        report.set_validation_duration(duration);
+        Ok((report, rules_run))
     }
 
     /// Validates a file for streaming platform upload.

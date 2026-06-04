@@ -28,9 +28,7 @@
 //! assert!(report.mean_delta_e < 0.01);
 //! ```
 
-#![allow(dead_code)]
-
-use crate::delta_e::{delta_e_2000, CieDe2000Weights};
+use crate::delta_e::{delta_e_2000_weighted, CieDe2000Weights};
 use crate::error::{ColorError, Result};
 use crate::xyz::Lab;
 
@@ -81,33 +79,137 @@ pub fn reference_patches() -> Vec<Patch> {
     // sRGB values: linearised from standard 8-bit sRGB encoding (X-Rite published)
     const DATA: &[(&str, u8, u8, f64, f64, f64, [f64; 3])] = &[
         // Row 0
-        ("Dark Skin",         0, 0, 37.99,  13.56,  14.06, [0.102, 0.052, 0.032]),
-        ("Light Skin",        0, 1, 65.71,  18.13,  17.81, [0.428, 0.219, 0.135]),
-        ("Blue Sky",          0, 2, 49.93,  -4.88, -21.93, [0.099, 0.148, 0.277]),
-        ("Foliage",           0, 3, 43.14, -13.10,  21.91, [0.089, 0.105, 0.034]),
-        ("Blue Flower",       0, 4, 55.11,   8.84, -25.40, [0.181, 0.163, 0.355]),
-        ("Bluish Green",      0, 5, 70.72, -33.40, -0.199, [0.124, 0.384, 0.334]),
+        (
+            "Dark Skin",
+            0,
+            0,
+            37.99,
+            13.56,
+            14.06,
+            [0.102, 0.052, 0.032],
+        ),
+        (
+            "Light Skin",
+            0,
+            1,
+            65.71,
+            18.13,
+            17.81,
+            [0.428, 0.219, 0.135],
+        ),
+        (
+            "Blue Sky",
+            0,
+            2,
+            49.93,
+            -4.88,
+            -21.93,
+            [0.099, 0.148, 0.277],
+        ),
+        ("Foliage", 0, 3, 43.14, -13.10, 21.91, [0.089, 0.105, 0.034]),
+        (
+            "Blue Flower",
+            0,
+            4,
+            55.11,
+            8.84,
+            -25.40,
+            [0.181, 0.163, 0.355],
+        ),
+        (
+            "Bluish Green",
+            0,
+            5,
+            70.72,
+            -33.40,
+            -0.199,
+            [0.124, 0.384, 0.334],
+        ),
         // Row 1
-        ("Orange",            1, 0, 62.66,  36.07,  57.10, [0.585, 0.211, 0.012]),
-        ("Purplish Blue",     1, 1, 40.02,  10.41, -45.96, [0.064, 0.076, 0.395]),
-        ("Moderate Red",      1, 2, 51.12,  48.24,  16.25, [0.421, 0.083, 0.087]),
-        ("Purple",            1, 3, 30.33,  22.98, -21.59, [0.117, 0.043, 0.115]),
-        ("Yellow Green",      1, 4, 71.77, -24.48,  58.10, [0.310, 0.447, 0.019]),
-        ("Orange Yellow",     1, 5, 71.51,  18.89,  67.37, [0.543, 0.371, 0.006]),
+        ("Orange", 1, 0, 62.66, 36.07, 57.10, [0.585, 0.211, 0.012]),
+        (
+            "Purplish Blue",
+            1,
+            1,
+            40.02,
+            10.41,
+            -45.96,
+            [0.064, 0.076, 0.395],
+        ),
+        (
+            "Moderate Red",
+            1,
+            2,
+            51.12,
+            48.24,
+            16.25,
+            [0.421, 0.083, 0.087],
+        ),
+        ("Purple", 1, 3, 30.33, 22.98, -21.59, [0.117, 0.043, 0.115]),
+        (
+            "Yellow Green",
+            1,
+            4,
+            71.77,
+            -24.48,
+            58.10,
+            [0.310, 0.447, 0.019],
+        ),
+        (
+            "Orange Yellow",
+            1,
+            5,
+            71.51,
+            18.89,
+            67.37,
+            [0.543, 0.371, 0.006],
+        ),
         // Row 2
-        ("Blue",              2, 0, 28.78,  14.18, -50.30, [0.033, 0.043, 0.281]),
-        ("Green",             2, 1, 55.26, -38.34,  31.37, [0.051, 0.266, 0.064]),
-        ("Red",               2, 2, 42.10,  53.38,  28.19, [0.349, 0.030, 0.029]),
-        ("Yellow",            2, 3, 81.73,   4.04,  79.82, [0.704, 0.607, 0.003]),
-        ("Magenta",           2, 4, 51.94,  49.99, -14.57, [0.401, 0.095, 0.272]),
-        ("Cyan",              2, 5, 51.04, -28.63, -28.64, [0.005, 0.192, 0.322]),
+        ("Blue", 2, 0, 28.78, 14.18, -50.30, [0.033, 0.043, 0.281]),
+        ("Green", 2, 1, 55.26, -38.34, 31.37, [0.051, 0.266, 0.064]),
+        ("Red", 2, 2, 42.10, 53.38, 28.19, [0.349, 0.030, 0.029]),
+        ("Yellow", 2, 3, 81.73, 4.04, 79.82, [0.704, 0.607, 0.003]),
+        ("Magenta", 2, 4, 51.94, 49.99, -14.57, [0.401, 0.095, 0.272]),
+        ("Cyan", 2, 5, 51.04, -28.63, -28.64, [0.005, 0.192, 0.322]),
         // Row 3 — neutral grey scale
-        ("White",             3, 0, 96.54,  -0.43,   1.19, [0.878, 0.878, 0.878]),
-        ("Neutral 8",         3, 1, 81.26,  -0.64,  -0.34, [0.572, 0.572, 0.572]),
-        ("Neutral 6.5",       3, 2, 66.77,  -0.73,  -0.50, [0.352, 0.352, 0.352]),
-        ("Neutral 5",         3, 3, 50.87,  -0.15,  -0.27, [0.192, 0.192, 0.192]),
-        ("Neutral 3.5",       3, 4, 35.66,  -0.46,  -0.48, [0.090, 0.090, 0.090]),
-        ("Black",             3, 5, 20.46,  -0.08,  -0.26, [0.031, 0.031, 0.031]),
+        ("White", 3, 0, 96.54, -0.43, 1.19, [0.878, 0.878, 0.878]),
+        (
+            "Neutral 8",
+            3,
+            1,
+            81.26,
+            -0.64,
+            -0.34,
+            [0.572, 0.572, 0.572],
+        ),
+        (
+            "Neutral 6.5",
+            3,
+            2,
+            66.77,
+            -0.73,
+            -0.50,
+            [0.352, 0.352, 0.352],
+        ),
+        (
+            "Neutral 5",
+            3,
+            3,
+            50.87,
+            -0.15,
+            -0.27,
+            [0.192, 0.192, 0.192],
+        ),
+        (
+            "Neutral 3.5",
+            3,
+            4,
+            35.66,
+            -0.46,
+            -0.48,
+            [0.090, 0.090, 0.090],
+        ),
+        ("Black", 3, 5, 20.46, -0.08, -0.26, [0.031, 0.031, 0.031]),
     ];
 
     DATA.iter()
@@ -181,10 +283,7 @@ impl AccuracyReport {
         } else {
             results.iter().map(|r| r.delta_e).sum::<f64>() / n as f64
         };
-        let max_delta_e = results
-            .iter()
-            .map(|r| r.delta_e)
-            .fold(0.0_f64, f64::max);
+        let max_delta_e = results.iter().map(|r| r.delta_e).fold(0.0_f64, f64::max);
 
         // p95: sort a copy of delta-e values
         let mut sorted_de: Vec<f64> = results.iter().map(|r| r.delta_e).collect();
@@ -211,17 +310,21 @@ impl AccuracyReport {
     /// Returns the worst patch (highest ΔE).
     #[must_use]
     pub fn worst_patch(&self) -> Option<&PatchResult> {
-        self.patches
-            .iter()
-            .max_by(|a, b| a.delta_e.partial_cmp(&b.delta_e).unwrap_or(std::cmp::Ordering::Equal))
+        self.patches.iter().max_by(|a, b| {
+            a.delta_e
+                .partial_cmp(&b.delta_e)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     }
 
     /// Returns the best patch (lowest ΔE).
     #[must_use]
     pub fn best_patch(&self) -> Option<&PatchResult> {
-        self.patches
-            .iter()
-            .min_by(|a, b| a.delta_e.partial_cmp(&b.delta_e).unwrap_or(std::cmp::Ordering::Equal))
+        self.patches.iter().min_by(|a, b| {
+            a.delta_e
+                .partial_cmp(&b.delta_e)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     }
 }
 
@@ -272,7 +375,7 @@ impl ColorChecker {
             .map(|(reference, measured)| {
                 let ref_lab = reference.lab();
                 let meas_lab = measured.lab();
-                let de = delta_e_2000(&ref_lab, &meas_lab);
+                let de = delta_e_2000_weighted(&ref_lab, &meas_lab, &self.weights);
                 PatchResult {
                     name: reference.name,
                     index: reference.index(),
@@ -306,7 +409,7 @@ impl ColorChecker {
             .map(|(reference, &[ml, ma, mb])| {
                 let ref_lab = reference.lab();
                 let meas_lab = Lab::new(ml, ma, mb);
-                let de = delta_e_2000(&ref_lab, &meas_lab);
+                let de = delta_e_2000_weighted(&ref_lab, &meas_lab, &self.weights);
                 PatchResult {
                     name: reference.name,
                     index: reference.index(),
@@ -428,9 +531,7 @@ fn invert_3x3(m: &[[f64; 3]; 3]) -> Result<[[f64; 3]; 3]> {
         + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
 
     if det.abs() < 1e-15 {
-        return Err(ColorError::Matrix(
-            "invert_3x3: matrix is singular".into(),
-        ));
+        return Err(ColorError::Matrix("invert_3x3: matrix is singular".into()));
     }
 
     let inv_det = 1.0 / det;
@@ -505,13 +606,22 @@ mod tests {
     #[test]
     fn neutral_patches_have_near_zero_ab() {
         let patches = reference_patches();
-        let neutrals = ["White", "Neutral 8", "Neutral 6.5", "Neutral 5", "Neutral 3.5", "Black"];
+        let neutrals = [
+            "White",
+            "Neutral 8",
+            "Neutral 6.5",
+            "Neutral 5",
+            "Neutral 3.5",
+            "Black",
+        ];
         for name in neutrals {
             let p = patches.iter().find(|p| p.name == name).expect(name);
             assert!(
                 p.a.abs() < 2.0 && p.b.abs() < 2.0,
                 "{}: a={}, b={} not neutral",
-                name, p.a, p.b
+                name,
+                p.a,
+                p.b
             );
         }
     }
@@ -519,7 +629,12 @@ mod tests {
     #[test]
     fn reference_l_values_in_range() {
         for p in reference_patches() {
-            assert!(p.l > 0.0 && p.l < 100.0, "{}: L={} out of range", p.name, p.l);
+            assert!(
+                p.l > 0.0 && p.l < 100.0,
+                "{}: L={} out of range",
+                p.name,
+                p.l
+            );
         }
     }
 

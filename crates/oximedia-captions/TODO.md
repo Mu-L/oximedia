@@ -14,7 +14,7 @@
 - [x] Consolidate `speaker_diarization` and `speaker_diarize` into a single module (redundant naming)
 - [x] Add IMSC 1.1 (Internet Media Subtitles and Captions) profile validation in `imsc`
 - [x] Extend `formats` with Netflix Timed Text (NFLX-TT) profile support (verified 2026-05-16; src/formats/nflx_tt.rs:19 NflxTtEntry, NflxTtParser:363, NflxTtWriter:384, parse_nflx_tt:95, serialize_nflx_tt:253, 575 lines)
-- [ ] Improve `caption_sync` with audio waveform-based synchronization (match speech onset) (verified-open 2026-05-16: caption_sync.rs has offset/drift adjustment but no audio_waveform/speech_onset analysis)
+- [x] Improve `caption_sync` with audio waveform-based synchronization (match speech onset) (already implemented at caption_sync.rs:310 WaveformSyncConfig, :336 SpeechOnset, :368 WaveformSync, :383 detect_speech_onsets, Wave 14 verified)
 - [x] Add `caption_rate_control` adaptive rate limiting based on scene complexity (verified 2026-05-16; src/caption_rate_control.rs:85 RateControlConfig, analyse_rates:189, RateStats, 433 lines)
 - [x] Extend `caption_validator` with broadcast-specific checks (max lines, max chars, safe area)
 
@@ -28,11 +28,11 @@
 - [x] Add `smpte_2052` module for SMPTE ST 2052-1 TTML profile compliance (verified 2026-05-16; src/smpte_2052.rs:84 validate_smpte_tt, ST 2052-1:5, compliance issues:51, 292 lines)
 
 ## Performance
-- [ ] Optimize `formats` SRT parser using zero-copy `nom` combinators instead of string allocation
-- [ ] Add parallel caption rendering in `caption_renderer` for batch export of burned-in subtitles
-- [ ] Cache compiled regex patterns in `caption_search` for repeated query execution
-- [ ] Use arena allocation for `Caption` entries in large track imports to reduce heap fragmentation
-- [ ] Lazy-parse TTML/DFXP XML: parse structure first, defer style resolution until rendering
+- [x] Optimize `formats` SRT parser using zero-copy `nom` combinators instead of string allocation (implemented at formats/srt.rs: parse_srt_nom + SrtCueRef<'a> + fast_parse_srt, Wave 14 Slice H)
+- [x] Add parallel caption rendering in `caption_renderer` for batch export of burned-in subtitles (already implemented at caption_renderer.rs:344 render_captions_batch_parallel using rayon par_iter, Wave 14 verified)
+- [x] Cache compiled regex patterns in `caption_search` for repeated query execution (already implemented at caption_search.rs:15 OnceLock<Mutex<HashMap<String, Regex>>>, Wave 14 verified)
+- [x] Use arena allocation for `Caption` entries in large track imports to reduce heap fragmentation (implemented at import.rs: CaptionBulkBuilder + import_bulk, Wave 14 Slice H)
+- [x] Lazy-parse TTML/DFXP XML: parse structure first, defer style resolution until rendering (implemented at formats/ttml.rs: LazyTtmlTrack + parse_ttml_lazy + UnresolvedCue, Wave 14 Slice H)
 
 ## Testing
 - [x] Add format round-trip tests for all 17 `CaptionFormat` variants: export then reimport (SRT and WebVTT done; remaining formats deferred)

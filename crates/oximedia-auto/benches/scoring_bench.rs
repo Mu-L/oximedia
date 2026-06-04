@@ -156,7 +156,7 @@ fn bench_score_scene_configs(c: &mut Criterion) {
     let mut group = c.benchmark_group("score_scene/configs");
 
     for (config_name, config) in &configs {
-        let scorer = SceneScorer::new(config.clone());
+        let mut scorer = SceneScorer::new(config.clone());
 
         group.bench_with_input(
             BenchmarkId::new("config", config_name),
@@ -226,7 +226,7 @@ fn bench_score_scene_with_context(c: &mut Criterion) {
     let mut group = c.benchmark_group("score_scene/temporal_context");
 
     for (config_name, config) in &configs {
-        let scorer = SceneScorer::new(config.clone())
+        let mut scorer = SceneScorer::new(config.clone())
             .with_temporal_context(TemporalContextConfig::default());
 
         group.bench_with_input(
@@ -267,7 +267,7 @@ fn bench_cache_warmup_vs_steady(c: &mut Criterion) {
     // Cold cache — scorer is recreated each iteration so cache starts empty
     group.bench_function("cold_cache", |b| {
         b.iter(|| {
-            let scorer = SceneScorer::new(ScoringConfig::default());
+            let mut scorer = SceneScorer::new(ScoringConfig::default());
             for features in &scenes {
                 let result = scorer
                     .score_scene(
@@ -282,7 +282,7 @@ fn bench_cache_warmup_vs_steady(c: &mut Criterion) {
     });
 
     // Warm cache — scorer is shared across iterations; first call populates cache
-    let warm_scorer = SceneScorer::new(ScoringConfig::default());
+    let mut warm_scorer = SceneScorer::new(ScoringConfig::default());
     // Pre-populate the cache
     for features in &scenes {
         let _ = warm_scorer.score_scene(start, end, features.clone());
@@ -325,7 +325,7 @@ fn bench_batch_scoring_throughput(c: &mut Criterion) {
     group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
 
     for (config_name, config) in &configs {
-        let scorer = SceneScorer::new(config.clone());
+        let mut scorer = SceneScorer::new(config.clone());
 
         group.bench_with_input(
             BenchmarkId::new("config", config_name),

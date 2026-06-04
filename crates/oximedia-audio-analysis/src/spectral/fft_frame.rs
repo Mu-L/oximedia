@@ -5,6 +5,8 @@
 
 use std::f64::consts::PI;
 
+use oxifft::Complex;
+
 /// FFT size for spectral analysis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FftSize {
@@ -100,6 +102,39 @@ impl WindowFunction {
             Self::Hamming => "Hamming",
             Self::Blackman => "Blackman",
             Self::FlatTop => "FlatTop",
+        }
+    }
+
+    /// Compute a single window coefficient for position `i` in a window of
+    /// length `n`.  Used by [`FftSpectralAnalyzer`] to fill the pre-allocated
+    /// scratch buffer without allocating an intermediate `Vec<f32>`.
+    #[must_use]
+    #[inline]
+    pub fn coefficient(self, i: usize, n: usize) -> f64 {
+        use std::f64::consts::PI;
+        if n == 0 {
+            return 1.0;
+        }
+        match self {
+            Self::Rectangular => 1.0,
+            Self::Hann => {
+                let t = 2.0 * PI * i as f64 / (n - 1) as f64;
+                0.5 * (1.0 - t.cos())
+            }
+            Self::Hamming => {
+                let t = 2.0 * PI * i as f64 / (n - 1) as f64;
+                0.54 - 0.46 * t.cos()
+            }
+            Self::Blackman => {
+                let t = 2.0 * PI * i as f64 / (n - 1) as f64;
+                0.42 - 0.5 * t.cos() + 0.08 * (2.0 * t).cos()
+            }
+            Self::FlatTop => {
+                let t = 2.0 * PI * i as f64 / (n - 1) as f64;
+                0.215_578_95 - 0.416_631_58 * t.cos() + 0.277_263_16 * (2.0 * t).cos()
+                    - 0.083_578_95 * (3.0 * t).cos()
+                    + 0.006_947_36 * (4.0 * t).cos()
+            }
         }
     }
 }
@@ -320,18 +355,28 @@ impl SpectralConfig {
 }
 
 /// Spectral analyzer that processes audio frames.
+///
+/// Pre-allocates a complex scratch buffer at construction time so that each
+/// call to [`process`] avoids heap allocation in the hot path.
 pub struct FftSpectralAnalyzer {
     config: SpectralConfig,
+    /// Ring buffer accumulating incoming samples.
     buffer: Vec<f32>,
+    /// Pre-allocated complex scratch buffer (length = fft_size).
+    fft_scratch: Vec<Complex<f64>>,
     frame_count: u64,
 }
 
 impl FftSpectralAnalyzer {
     /// Create a new spectral analyzer.
+    ///
+    /// Pre-allocates the FFT scratch buffer for the configured FFT size.
     #[must_use]
     pub fn new(config: SpectralConfig) -> Self {
+        let fft_size = config.fft_size.size();
         Self {
             buffer: Vec::new(),
+            fft_scratch: vec![Complex::new(0.0, 0.0); fft_size],
             frame_count: 0,
             config,
         }
@@ -339,8 +384,9 @@ impl FftSpectralAnalyzer {
 
     /// Process a block of samples and emit spectral frames.
     ///
-    /// Uses a simple DFT for correctness (no external FFT library dependency
-    /// beyond what the crate already has via rustfft).
+    /// Uses OxiFFT (pure-Rust FFT) for O(N log N) spectral analysis.  The
+    /// internal scratch buffer is reused across calls to avoid per-frame
+    /// allocation.
     pub fn process(&mut self, samples: &[f32]) -> Vec<SpectralFrame> {
         self.buffer.extend_from_slice(samples);
         let fft_size = self.config.fft_size.size();
@@ -348,11 +394,25 @@ impl FftSpectralAnalyzer {
         let mut frames = Vec::new();
 
         while self.buffer.len() >= fft_size {
-            let window_samples: Vec<f32> = self.buffer[..fft_size].to_vec();
-            let mut windowed = window_samples;
-            self.config.window.apply(&mut windowed);
+            // Copy samples into scratch buffer and apply window in-place.
+            debug_assert_eq!(self.fft_scratch.len(), fft_size);
+            for (i, dst) in self.fft_scratch.iter_mut().enumerate() {
+                let s = f64::from(self.buffer[i]);
+                let w = self.config.window.coefficient(i, fft_size);
+                *dst = Complex::new(s * w, 0.0);
+            }
 
-            let (magnitudes, phases) = compute_dft(&windowed, fft_size);
+            let fft_out = oxifft::fft(&self.fft_scratch);
+
+            let num_bins = fft_size / 2 + 1;
+            let magnitudes: Vec<f32> = fft_out[..num_bins]
+                .iter()
+                .map(|c| c.norm() as f32)
+                .collect();
+            let phases: Vec<f32> = fft_out[..num_bins]
+                .iter()
+                .map(|c| c.im.atan2(c.re) as f32)
+                .collect();
 
             let mut frame = SpectralFrame::new(fft_size, self.config.sample_rate);
             frame.magnitudes = magnitudes;
@@ -384,31 +444,6 @@ impl FftSpectralAnalyzer {
     pub fn buffered_samples(&self) -> usize {
         self.buffer.len()
     }
-}
-
-/// Simple DFT implementation.
-///
-/// `X[k] = sum(x[n] * exp(-2*pi*i*k*n/N))` for `n` in `0..N`.
-/// Returns `(magnitudes, phases)` for bins `0..=fft_size/2`.
-fn compute_dft(samples: &[f32], fft_size: usize) -> (Vec<f32>, Vec<f32>) {
-    let n = fft_size.min(samples.len());
-    let num_bins = fft_size / 2 + 1;
-    let mut magnitudes = vec![0.0_f32; num_bins];
-    let mut phases = vec![0.0_f32; num_bins];
-
-    for k in 0..num_bins {
-        let mut re = 0.0_f64;
-        let mut im = 0.0_f64;
-        for (j, &sample) in samples[..n].iter().enumerate() {
-            let angle = -2.0 * PI * k as f64 * j as f64 / fft_size as f64;
-            re += f64::from(sample) * angle.cos();
-            im += f64::from(sample) * angle.sin();
-        }
-        magnitudes[k] = (re * re + im * im).sqrt() as f32;
-        phases[k] = im.atan2(re) as f32;
-    }
-
-    (magnitudes, phases)
 }
 
 #[cfg(test)]

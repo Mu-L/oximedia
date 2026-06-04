@@ -79,44 +79,84 @@
 
 pub mod aces;
 pub mod baking;
+/// LUT strength / blend utilities (free-function API, f32 scalars).
+pub mod blend;
 pub mod builder;
 pub mod chromatic;
+/// Common LUT Format (CLF / ACES S-2014-006) XML read/write.
+pub mod clf;
+pub mod color_chart;
 pub mod color_cube;
 pub mod colorspace;
+/// LUT combination utilities — sequential 1-D LUT application (f32 API).
+pub mod combine;
 pub mod compose;
 pub mod creative;
+pub mod creative_grade;
 pub mod cube_writer;
+/// DaVinci Resolve `.cube` export (format A / standard `.cube` float grid).
+pub mod davinci;
+pub mod display_calibration;
 pub mod domain_clamp;
 pub mod export;
 pub mod formats;
 pub mod gamut;
 pub mod gamut_compress_lut;
+/// Hald CLUT image-encoded 3-D LUT format (identity & custom CLUTs).
+///
+/// **CFIX anchor**: `lut_chain_ops` and `photographic_luts` both depend on
+/// `crate::hald_clut::Lut3DData`.  This module is registered first so those
+/// downstream modules compile cleanly.
+pub mod hald_clut;
 pub mod hdr_lut;
 pub mod hdr_metadata;
 pub mod hdr_pipeline;
+pub mod icc_profile;
 pub mod identity_lut;
 pub mod interpolation;
+/// 1-D LUT inversion utilities.
+pub mod invert;
+/// Log-to-display LUT generation (S-Log3, LogC3, V-Log, C-Log3).
+pub mod log_to_display;
 pub mod lut1d;
 pub mod lut3d;
 pub mod lut_analysis;
+/// LUT blending — struct-based crossfade between two LUTs with a mix factor (struct-based API).
+pub mod lut_blend;
 pub mod lut_chain;
+/// LUT processing chain with algebraic operations and baking to `hald_clut::Lut3DData`.
+pub mod lut_chain_ops;
 pub mod lut_combine;
+pub mod lut_compress;
 pub mod lut_dither;
+/// LUT export to DaVinci Resolve `.drx`, Nuke `.csp`, and Iridas `.look`.
+pub mod lut_export;
 pub mod lut_fingerprint;
 pub mod lut_gradient;
 pub mod lut_interpolation;
 pub mod lut_io;
 pub mod lut_metadata;
+pub mod lut_preview_html;
 pub mod lut_provenance;
 pub mod lut_resample;
+/// LUT smoothing (Gaussian, contrast-preserving, difference analysis).
+pub mod lut_smoother;
 pub mod lut_stats;
 pub mod lut_validate;
 pub mod lut_version;
 pub mod matrix;
+/// Pre-built photographic and cinematic LUT presets (Kodak, Fuji, etc.).
+pub mod photographic_luts;
 pub mod preview;
+/// DaVinci Resolve `.drx` correction file parser (format B / XML node graph).
+pub mod resolve_lut;
+/// Split toning LUT generation (shadow/highlight hue tinting).
+pub mod split_toning;
 pub mod temperature;
 pub mod tetrahedral;
 pub mod tonemap;
+/// Simple 1-D LUT validation predicates (lightweight monotone / clip checks).
+pub mod validate;
 
 mod error;
 

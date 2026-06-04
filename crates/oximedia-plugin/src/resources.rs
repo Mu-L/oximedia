@@ -373,10 +373,7 @@ impl ResourceTracker {
     /// Check if a plugin is suspended due to limit violations.
     #[must_use]
     pub fn is_suspended(&self, name: &str) -> bool {
-        self.entries
-            .get(name)
-            .map(|e| e.suspended)
-            .unwrap_or(false)
+        self.entries.get(name).map(|e| e.suspended).unwrap_or(false)
     }
 
     /// Resume a suspended plugin, resetting its violation state.
@@ -590,9 +587,7 @@ mod tests {
         let mut tracker = ResourceTracker::new();
         tracker.register("dealloc-test", ResourceLimit::new());
 
-        tracker
-            .record_allocation("dealloc-test", 1024)
-            .expect("ok");
+        tracker.record_allocation("dealloc-test", 1024).expect("ok");
         tracker
             .record_deallocation("dealloc-test", 512)
             .expect("ok");
@@ -608,15 +603,9 @@ mod tests {
         let mut tracker = ResourceTracker::new();
         tracker.register("peak-test", ResourceLimit::new());
 
-        tracker
-            .record_allocation("peak-test", 1000)
-            .expect("ok");
-        tracker
-            .record_deallocation("peak-test", 800)
-            .expect("ok");
-        tracker
-            .record_allocation("peak-test", 500)
-            .expect("ok");
+        tracker.record_allocation("peak-test", 1000).expect("ok");
+        tracker.record_deallocation("peak-test", 800).expect("ok");
+        tracker.record_allocation("peak-test", 500).expect("ok");
 
         let usage = tracker.usage("peak-test").expect("registered");
         assert_eq!(usage.peak_memory_bytes, 1000);
@@ -642,9 +631,7 @@ mod tests {
         let mut tracker = ResourceTracker::new();
         tracker.register("reset-test", ResourceLimit::new().max_memory(1000));
 
-        tracker
-            .record_allocation("reset-test", 500)
-            .expect("ok");
+        tracker.record_allocation("reset-test", 500).expect("ok");
         tracker.reset_usage("reset-test").expect("reset ok");
 
         let usage = tracker.usage("reset-test").expect("registered");

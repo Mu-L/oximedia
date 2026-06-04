@@ -638,9 +638,9 @@ mod tests {
         let plan = sample_plan();
         let (x, y, w, h) = plan.usable_rect();
         // Default style uses 10 % title-safe margins.
-        assert_eq!(x, 192);   // 1920 * 0.10
-        assert_eq!(y, 108);   // 1080 * 0.10
-        // 1920 * 0.80 as f32 may round to 1535 or 1536 depending on FP precision.
+        assert_eq!(x, 192); // 1920 * 0.10
+        assert_eq!(y, 108); // 1080 * 0.10
+                            // 1920 * 0.80 as f32 may round to 1535 or 1536 depending on FP precision.
         assert!(w == 1535 || w == 1536, "expected w≈1536, got {w}");
         assert!(h == 863 || h == 864, "expected h≈864, got {h}");
     }

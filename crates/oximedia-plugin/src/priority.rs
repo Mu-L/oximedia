@@ -150,8 +150,7 @@ impl PluginOrderEntry {
     /// Add a constraint that this plugin must be ordered after `other`.
     #[must_use]
     pub fn after(mut self, other: impl Into<String>) -> Self {
-        self.constraints
-            .push(PluginConstraint::After(other.into()));
+        self.constraints.push(PluginConstraint::After(other.into()));
         self
     }
 

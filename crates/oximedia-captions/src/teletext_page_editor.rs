@@ -22,13 +22,21 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum TeletextColour {
+    /// Black (0, 0, 0).
     Black = 0,
+    /// Red (255, 0, 0).
     Red = 1,
+    /// Green (0, 255, 0).
     Green = 2,
+    /// Yellow (255, 255, 0).
     Yellow = 3,
+    /// Blue (0, 0, 255).
     Blue = 4,
+    /// Magenta (255, 0, 255).
     Magenta = 5,
+    /// Cyan (0, 255, 255).
     Cyan = 6,
+    /// White (255, 255, 255).
     White = 7,
 }
 
@@ -250,7 +258,10 @@ impl TeletextPage {
             if c >= TELETEXT_COLS {
                 break;
             }
-            self.grid[row][c] = TeletextCell { character: ch, attrs };
+            self.grid[row][c] = TeletextCell {
+                character: ch,
+                attrs,
+            };
             written += 1;
         }
         written
@@ -330,12 +341,7 @@ impl TeletextPage {
     }
 
     /// Centre `text` on `row` with given attributes.
-    pub fn write_centred(
-        &mut self,
-        row: usize,
-        text: &str,
-        attrs: CharacterAttributes,
-    ) -> usize {
+    pub fn write_centred(&mut self, row: usize, text: &str, attrs: CharacterAttributes) -> usize {
         let len = text.chars().count().min(TELETEXT_COLS);
         let col = (TELETEXT_COLS.saturating_sub(len)) / 2;
         self.write_text(row, col, text, attrs)
@@ -403,9 +409,9 @@ impl TeletextPageEditor {
     ///
     /// Returns the number of characters written.
     pub fn type_text(&mut self, text: &str) -> usize {
-        let written = self
-            .page
-            .write_text(self.cursor_row, self.cursor_col, text, self.active_attrs);
+        let written =
+            self.page
+                .write_text(self.cursor_row, self.cursor_col, text, self.active_attrs);
         self.cursor_col = (self.cursor_col + written).min(TELETEXT_COLS - 1);
         written
     }

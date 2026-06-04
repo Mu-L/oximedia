@@ -513,6 +513,430 @@ impl Default for ChromaKey {
     }
 }
 
+// ---------------------------------------------------------------------------
+// YCbCr-space chroma keying
+// ---------------------------------------------------------------------------
+
+/// BT.601 RGB→Y′CbCr conversion constants (studio-swing, full-range).
+///
+/// For 8-bit full-range:
+/// ```text
+/// Y  =  0.2989 * R + 0.5866 * G + 0.1145 * B
+/// Cb = -0.1687 * R - 0.3313 * G + 0.5000 * B + 128
+/// Cr =  0.5000 * R - 0.4187 * G - 0.0813 * B + 128
+/// ```
+///
+/// Cb and Cr are in [0, 255] with neutral grey at 128.
+#[inline]
+fn rgb_to_ycbcr_601(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
+    let r = r as f32;
+    let g = g as f32;
+    let b = b as f32;
+    let y = 0.2989 * r + 0.5866 * g + 0.1145 * b;
+    let cb = -0.1687 * r - 0.3313 * g + 0.5000 * b + 128.0;
+    let cr = 0.5000 * r - 0.4187 * g - 0.0813 * b + 128.0;
+    (y, cb, cr)
+}
+
+/// Parameters for YCbCr-space chroma keying.
+///
+/// This is the industry-standard algorithm used by professional broadcast
+/// switchers (Blackmagic, Ross, Grass Valley, etc.).  Rather than converting to
+/// HSV and measuring hue distance, the algorithm measures **Euclidean distance
+/// in Cb/Cr space** from the key colour's chrominance coordinates.
+///
+/// ## Algorithm
+///
+/// ```text
+/// key_cb, key_cr = YCbCr of the key colour (e.g. green → Cb≈83, Cr≈38)
+///
+/// For each pixel (R, G, B):
+///   Y, Cb, Cr = bt601_rgb_to_ycbcr(R, G, B)
+///   dist_cb = Cb - key_cb
+///   dist_cr = Cr - key_cr
+///   chroma_dist = sqrt(dist_cb² + dist_cr²)   ∈ [0, 127]
+///
+///   # Normalise to [0, 1]:
+///   t = chroma_dist / (max_dist * tolerance)
+///   raw_alpha = smoothstep(0, 1, t)             ← Hermite cubic
+///
+///   # Luminance suppression: very dark pixels are always opaque.
+///   luma_weight = clamp(Y / 64, 0, 1)           ← 0 = black, 1 = normal
+///   alpha = raw_alpha * luma_weight + (1 - luma_weight)
+/// ```
+///
+/// `tolerance` controls how "wide" the key colour window is: `0.0` keys
+/// nothing, `1.0` keys the full Cb/Cr hemisphere on the key colour's side.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChromaKeyYcbcrParams {
+    /// Key colour in RGB (will be converted to Cb/Cr internally).
+    pub key_rgb: (u8, u8, u8),
+    /// Tolerance radius in normalised Cb/Cr space (0.0 – 1.0).
+    ///
+    /// Controls how wide the key colour window is.  Typical values: 0.3 – 0.6.
+    pub tolerance: f32,
+    /// Softness of the key edge (0.0 – 1.0).
+    ///
+    /// A value of `0.0` gives a hard edge; higher values blend gradually.
+    pub softness: f32,
+    /// Spill suppression strength (0.0 – 1.0).
+    ///
+    /// Reduces key-colour contamination on foreground subjects.
+    pub spill_suppression: f32,
+    /// If `true`, swap transparent and opaque regions.
+    pub invert: bool,
+}
+
+impl ChromaKeyYcbcrParams {
+    /// Maximum Cb/Cr distance from the neutral axis to any pure saturated colour.
+    ///
+    /// In 8-bit BT.601 with full-range encoding the Cb and Cr channels each
+    /// span roughly [3, 250] (≈ ±127 from neutral-128).  The maximum Euclidean
+    /// distance from any two antipodal colours in Cb/Cr space is therefore
+    /// `sqrt(127² + 127²) ≈ 179.6`.  We use `128.0 * sqrt(2) ≈ 181` as a
+    /// convenient normalisation constant.
+    const MAX_CBCR_DIST: f32 = 181.0;
+
+    /// Create default green-screen parameters.
+    pub fn green_screen() -> Self {
+        Self {
+            key_rgb: (0, 255, 0),
+            tolerance: 0.45,
+            softness: 0.15,
+            spill_suppression: 0.5,
+            invert: false,
+        }
+    }
+
+    /// Create default blue-screen parameters.
+    pub fn blue_screen() -> Self {
+        Self {
+            key_rgb: (0, 0, 255),
+            tolerance: 0.45,
+            softness: 0.15,
+            spill_suppression: 0.5,
+            invert: false,
+        }
+    }
+
+    /// Compute the Cb and Cr targets for the configured key colour.
+    pub fn key_cbcr(&self) -> (f32, f32) {
+        let (_, cb, cr) = rgb_to_ycbcr_601(self.key_rgb.0, self.key_rgb.1, self.key_rgb.2);
+        (cb, cr)
+    }
+}
+
+impl Default for ChromaKeyYcbcrParams {
+    fn default() -> Self {
+        Self::green_screen()
+    }
+}
+
+/// YCbCr-space chroma keyer.
+///
+/// Operates entirely in the Cb/Cr chrominance plane using Euclidean distance,
+/// which is faster and more numerically accurate than HSV-based approaches for
+/// broadcast green-/blue-screen work.
+///
+/// See [`ChromaKeyYcbcrParams`] for the full mathematical description.
+pub struct ChromaKeyYcbcr {
+    params: ChromaKeyYcbcrParams,
+    enabled: bool,
+    /// Cached key Cb/Cr to avoid recomputing every frame.
+    cached_key_cbcr: (f32, f32),
+}
+
+impl ChromaKeyYcbcr {
+    /// Create a green-screen keyer.
+    pub fn new_green() -> Self {
+        let params = ChromaKeyYcbcrParams::green_screen();
+        let cached_key_cbcr = params.key_cbcr();
+        Self {
+            params,
+            enabled: true,
+            cached_key_cbcr,
+        }
+    }
+
+    /// Create a blue-screen keyer.
+    pub fn new_blue() -> Self {
+        let params = ChromaKeyYcbcrParams::blue_screen();
+        let cached_key_cbcr = params.key_cbcr();
+        Self {
+            params,
+            enabled: true,
+            cached_key_cbcr,
+        }
+    }
+
+    /// Create with specific parameters.
+    pub fn with_params(params: ChromaKeyYcbcrParams) -> Self {
+        let cached_key_cbcr = params.key_cbcr();
+        Self {
+            params,
+            enabled: true,
+            cached_key_cbcr,
+        }
+    }
+
+    /// Get the parameters.
+    pub fn params(&self) -> &ChromaKeyYcbcrParams {
+        &self.params
+    }
+
+    /// Get mutable parameters and refresh the Cb/Cr cache.
+    pub fn params_mut(&mut self) -> &mut ChromaKeyYcbcrParams {
+        &mut self.params
+    }
+
+    /// Refresh the internal Cb/Cr cache after mutating params.
+    pub fn refresh_cache(&mut self) {
+        self.cached_key_cbcr = self.params.key_cbcr();
+    }
+
+    /// Update all parameters at once (refreshes cache automatically).
+    pub fn set_params(&mut self, params: ChromaKeyYcbcrParams) {
+        self.cached_key_cbcr = params.key_cbcr();
+        self.params = params;
+    }
+
+    /// Enable or disable the keyer.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
+    /// Whether the keyer is enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Compute the normalised chroma distance for a pixel.
+    ///
+    /// Returns a value in `[0.0, 1.0]`:
+    /// * `0.0` — pixel is exactly the key colour (fully transparent)
+    /// * `1.0` — pixel is maximally far from the key colour (fully opaque)
+    pub fn chroma_distance(&self, r: u8, g: u8, b: u8) -> f32 {
+        let (_, cb, cr) = rgb_to_ycbcr_601(r, g, b);
+        let (key_cb, key_cr) = self.cached_key_cbcr;
+        let d_cb = cb - key_cb;
+        let d_cr = cr - key_cr;
+        let dist = (d_cb * d_cb + d_cr * d_cr).sqrt();
+        // Normalise by tolerance-scaled max distance.
+        let scaled_max = ChromaKeyYcbcrParams::MAX_CBCR_DIST * self.params.tolerance.max(1e-4);
+        (dist / scaled_max).min(1.0)
+    }
+
+    /// Compute the alpha (opacity) for a single pixel.
+    ///
+    /// `0.0` = fully transparent (matches key colour); `1.0` = fully opaque.
+    pub fn calculate_alpha(&self, r: u8, g: u8, b: u8) -> f32 {
+        if !self.enabled {
+            return 1.0;
+        }
+
+        let dist = self.chroma_distance(r, g, b);
+
+        // Smoothstep from dist=0 (transparent) to dist=1 (opaque).
+        let softness = self.params.softness.max(1e-4);
+        let lo = 0.0_f32;
+        let hi = softness;
+
+        let raw_alpha = if dist <= lo {
+            0.0
+        } else if dist >= hi {
+            1.0
+        } else {
+            let t = (dist - lo) / (hi - lo);
+            t * t * (3.0 - 2.0 * t) // Hermite smoothstep
+        };
+
+        // Luminance-aware blend: very dark pixels are always opaque to avoid
+        // keying out dark/shadowed regions on the subject.
+        let (y, _, _) = rgb_to_ycbcr_601(r, g, b);
+        // Threshold: below 32 (≈ 12% luma) we protect the pixel from keying.
+        let luma_protect = (y / 32.0).clamp(0.0, 1.0);
+        let alpha = raw_alpha * luma_protect + (1.0 - luma_protect);
+
+        if self.params.invert {
+            1.0 - alpha.clamp(0.0, 1.0)
+        } else {
+            alpha.clamp(0.0, 1.0)
+        }
+    }
+
+    /// Apply YCbCr-space spill suppression to a pixel.
+    ///
+    /// Reduces contamination by the key colour in the foreground subject.
+    /// Unlike simple colour desaturation, this targets only the key-colour
+    /// Cb/Cr quadrant while leaving other colours untouched.
+    ///
+    /// The technique:
+    /// 1. Convert RGB → YCbCr.
+    /// 2. Measure angular distance of the pixel's chrominance from the key
+    ///    colour's Cb/Cr direction.
+    /// 3. For pixels whose chrominance angle is close to the key direction,
+    ///    push the Cb/Cr coordinates towards the neutral axis (128, 128)
+    ///    proportionally to `spill_suppression`.
+    /// 4. Convert back to RGB.
+    pub fn suppress_spill(&self, r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+        let strength = self.params.spill_suppression;
+        if strength <= 0.0 {
+            return (r, g, b);
+        }
+
+        let (y, cb, cr) = rgb_to_ycbcr_601(r, g, b);
+        let (key_cb, key_cr) = self.cached_key_cbcr;
+
+        // Direction vectors from neutral.
+        let key_dcb = key_cb - 128.0;
+        let key_dcr = key_cr - 128.0;
+        let px_dcb = cb - 128.0;
+        let px_dcr = cr - 128.0;
+
+        // Dot product — how much of the pixel's chroma aligns with the key direction.
+        let key_len2 = key_dcb * key_dcb + key_dcr * key_dcr;
+        if key_len2 < 1.0 {
+            return (r, g, b); // key colour is nearly neutral; no suppression possible
+        }
+        let dot = px_dcb * key_dcb + px_dcr * key_dcr;
+        // Only suppress if the pixel's chroma is pointing in the same direction.
+        if dot <= 0.0 {
+            return (r, g, b);
+        }
+
+        // Projection of pixel chrominance onto the key direction.
+        let proj = dot / key_len2;
+        // Move the Cb/Cr towards neutral by `strength * projection * key_vector`.
+        let new_cb = cb - strength * proj * key_dcb;
+        let new_cr = cr - strength * proj * key_dcr;
+
+        // Convert back to RGB via BT.601 inverse (full-range).
+        // R = Y + 1.4022 * (Cr - 128)
+        // G = Y - 0.3456 * (Cb - 128) - 0.7145 * (Cr - 128)
+        // B = Y + 1.7710 * (Cb - 128)
+        let new_r = (y + 1.4022 * (new_cr - 128.0)).clamp(0.0, 255.0) as u8;
+        let new_g =
+            (y - 0.3456 * (new_cb - 128.0) - 0.7145 * (new_cr - 128.0)).clamp(0.0, 255.0) as u8;
+        let new_b = (y + 1.7710 * (new_cb - 128.0)).clamp(0.0, 255.0) as u8;
+
+        (new_r, new_g, new_b)
+    }
+
+    /// Process a single pixel.
+    ///
+    /// Returns `(R, G, B, A)` after spill suppression and alpha calculation.
+    pub fn process_pixel(&self, r: u8, g: u8, b: u8) -> (u8, u8, u8, u8) {
+        let alpha = self.calculate_alpha(r, g, b);
+        let (r_out, g_out, b_out) = self.suppress_spill(r, g, b);
+        let alpha_u8 = (alpha * 255.0) as u8;
+        (r_out, g_out, b_out, alpha_u8)
+    }
+
+    /// Process a video frame (planar YCbCr 4:2:0 / 4:2:2 or single-plane).
+    ///
+    /// For frames with at least 3 planes (Y, Cb, Cr), the chroma planes are
+    /// sampled directly — no RGB conversion is needed, which is considerably
+    /// more efficient.  For frames with fewer planes, RGB channels are used
+    /// as an approximation.
+    ///
+    /// Returns a `Vec<u8>` with one alpha byte per luma-plane pixel.
+    pub fn process_frame(&self, fill: &VideoFrame) -> Result<Vec<u8>, ChromaKeyError> {
+        if fill.planes.is_empty() {
+            return Err(ChromaKeyError::ProcessingError(
+                "Frame has no planes".to_string(),
+            ));
+        }
+
+        let luma_plane = &fill.planes[0];
+        let luma_w = luma_plane.width as usize;
+        let luma_h = luma_plane.height as usize;
+        let pixel_count = luma_w * luma_h;
+
+        if fill.planes.len() >= 3 {
+            // Native YCbCr path: sample Cb and Cr directly.
+            let cb_plane = &fill.planes[1];
+            let cr_plane = &fill.planes[2];
+
+            let h_ratio = luma_w.checked_div(cb_plane.width as usize).unwrap_or(1);
+            let v_ratio = luma_h.checked_div(cb_plane.height as usize).unwrap_or(1);
+
+            let (key_cb, key_cr) = self.cached_key_cbcr;
+
+            let mut alpha_out = Vec::with_capacity(pixel_count);
+
+            for y in 0..luma_h {
+                for x in 0..luma_w {
+                    let li = y * luma_plane.stride + x;
+                    let y_val = if li < luma_plane.data.len() {
+                        luma_plane.data[li] as f32
+                    } else {
+                        0.0
+                    };
+
+                    let cx = x / h_ratio.max(1);
+                    let cy = y / v_ratio.max(1);
+                    let cb_i = cy * cb_plane.stride + cx;
+                    let cr_i = cy * cr_plane.stride + cx;
+
+                    let cb_val = if cb_i < cb_plane.data.len() {
+                        cb_plane.data[cb_i] as f32
+                    } else {
+                        128.0
+                    };
+                    let cr_val = if cr_i < cr_plane.data.len() {
+                        cr_plane.data[cr_i] as f32
+                    } else {
+                        128.0
+                    };
+
+                    // Distance in Cb/Cr space.
+                    let d_cb = cb_val - key_cb;
+                    let d_cr = cr_val - key_cr;
+                    let dist = (d_cb * d_cb + d_cr * d_cr).sqrt();
+                    let scaled_max =
+                        ChromaKeyYcbcrParams::MAX_CBCR_DIST * self.params.tolerance.max(1e-4);
+                    let norm_dist = (dist / scaled_max).min(1.0);
+
+                    let softness = self.params.softness.max(1e-4);
+                    let raw_alpha = if norm_dist >= softness {
+                        1.0
+                    } else {
+                        let t = norm_dist / softness;
+                        t * t * (3.0 - 2.0 * t)
+                    };
+
+                    let luma_protect = (y_val / 32.0).clamp(0.0, 1.0);
+                    let alpha = raw_alpha * luma_protect + (1.0 - luma_protect);
+                    let alpha = if self.params.invert {
+                        1.0 - alpha.clamp(0.0, 1.0)
+                    } else {
+                        alpha.clamp(0.0, 1.0)
+                    };
+
+                    alpha_out.push((alpha * 255.0) as u8);
+                }
+            }
+
+            Ok(alpha_out)
+        } else {
+            // Fallback: treat single plane as luminance approximation.
+            let mut alpha_out = Vec::with_capacity(pixel_count);
+            for &luma in &luma_plane.data[..pixel_count.min(luma_plane.data.len())] {
+                // Approximate: treat as grey pixel, calculate alpha.
+                let alpha = self.calculate_alpha(luma, luma, luma);
+                alpha_out.push((alpha * 255.0) as u8);
+            }
+            Ok(alpha_out)
+        }
+    }
+}
+
+impl Default for ChromaKeyYcbcr {
+    fn default() -> Self {
+        Self::new_green()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -712,5 +1136,171 @@ mod tests {
 
         assert!(params.set_saturation_tolerance(0.4).is_ok());
         assert_eq!(params.saturation_tolerance, 0.4);
+    }
+
+    // -----------------------------------------------------------------------
+    // YCbCr keyer tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ycbcr_keyer_green_keys_green() {
+        let keyer = ChromaKeyYcbcr::new_green();
+
+        // Pure green (0, 255, 0) should produce very low / zero alpha.
+        let alpha = keyer.calculate_alpha(0, 255, 0);
+        assert!(
+            alpha < 0.15,
+            "pure green should be nearly transparent, got {alpha}"
+        );
+    }
+
+    #[test]
+    fn test_ycbcr_keyer_green_opaque_red() {
+        let keyer = ChromaKeyYcbcr::new_green();
+
+        // Pure red (255, 0, 0) is far from green in Cb/Cr space → opaque.
+        let alpha = keyer.calculate_alpha(255, 0, 0);
+        assert!(
+            alpha > 0.8,
+            "pure red should be mostly opaque in green keyer, got {alpha}"
+        );
+    }
+
+    #[test]
+    fn test_ycbcr_keyer_blue_keys_blue() {
+        let keyer = ChromaKeyYcbcr::new_blue();
+
+        // Pure blue (0, 0, 255) should produce very low / zero alpha.
+        let alpha = keyer.calculate_alpha(0, 0, 255);
+        assert!(
+            alpha < 0.15,
+            "pure blue should be nearly transparent, got {alpha}"
+        );
+    }
+
+    #[test]
+    fn test_ycbcr_keyer_disabled_always_opaque() {
+        let mut keyer = ChromaKeyYcbcr::new_green();
+        keyer.set_enabled(false);
+
+        // Even pure green should be fully opaque when disabled.
+        let alpha = keyer.calculate_alpha(0, 255, 0);
+        assert_eq!(alpha, 1.0, "disabled keyer must return 1.0 for any pixel");
+    }
+
+    #[test]
+    fn test_ycbcr_keyer_invert() {
+        let mut keyer = ChromaKeyYcbcr::new_green();
+        keyer.params_mut().invert = true;
+        keyer.refresh_cache();
+
+        // Inverted: pure green should now be opaque.
+        let alpha = keyer.calculate_alpha(0, 255, 0);
+        assert!(
+            alpha > 0.85,
+            "inverted keyer: pure green should be nearly opaque, got {alpha}"
+        );
+
+        // Inverted: pure red should be transparent.
+        let alpha_red = keyer.calculate_alpha(255, 0, 0);
+        assert!(
+            alpha_red < 0.2,
+            "inverted keyer: pure red should be nearly transparent, got {alpha_red}"
+        );
+    }
+
+    #[test]
+    fn test_ycbcr_rgb_to_ycbcr_601_neutral_grey() {
+        // For neutral grey (R=G=B=128) the chrominance should be at neutral 128.
+        let (y, cb, cr) = rgb_to_ycbcr_601(128, 128, 128);
+        assert!(
+            (cb - 128.0).abs() < 2.0,
+            "grey pixel: Cb should be ~128, got {cb}"
+        );
+        assert!(
+            (cr - 128.0).abs() < 2.0,
+            "grey pixel: Cr should be ~128, got {cr}"
+        );
+        assert!(
+            y > 100.0 && y < 150.0,
+            "grey pixel: Y should be ~128, got {y}"
+        );
+    }
+
+    #[test]
+    fn test_ycbcr_spill_suppression_reduces_key_channel() {
+        let keyer = ChromaKeyYcbcr::new_green();
+
+        // A pixel with green spill (slightly greenish skin tone).
+        let (r, g, b) = (200u8, 220u8, 180u8);
+        let (_r_out, g_out, _b_out) = keyer.suppress_spill(r, g, b);
+
+        // Green channel must be reduced (or at worst unchanged).
+        assert!(
+            g_out <= g,
+            "spill suppression must not increase the green channel; g_out={g_out} vs g={g}"
+        );
+    }
+
+    #[test]
+    fn test_ycbcr_spill_suppression_unchanged_for_neutral() {
+        let keyer = ChromaKeyYcbcr::new_green();
+
+        // Neutral grey has no chroma alignment → should be unchanged.
+        let (r, g, b) = (128u8, 128u8, 128u8);
+        let (r_out, g_out, b_out) = keyer.suppress_spill(r, g, b);
+
+        // Allow ±2 for rounding in the BT.601 round-trip.
+        let diff_r = (r_out as i16 - r as i16).unsigned_abs();
+        let diff_g = (g_out as i16 - g as i16).unsigned_abs();
+        let diff_b = (b_out as i16 - b as i16).unsigned_abs();
+        assert!(
+            diff_r <= 2,
+            "neutral grey R changed by more than 2: {diff_r}"
+        );
+        assert!(
+            diff_g <= 2,
+            "neutral grey G changed by more than 2: {diff_g}"
+        );
+        assert!(
+            diff_b <= 2,
+            "neutral grey B changed by more than 2: {diff_b}"
+        );
+    }
+
+    #[test]
+    fn test_ycbcr_keyer_process_pixel_green_reduces_alpha() {
+        let keyer = ChromaKeyYcbcr::new_green();
+        let (_, _, _, a) = keyer.process_pixel(0, 255, 0);
+        assert!(
+            a < 128,
+            "green screen pixel must yield low alpha (< 128), got {a}"
+        );
+    }
+
+    #[test]
+    fn test_ycbcr_keyer_chroma_distance_zero_for_exact_match() {
+        let keyer = ChromaKeyYcbcr::new_green();
+        // For (0, 255, 0) the distance must be 0 (exact key colour).
+        let d = keyer.chroma_distance(0, 255, 0);
+        assert!(
+            d < 0.01,
+            "exact key colour must have near-zero chroma distance, got {d}"
+        );
+    }
+
+    #[test]
+    fn test_ycbcr_set_params_refreshes_cache() {
+        let mut keyer = ChromaKeyYcbcr::new_green();
+        // Change key to blue.
+        let params = ChromaKeyYcbcrParams::blue_screen();
+        keyer.set_params(params);
+
+        // Now pure blue should key out.
+        let alpha = keyer.calculate_alpha(0, 0, 255);
+        assert!(
+            alpha < 0.15,
+            "after switching to blue screen, blue should key out; got {alpha}"
+        );
     }
 }

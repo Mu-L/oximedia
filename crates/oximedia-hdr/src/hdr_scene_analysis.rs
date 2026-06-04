@@ -116,14 +116,8 @@ impl SceneStats {
         }
 
         let frame_count = samples.len() as u64;
-        let peak_nits = samples
-            .iter()
-            .copied()
-            .fold(f32::NEG_INFINITY, f32::max);
-        let min_nits = samples
-            .iter()
-            .copied()
-            .fold(f32::INFINITY, f32::min);
+        let peak_nits = samples.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let min_nits = samples.iter().copied().fold(f32::INFINITY, f32::min);
         let mean_nits = samples.iter().copied().sum::<f32>() / samples.len() as f32;
 
         let mut sorted = samples.to_vec();
@@ -423,8 +417,16 @@ mod tests {
         let samples: Vec<f32> = (1..=100).map(|x| x as f32).collect();
         let stats = SceneStats::from_samples(&samples, 0).unwrap();
         // p95 should be ~95 (within 1 nit due to interpolation).
-        assert!((stats.p95_nits - 95.05).abs() < 1.0, "p95={}", stats.p95_nits);
-        assert!((stats.p99_nits - 99.01).abs() < 1.0, "p99={}", stats.p99_nits);
+        assert!(
+            (stats.p95_nits - 95.05).abs() < 1.0,
+            "p95={}",
+            stats.p95_nits
+        );
+        assert!(
+            (stats.p99_nits - 99.01).abs() < 1.0,
+            "p99={}",
+            stats.p99_nits
+        );
     }
 
     #[test]
@@ -474,7 +476,11 @@ mod tests {
             analyzer.push_frame(800.0).unwrap();
         }
         let scenes = analyzer.finish().unwrap();
-        assert!(scenes.len() >= 2, "expected >=2 scenes, got {}", scenes.len());
+        assert!(
+            scenes.len() >= 2,
+            "expected >=2 scenes, got {}",
+            scenes.len()
+        );
     }
 
     #[test]
@@ -487,8 +493,7 @@ mod tests {
     #[test]
     fn test_frame_peak_sampler_uniform() {
         // All pixels at (100, 0, 0) → luma = KR * 100 = 26.27 nits.
-        let pixels: Vec<f32> = std::iter::repeat([100.0_f32, 0.0, 0.0])
-            .take(10)
+        let pixels: Vec<f32> = std::iter::repeat_n([100.0_f32, 0.0, 0.0], 10)
             .flatten()
             .collect();
         let (peak, mean) = FramePeakSampler::sample_linear(&pixels).unwrap();

@@ -66,30 +66,45 @@ pub mod awareness;
 pub mod bandwidth_throttle;
 /// Compact binary frame format for WebSocket throughput optimisation (replaces JSON for hot paths).
 pub mod binary_framer;
+pub mod change_feed;
 pub mod changeset;
+pub mod collab_bus;
 pub mod comments;
+pub mod conflict_resolution;
 pub mod conflict_resolve;
+pub mod conflict_resolver;
 pub mod crdt;
 /// Classic CRDT primitives: GCounter, PNCounter, LWWRegister, MVRegister, GSet, TwoPhaseSet.
 pub mod crdt_primitives;
+pub mod cursor_interpolation;
+pub mod cursor_sharing;
+pub mod dag_index;
 pub mod diff_tracker;
 pub mod diff_viewer;
 /// Region-based, track-based, and hierarchical edit locking with automatic expiration and deadlock detection.
 pub mod edit_lock;
+pub mod export_coordinator;
 pub mod history;
+pub mod history_replay;
+pub mod incremental_sync;
 pub mod invite_link;
 pub mod invite_system;
 pub mod lock;
+pub mod lock_escalation;
 pub mod merge_strategy;
 pub mod notification;
+pub mod op_batcher;
 /// Operational transformation log: per-op DAG, OT transform/rebase, apply to `Vec<f32>` state.
 pub mod operation_log;
+pub mod opt_lock;
 pub mod permission;
 pub mod presence;
 pub mod review_link;
 pub mod session;
+pub mod session_lifecycle;
 pub mod session_lock;
 pub mod session_manager;
+pub mod session_recording;
 /// Project snapshot and version management with branching and fast-forward merge detection.
 pub mod snapshot_manager;
 pub mod sync;
@@ -98,6 +113,7 @@ pub mod task_tracker;
 pub mod team_role;
 /// Three-way media project merge: scalar, string, timeline-event, and parameter-map merging.
 pub mod three_way_merge;
+pub mod timeline_collab;
 /// Spatial presence tracking (cursor/viewport positions) for collaboration.
 pub mod user_presence_map;
 pub mod version_compare;

@@ -8,6 +8,9 @@ pub mod composite;
 pub mod depth;
 pub mod foreground;
 pub mod frustum_tracking;
+pub mod tiled;
+
+pub use tiled::TiledCompositor;
 
 use serde::{Deserialize, Serialize};
 

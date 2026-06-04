@@ -5,17 +5,17 @@
 //!
 //! | Variant | Description |
 //! |---------|-------------|
-//! | [`RoutingStrategy::LatencyBased`] | Prefer the PoP with lowest estimated propagation latency (Haversine if lat/lon available, else region match). |
-//! | [`RoutingStrategy::LoadBased`] | Prefer the healthy PoP with the lowest `load_pct`. |
-//! | [`RoutingStrategy::GeoNearest`] | Prefer the geographically nearest healthy PoP by Haversine distance. |
-//! | [`RoutingStrategy::RoundRobin`] | Cycle through healthy PoPs in insertion order. |
-//! | [`RoutingStrategy::WeightedRandom`] | Sample proportional to `(1 − load_pct) × capacity_gbps`; falls back to uniform when all weights are zero. |
+//! | `RoutingStrategy::LatencyBased` | Prefer the PoP with lowest estimated propagation latency (Haversine if lat/lon available, else region match). |
+//! | `RoutingStrategy::LoadBased` | Prefer the healthy PoP with the lowest `load_pct`. |
+//! | `RoutingStrategy::GeoNearest` | Prefer the geographically nearest healthy PoP by Haversine distance. |
+//! | `RoutingStrategy::RoundRobin` | Cycle through healthy PoPs in insertion order. |
+//! | `RoutingStrategy::WeightedRandom` | Sample proportional to `(1 − load_pct) × capacity_gbps`; falls back to uniform when all weights are zero. |
 //!
 //! # Notes
 //!
 //! - **No I/O** is performed; the router is a pure-logic component.
 //! - Unhealthy PoPs (`healthy == false`) are excluded from all strategies.
-//! - When no healthy PoPs exist, [`RequestRouter::route`] returns `None`.
+//! - When no healthy PoPs exist, `RequestRouter::route` returns `None`.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -27,8 +27,7 @@ fn haversine_km(lat1: f32, lon1: f32, lat2: f32, lon2: f32) -> f32 {
     let dlon = (lon2 - lon1).to_radians();
     let lat1_r = lat1.to_radians();
     let lat2_r = lat2.to_radians();
-    let a = (dlat / 2.0).sin().powi(2)
-        + lat1_r.cos() * lat2_r.cos() * (dlon / 2.0).sin().powi(2);
+    let a = (dlat / 2.0).sin().powi(2) + lat1_r.cos() * lat2_r.cos() * (dlon / 2.0).sin().powi(2);
     let c = 2.0 * a.sqrt().asin();
     R_KM * c
 }
@@ -213,11 +212,7 @@ impl RequestRouter {
     /// Select the best PoP for `request` using `strategy`.
     ///
     /// Returns `None` when no healthy PoPs exist.
-    pub fn route(
-        &self,
-        request: &RouteRequest,
-        strategy: RoutingStrategy,
-    ) -> Option<&CdnPop> {
+    pub fn route(&self, request: &RouteRequest, strategy: RoutingStrategy) -> Option<&CdnPop> {
         match strategy {
             RoutingStrategy::LatencyBased => self.route_latency(request),
             RoutingStrategy::LoadBased => self.route_load(),
@@ -234,14 +229,11 @@ impl RequestRouter {
     fn route_latency(&self, request: &RouteRequest) -> Option<&CdnPop> {
         if let (Some(clat), Some(clon)) = (request.client_lat, request.client_lon) {
             // Prefer closest by propagation distance
-            self.pops
-                .iter()
-                .filter(|p| p.healthy)
-                .min_by(|a, b| {
-                    let da = a.distance_to(clat, clon);
-                    let db = b.distance_to(clat, clon);
-                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-                })
+            self.pops.iter().filter(|p| p.healthy).min_by(|a, b| {
+                let da = a.distance_to(clat, clon);
+                let db = b.distance_to(clat, clon);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
         } else {
             // Fallback: region-string prefix match, then load as tiebreak
             let region = &request.client_ip_region;
@@ -280,29 +272,22 @@ impl RequestRouter {
 
     /// Load-based: healthy PoP with the lowest `load_pct`.
     fn route_load(&self) -> Option<&CdnPop> {
-        self.pops
-            .iter()
-            .filter(|p| p.healthy)
-            .min_by(|a, b| {
-                a.load_pct
-                    .partial_cmp(&b.load_pct)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+        self.pops.iter().filter(|p| p.healthy).min_by(|a, b| {
+            a.load_pct
+                .partial_cmp(&b.load_pct)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     }
 
     /// Geo-nearest: healthy PoP closest by Haversine distance.
     /// Falls back to load-based when the request carries no coordinates.
     fn route_geo_nearest(&self, request: &RouteRequest) -> Option<&CdnPop> {
         match (request.client_lat, request.client_lon) {
-            (Some(clat), Some(clon)) => self
-                .pops
-                .iter()
-                .filter(|p| p.healthy)
-                .min_by(|a, b| {
-                    let da = a.distance_to(clat, clon);
-                    let db = b.distance_to(clat, clon);
-                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-                }),
+            (Some(clat), Some(clon)) => self.pops.iter().filter(|p| p.healthy).min_by(|a, b| {
+                let da = a.distance_to(clat, clon);
+                let db = b.distance_to(clat, clon);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            }),
             _ => self.route_load(),
         }
     }
@@ -313,10 +298,7 @@ impl RequestRouter {
         if healthy.is_empty() {
             return None;
         }
-        let idx = self
-            .rr_counter
-            .fetch_add(1, Ordering::Relaxed)
-            % healthy.len();
+        let idx = self.rr_counter.fetch_add(1, Ordering::Relaxed) % healthy.len();
         Some(healthy[idx])
     }
 
@@ -335,10 +317,7 @@ impl RequestRouter {
 
         if total <= 0.0 {
             // All weights are zero → fall back to uniform round-robin
-            let idx = self
-                .rr_counter
-                .fetch_add(1, Ordering::Relaxed)
-                % healthy.len();
+            let idx = self.rr_counter.fetch_add(1, Ordering::Relaxed) % healthy.len();
             return Some(healthy[idx]);
         }
 
@@ -388,9 +367,7 @@ mod tests {
         let router = RequestRouter::new();
         let req = RouteRequest::region_only("us-east-1", 1_000);
         assert!(router.route(&req, RoutingStrategy::LoadBased).is_none());
-        assert!(router
-            .route(&req, RoutingStrategy::RoundRobin)
-            .is_none());
+        assert!(router.route(&req, RoutingStrategy::RoundRobin).is_none());
         assert!(router
             .route(&req, RoutingStrategy::WeightedRandom)
             .is_none());
@@ -559,7 +536,9 @@ mod tests {
             10.0,
         ));
         let req = RouteRequest::region_only("us-east-1", 1_000);
-        let sel = r.route(&req, RoutingStrategy::WeightedRandom).expect("some");
+        let sel = r
+            .route(&req, RoutingStrategy::WeightedRandom)
+            .expect("some");
         assert_eq!(sel.id, "full");
     }
 

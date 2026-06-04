@@ -7,6 +7,10 @@
 
 /// Severity level of a QC finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(
+    any(feature = "json", feature = "xml"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub enum FindingSeverity {
     /// Informational note; not a problem.
     Info,
@@ -20,6 +24,10 @@ pub enum FindingSeverity {
 
 /// A single finding produced by a QC check.
 #[derive(Debug, Clone)]
+#[cfg_attr(
+    any(feature = "json", feature = "xml"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct QcFinding {
     /// Name of the check that produced this finding.
     pub check_name: String,
@@ -28,6 +36,10 @@ pub struct QcFinding {
     /// Human-readable description.
     pub message: String,
     /// Optional timecode or position (seconds) where the issue occurs.
+    #[cfg_attr(
+        any(feature = "json", feature = "xml"),
+        serde(skip_serializing_if = "Option::is_none", default)
+    )]
     pub position_secs: Option<f64>,
 }
 
@@ -65,6 +77,10 @@ impl QcFinding {
 
 /// Result of running a single named QC check, potentially with multiple findings.
 #[derive(Debug, Clone)]
+#[cfg_attr(
+    any(feature = "json", feature = "xml"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct QcCheckResult {
     /// Name of the check.
     pub check_name: String,
@@ -129,10 +145,18 @@ impl QcCheckResult {
 
 /// Aggregated QC report collecting results from multiple checks.
 #[derive(Debug, Default, Clone)]
+#[cfg_attr(
+    any(feature = "json", feature = "xml"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct QcReport {
     /// All individual check results.
     results: Vec<QcCheckResult>,
     /// Optional label for this report (e.g. file name).
+    #[cfg_attr(
+        any(feature = "json", feature = "xml"),
+        serde(skip_serializing_if = "Option::is_none", default)
+    )]
     pub label: Option<String>,
 }
 
@@ -341,5 +365,99 @@ mod tests {
             vec![QcFinding::new("a", FindingSeverity::Fatal, "Fatal")],
         ));
         assert!(report.summary().contains("[FATAL]"));
+    }
+
+    // ── Round-trip serialization tests ───────────────────────────────────────
+
+    /// Build a fixture QcReport with known contents.
+    fn make_fixture_report() -> QcReport {
+        let mut report = QcReport::with_label("fixture.mp4");
+
+        let mut result1 = QcCheckResult::pass("video_codec");
+        result1.add_finding(QcFinding::new(
+            "video_codec",
+            FindingSeverity::Info,
+            "Codec is AV1",
+        ));
+        report.add_result(result1);
+
+        let mut finding_err = QcFinding::new("loudness", FindingSeverity::Error, "Too loud");
+        finding_err = finding_err.at_position(42.5);
+        report.add_result(QcCheckResult::fail("loudness", vec![finding_err]));
+
+        report
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn test_qc_report_json_roundtrip() {
+        let original = make_fixture_report();
+        let json =
+            serde_json::to_string_pretty(&original).expect("QcReport should serialize to JSON");
+        let restored: QcReport =
+            serde_json::from_str(&json).expect("QcReport should deserialize from JSON");
+
+        // Structural equivalence checks.
+        assert_eq!(
+            original.result_count(),
+            restored.result_count(),
+            "result_count should be preserved through JSON round-trip"
+        );
+        assert_eq!(
+            original.label, restored.label,
+            "label should be preserved through JSON round-trip"
+        );
+        assert_eq!(
+            original.pass_count(),
+            restored.pass_count(),
+            "pass_count should be preserved through JSON round-trip"
+        );
+        assert_eq!(
+            original.fail_count(),
+            restored.fail_count(),
+            "fail_count should be preserved through JSON round-trip"
+        );
+
+        // Verify finding content round-trips.
+        let orig_findings: Vec<_> = original
+            .all_results()
+            .iter()
+            .flat_map(|r| r.findings.iter())
+            .collect();
+        let rest_findings: Vec<_> = restored
+            .all_results()
+            .iter()
+            .flat_map(|r| r.findings.iter())
+            .collect();
+        assert_eq!(
+            orig_findings.len(),
+            rest_findings.len(),
+            "Finding count should match"
+        );
+        for (o, r) in orig_findings.iter().zip(rest_findings.iter()) {
+            assert_eq!(o.check_name, r.check_name);
+            assert_eq!(o.severity, r.severity);
+            assert_eq!(o.message, r.message);
+            assert_eq!(o.position_secs, r.position_secs);
+        }
+    }
+
+    #[cfg(feature = "xml")]
+    #[test]
+    fn test_qc_report_xml_roundtrip() {
+        let original = make_fixture_report();
+        let xml = quick_xml::se::to_string(&original).expect("QcReport should serialize to XML");
+        let restored: QcReport =
+            quick_xml::de::from_str(&xml).expect("QcReport should deserialize from XML");
+
+        assert_eq!(
+            original.result_count(),
+            restored.result_count(),
+            "result_count should be preserved through XML round-trip"
+        );
+        assert_eq!(
+            original.label, restored.label,
+            "label should be preserved through XML round-trip"
+        );
     }
 }

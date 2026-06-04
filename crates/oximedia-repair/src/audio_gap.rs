@@ -64,7 +64,11 @@ impl AudioGapFiller {
 
         // Boundary values
         let v_before = if start > 0 { samples[start - 1] } else { 0.0 };
-        let v_after = if end < samples.len() { samples[end] } else { 0.0 };
+        let v_after = if end < samples.len() {
+            samples[end]
+        } else {
+            0.0
+        };
 
         for i in 0..actual_len {
             // t goes from 0.0 (exclusive) to 1.0 (exclusive) across the gap

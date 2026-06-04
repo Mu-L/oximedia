@@ -153,13 +153,21 @@ impl AttenuationModel {
     /// Returns an error if the custom curve contains no nodes.
     pub fn gain_at(&self, distance_m: f32) -> Result<f32, SpatialError> {
         match self {
-            Self::InverseSquare { reference_distance, max_distance, rolloff_factor } => {
+            Self::InverseSquare {
+                reference_distance,
+                max_distance,
+                rolloff_factor,
+            } => {
                 let ref_d = reference_distance.max(1e-6_f32);
                 let d = distance_m.max(ref_d).min(*max_distance);
                 Ok((ref_d / d).powi(2) * rolloff_factor)
             }
 
-            Self::Logarithmic { reference_distance, rolloff_factor, max_distance } => {
+            Self::Logarithmic {
+                reference_distance,
+                rolloff_factor,
+                max_distance,
+            } => {
                 let ref_d = reference_distance.max(1e-6_f32);
                 let d = distance_m.max(ref_d).min(*max_distance);
                 let denom = ref_d + rolloff_factor * (d - ref_d);
@@ -170,7 +178,11 @@ impl AttenuationModel {
                 }
             }
 
-            Self::Linear { reference_distance, max_distance, rolloff_factor } => {
+            Self::Linear {
+                reference_distance,
+                max_distance,
+                rolloff_factor,
+            } => {
                 let ref_d = reference_distance.max(1e-6_f32);
                 let max_d = max_distance.max(ref_d + 1e-6);
                 let d = distance_m.clamp(ref_d, max_d);
@@ -178,7 +190,11 @@ impl AttenuationModel {
                 Ok(gain.clamp(0.0, 1.0))
             }
 
-            Self::Exponential { reference_distance, rolloff_factor, max_distance } => {
+            Self::Exponential {
+                reference_distance,
+                rolloff_factor,
+                max_distance,
+            } => {
                 let ref_d = reference_distance.max(1e-6_f32);
                 let d = distance_m.max(ref_d).min(*max_distance);
                 Ok((d / ref_d).powf(-rolloff_factor).max(0.0))
@@ -252,7 +268,11 @@ pub struct DistanceAttenuator {
 impl DistanceAttenuator {
     /// Create a new attenuator with the supplied model.
     pub fn new(model: AttenuationModel) -> Self {
-        Self { model, max_gain: 1.0, min_gain: 0.0 }
+        Self {
+            model,
+            max_gain: 1.0,
+            min_gain: 0.0,
+        }
     }
 
     /// Set the maximum gain (builder pattern).
@@ -426,8 +446,14 @@ mod tests {
     fn test_custom_curve_interpolation() {
         let model = AttenuationModel::CustomCurve {
             nodes: vec![
-                CurveNode { distance_m: 1.0, gain: 1.0 },
-                CurveNode { distance_m: 10.0, gain: 0.0 },
+                CurveNode {
+                    distance_m: 1.0,
+                    gain: 1.0,
+                },
+                CurveNode {
+                    distance_m: 10.0,
+                    gain: 0.0,
+                },
             ],
         };
         let g = model.gain_at(5.5).expect("ok");
@@ -446,8 +472,14 @@ mod tests {
     fn test_custom_curve_below_range_clamps_to_first() {
         let model = AttenuationModel::CustomCurve {
             nodes: vec![
-                CurveNode { distance_m: 2.0, gain: 0.8 },
-                CurveNode { distance_m: 10.0, gain: 0.1 },
+                CurveNode {
+                    distance_m: 2.0,
+                    gain: 0.8,
+                },
+                CurveNode {
+                    distance_m: 10.0,
+                    gain: 0.1,
+                },
             ],
         };
         let g = model.gain_at(0.5).expect("ok");
@@ -476,8 +508,8 @@ mod tests {
 
     #[test]
     fn test_attenuator_max_gain_clamp() {
-        let att = DistanceAttenuator::new(AttenuationModel::inverse_square_default())
-            .with_max_gain(0.5);
+        let att =
+            DistanceAttenuator::new(AttenuationModel::inverse_square_default()).with_max_gain(0.5);
         // At reference distance gain would be 1.0, but max_gain=0.5 clamps it.
         let g = att.gain_at(1.0).expect("ok");
         assert!((g - 0.5).abs() < 1e-5, "g={g}");

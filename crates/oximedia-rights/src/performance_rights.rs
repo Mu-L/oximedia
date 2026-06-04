@@ -169,9 +169,7 @@ impl ReportingPeriod {
     /// Create a new reporting period.
     pub fn new(start: u64, end: u64, label: impl Into<String>) -> Result<Self> {
         if end < start {
-            return Err(RightsError::InvalidOperation(
-                "end must be >= start".into(),
-            ));
+            return Err(RightsError::InvalidOperation("end must be >= start".into()));
         }
         Ok(Self {
             start,
@@ -234,7 +232,9 @@ impl PerformanceReport {
     #[must_use]
     pub fn to_csv(&self) -> String {
         let mut out = String::new();
-        out.push_str("Work Key,Title,Records,Total Plays,Total Duration (s),Broadcast,Streaming,Live\n");
+        out.push_str(
+            "Work Key,Title,Records,Total Plays,Total Duration (s),Broadcast,Streaming,Live\n",
+        );
         for s in &self.summaries {
             let broadcast = s.plays_by_category.get("Broadcast").copied().unwrap_or(0);
             let streaming = s.plays_by_category.get("Streaming").copied().unwrap_or(0);
@@ -468,15 +468,17 @@ impl PerformanceRightsTracker {
                 .iswc
                 .clone()
                 .unwrap_or_else(|| record.work_title.clone());
-            let summary = agg.entry(key.clone()).or_insert_with(|| PerformanceSummary {
-                work_key: key,
-                work_title: record.work_title.clone(),
-                record_count: 0,
-                total_plays: 0,
-                total_duration_secs: 0.0,
-                plays_by_category: HashMap::new(),
-                plays_by_territory: HashMap::new(),
-            });
+            let summary = agg
+                .entry(key.clone())
+                .or_insert_with(|| PerformanceSummary {
+                    work_key: key,
+                    work_title: record.work_title.clone(),
+                    record_count: 0,
+                    total_plays: 0,
+                    total_duration_secs: 0.0,
+                    plays_by_category: HashMap::new(),
+                    plays_by_territory: HashMap::new(),
+                });
             summary.record_count += 1;
             summary.total_plays += record.play_count;
             summary.total_duration_secs += record.total_duration_secs();

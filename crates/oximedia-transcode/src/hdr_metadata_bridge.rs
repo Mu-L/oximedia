@@ -359,9 +359,7 @@ impl HdrMetadataBridge {
                 hlg_system_gamma: None,
             }),
 
-            HdrPolicy::Convert { target_tf } => {
-                self.convert(source, *target_tf)
-            }
+            HdrPolicy::Convert { target_tf } => self.convert(source, *target_tf),
         }
     }
 
@@ -383,24 +381,16 @@ impl HdrMetadataBridge {
             (TransferFunction::Bt709, TransferFunction::Bt709) => Ok(source.clone()),
 
             // HDR10 (PQ) -> HLG
-            (TransferFunction::Pq, TransferFunction::Hlg) => {
-                self.convert_hdr10_to_hlg(source)
-            }
+            (TransferFunction::Pq, TransferFunction::Hlg) => self.convert_hdr10_to_hlg(source),
 
             // HLG -> HDR10 (PQ)
-            (TransferFunction::Hlg, TransferFunction::Pq) => {
-                self.convert_hlg_to_hdr10(source)
-            }
+            (TransferFunction::Hlg, TransferFunction::Pq) => self.convert_hlg_to_hdr10(source),
 
             // HDR10 (PQ) -> SDR
-            (TransferFunction::Pq, TransferFunction::Bt709) => {
-                Ok(self.strip_to_sdr())
-            }
+            (TransferFunction::Pq, TransferFunction::Bt709) => Ok(self.strip_to_sdr()),
 
             // HLG -> SDR
-            (TransferFunction::Hlg, TransferFunction::Bt709) => {
-                Ok(self.strip_to_sdr())
-            }
+            (TransferFunction::Hlg, TransferFunction::Bt709) => Ok(self.strip_to_sdr()),
 
             // Unspecified source -> target (treat as passthrough with updated TF)
             (TransferFunction::Unspecified, _) => {
@@ -605,8 +595,7 @@ mod tests {
 
     #[test]
     fn test_hdr10plus_sei_validation_bad_knee() {
-        let sei = Hdr10PlusSei::new(1000)
-            .with_bezier(1.5, 0.5, vec![]);
+        let sei = Hdr10PlusSei::new(1000).with_bezier(1.5, 0.5, vec![]);
         assert!(sei.validate().is_err());
     }
 
@@ -687,7 +676,9 @@ mod tests {
             target_tf: TransferFunction::Pq,
         });
         let source = BridgeHdrMetadata::default();
-        let output = bridge.process(&source).expect("unspecified->PQ should succeed");
+        let output = bridge
+            .process(&source)
+            .expect("unspecified->PQ should succeed");
         assert_eq!(output.base.transfer_function, Some(TransferFunction::Pq));
     }
 }

@@ -44,7 +44,10 @@ struct BandMatrix {
 impl BandMatrix {
     fn new(order: usize) -> Self {
         let s = 2 * order + 1;
-        Self { order, data: vec![0.0; s * s] }
+        Self {
+            order,
+            data: vec![0.0; s * s],
+        }
     }
 
     #[inline]
@@ -85,7 +88,11 @@ impl BandMatrix {
 /// Kronecker delta.
 #[inline]
 fn kd(a: i32, b: i32) -> f64 {
-    if a == b { 1.0 } else { 0.0 }
+    if a == b {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 /// u(l, m, n) — scalar coefficient, eq. (8.2) in I&R 1996.
@@ -98,7 +105,9 @@ fn coeff_u(l: i32, m: i32, n: i32) -> f64 {
     } else {
         (lf + nf) * (lf - nf)
     };
-    if d.abs() < 1e-15 { return 0.0; }
+    if d.abs() < 1e-15 {
+        return 0.0;
+    }
     ((lf + mf) * (lf - mf) / d).sqrt()
 }
 
@@ -112,13 +121,17 @@ fn coeff_v(l: i32, m: i32, n: i32) -> f64 {
     } else {
         (lf + nf) * (lf - nf)
     };
-    if d.abs() < 1e-15 { return 0.0; }
+    if d.abs() < 1e-15 {
+        return 0.0;
+    }
     0.5 * ((1.0 + kd(m, 0)) * (lf + ma - 1.0) * (lf + ma) / d).sqrt()
 }
 
 /// w(l, m, n) — scalar coefficient, eq. (8.4).
 fn coeff_w(l: i32, m: i32, n: i32) -> f64 {
-    if m == 0 { return 0.0; }
+    if m == 0 {
+        return 0.0;
+    }
     let lf = l as f64;
     let ma = m.abs() as f64;
     let nf = n as f64;
@@ -127,7 +140,9 @@ fn coeff_w(l: i32, m: i32, n: i32) -> f64 {
     } else {
         (lf + nf) * (lf - nf)
     };
-    if d.abs() < 1e-15 { return 0.0; }
+    if d.abs() < 1e-15 {
+        return 0.0;
+    }
     -0.5 * ((lf - ma - 1.0) * (lf - ma) / d).sqrt()
 }
 
@@ -138,11 +153,9 @@ fn coeff_w(l: i32, m: i32, n: i32) -> f64 {
 fn p_func(i: i32, a: i32, b: i32, l: i32, r1: &BandMatrix, rl1: &BandMatrix) -> f64 {
     let lm1 = (l - 1) as i32;
     if b == lm1 {
-        r1.get_mn(i, 1) * rl1.get_mn(a, lm1 - 1)
-            - r1.get_mn(i, -1) * rl1.get_mn(a, -(lm1 - 1))
+        r1.get_mn(i, 1) * rl1.get_mn(a, lm1 - 1) - r1.get_mn(i, -1) * rl1.get_mn(a, -(lm1 - 1))
     } else if b == -lm1 {
-        r1.get_mn(i, 1) * rl1.get_mn(a, -(lm1 - 1))
-            + r1.get_mn(i, -1) * rl1.get_mn(a, lm1 - 1)
+        r1.get_mn(i, 1) * rl1.get_mn(a, -(lm1 - 1)) + r1.get_mn(i, -1) * rl1.get_mn(a, lm1 - 1)
     } else {
         r1.get_mn(i, 0) * rl1.get_mn(a, b)
     }
@@ -202,8 +215,8 @@ fn order1_matrix(rot3: &[[f64; 3]; 3]) -> BandMatrix {
     // m → Cartesian axis
     let axis = |m: i32| match m {
         -1 => 1_usize, // y
-        0  => 2,       // z
-        _  => 0,       // x
+        0 => 2,        // z
+        _ => 0,        // x
     };
     let mut mat = BandMatrix::new(1);
     // R^1_{m,n} = rot3[ axis(n) ][ axis(m) ]
@@ -229,13 +242,9 @@ fn zyz_rotation_matrix(yaw: f64, pitch: f64, roll: f64) -> [[f64; 3]; 3] {
     let (sr, cr) = roll.sin_cos();
 
     // Rz(α) column-major: col 0 = (c, s, 0), col 1 = (-s, c, 0), col 2 = (0, 0, 1)
-    let rz = |s: f64, c: f64| -> [[f64; 3]; 3] {
-        [[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]]
-    };
+    let rz = |s: f64, c: f64| -> [[f64; 3]; 3] { [[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]] };
     // Ry(α) column-major: col 0 = (c, 0, -s), col 1 = (0, 1, 0), col 2 = (s, 0, c)
-    let ry = |s: f64, c: f64| -> [[f64; 3]; 3] {
-        [[c, 0.0, -s], [0.0, 1.0, 0.0], [s, 0.0, c]]
-    };
+    let ry = |s: f64, c: f64| -> [[f64; 3]; 3] { [[c, 0.0, -s], [0.0, 1.0, 0.0], [s, 0.0, c]] };
 
     // Matrix multiply: C = A · B, where A,B stored column-major.
     // C[col][row] = Σ_k A[k][row] * B[col][k]
@@ -251,9 +260,9 @@ fn zyz_rotation_matrix(yaw: f64, pitch: f64, roll: f64) -> [[f64; 3]; 3] {
         c
     };
 
-    let rz_yaw  = rz(sy, cy);
+    let rz_yaw = rz(sy, cy);
     let ry_pitch = ry(sp, cp);
-    let rz_roll  = rz(sr, cr);
+    let rz_roll = rz(sr, cr);
 
     mul(rz_yaw, mul(ry_pitch, rz_roll))
 }
@@ -349,7 +358,10 @@ pub fn build_rotation_matrix(
     full[0] = 1.0;
 
     if max_order == 0 {
-        return Ok(HoaRotationMatrix { max_order, matrix: full });
+        return Ok(HoaRotationMatrix {
+            max_order,
+            matrix: full,
+        });
     }
 
     // Order-1 block from Cartesian rotation.
@@ -387,7 +399,10 @@ pub fn build_rotation_matrix(
         rl_prev = rl;
     }
 
-    Ok(HoaRotationMatrix { max_order, matrix: full })
+    Ok(HoaRotationMatrix {
+        max_order,
+        matrix: full,
+    })
 }
 
 /// Convenience: build and apply a rotation to a single HOA frame.
@@ -472,7 +487,10 @@ mod tests {
         let frame = vec![1.0_f32, 0.5, 0.3, 0.7];
         let out = mat.rotate_frame(&frame).unwrap();
         for (a, b) in out.iter().zip(frame.iter()) {
-            assert!(close(*a, *b, 1e-5), "zero rotation should be identity: {a} vs {b}");
+            assert!(
+                close(*a, *b, 1e-5),
+                "zero rotation should be identity: {a} vs {b}"
+            );
         }
     }
 
@@ -508,8 +526,10 @@ mod tests {
         let energy_in: f32 = frame.iter().map(|x| x * x).sum();
         let out = rotate_frame(&frame, 2, 0.7, 0.3, 1.1).unwrap();
         let energy_out: f32 = out.iter().map(|x| x * x).sum();
-        assert!((energy_in - energy_out).abs() < 0.01 * energy_in,
-            "energy not preserved: in={energy_in}, out={energy_out}");
+        assert!(
+            (energy_in - energy_out).abs() < 0.01 * energy_in,
+            "energy not preserved: in={energy_in}, out={energy_out}"
+        );
     }
 
     /// W channel (order 0) is never modified by any rotation.
@@ -518,7 +538,11 @@ mod tests {
         let mut frame: Vec<f32> = (0..16).map(|i| i as f32 * 0.1).collect();
         frame[0] = 1.0;
         let out = rotate_frame(&frame, 3, 1.2, 0.8, 2.1).unwrap();
-        assert!(close(out[0], 1.0, 1e-5), "W channel must not change: {}", out[0]);
+        assert!(
+            close(out[0], 1.0, 1e-5),
+            "W channel must not change: {}",
+            out[0]
+        );
     }
 
     /// Wrong channel count returns an error.

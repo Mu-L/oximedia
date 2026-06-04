@@ -201,11 +201,7 @@ impl ChapterMap {
     /// # Errors
     ///
     /// Returns [`TranscodeError::InvalidInput`] if `trim_end_ms <= trim_start_ms`.
-    pub fn adjust_for_trim(
-        &self,
-        trim_start_ms: u64,
-        trim_end_ms: u64,
-    ) -> Result<ChapterMap> {
+    pub fn adjust_for_trim(&self, trim_start_ms: u64, trim_end_ms: u64) -> Result<ChapterMap> {
         if trim_end_ms <= trim_start_ms {
             return Err(TranscodeError::InvalidInput(format!(
                 "trim_end_ms ({trim_end_ms}) must be greater than trim_start_ms ({trim_start_ms})"
@@ -342,9 +338,7 @@ impl ChapterMap {
             }
 
             let start = start_ms.ok_or_else(|| {
-                TranscodeError::InvalidInput(
-                    ChapterParseError::MissingStartTime.to_string(),
-                )
+                TranscodeError::InvalidInput(ChapterParseError::MissingStartTime.to_string())
             })?;
             let t = title.ok_or_else(|| {
                 TranscodeError::InvalidInput(ChapterParseError::MissingTitle.to_string())
@@ -366,19 +360,12 @@ impl ChapterMap {
     ///
     /// Returns the number of chapters added (0 if `split_ms` does not fall
     /// inside any chapter).
-    pub fn split_chapter_at(
-        &mut self,
-        split_ms: u64,
-        new_title: impl Into<String>,
-    ) -> usize {
+    pub fn split_chapter_at(&mut self, split_ms: u64, new_title: impl Into<String>) -> usize {
         let new_title = new_title.into();
-        let pos = self
-            .chapters
-            .iter()
-            .position(|c| {
-                let end = c.end_ms.unwrap_or(u64::MAX);
-                c.start_ms < split_ms && end > split_ms
-            });
+        let pos = self.chapters.iter().position(|c| {
+            let end = c.end_ms.unwrap_or(u64::MAX);
+            c.start_ms < split_ms && end > split_ms
+        });
 
         let Some(idx) = pos else {
             return 0;
@@ -489,9 +476,7 @@ impl ChapterTranscodeSpec {
 
             ChapterHandling::AdjustForTrim => {
                 let start = self.trim_start_ms.ok_or_else(|| {
-                    TranscodeError::InvalidInput(
-                        "AdjustForTrim requires trim_start_ms".to_string(),
-                    )
+                    TranscodeError::InvalidInput("AdjustForTrim requires trim_start_ms".to_string())
                 })?;
                 let end = self.trim_end_ms.ok_or_else(|| {
                     TranscodeError::InvalidInput("AdjustForTrim requires trim_end_ms".to_string())
@@ -667,8 +652,7 @@ mod tests {
 
     #[test]
     fn test_spec_resolve_drop() {
-        let spec = ChapterTranscodeSpec::new(sample_map())
-            .with_handling(ChapterHandling::Drop);
+        let spec = ChapterTranscodeSpec::new(sample_map()).with_handling(ChapterHandling::Drop);
         let out = spec.resolve().unwrap();
         assert!(out.is_empty());
     }
@@ -676,16 +660,14 @@ mod tests {
     #[test]
     fn test_spec_resolve_copy() {
         let m = sample_map();
-        let spec = ChapterTranscodeSpec::new(m.clone())
-            .with_handling(ChapterHandling::Copy);
+        let spec = ChapterTranscodeSpec::new(m.clone()).with_handling(ChapterHandling::Copy);
         let out = spec.resolve().unwrap();
         assert_eq!(out.len(), m.len());
     }
 
     #[test]
     fn test_spec_resolve_adjust_for_trim() {
-        let spec = ChapterTranscodeSpec::new(sample_map())
-            .with_trim(30_000, 120_000);
+        let spec = ChapterTranscodeSpec::new(sample_map()).with_trim(30_000, 120_000);
         let out = spec.resolve().unwrap();
         assert_eq!(out.len(), 2);
     }
@@ -695,12 +677,14 @@ mod tests {
         let mut extra = ChapterMap::new();
         extra.add(ChapterInfo::new("Bonus", 0).with_end(30_000));
 
-        let spec = ChapterTranscodeSpec::new(sample_map())
-            .with_concat(extra, 180_000);
+        let spec = ChapterTranscodeSpec::new(sample_map()).with_concat(extra, 180_000);
         let out = spec.resolve().unwrap();
         // 4 original + 1 extra
         assert_eq!(out.len(), 5);
-        assert_eq!(out.chapters().last().map(|c| c.title.as_str()), Some("Bonus"));
+        assert_eq!(
+            out.chapters().last().map(|c| c.title.as_str()),
+            Some("Bonus")
+        );
     }
 
     #[test]

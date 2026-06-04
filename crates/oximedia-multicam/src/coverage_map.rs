@@ -1,11 +1,5 @@
 //! Camera coverage analysis for multicam production.
 
-#![allow(dead_code)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::must_use_candidate)]
-#![allow(clippy::missing_panics_doc)]
-#![allow(clippy::module_name_repetitions)]
-
 // ── CameraPosition ────────────────────────────────────────────────────────────
 
 /// Position and field-of-view of a camera in 2-D space
@@ -157,6 +151,181 @@ impl CoverageAnalyzer {
     }
 }
 
+// ── CoverageMap (incremental) ─────────────────────────────────────────────────
+
+use std::collections::HashSet;
+
+/// An incremental camera-coverage map over a square 2-D area.
+///
+/// Unlike [`CoverageAnalyzer`] (which recomputes the entire grid on every
+/// call), `CoverageMap` tracks which camera IDs have changed since the last
+/// build via a *dirty set* and only recomputes the cells that overlap with
+/// those cameras during [`update_incremental`].
+///
+/// # Typical workflow
+///
+/// 1. Create with [`CoverageMap::new`] supplying all cameras and the desired
+///    grid parameters.
+/// 2. Call [`full_rebuild`] once to populate the initial grid.
+/// 3. When one or more cameras move / change FOV, call [`mark_dirty`] for each
+///    affected camera and then [`update_incremental`].
+///
+/// [`update_incremental`]: CoverageMap::update_incremental
+/// [`full_rebuild`]: CoverageMap::full_rebuild
+/// [`mark_dirty`]: CoverageMap::mark_dirty
+#[derive(Debug)]
+pub struct CoverageMap {
+    /// Side length of each grid cell (metres).
+    pub grid_size: f32,
+    /// Side length of the square area to cover (metres).
+    pub area: f32,
+    /// Computed coverage grid (populated by a build call).
+    pub cells: Vec<CoverageCell>,
+    /// Cameras registered with this map.
+    pub cameras: Vec<CameraPosition>,
+    /// Camera IDs that have changed since the last build.
+    dirty_cameras: HashSet<u32>,
+}
+
+impl CoverageMap {
+    /// Create a new, initially empty map with no cells computed.
+    ///
+    /// Call [`full_rebuild`] after construction to populate the grid.
+    ///
+    /// [`full_rebuild`]: CoverageMap::full_rebuild
+    #[must_use]
+    pub fn new(grid_size: f32, area: f32) -> Self {
+        Self {
+            grid_size,
+            area,
+            cells: Vec::new(),
+            cameras: Vec::new(),
+            dirty_cameras: HashSet::new(),
+        }
+    }
+
+    /// Register a camera.
+    pub fn add_camera(&mut self, cam: CameraPosition) {
+        self.cameras.push(cam);
+    }
+
+    /// Mark a camera ID as having changed since the last build.
+    ///
+    /// The camera's cells will be recomputed on the next call to
+    /// `update_incremental`.
+    pub fn mark_dirty(&mut self, camera_id: u32) {
+        self.dirty_cameras.insert(camera_id);
+    }
+
+    /// Recompute **only** the grid cells that may be affected by cameras in the
+    /// dirty set, then clear the dirty set.
+    ///
+    /// Cells not overlapping any dirty camera retain their previous values.
+    /// If the dirty set is empty this is a true no-op (no cell is touched).
+    ///
+    /// Note: "overlapping" is defined conservatively — any cell whose
+    /// `covering_cameras` list contained a dirty camera ID, **or** that now
+    /// falls within the FOV of a dirty camera, is recomputed.
+    pub fn update_incremental(&mut self, cameras: &[CameraPosition]) {
+        if self.dirty_cameras.is_empty() {
+            return;
+        }
+
+        // Refresh our camera list from the provided slice.
+        self.cameras = cameras.to_vec();
+
+        let dirty = &self.dirty_cameras;
+        let w = self.grid_size;
+        let steps = (self.area / w).ceil() as usize;
+
+        for cell in &mut self.cells {
+            // Recompute this cell only if it was previously covered by a dirty
+            // camera OR it might now be covered by one.
+            let touches_dirty = cell.covering_cameras.iter().any(|id| dirty.contains(id))
+                || self.cameras.iter().any(|cam| {
+                    if !dirty.contains(&cam.id) {
+                        return false;
+                    }
+                    let target_angle = cell.y.atan2(cell.x).to_degrees();
+                    cam.can_see(target_angle)
+                });
+
+            if !touches_dirty {
+                continue;
+            }
+
+            let target_angle = cell.y.atan2(cell.x).to_degrees();
+            cell.covering_cameras = self
+                .cameras
+                .iter()
+                .filter(|cam| cam.can_see(target_angle))
+                .map(|cam| cam.id)
+                .collect();
+        }
+
+        // If the grid is empty (first call without a prior full_rebuild) fall
+        // back to generating it from scratch.
+        if self.cells.is_empty() {
+            for row in 0..steps {
+                for col in 0..steps {
+                    let cx = col as f32 * w + w / 2.0;
+                    let cy = row as f32 * w + w / 2.0;
+                    let target_angle = cy.atan2(cx).to_degrees();
+                    let covering_cameras: Vec<u32> = self
+                        .cameras
+                        .iter()
+                        .filter(|cam| cam.can_see(target_angle))
+                        .map(|cam| cam.id)
+                        .collect();
+                    self.cells.push(CoverageCell {
+                        x: cx,
+                        y: cy,
+                        covering_cameras,
+                    });
+                }
+            }
+        }
+
+        self.dirty_cameras.clear();
+    }
+
+    /// Recompute the **entire** coverage grid from scratch.
+    ///
+    /// This is the correct starting point before the first incremental update
+    /// and is also useful when many cameras change simultaneously.
+    pub fn full_rebuild(&mut self, cameras: &[CameraPosition]) {
+        self.cameras = cameras.to_vec();
+        self.cells.clear();
+        let w = self.grid_size;
+        let steps = (self.area / w).ceil() as usize;
+        for row in 0..steps {
+            for col in 0..steps {
+                let cx = col as f32 * w + w / 2.0;
+                let cy = row as f32 * w + w / 2.0;
+                let target_angle = cy.atan2(cx).to_degrees();
+                let covering_cameras: Vec<u32> = self
+                    .cameras
+                    .iter()
+                    .filter(|cam| cam.can_see(target_angle))
+                    .map(|cam| cam.id)
+                    .collect();
+                self.cells.push(CoverageCell {
+                    x: cx,
+                    y: cy,
+                    covering_cameras,
+                });
+            }
+        }
+        self.dirty_cameras.clear();
+    }
+
+    /// Return the number of cameras currently in the dirty set.
+    #[must_use]
+    pub fn dirty_count(&self) -> usize {
+        self.dirty_cameras.len()
+    }
+}
+
 // ── Unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -279,5 +448,107 @@ mod tests {
         let uncovered = az.uncovered_areas(2.0);
         // No cameras → all 4 cells are uncovered
         assert_eq!(uncovered.len(), 4);
+    }
+
+    // ── CoverageMap (incremental) tests ──────────────────────────────────────
+
+    /// After a single-angle change, incremental update must produce the same
+    /// cell coverage vectors as a full rebuild.
+    #[test]
+    fn test_incremental_coverage_matches_full_rebuild() {
+        // Camera 0 points straight (0°, 180° FOV) — covers everything in
+        // front.  Camera 1 points at 90° with a narrow FOV.
+        let cam0 = CameraPosition::new(0, 0.0, 0.0, 0.0, 180.0);
+        let cam1_initial = CameraPosition::new(1, 0.0, 0.0, 90.0, 30.0);
+
+        let cameras = vec![cam0.clone(), cam1_initial.clone()];
+
+        // Build baseline with full rebuild.
+        let mut base_map = CoverageMap::new(1.0, 4.0);
+        base_map.full_rebuild(&cameras);
+
+        // Now change camera 1.
+        let cam1_updated = CameraPosition::new(1, 0.0, 0.0, 45.0, 60.0);
+        let updated_cameras = vec![cam0.clone(), cam1_updated.clone()];
+
+        // Reference: full rebuild with updated cameras.
+        let mut ref_map = CoverageMap::new(1.0, 4.0);
+        ref_map.full_rebuild(&updated_cameras);
+
+        // Incremental: mark camera 1 dirty and update.
+        base_map.mark_dirty(1);
+        base_map.update_incremental(&updated_cameras);
+
+        // Both maps must have the same number of cells.
+        assert_eq!(
+            base_map.cells.len(),
+            ref_map.cells.len(),
+            "cell counts must match"
+        );
+
+        // Every cell must have the same covering_cameras set (order may differ).
+        for (idx, (inc_cell, ref_cell)) in
+            base_map.cells.iter().zip(ref_map.cells.iter()).enumerate()
+        {
+            let mut inc_sorted = inc_cell.covering_cameras.clone();
+            let mut ref_sorted = ref_cell.covering_cameras.clone();
+            inc_sorted.sort_unstable();
+            ref_sorted.sort_unstable();
+            assert_eq!(
+                inc_sorted, ref_sorted,
+                "cell {idx} mismatch: incremental {:?} vs full {:?}",
+                inc_sorted, ref_sorted
+            );
+        }
+    }
+
+    /// When the dirty set is empty, `update_incremental` must be a true no-op:
+    /// cell data must not change.
+    #[test]
+    fn test_no_dirty_no_recompute() {
+        let cam = CameraPosition::new(0, 0.0, 0.0, 45.0, 180.0);
+        let cameras = vec![cam.clone()];
+
+        let mut map = CoverageMap::new(1.0, 3.0);
+        map.full_rebuild(&cameras);
+
+        // Snapshot the covering_cameras for each cell.
+        let snapshot: Vec<Vec<u32>> = map
+            .cells
+            .iter()
+            .map(|c| c.covering_cameras.clone())
+            .collect();
+
+        // Calling update_incremental with empty dirty set — no change.
+        assert_eq!(map.dirty_count(), 0);
+        map.update_incremental(&cameras);
+
+        // Cells must be identical.
+        for (idx, (cell, snap)) in map.cells.iter().zip(snapshot.iter()).enumerate() {
+            assert_eq!(
+                cell.covering_cameras, *snap,
+                "cell {idx} changed even though dirty set was empty"
+            );
+        }
+    }
+
+    /// Verifying that `mark_dirty` increments the dirty set and that
+    /// `update_incremental` clears it.
+    #[test]
+    fn test_dirty_set_cleared_after_update() {
+        let cam = CameraPosition::new(5, 0.0, 0.0, 0.0, 90.0);
+        let cameras = vec![cam];
+
+        let mut map = CoverageMap::new(1.0, 2.0);
+        map.full_rebuild(&cameras);
+
+        map.mark_dirty(5);
+        assert_eq!(map.dirty_count(), 1);
+        map.update_incremental(&cameras);
+        assert_eq!(
+            map.dirty_count(),
+            0,
+            "dirty set should be empty after update"
+        );
     }
 }

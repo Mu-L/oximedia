@@ -136,7 +136,7 @@ impl Default for PtpServoConfig {
             kp: 0.2,
             ki: 0.02,
             integrator_cap: 1_000_000.0, // 1 ms
-            max_step_nanos: 500_000,      // 500 µs per step
+            max_step_nanos: 500_000,     // 500 µs per step
             warmup_samples: 4,
         }
     }

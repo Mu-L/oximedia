@@ -7,7 +7,7 @@
 #![allow(clippy::wildcard_imports)]
 
 use super::ebml::{self, element_id, EbmlElement};
-use super::matroska_v4;
+use super::matroska_v4::{self, parse_block_additions};
 use super::types::*;
 use oximedia_core::{CodecId, OxiError, OxiResult};
 
@@ -1173,10 +1173,14 @@ pub fn parse_simple_block(data: &[u8]) -> OxiResult<Block> {
         duration: None,
         references: Vec::new(),
         discard_padding: None,
+        block_additions: Vec::new(),
     })
 }
 
 /// Parses a block group.
+///
+/// Extracts the main `Block` payload as well as any block-level additional data
+/// from `BlockAdditions` (0x75A1) → `BlockMore` (0xA6) children.
 ///
 /// # Errors
 ///
@@ -1203,6 +1207,20 @@ pub fn parse_block_group(data: &[u8], size: u64) -> OxiResult<Block> {
             }
             element_id::DISCARD_PADDING => {
                 block.discard_padding = Some(parser.read_int(elem_size)?);
+            }
+            element_id::BLOCK_ADDITIONS => {
+                // Parse the BlockAdditions master element to extract all
+                // BlockMore children (each carrying a BlockAddID + BlockAdditional).
+                let additions_data = parser.read_data(elem_size)?;
+                match parse_block_additions(additions_data, element.size) {
+                    Ok(additions) => {
+                        block.block_additions = additions;
+                    }
+                    Err(_) => {
+                        // Resilient: ignore malformed BlockAdditions rather than
+                        // failing the entire block parse.
+                    }
+                }
             }
             _ => {
                 parser.skip(elem_size);

@@ -278,10 +278,10 @@ impl WatchTranscoderConfig {
                 GlobPattern::new("*.ts"),
             ],
             exclude_patterns: vec![
-                GlobPattern::new(".*"),       // hidden files
-                GlobPattern::new("*~"),       // temp/backup files
-                GlobPattern::new("*.part"),   // partial downloads
-                GlobPattern::new("*.tmp"),    // temp files
+                GlobPattern::new(".*"),     // hidden files
+                GlobPattern::new("*~"),     // temp/backup files
+                GlobPattern::new("*.part"), // partial downloads
+                GlobPattern::new("*.tmp"),  // temp files
             ],
             debounce: DebounceConfig::default(),
             profile,
@@ -496,10 +496,7 @@ impl WatchTranscoder {
             }
 
             // Check pattern matching.
-            let filename = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
+            let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
             if !self.should_process(filename) {
                 continue;
@@ -729,8 +726,7 @@ mod tests {
 
     #[test]
     fn test_transcode_profile_output_dir() {
-        let profile = make_test_profile()
-            .with_output_dir("/media/output");
+        let profile = make_test_profile().with_output_dir("/media/output");
         let source = Path::new("/media/input/clip.mp4");
         let output = profile.output_path_for(source);
         assert_eq!(output, PathBuf::from("/media/output/clip.webm"));
@@ -755,12 +751,15 @@ mod tests {
         // Create test files.
         let mp4_path = temp_dir.join("test.mp4");
         let txt_path = temp_dir.join("readme.txt");
-        std::fs::write(&mp4_path, b"fake mp4 content that is long enough to pass min size check 1234567890 1234567890").expect("write mp4");
+        std::fs::write(
+            &mp4_path,
+            b"fake mp4 content that is long enough to pass min size check 1234567890 1234567890",
+        )
+        .expect("write mp4");
         std::fs::write(&txt_path, b"not a video").expect("write txt");
 
         let profile = make_test_profile();
-        let config = WatchTranscoderConfig::new(&temp_dir, profile)
-            .with_process_existing(true);
+        let config = WatchTranscoderConfig::new(&temp_dir, profile).with_process_existing(true);
         let mut watcher = WatchTranscoder::new(config);
 
         let new_count = watcher.scan().expect("scan should succeed");
@@ -786,8 +785,7 @@ mod tests {
         let debounce = DebounceConfig::new()
             .with_required_checks(2)
             .with_min_size(512);
-        let config = WatchTranscoderConfig::new(&temp_dir, profile)
-            .with_debounce(debounce);
+        let config = WatchTranscoderConfig::new(&temp_dir, profile).with_debounce(debounce);
         let mut watcher = WatchTranscoder::new(config);
 
         // First scan discovers the file and runs one debounce check (stable_count=1).
@@ -926,8 +924,8 @@ mod tests {
         let config = WatchTranscoderConfig::new("/nonexistent/path/12345", profile.clone());
         assert!(config.validate().is_err());
 
-        let config2 = WatchTranscoderConfig::new(std::env::temp_dir(), profile)
-            .with_max_concurrent(0);
+        let config2 =
+            WatchTranscoderConfig::new(std::env::temp_dir(), profile).with_max_concurrent(0);
         assert!(config2.validate().is_err());
     }
 }

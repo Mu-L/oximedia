@@ -29,10 +29,30 @@
 
 ## Performance
 - [x] Parallelize sync verification across all angle pairs using rayon in sync_verify (verified 2026-05-16; src/sync_verify_parallel.rs:158 par_iter() across angle pairs)
-- [ ] Cache angle score computations per frame to avoid redundant face/motion detection in auto switcher (verified-open 2026-05-16: no score cache in angle_score.rs)
-- [ ] Implement lazy frame loading in MultiCamTimeline -- only decode frames for active/preview angles (verified-open 2026-05-16: no lazy frame loading found)
-- [ ] Use tile-based color matching in color module to reduce full-frame processing to sampled regions (verified-open 2026-05-16: no tile/sampled region in color/match_color.rs)
-- [ ] Add incremental coverage_map updates instead of full recomputation when angles change (verified-open 2026-05-16: no incremental update in coverage_map.rs)
+- [x] Cache angle score computations per frame to avoid redundant face/motion detection (completed 2026-06-01)
+  - **Goal:** Memoize per-(angle, frame) score so repeated queries don't re-run detection.
+  - **Design:** `src/angle_score.rs:225` `AngleScorer` has no cache field. Add `HashMap<(AngleId, FrameNumber), AngleScore>` memo; check before calling the heavy computation path. Invalidate on scorer config change.
+  - **Files:** `src/angle_score.rs`, `TODO.md`.
+  - **Tests:** cached score == uncached on first call; second call returns same value without recomputing; config change invalidates.
+  - **Risk:** cache key must be stable; memory bound the cache (LRU or bounded window).
+- [x] Lazy frame loading in MultiCamTimeline (decode only active/preview angles) (completed 2026-06-01)
+  - **Goal:** Wire the existing `LazyFrameRef` primitive into `MultiCamTimeline` so inactive angles are not decoded.
+  - **Design:** `src/edit/lazy_frame.rs:LazyFrameRef` exists with `OnceCell` deferred decode but `src/edit/timeline.rs:MultiCamTimeline` never references it. Change `MultiCamTimeline::frame_at(angle, timecode)` to return `LazyFrameRef` (or wrap frames in it) so inactive angles skip decoding until accessed.
+  - **Files:** `src/edit/timeline.rs`, `src/edit/lazy_frame.rs` (read), `TODO.md`.
+  - **Tests:** lazy-frame for inactive angle is NOT decoded until `force()` is called; active angle is decoded immediately on access; 4-angle setup only decodes the active one.
+  - **Risk:** lazy-frame cache key must be stable across timeline mutations.
+- [x] Tile-based color matching to reduce full-frame processing to sampled regions (completed 2026-06-01)
+  - **Goal:** Reduce color matching cost by sampling a grid of tiles instead of every pixel.
+  - **Design:** `src/color/match_color.rs` does full-frame histogram/stats for 3D LUT transfer at :199. Add `match_color_tiled(src, reference, tile_n: usize)` that samples a `tile_n × tile_n` grid of tiles (evenly spaced) for stats computation instead of every pixel.
+  - **Files:** `src/color/match_color.rs`, `TODO.md`.
+  - **Tests:** tiled match ≈ full-frame match within ΔE tolerance at tile_n=8; tile_n=1 (single center tile) still runs without panic; tile_n > frame dimensions degrades gracefully.
+  - **Risk:** sampling bias on non-uniform images — use stratified grid, not random.
+- [x] Incremental coverage_map updates instead of full recomputation when angles change (completed 2026-06-01)
+  - **Goal:** Recompute only coverage cells affected by changed angles, not the entire map.
+  - **Design:** `src/coverage_map.rs` (283L) recomputes the full map on every call with no dirty tracking. Add `dirty_angles: HashSet<AngleId>` field; add `update_coverage(changed_angles: &[AngleId])` that only recomputes cells overlapping with those angles; keep `full_rebuild()` for initial construction.
+  - **Files:** `src/coverage_map.rs`, `TODO.md`.
+  - **Tests:** incremental update == full rebuild after a single-angle change; multiple concurrent angle changes processed correctly; no-change call is a no-op.
+  - **Risk:** partial update must be conservative (all cells affected by changed angle, not just direct overlap); test against full rebuild to ensure correctness.
 
 ## Testing
 - [x] Test audio sync with known-offset synthetic signals (1kHz tone with 100ms offset between channels)

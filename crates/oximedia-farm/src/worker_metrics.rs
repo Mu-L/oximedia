@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Per-worker performance metrics for the encoding farm.
 //!
 //! Tracks job completion rate, average processing time, error rate, and

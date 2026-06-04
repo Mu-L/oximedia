@@ -225,7 +225,8 @@ impl CrossfadeEngine {
         let xfade_in = &incoming[..region.length_samples];
         let xfade = self.apply(xfade_out, xfade_in, region)?;
 
-        let mut result = Vec::with_capacity(outgoing.len() + incoming.len() - region.length_samples);
+        let mut result =
+            Vec::with_capacity(outgoing.len() + incoming.len() - region.length_samples);
         result.extend_from_slice(&outgoing[..pre_len]);
         result.extend_from_slice(&xfade);
         result.extend_from_slice(&incoming[region.length_samples..]);
@@ -275,10 +276,7 @@ impl Take {
 ///
 /// Returns an error if any take is too short for its crossfade, or if the take list
 /// is empty.
-pub fn splice_takes(
-    takes: &[Take],
-    engine: &CrossfadeEngine,
-) -> AudioPostResult<Vec<f32>> {
+pub fn splice_takes(takes: &[Take], engine: &CrossfadeEngine) -> AudioPostResult<Vec<f32>> {
     if takes.is_empty() {
         return Err(AudioPostError::Generic("take list is empty".to_string()));
     }

@@ -2,6 +2,10 @@
 
 //! GPU-based frame scaling and color conversion for game streaming.
 //!
+//! The `scale_plane` function (and callers) uses rayon parallel iterators to
+//! distribute row work across all available CPU threads.  A real GPU backend
+//! via oximedia-gpu is deferred to a future wave.
+//!
 //! Provides efficient GPU-accelerated operations for the capture-to-encode
 //! pipeline, including resolution scaling, color space conversion (RGB to YUV),
 //! and chroma subsampling. Uses a software fallback when GPU hardware is
@@ -16,6 +20,7 @@
 //! - **Software fallback**: Deterministic CPU path when GPU is not present
 //! - **Pipeline integration**: Accepts raw RGBA buffers from capture stage
 
+use rayon::prelude::*;
 use std::time::{Duration, Instant};
 
 use crate::{GamingError, GamingResult};
@@ -365,6 +370,17 @@ fn nearest_sample(src: &[u8], src_w: u32, stride: usize, x: f64, y: f64) -> u8 {
 }
 
 /// Scale a single-channel plane from `src` dimensions to `dst` dimensions.
+///
+/// # Parallelism
+///
+/// Row work is distributed across all available threads via
+/// `rayon::par_chunks_mut`.  Each thread processes one or more complete output
+/// rows; the inner column loop remains serial within each row.
+///
+/// # Note on GPU backend
+///
+/// Real oximedia-gpu backend is deferred; this path uses rayon CPU
+/// parallelism as a Pure-Rust substitute.
 fn scale_plane(
     src: &[u8],
     src_w: u32,
@@ -373,7 +389,10 @@ fn scale_plane(
     dst_h: u32,
     filter: ScaleFilter,
 ) -> Vec<u8> {
-    let mut dst = vec![0u8; (dst_w as usize) * (dst_h as usize)];
+    let dw = dst_w as usize;
+    let dh = dst_h as usize;
+    let mut dst = vec![0u8; dw * dh];
+
     let sx = if dst_w > 1 {
         (src_w as f64 - 1.0) / (dst_w as f64 - 1.0)
     } else {
@@ -385,22 +404,29 @@ fn scale_plane(
         0.0
     };
 
-    for dy in 0..dst_h {
-        for dx in 0..dst_w {
-            let src_x = dx as f64 * sx;
+    // Parallel outer loop over destination rows.
+    dst.par_chunks_mut(dw)
+        .enumerate()
+        .for_each(|(dy, row_slice)| {
             let src_y = dy as f64 * sy;
-            let val = match filter {
-                ScaleFilter::Nearest => nearest_sample(src, src_w, src_w as usize, src_x, src_y),
-                // Bilinear, Bicubic, and Lanczos3 all use bilinear as a
-                // reasonable software fallback. A production implementation
-                // would use proper kernel convolution for bicubic/lanczos.
-                ScaleFilter::Bilinear | ScaleFilter::Bicubic | ScaleFilter::Lanczos3 => {
-                    bilinear_sample(src, src_w, src_h, src_w as usize, src_x, src_y)
-                }
-            };
-            dst[(dy as usize) * (dst_w as usize) + (dx as usize)] = val;
-        }
-    }
+            // Serial inner loop over columns (contiguous within a cache line).
+            for dx in 0..dw {
+                let src_x = dx as f64 * sx;
+                let val = match filter {
+                    ScaleFilter::Nearest => {
+                        nearest_sample(src, src_w, src_w as usize, src_x, src_y)
+                    }
+                    // Bilinear, Bicubic, and Lanczos3 all use bilinear as a
+                    // reasonable software fallback. A production implementation
+                    // would use proper kernel convolution for bicubic/lanczos.
+                    ScaleFilter::Bilinear | ScaleFilter::Bicubic | ScaleFilter::Lanczos3 => {
+                        bilinear_sample(src, src_w, src_h, src_w as usize, src_x, src_y)
+                    }
+                };
+                row_slice[dx] = val;
+            }
+        });
+
     dst
 }
 

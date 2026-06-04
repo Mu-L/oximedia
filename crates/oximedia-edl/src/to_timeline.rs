@@ -96,8 +96,7 @@ impl TimelineClip {
     /// Source duration in frames.
     #[must_use]
     pub fn source_duration_frames(&self) -> u64 {
-        self.source_out_frames
-            .saturating_sub(self.source_in_frames)
+        self.source_out_frames.saturating_sub(self.source_in_frames)
     }
 }
 
@@ -307,11 +306,8 @@ fn determine_track_name(event: &EdlEvent, config: &EdlToTimelineConfig) -> Strin
 /// # Errors
 ///
 /// Returns `EdlError` if conversion fails.
-pub fn convert_edl_to_timeline(
-    edl: &crate::Edl,
-) -> EdlResult<Timeline> {
-    let config = EdlToTimelineConfig::default()
-        .with_frame_rate(edl.frame_rate);
+pub fn convert_edl_to_timeline(edl: &crate::Edl) -> EdlResult<Timeline> {
+    let config = EdlToTimelineConfig::default().with_frame_rate(edl.frame_rate);
     convert_to_timeline(&edl.events, edl.title.clone(), &config)
 }
 
@@ -377,12 +373,9 @@ mod tests {
 
     #[test]
     fn test_clips_on_correct_track() {
-        let events = vec![
-            make_cut(1, "A001", tc(1, 0, 0, 0), tc(1, 0, 5, 0)),
-        ];
+        let events = vec![make_cut(1, "A001", tc(1, 0, 0, 0), tc(1, 0, 5, 0))];
         let config = EdlToTimelineConfig::default();
-        let tl = convert_to_timeline(&events, None, &config)
-            .expect("conversion should succeed");
+        let tl = convert_to_timeline(&events, None, &config).expect("conversion should succeed");
 
         let track = tl.get_track("V1").expect("V1 track should exist");
         assert!(track.is_video);
@@ -403,8 +396,8 @@ mod tests {
             tc(1, 0, 5, 0),
         );
         let config = EdlToTimelineConfig::default();
-        let tl = convert_to_timeline(&[audio_event], None, &config)
-            .expect("conversion should succeed");
+        let tl =
+            convert_to_timeline(&[audio_event], None, &config).expect("conversion should succeed");
 
         assert_eq!(tl.track_count(), 1);
         let track = tl.get_track("A1").expect("A1 track should exist");
@@ -419,8 +412,7 @@ mod tests {
             make_dissolve(2, "A002", tc(1, 0, 10, 0), tc(1, 0, 20, 0), 25), // 1-second dissolve at 25fps
         ];
         let config = EdlToTimelineConfig::default();
-        let tl = convert_to_timeline(&events, None, &config)
-            .expect("conversion should succeed");
+        let tl = convert_to_timeline(&events, None, &config).expect("conversion should succeed");
 
         let track = tl.get_track("V1").expect("V1 track should exist");
         assert_eq!(track.clip_count(), 2);
@@ -434,12 +426,15 @@ mod tests {
 
     #[test]
     fn test_dissolve_without_expansion() {
-        let events = vec![
-            make_dissolve(1, "A001", tc(1, 0, 0, 0), tc(1, 0, 10, 0), 25),
-        ];
+        let events = vec![make_dissolve(
+            1,
+            "A001",
+            tc(1, 0, 0, 0),
+            tc(1, 0, 10, 0),
+            25,
+        )];
         let config = EdlToTimelineConfig::default().with_expand_dissolves(false);
-        let tl = convert_to_timeline(&events, None, &config)
-            .expect("conversion should succeed");
+        let tl = convert_to_timeline(&events, None, &config).expect("conversion should succeed");
 
         let track = tl.get_track("V1").expect("V1 track should exist");
         let clip = &track.clips[0];
@@ -462,8 +457,8 @@ mod tests {
             tc(1, 0, 5, 0),
         );
         let config = EdlToTimelineConfig::default();
-        let tl = convert_to_timeline(&[video, audio], None, &config)
-            .expect("conversion should succeed");
+        let tl =
+            convert_to_timeline(&[video, audio], None, &config).expect("conversion should succeed");
 
         assert_eq!(tl.track_count(), 2);
         assert!(tl.get_track("V1").is_some());
@@ -484,8 +479,8 @@ mod tests {
             tc(1, 0, 5, 0),
         );
         let config = EdlToTimelineConfig::default().with_separate_audio_video(false);
-        let tl = convert_to_timeline(&[video, audio], None, &config)
-            .expect("conversion should succeed");
+        let tl =
+            convert_to_timeline(&[video, audio], None, &config).expect("conversion should succeed");
 
         assert_eq!(tl.track_count(), 1);
         assert_eq!(tl.total_clips(), 2);
@@ -517,8 +512,7 @@ mod tests {
             make_cut(2, "A002", tc(1, 0, 5, 0), tc(1, 0, 10, 0)),
         ];
         let config = EdlToTimelineConfig::default();
-        let tl = convert_to_timeline(&events, None, &config)
-            .expect("conversion should succeed");
+        let tl = convert_to_timeline(&events, None, &config).expect("conversion should succeed");
 
         let expected_dur = tc(1, 0, 10, 0).to_frames();
         assert_eq!(tl.duration_frames(), expected_dur);
@@ -531,8 +525,7 @@ mod tests {
             make_cut(2, "A002", tc(1, 0, 10, 0), tc(1, 0, 15, 0)),
         ];
         let config = EdlToTimelineConfig::default();
-        let tl = convert_to_timeline(&events, None, &config)
-            .expect("conversion should succeed");
+        let tl = convert_to_timeline(&events, None, &config).expect("conversion should succeed");
 
         let track = tl.get_track("V1").expect("V1 should exist");
         let span = track.span_frames();
@@ -543,8 +536,7 @@ mod tests {
     #[test]
     fn test_empty_events() {
         let config = EdlToTimelineConfig::default();
-        let tl = convert_to_timeline(&[], None, &config)
-            .expect("conversion should succeed");
+        let tl = convert_to_timeline(&[], None, &config).expect("conversion should succeed");
         assert_eq!(tl.total_clips(), 0);
         assert_eq!(tl.track_count(), 0);
         assert_eq!(tl.duration_frames(), 0);
@@ -570,13 +562,9 @@ mod tests {
         ev.set_clip_name("interview.mov".to_string());
 
         let config = EdlToTimelineConfig::default();
-        let tl = convert_to_timeline(&[ev], None, &config)
-            .expect("conversion should succeed");
+        let tl = convert_to_timeline(&[ev], None, &config).expect("conversion should succeed");
 
         let track = tl.get_track("V1").expect("V1 should exist");
-        assert_eq!(
-            track.clips[0].clip_name.as_deref(),
-            Some("interview.mov")
-        );
+        assert_eq!(track.clips[0].clip_name.as_deref(), Some("interview.mov"));
     }
 }

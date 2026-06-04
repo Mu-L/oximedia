@@ -128,9 +128,15 @@ impl IccProfileBuilder {
         // For simplicity, compute chad as identity * (D50_wp / wp)
         let d50 = [0.9642_f32, 1.0_f32, 0.8251_f32];
         let chad: [f32; 9] = [
-            d50[0] / wp[0].max(1e-10), 0.0, 0.0,
-            0.0, d50[1] / wp[1].max(1e-10), 0.0,
-            0.0, 0.0, d50[2] / wp[2].max(1e-10),
+            d50[0] / wp[0].max(1e-10),
+            0.0,
+            0.0,
+            0.0,
+            d50[1] / wp[1].max(1e-10),
+            0.0,
+            0.0,
+            0.0,
+            d50[2] / wp[2].max(1e-10),
         ];
 
         // Helper: encode XYZ tag (tag type 'XYZ ', 20 bytes total)
@@ -226,7 +232,7 @@ impl IccProfileBuilder {
         profile.extend_from_slice(b"OXIP"); // device model
         profile.extend_from_slice(&[0u8; 8]); // device attributes
         profile.extend_from_slice(&0_u32.to_be_bytes()); // rendering intent (perceptual)
-        // PCS illuminant (D50 XYZ as s15Fixed16)
+                                                         // PCS illuminant (D50 XYZ as s15Fixed16)
         profile.extend_from_slice(&encode_s15fixed16(0.9642));
         profile.extend_from_slice(&encode_s15fixed16(1.0));
         profile.extend_from_slice(&encode_s15fixed16(0.8251));
@@ -364,45 +370,168 @@ struct RobertsonEntry {
 
 /// Pre-computed Robertson isotherms table (21 entries covering ~1000-25000 K).
 const ROBERTSON_TABLE: [RobertsonEntry; 31] = [
-    RobertsonEntry { u: 0.18006, v: 0.26352, t: -0.24341 },
-    RobertsonEntry { u: 0.18066, v: 0.26589, t: -0.25479 },
-    RobertsonEntry { u: 0.18133, v: 0.26846, t: -0.26876 },
-    RobertsonEntry { u: 0.18208, v: 0.27119, t: -0.28539 },
-    RobertsonEntry { u: 0.18293, v: 0.27407, t: -0.30470 },
-    RobertsonEntry { u: 0.18388, v: 0.27709, t: -0.32675 },
-    RobertsonEntry { u: 0.18494, v: 0.28021, t: -0.35156 },
-    RobertsonEntry { u: 0.18611, v: 0.28342, t: -0.37915 },
-    RobertsonEntry { u: 0.18740, v: 0.28668, t: -0.40955 },
-    RobertsonEntry { u: 0.18880, v: 0.28997, t: -0.44278 },
-    RobertsonEntry { u: 0.19032, v: 0.29326, t: -0.47888 },
-    RobertsonEntry { u: 0.19462, v: 0.30141, t: -0.58204 },
-    RobertsonEntry { u: 0.19962, v: 0.30921, t: -0.70471 },
-    RobertsonEntry { u: 0.20525, v: 0.31647, t: -0.84901 },
-    RobertsonEntry { u: 0.21142, v: 0.32312, t: -1.0182  },
-    RobertsonEntry { u: 0.21807, v: 0.32909, t: -1.2168  },
-    RobertsonEntry { u: 0.22511, v: 0.33439, t: -1.4512  },
-    RobertsonEntry { u: 0.23247, v: 0.33904, t: -1.7298  },
-    RobertsonEntry { u: 0.24010, v: 0.34308, t: -2.0637  },
-    RobertsonEntry { u: 0.24792, v: 0.34655, t: -2.4681  },
-    RobertsonEntry { u: 0.25591, v: 0.34951, t: -2.9641  },
-    RobertsonEntry { u: 0.26400, v: 0.35200, t: -3.5814  },
-    RobertsonEntry { u: 0.27218, v: 0.35407, t: -4.3633  },
-    RobertsonEntry { u: 0.28039, v: 0.35577, t: -5.3762  },
-    RobertsonEntry { u: 0.28863, v: 0.35714, t: -6.7262  },
-    RobertsonEntry { u: 0.29685, v: 0.35823, t: -8.5955  },
-    RobertsonEntry { u: 0.30505, v: 0.35907, t: -11.324  },
-    RobertsonEntry { u: 0.31320, v: 0.35968, t: -15.628  },
-    RobertsonEntry { u: 0.32129, v: 0.36011, t: -23.325  },
-    RobertsonEntry { u: 0.32931, v: 0.36038, t: -40.020  },
-    RobertsonEntry { u: 0.33724, v: 0.36051, t: -116.45  },
+    RobertsonEntry {
+        u: 0.18006,
+        v: 0.26352,
+        t: -0.24341,
+    },
+    RobertsonEntry {
+        u: 0.18066,
+        v: 0.26589,
+        t: -0.25479,
+    },
+    RobertsonEntry {
+        u: 0.18133,
+        v: 0.26846,
+        t: -0.26876,
+    },
+    RobertsonEntry {
+        u: 0.18208,
+        v: 0.27119,
+        t: -0.28539,
+    },
+    RobertsonEntry {
+        u: 0.18293,
+        v: 0.27407,
+        t: -0.30470,
+    },
+    RobertsonEntry {
+        u: 0.18388,
+        v: 0.27709,
+        t: -0.32675,
+    },
+    RobertsonEntry {
+        u: 0.18494,
+        v: 0.28021,
+        t: -0.35156,
+    },
+    RobertsonEntry {
+        u: 0.18611,
+        v: 0.28342,
+        t: -0.37915,
+    },
+    RobertsonEntry {
+        u: 0.18740,
+        v: 0.28668,
+        t: -0.40955,
+    },
+    RobertsonEntry {
+        u: 0.18880,
+        v: 0.28997,
+        t: -0.44278,
+    },
+    RobertsonEntry {
+        u: 0.19032,
+        v: 0.29326,
+        t: -0.47888,
+    },
+    RobertsonEntry {
+        u: 0.19462,
+        v: 0.30141,
+        t: -0.58204,
+    },
+    RobertsonEntry {
+        u: 0.19962,
+        v: 0.30921,
+        t: -0.70471,
+    },
+    RobertsonEntry {
+        u: 0.20525,
+        v: 0.31647,
+        t: -0.84901,
+    },
+    RobertsonEntry {
+        u: 0.21142,
+        v: 0.32312,
+        t: -1.0182,
+    },
+    RobertsonEntry {
+        u: 0.21807,
+        v: 0.32909,
+        t: -1.2168,
+    },
+    RobertsonEntry {
+        u: 0.22511,
+        v: 0.33439,
+        t: -1.4512,
+    },
+    RobertsonEntry {
+        u: 0.23247,
+        v: 0.33904,
+        t: -1.7298,
+    },
+    RobertsonEntry {
+        u: 0.24010,
+        v: 0.34308,
+        t: -2.0637,
+    },
+    RobertsonEntry {
+        u: 0.24792,
+        v: 0.34655,
+        t: -2.4681,
+    },
+    RobertsonEntry {
+        u: 0.25591,
+        v: 0.34951,
+        t: -2.9641,
+    },
+    RobertsonEntry {
+        u: 0.26400,
+        v: 0.35200,
+        t: -3.5814,
+    },
+    RobertsonEntry {
+        u: 0.27218,
+        v: 0.35407,
+        t: -4.3633,
+    },
+    RobertsonEntry {
+        u: 0.28039,
+        v: 0.35577,
+        t: -5.3762,
+    },
+    RobertsonEntry {
+        u: 0.28863,
+        v: 0.35714,
+        t: -6.7262,
+    },
+    RobertsonEntry {
+        u: 0.29685,
+        v: 0.35823,
+        t: -8.5955,
+    },
+    RobertsonEntry {
+        u: 0.30505,
+        v: 0.35907,
+        t: -11.324,
+    },
+    RobertsonEntry {
+        u: 0.31320,
+        v: 0.35968,
+        t: -15.628,
+    },
+    RobertsonEntry {
+        u: 0.32129,
+        v: 0.36011,
+        t: -23.325,
+    },
+    RobertsonEntry {
+        u: 0.32931,
+        v: 0.36038,
+        t: -40.020,
+    },
+    RobertsonEntry {
+        u: 0.33724,
+        v: 0.36051,
+        t: -116.45,
+    },
 ];
 
 /// Reciprocal megakelvins for each Robertson entry (100 MRD → 1000 K, etc.).
 const ROBERTSON_MRD: [f64; 31] = [
-    0.0,    10.0,  20.0,  30.0,  40.0,  50.0,  60.0,  70.0,  80.0,  90.0,
-    100.0, 125.0, 150.0, 175.0, 200.0, 225.0, 250.0, 275.0, 300.0, 325.0,
-    350.0, 375.0, 400.0, 425.0, 450.0, 475.0, 500.0, 525.0, 550.0, 575.0,
-    600.0,
+    0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0, 125.0, 150.0, 175.0, 200.0,
+    225.0, 250.0, 275.0, 300.0, 325.0, 350.0, 375.0, 400.0, 425.0, 450.0, 475.0, 500.0, 525.0,
+    550.0, 575.0, 600.0,
 ];
 
 /// Color temperature measurement from CIE xy chromaticity.
@@ -531,33 +660,33 @@ impl ColorCheckerPassport {
     pub fn lab_references() -> Vec<[f32; 3]> {
         vec![
             // Row 1 — natural colours
-            [37.54,  14.37,  14.92], // Dark Skin
-            [65.70,  19.29,  17.81], // Light Skin
-            [49.32,  -3.82, -22.54], // Blue Sky
-            [43.46, -12.74,  22.72], // Foliage
-            [54.94,   9.61, -24.79], // Blue Flower
-            [70.48, -32.26,  -0.37], // Bluish Green
+            [37.54, 14.37, 14.92],  // Dark Skin
+            [65.70, 19.29, 17.81],  // Light Skin
+            [49.32, -3.82, -22.54], // Blue Sky
+            [43.46, -12.74, 22.72], // Foliage
+            [54.94, 9.61, -24.79],  // Blue Flower
+            [70.48, -32.26, -0.37], // Bluish Green
             // Row 2 — miscellaneous
-            [62.73,  35.83,  56.50], // Orange
-            [39.43,  10.75, -45.17], // Purplish Blue
-            [51.03,  48.13,  16.25], // Moderate Red
-            [30.10,  22.54, -20.87], // Purple
-            [72.75, -22.76,  57.26], // Yellow Green
-            [71.94,  18.68,  67.86], // Orange Yellow
+            [62.73, 35.83, 56.50],  // Orange
+            [39.43, 10.75, -45.17], // Purplish Blue
+            [51.03, 48.13, 16.25],  // Moderate Red
+            [30.10, 22.54, -20.87], // Purple
+            [72.75, -22.76, 57.26], // Yellow Green
+            [71.94, 18.68, 67.86],  // Orange Yellow
             // Row 3 — primary / secondary
-            [28.78,  14.17, -49.57], // Blue
-            [55.38, -37.40,  32.27], // Green
-            [42.43,  53.05,  28.62], // Red
-            [81.80,  -0.57,  79.04], // Yellow
-            [51.94,  48.93, -14.90], // Magenta
+            [28.78, 14.17, -49.57],  // Blue
+            [55.38, -37.40, 32.27],  // Green
+            [42.43, 53.05, 28.62],   // Red
+            [81.80, -0.57, 79.04],   // Yellow
+            [51.94, 48.93, -14.90],  // Magenta
             [51.04, -28.63, -28.64], // Cyan
             // Row 4 — greyscale
-            [96.24,  -0.43,   1.19], // White
-            [81.29,  -0.57,   0.44], // Neutral 8
-            [66.89,  -0.75,  -0.06], // Neutral 6.5
-            [50.87,  -0.15,  -0.27], // Neutral 5
-            [35.66,  -0.37,  -0.45], // Neutral 3.5
-            [20.46,  -0.13,  -0.15], // Black
+            [96.24, -0.43, 1.19],  // White
+            [81.29, -0.57, 0.44],  // Neutral 8
+            [66.89, -0.75, -0.06], // Neutral 6.5
+            [50.87, -0.15, -0.27], // Neutral 5
+            [35.66, -0.37, -0.45], // Neutral 3.5
+            [20.46, -0.13, -0.15], // Black
         ]
     }
 }
@@ -590,8 +719,14 @@ pub struct LensCalibration {
 impl Default for LensCalibration {
     fn default() -> Self {
         Self {
-            k1: 0.0, k2: 0.0, p1: 0.0, p2: 0.0,
-            fx: 1.0, fy: 1.0, cx: 0.0, cy: 0.0,
+            k1: 0.0,
+            k2: 0.0,
+            p1: 0.0,
+            p2: 0.0,
+            fx: 1.0,
+            fy: 1.0,
+            cx: 0.0,
+            cy: 0.0,
         }
     }
 }
@@ -632,9 +767,9 @@ impl LensCalibrator {
         }
 
         // Estimate principal point as the centroid of all corner coordinates
-        let (sum_x, sum_y) = corners.iter().fold((0.0_f32, 0.0_f32), |(sx, sy), &(x, y)| {
-            (sx + x, sy + y)
-        });
+        let (sum_x, sum_y) = corners
+            .iter()
+            .fold((0.0_f32, 0.0_f32), |(sx, sy), &(x, y)| (sx + x, sy + y));
         let cx = sum_x / corners.len() as f32;
         let cy = sum_y / corners.len() as f32;
 
@@ -739,15 +874,15 @@ impl BradfordAdapt {
     pub fn adapt(xyz: [f32; 3], src_white: [f32; 3], dst_white: [f32; 3]) -> [f32; 3] {
         // Bradford matrix M
         const BRADFORD: [[f32; 3]; 3] = [
-            [ 0.8951,  0.2664, -0.1614],
-            [-0.7502,  1.7135,  0.0367],
-            [ 0.0389, -0.0685,  1.0296],
+            [0.8951, 0.2664, -0.1614],
+            [-0.7502, 1.7135, 0.0367],
+            [0.0389, -0.0685, 1.0296],
         ];
         // Inverse Bradford M^{-1}
         const BRADFORD_INV: [[f32; 3]; 3] = [
-            [ 0.9869929, -0.1470543,  0.1599627],
-            [ 0.4323053,  0.5183603,  0.0492912],
-            [-0.0085287,  0.0400428,  0.9684867],
+            [0.9869929, -0.1470543, 0.1599627],
+            [0.4323053, 0.5183603, 0.0492912],
+            [-0.0085287, 0.0400428, 0.9684867],
         ];
 
         let src_lms = mat3_mul_vec3(BRADFORD, [src_white[0], src_white[1], src_white[2]]);
@@ -755,9 +890,21 @@ impl BradfordAdapt {
 
         // Guard against division by zero
         let scale = [
-            if src_lms[0].abs() < 1e-10 { 1.0 } else { dst_lms[0] / src_lms[0] },
-            if src_lms[1].abs() < 1e-10 { 1.0 } else { dst_lms[1] / src_lms[1] },
-            if src_lms[2].abs() < 1e-10 { 1.0 } else { dst_lms[2] / src_lms[2] },
+            if src_lms[0].abs() < 1e-10 {
+                1.0
+            } else {
+                dst_lms[0] / src_lms[0]
+            },
+            if src_lms[1].abs() < 1e-10 {
+                1.0
+            } else {
+                dst_lms[1] / src_lms[1]
+            },
+            if src_lms[2].abs() < 1e-10 {
+                1.0
+            } else {
+                dst_lms[2] / src_lms[2]
+            },
         ];
 
         let scaled = [
@@ -826,19 +973,22 @@ mod tests {
     fn test_calibration_lut_identity() {
         // measured == target → LUT should be identity
         let measured = [0.0_f32, 0.25, 0.5, 0.75, 1.0];
-        let target   = [0.0_f32, 0.25, 0.5, 0.75, 1.0];
+        let target = [0.0_f32, 0.25, 0.5, 0.75, 1.0];
         let lut = CalibrationLut::build_1d_correction(&measured, &target, 5);
         assert_eq!(lut.len(), 5);
         for (i, &v) in lut.iter().enumerate() {
             let expected = i as f32 / 4.0;
-            assert!((v - expected).abs() < 1e-4, "lut[{i}] = {v}, expected {expected}");
+            assert!(
+                (v - expected).abs() < 1e-4,
+                "lut[{i}] = {v}, expected {expected}"
+            );
         }
     }
 
     #[test]
     fn test_calibration_lut_size_respected() {
         let measured = [0.0_f32, 0.5, 1.0];
-        let target   = [0.0_f32, 0.5, 1.0];
+        let target = [0.0_f32, 0.5, 1.0];
         let lut = CalibrationLut::build_1d_correction(&measured, &target, 256);
         assert_eq!(lut.len(), 256);
     }
@@ -853,7 +1003,7 @@ mod tests {
     fn test_calibration_lut_correction() {
         // measured is a darker response, target is ideal linear
         let measured = [0.0_f32, 0.3, 0.6, 1.0]; // measured (compressed highlights)
-        let target   = [0.0_f32, 0.333, 0.666, 1.0]; // ideal linear
+        let target = [0.0_f32, 0.333, 0.666, 1.0]; // ideal linear
         let lut = CalibrationLut::build_1d_correction(&measured, &target, 4);
         assert_eq!(lut.len(), 4);
         // First and last entries must be at 0 and 1
@@ -1012,8 +1162,16 @@ mod tests {
         let xyz_d50 = [0.9642_f32, 1.0, 0.8251]; // D50 white point in D50 space
         let adapted = BradfordAdapt::adapt(xyz_d50, d50, d65);
         // After adaptation, result should be close to D65 white point
-        assert!((adapted[0] - 0.9505).abs() < 0.05, "X after adapt = {}", adapted[0]);
-        assert!((adapted[1] - 1.0).abs() < 0.05, "Y after adapt = {}", adapted[1]);
+        assert!(
+            (adapted[0] - 0.9505).abs() < 0.05,
+            "X after adapt = {}",
+            adapted[0]
+        );
+        assert!(
+            (adapted[1] - 1.0).abs() < 0.05,
+            "Y after adapt = {}",
+            adapted[1]
+        );
     }
 
     #[test]

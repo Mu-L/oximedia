@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Format validation for archived media files.
 //!
 //! This module provides tools to verify that archived files conform to their
@@ -50,6 +49,10 @@ pub enum FormatFamily {
     Avi,
     /// TIFF image.
     Tiff,
+    /// DPX (Digital Picture Exchange) image.
+    Dpx,
+    /// OpenEXR image.
+    OpenExr,
     /// PNG image.
     Png,
     /// JPEG 2000 image.
@@ -73,6 +76,8 @@ impl FormatFamily {
             Self::Mpeg4 => &["mp4", "m4a", "m4v"],
             Self::Avi => &["avi"],
             Self::Tiff => &["tif", "tiff"],
+            Self::Dpx => &["dpx"],
+            Self::OpenExr => &["exr"],
             Self::Png => &["png"],
             Self::Jpeg2000 => &["jp2", "j2k"],
             Self::Wav => &["wav"],
@@ -90,6 +95,10 @@ impl FormatFamily {
             Self::Mpeg4 => &[], // ftyp at offset 4
             Self::Avi => b"RIFF",
             Self::Tiff => &[0x49, 0x49, 0x2A, 0x00], // little-endian TIFF
+            // DPX little-endian ("SDPX") — big-endian ("XPDS") handled via detect_format
+            Self::Dpx => &[0x53, 0x44, 0x50, 0x58],
+            // OpenEXR magic: 0x76 0x2F 0x31 0x01
+            Self::OpenExr => &[0x76, 0x2F, 0x31, 0x01],
             Self::Png => &[0x89, 0x50, 0x4E, 0x47],
             Self::Jpeg2000 => &[0x00, 0x00, 0x00, 0x0C],
             Self::Wav => b"RIFF",
@@ -288,7 +297,14 @@ impl FormatValidator {
             return report;
         }
 
-        if &data[..magic.len()] != magic {
+        // DPX accepts either little-endian "SDPX" or big-endian "XPDS"
+        let matches = if format == FormatFamily::Dpx {
+            data.starts_with(b"SDPX") || data.starts_with(b"XPDS")
+        } else {
+            &data[..magic.len()] == magic
+        };
+
+        if !matches {
             report.add_finding(
                 ValidationFinding::new(
                     Severity::Error,
@@ -356,6 +372,14 @@ impl FormatValidator {
         }
         if data.starts_with(&[0x49, 0x49, 0x2A, 0x00]) {
             return Some(FormatFamily::Tiff);
+        }
+        // DPX: little-endian "SDPX" or big-endian "XPDS"
+        if data.starts_with(b"SDPX") || data.starts_with(b"XPDS") {
+            return Some(FormatFamily::Dpx);
+        }
+        // OpenEXR: 0x76 0x2F 0x31 0x01
+        if data.starts_with(&[0x76, 0x2F, 0x31, 0x01]) {
+            return Some(FormatFamily::OpenExr);
         }
         None
     }
@@ -479,5 +503,58 @@ mod tests {
     fn test_finding_with_offset() {
         let finding = ValidationFinding::new(Severity::Error, "E01", "Bad byte").with_offset(42);
         assert_eq!(finding.offset, Some(42));
+    }
+
+    #[test]
+    fn test_dpx_magic_detected() {
+        // Little-endian DPX ("SDPX")
+        let data_le = *b"SDPX\x00\x00\x00\x00";
+        assert_eq!(
+            FormatValidator::detect_format(&data_le),
+            Some(FormatFamily::Dpx),
+            "little-endian DPX magic must be detected"
+        );
+
+        // Big-endian DPX ("XPDS")
+        let data_be = *b"XPDS\x00\x00\x00\x00";
+        assert_eq!(
+            FormatValidator::detect_format(&data_be),
+            Some(FormatFamily::Dpx),
+            "big-endian DPX magic must be detected"
+        );
+
+        // validate_magic should pass for both byte orders
+        let validator = FormatValidator::new();
+        let report_le = validator.validate_magic(&data_le, FormatFamily::Dpx);
+        assert_eq!(
+            report_le.verdict,
+            ValidationVerdict::Pass,
+            "LE DPX validate_magic must pass"
+        );
+        let report_be = validator.validate_magic(&data_be, FormatFamily::Dpx);
+        assert_eq!(
+            report_be.verdict,
+            ValidationVerdict::Pass,
+            "BE DPX validate_magic must pass"
+        );
+    }
+
+    #[test]
+    fn test_exr_magic_detected() {
+        // OpenEXR magic: 0x76 0x2F 0x31 0x01
+        let data: [u8; 8] = [0x76, 0x2F, 0x31, 0x01, 0x02, 0x00, 0x00, 0x00];
+        assert_eq!(
+            FormatValidator::detect_format(&data),
+            Some(FormatFamily::OpenExr),
+            "OpenEXR magic must be detected"
+        );
+
+        let validator = FormatValidator::new();
+        let report = validator.validate_magic(&data, FormatFamily::OpenExr);
+        assert_eq!(
+            report.verdict,
+            ValidationVerdict::Pass,
+            "OpenEXR validate_magic must pass for correct magic bytes"
+        );
     }
 }

@@ -116,7 +116,9 @@ impl SoundfieldConverter {
     /// Create with standard normalization gain (1/√2).
     #[must_use]
     pub fn new() -> Self {
-        Self { gain: std::f32::consts::FRAC_1_SQRT_2 }
+        Self {
+            gain: std::f32::consts::FRAC_1_SQRT_2,
+        }
     }
 
     /// Create with a custom normalization gain.
@@ -129,7 +131,9 @@ impl SoundfieldConverter {
     pub fn convert(&self, a: &AFormatFrame) -> Result<BFormatFrame, SpatialError> {
         let n = a.flu.len();
         if n == 0 {
-            return Err(SpatialError::InvalidConfig("A-format frame is empty".into()));
+            return Err(SpatialError::InvalidConfig(
+                "A-format frame is empty".into(),
+            ));
         }
         if a.frd.len() != n || a.bld.len() != n || a.bru.len() != n {
             return Err(SpatialError::InvalidConfig(
@@ -179,18 +183,48 @@ pub struct CapsulePosition {
 #[must_use]
 pub fn eigenmike_positions() -> [CapsulePosition; EIGENMIKE_CAPSULES] {
     const TABLE: [(f32, f32); 32] = [
-        (0.0, 21.0), (32.0, 0.0), (0.0, -21.0), (328.0, 0.0),
-        (0.0, 58.0), (45.0, 35.0), (69.0, 0.0), (45.0, -35.0),
-        (0.0, -58.0), (315.0, -35.0), (291.0, 0.0), (315.0, 35.0),
-        (91.0, 69.0), (90.0, 32.0), (90.0, -31.0), (89.0, -69.0),
-        (180.0, 21.0), (212.0, 0.0), (180.0, -21.0), (148.0, 0.0),
-        (180.0, 58.0), (225.0, 35.0), (249.0, 0.0), (225.0, -35.0),
-        (180.0, -58.0), (135.0, -35.0), (111.0, 0.0), (135.0, 35.0),
-        (269.0, 69.0), (270.0, 32.0), (270.0, -31.0), (271.0, -69.0),
+        (0.0, 21.0),
+        (32.0, 0.0),
+        (0.0, -21.0),
+        (328.0, 0.0),
+        (0.0, 58.0),
+        (45.0, 35.0),
+        (69.0, 0.0),
+        (45.0, -35.0),
+        (0.0, -58.0),
+        (315.0, -35.0),
+        (291.0, 0.0),
+        (315.0, 35.0),
+        (91.0, 69.0),
+        (90.0, 32.0),
+        (90.0, -31.0),
+        (89.0, -69.0),
+        (180.0, 21.0),
+        (212.0, 0.0),
+        (180.0, -21.0),
+        (148.0, 0.0),
+        (180.0, 58.0),
+        (225.0, 35.0),
+        (249.0, 0.0),
+        (225.0, -35.0),
+        (180.0, -58.0),
+        (135.0, -35.0),
+        (111.0, 0.0),
+        (135.0, 35.0),
+        (269.0, 69.0),
+        (270.0, 32.0),
+        (270.0, -31.0),
+        (271.0, -69.0),
     ];
-    let mut out = [CapsulePosition { azimuth_deg: 0.0, elevation_deg: 0.0 }; 32];
+    let mut out = [CapsulePosition {
+        azimuth_deg: 0.0,
+        elevation_deg: 0.0,
+    }; 32];
     for (i, &(az, el)) in TABLE.iter().enumerate() {
-        out[i] = CapsulePosition { azimuth_deg: az, elevation_deg: el };
+        out[i] = CapsulePosition {
+            azimuth_deg: az,
+            elevation_deg: el,
+        };
     }
     out
 }
@@ -238,7 +272,9 @@ impl EigenmikeCapturer {
             ));
         }
         if n == 0 {
-            return Err(SpatialError::InvalidConfig("Capsule channels are empty".into()));
+            return Err(SpatialError::InvalidConfig(
+                "Capsule channels are empty".into(),
+            ));
         }
         let mut w = vec![0.0_f32; n];
         let mut y_ch = vec![0.0_f32; n];
@@ -256,7 +292,12 @@ impl EigenmikeCapturer {
                 x_ch[i] += ex * cap[i];
             }
         }
-        Ok(BFormatFrame { w, x: x_ch, y: y_ch, z: z_ch })
+        Ok(BFormatFrame {
+            w,
+            x: x_ch,
+            y: y_ch,
+            z: z_ch,
+        })
     }
 }
 
@@ -297,7 +338,12 @@ mod tests {
     #[test]
     fn test_soundfield_empty_error() {
         let conv = SoundfieldConverter::new();
-        let a = AFormatFrame { flu: vec![], frd: vec![], bld: vec![], bru: vec![] };
+        let a = AFormatFrame {
+            flu: vec![],
+            frd: vec![],
+            bld: vec![],
+            bru: vec![],
+        };
         assert!(conv.convert(&a).is_err());
     }
 
@@ -328,7 +374,9 @@ mod tests {
     #[test]
     fn test_eigenmike_encode_output_length() {
         let encoder = EigenmikeCapturer::new();
-        let capsules: Vec<Vec<f32>> = (0..EIGENMIKE_CAPSULES).map(|_| vec![0.1_f32; 128]).collect();
+        let capsules: Vec<Vec<f32>> = (0..EIGENMIKE_CAPSULES)
+            .map(|_| vec![0.1_f32; 128])
+            .collect();
         let b = encoder.encode(&capsules).expect("ok");
         assert_eq!(b.len(), 128);
     }
@@ -345,7 +393,12 @@ mod tests {
         let encoder = EigenmikeCapturer::new();
         let capsules: Vec<Vec<f32>> = (0..EIGENMIKE_CAPSULES).map(|_| vec![0.0_f32; 64]).collect();
         let b = encoder.encode(&capsules).expect("ok");
-        for &s in b.w.iter().chain(b.x.iter()).chain(b.y.iter()).chain(b.z.iter()) {
+        for &s in
+            b.w.iter()
+                .chain(b.x.iter())
+                .chain(b.y.iter())
+                .chain(b.z.iter())
+        {
             assert!(s.abs() < 1e-7, "Expected silence, got {s}");
         }
     }

@@ -215,12 +215,18 @@ impl HeatMap {
     ///
     /// Columns: `bucket,start_byte,end_byte,max_severity,avg_severity,coverage,region_count`
     pub fn to_csv(&self) -> String {
-        let mut out =
-            String::from("bucket,start_byte,end_byte,max_severity,avg_severity,coverage,region_count\n");
+        let mut out = String::from(
+            "bucket,start_byte,end_byte,max_severity,avg_severity,coverage,region_count\n",
+        );
         for b in &self.buckets {
             out.push_str(&format!(
                 "{},{},{},{:.4},{:.4},{:.4},{}\n",
-                b.index, b.start_byte, b.end_byte, b.max_severity, b.avg_severity, b.coverage,
+                b.index,
+                b.start_byte,
+                b.end_byte,
+                b.max_severity,
+                b.avg_severity,
+                b.coverage,
                 b.region_count,
             ));
         }
@@ -286,7 +292,11 @@ impl HeatMap {
         self.buckets
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.max_severity.partial_cmp(&b.max_severity).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|(_, a), (_, b)| {
+                a.max_severity
+                    .partial_cmp(&b.max_severity)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|(i, _)| i)
     }
 
@@ -427,7 +437,10 @@ mod tests {
         let hmap = HeatMap::build(&regions, &config);
         let csv = hmap.to_csv();
         let lines: Vec<&str> = csv.lines().collect();
-        assert_eq!(lines[0], "bucket,start_byte,end_byte,max_severity,avg_severity,coverage,region_count");
+        assert_eq!(
+            lines[0],
+            "bucket,start_byte,end_byte,max_severity,avg_severity,coverage,region_count"
+        );
         assert_eq!(lines.len(), 3); // header + 2 buckets
     }
 
@@ -479,8 +492,8 @@ mod tests {
         let hmap = HeatMap::build(&regions, &config);
         let runs = hmap.corrupted_runs();
         assert_eq!(runs.len(), 2);
-        assert_eq!(runs[0], (0, 3));  // buckets 0,1,2
-        assert_eq!(runs[1], (5, 1));  // bucket 5
+        assert_eq!(runs[0], (0, 3)); // buckets 0,1,2
+        assert_eq!(runs[1], (5, 1)); // bucket 5
     }
 
     #[test]

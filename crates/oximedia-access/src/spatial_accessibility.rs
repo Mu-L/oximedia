@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Audio spatializer for accessibility: directional audio cues for visually impaired users.
 //!
 //! Provides spatial audio indicators that convey directional information

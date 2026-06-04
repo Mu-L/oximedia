@@ -209,11 +209,7 @@ impl LookLut1d {
     ///
     /// All channels must have the same length (≥ 2). Returns an error if they
     /// do not.
-    pub fn from_channels(
-        red: Vec<f64>,
-        green: Vec<f64>,
-        blue: Vec<f64>,
-    ) -> Result<Self, String> {
+    pub fn from_channels(red: Vec<f64>, green: Vec<f64>, blue: Vec<f64>) -> Result<Self, String> {
         if red.len() < 2 || green.len() < 2 || blue.len() < 2 {
             return Err("LUT channels must have at least 2 entries".to_string());
         }
@@ -466,9 +462,7 @@ impl LookTransform {
                     "offset" => offset = parse_f64_3(val)?,
                     "power" => power = parse_f64_3(val)?,
                     "saturation" => {
-                        saturation = val
-                            .parse::<f64>()
-                            .map_err(|e| format!("saturation: {e}"))?;
+                        saturation = val.parse::<f64>().map_err(|e| format!("saturation: {e}"))?;
                     }
                     _ => {}
                 },
@@ -511,15 +505,24 @@ fn parse_f64_3(s: &str) -> Result<[f64; 3], String> {
         return Err(format!("Expected 3 values, got {}: {:?}", parts.len(), s));
     }
     Ok([
-        parts[0].parse::<f64>().map_err(|e| format!("parse error: {e}"))?,
-        parts[1].parse::<f64>().map_err(|e| format!("parse error: {e}"))?,
-        parts[2].parse::<f64>().map_err(|e| format!("parse error: {e}"))?,
+        parts[0]
+            .parse::<f64>()
+            .map_err(|e| format!("parse error: {e}"))?,
+        parts[1]
+            .parse::<f64>()
+            .map_err(|e| format!("parse error: {e}"))?,
+        parts[2]
+            .parse::<f64>()
+            .map_err(|e| format!("parse error: {e}"))?,
     ])
 }
 
 fn parse_f64_vec(s: &str) -> Result<Vec<f64>, String> {
     s.split_whitespace()
-        .map(|t| t.parse::<f64>().map_err(|e| format!("parse error in vec: {e}")))
+        .map(|t| {
+            t.parse::<f64>()
+                .map_err(|e| format!("parse error in vec: {e}"))
+        })
         .collect()
 }
 
@@ -619,9 +622,21 @@ mod tests {
         let cdl = AscCdl::new([2.0, 1.0, 0.5], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1.0);
         let pixel = [0.4, 0.4, 0.4];
         let out = cdl.apply(pixel);
-        assert!((out[0] - 0.8).abs() < 1e-10, "R slope=2 should double: {}", out[0]);
-        assert!((out[1] - 0.4).abs() < 1e-10, "G slope=1 unchanged: {}", out[1]);
-        assert!((out[2] - 0.2).abs() < 1e-10, "B slope=0.5 halves: {}", out[2]);
+        assert!(
+            (out[0] - 0.8).abs() < 1e-10,
+            "R slope=2 should double: {}",
+            out[0]
+        );
+        assert!(
+            (out[1] - 0.4).abs() < 1e-10,
+            "G slope=1 unchanged: {}",
+            out[1]
+        );
+        assert!(
+            (out[2] - 0.2).abs() < 1e-10,
+            "B slope=0.5 halves: {}",
+            out[2]
+        );
     }
 
     #[test]
@@ -633,15 +648,18 @@ mod tests {
         let expected = 0.2126;
         assert!(
             (out[0] - expected).abs() < 1e-6,
-            "R should equal luma: {}", out[0]
+            "R should equal luma: {}",
+            out[0]
         );
         assert!(
             (out[1] - expected).abs() < 1e-6,
-            "G should equal luma: {}", out[1]
+            "G should equal luma: {}",
+            out[1]
         );
         assert!(
             (out[2] - expected).abs() < 1e-6,
-            "B should equal luma: {}", out[2]
+            "B should equal luma: {}",
+            out[2]
         );
     }
 
@@ -649,13 +667,19 @@ mod tests {
     fn test_cdl_validate_invalid() {
         let cdl = AscCdl::new([-1.0, 1.0, 1.0], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1.0);
         // Negative slope should fail validation
-        assert!(cdl.validate().is_err(), "Negative slope should fail validation");
+        assert!(
+            cdl.validate().is_err(),
+            "Negative slope should fail validation"
+        );
     }
 
     #[test]
     fn test_lut1d_identity() {
         let lut = LookLut1d::identity(65);
-        assert!(lut.is_identity(1e-6), "identity LUT should report as identity");
+        assert!(
+            lut.is_identity(1e-6),
+            "identity LUT should report as identity"
+        );
         let pixel = [0.3, 0.6, 0.9];
         let out = lut.apply(pixel);
         for i in 0..3 {
@@ -685,9 +709,21 @@ mod tests {
         let look = LookTransform::new(cdl, None);
         let pixel = [0.5, 0.5, 0.5];
         let out = look.apply(pixel);
-        assert!((out[0] - 0.55).abs() < 1e-10, "R×1.1 should be 0.55: {}", out[0]);
-        assert!((out[1] - 0.50).abs() < 1e-10, "G×1.0 should be 0.50: {}", out[1]);
-        assert!((out[2] - 0.45).abs() < 1e-10, "B×0.9 should be 0.45: {}", out[2]);
+        assert!(
+            (out[0] - 0.55).abs() < 1e-10,
+            "R×1.1 should be 0.55: {}",
+            out[0]
+        );
+        assert!(
+            (out[1] - 0.50).abs() < 1e-10,
+            "G×1.0 should be 0.50: {}",
+            out[1]
+        );
+        assert!(
+            (out[2] - 0.45).abs() < 1e-10,
+            "B×0.9 should be 0.45: {}",
+            out[2]
+        );
     }
 
     #[test]
@@ -699,8 +735,7 @@ mod tests {
         look.description = "A test".to_string();
 
         let serialized = look.serialize();
-        let restored = LookTransform::deserialize(&serialized)
-            .expect("deserialize should succeed");
+        let restored = LookTransform::deserialize(&serialized).expect("deserialize should succeed");
 
         assert_eq!(restored.name, "TestLook");
         assert_eq!(restored.description, "A test");
@@ -720,7 +755,11 @@ mod tests {
     fn test_preview_strip_length() {
         let look = LookTransform::new(AscCdl::identity(), None);
         let strip = PreviewStrip::new(&look, 64);
-        assert_eq!(strip.pixels.len(), 64, "Strip should have requested number of pixels");
+        assert_eq!(
+            strip.pixels.len(),
+            64,
+            "Strip should have requested number of pixels"
+        );
     }
 
     #[test]
@@ -736,7 +775,10 @@ mod tests {
     fn test_preview_strip_monotone_identity() {
         let look = LookTransform::new(AscCdl::identity(), None);
         let strip = PreviewStrip::new(&look, 128);
-        assert!(strip.is_monotone(), "Identity look strip should be monotone");
+        assert!(
+            strip.is_monotone(),
+            "Identity look strip should be monotone"
+        );
     }
 
     #[test]
@@ -755,7 +797,8 @@ mod tests {
     fn test_apply_buffer() {
         let look = LookTransform::new(AscCdl::identity(), None);
         let mut buf = vec![0.5, 0.5, 0.5, 0.8, 0.2, 0.1];
-        look.apply_buffer(&mut buf).expect("apply_buffer should succeed");
+        look.apply_buffer(&mut buf)
+            .expect("apply_buffer should succeed");
         assert!((buf[0] - 0.5).abs() < 1e-10);
     }
 

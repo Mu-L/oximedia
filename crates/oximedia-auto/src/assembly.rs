@@ -785,3 +785,101 @@ pub fn calculate_optimal_pacing(
         max_duration.min(15_000), // At most 15 seconds
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scoring::{ContentType, SceneFeatures, Sentiment};
+    use oximedia_core::{Rational, Timestamp};
+
+    fn make_ts(pts: i64) -> Timestamp {
+        Timestamp::new(pts, Rational::new(1, 1000))
+    }
+
+    /// Build N synthetic scenes with equal duration and importance > min_importance.
+    fn make_scenes(count: usize, scene_duration_ms: i64, score: f64) -> Vec<ScoredScene> {
+        (0..count)
+            .map(|i| {
+                let start = make_ts(i as i64 * scene_duration_ms);
+                let end = make_ts(i as i64 * scene_duration_ms + scene_duration_ms);
+                let mut scene =
+                    ScoredScene::new(start, end, score, ContentType::Action, Sentiment::Neutral);
+                scene.features = SceneFeatures {
+                    motion_intensity: 0.8,
+                    ..Default::default()
+                };
+                scene
+            })
+            .collect()
+    }
+
+    /// `generate_social_clip(scenes, 15_000)` with 5 synthetic scenes should
+    /// produce assembled duration within ±20 % of 15 000 ms.
+    ///
+    /// We configure the base assembler with `min_clip_duration_ms=2500` and
+    /// `max_clip_duration_ms=3500` so the auto-target-count calculation yields
+    /// a number of clips that fills the 15 s window.  `generate_social_clip`
+    /// inherits these bounds via `self.config.clone()`.
+    #[test]
+    fn test_generate_social_clip_15s() {
+        let target_ms = 15_000i64;
+        // 5 scenes of 3 s each, high importance.
+        let scenes = make_scenes(5, 3_000, 0.9);
+
+        // Clip bounds tightly around 3 s so auto-count ≈ 15 000 / 3 000 = 5.
+        let config = AssemblyConfig {
+            assembly_type: AssemblyType::SocialClip,
+            target_duration_ms: target_ms,
+            min_importance: 0.5,
+            min_clip_duration_ms: 2_500,
+            max_clip_duration_ms: 3_500,
+            ..Default::default()
+        };
+        let assembler = AutoAssembler::new(config);
+        let clips = assembler
+            .generate_social_clip(&scenes, target_ms)
+            .expect("generate_social_clip should succeed");
+
+        assert!(!clips.is_empty(), "should produce at least one clip");
+
+        let total_ms: i64 = clips.iter().map(|c| c.output_duration_ms()).sum();
+        let tolerance = (target_ms as f64 * 0.20) as i64;
+        assert!(
+            (total_ms - target_ms).abs() <= tolerance,
+            "assembled duration {total_ms} ms should be within 20 % of target {target_ms} ms (tolerance ±{tolerance} ms)"
+        );
+    }
+
+    /// Same test for a 30 s target.
+    ///
+    /// We use 10 scenes of 3 s each and set clip bounds to [2 500, 3 500] ms
+    /// so the auto-count = 30 000 / 3 000 = 10 clips × 3 s = 30 s.
+    #[test]
+    fn test_generate_social_clip_30s() {
+        let target_ms = 30_000i64;
+        // 10 scenes of 3 s each, high importance.
+        let scenes = make_scenes(10, 3_000, 0.9);
+
+        let config = AssemblyConfig {
+            assembly_type: AssemblyType::SocialClip,
+            target_duration_ms: target_ms,
+            min_importance: 0.5,
+            min_clip_duration_ms: 2_500,
+            max_clip_duration_ms: 3_500,
+            ..Default::default()
+        };
+        let assembler = AutoAssembler::new(config);
+        let clips = assembler
+            .generate_social_clip(&scenes, target_ms)
+            .expect("generate_social_clip should succeed");
+
+        assert!(!clips.is_empty(), "should produce at least one clip");
+
+        let total_ms: i64 = clips.iter().map(|c| c.output_duration_ms()).sum();
+        let tolerance = (target_ms as f64 * 0.20) as i64;
+        assert!(
+            (total_ms - target_ms).abs() <= tolerance,
+            "assembled duration {total_ms} ms should be within 20 % of target {target_ms} ms (tolerance ±{tolerance} ms)"
+        );
+    }
+}

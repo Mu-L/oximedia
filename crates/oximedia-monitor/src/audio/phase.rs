@@ -1,7 +1,6 @@
 //! Phase correlation meter (stereo only).
 
 use serde::{Deserialize, Serialize};
-use std::f32::consts::PI;
 
 /// Phase correlation metrics.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

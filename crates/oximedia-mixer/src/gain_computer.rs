@@ -513,8 +513,11 @@ mod tests {
         };
         let comp = GainComputer::new(config, 48000);
         let gr = comp.static_gain_db(0.0); // 20 dB above threshold
-        // Expected: gain change = T + (0 - T)/R - 0 = -20 + 20/4 = -20 + 5 = -15 dB
-        assert!((gr - (-15.0)).abs() < 0.1, "gain_change={gr}, expected ~-15");
+                                           // Expected: gain change = T + (0 - T)/R - 0 = -20 + 20/4 = -20 + 5 = -15 dB
+        assert!(
+            (gr - (-15.0)).abs() < 0.1,
+            "gain_change={gr}, expected ~-15"
+        );
     }
 
     #[test]
@@ -603,7 +606,10 @@ mod tests {
         let samples = vec![0.9f32; 48000];
         norm.push_samples(&samples);
         let correction = norm.gain_correction_db().unwrap();
-        assert!(correction < 0.0, "loud signal should get attenuated, correction={correction}");
+        assert!(
+            correction < 0.0,
+            "loud signal should get attenuated, correction={correction}"
+        );
     }
 
     #[test]

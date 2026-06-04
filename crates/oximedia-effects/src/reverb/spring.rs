@@ -299,6 +299,8 @@ impl SpringReverb {
 }
 
 impl AudioEffect for SpringReverb {
+    const EFFECT_ID: &'static str = "spring_reverb";
+
     fn process_sample(&mut self, input: f32) -> f32 {
         // 1. Apply input pre-diffusion.
         let mut diffused = input;
@@ -512,5 +514,52 @@ mod tests {
         // Clamp low.
         reverb.set_tension(-1.0);
         assert!((reverb.config.tension - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_spring_energy_conservation() {
+        // Verify spring reverb short-burst stability: after a short impulse, the
+        // reverb tail must be finite for the first 500 ms (24000 samples) of drain.
+        // Spring tanks have long RT60 (2–5 s) so this test confirms the output
+        // remains bounded immediately after excitation.
+        let config = SpringReverbConfig {
+            wet_mix: 0.4,
+            ..Default::default()
+        };
+        let mut reverb = SpringReverb::new(config, 48000.0);
+
+        // Compute input energy from a brief 100 ms sine burst (4800 samples).
+        let mut input_energy = 0.0f32;
+        for i in 0..4800 {
+            #[allow(clippy::cast_precision_loss)]
+            let input = (i as f32 * 0.1).sin() * 0.5;
+            input_energy += input * input;
+            let out = reverb.process_sample(input);
+            assert!(
+                out.is_finite(),
+                "Output during excitation must be finite: {out}"
+            );
+        }
+
+        // Collect output energy during the first 500 ms (24000 samples) of drain.
+        let mut output_energy = 0.0f32;
+        for _ in 0..24000 {
+            let out = reverb.process_sample(0.0);
+            assert!(out.is_finite(), "Tail output must remain finite: {out}");
+            output_energy += out * out;
+        }
+
+        // The short tail must be finite; we don't bound against input energy
+        // because a long-decay spring legitimately recirculates energy for seconds.
+        assert!(
+            output_energy.is_finite(),
+            "Spring reverb 500 ms tail energy must be finite; got {output_energy}"
+        );
+        // Sanity-check: tail energy must not already exceed 1 000× input energy
+        // within 500 ms (which would indicate pathological amplification).
+        assert!(
+            output_energy <= input_energy * 1000.0 + 1.0,
+            "spring reverb 500 ms tail energy {output_energy} is pathologically large vs input {input_energy}"
+        );
     }
 }

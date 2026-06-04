@@ -7,7 +7,7 @@
 
 use crate::cpu_fallback::CpuAccel;
 use crate::device::{DevicePreference, DeviceSelector};
-use crate::error::{AccelError, AccelResult};
+use crate::error::AccelResult;
 use crate::traits::{HardwareAccel, ScaleFilter};
 use crate::vulkan::VulkanAccel;
 use oximedia_core::PixelFormat;
@@ -89,10 +89,7 @@ impl MultiGpuDispatcher {
             }
         }
 
-        tracing::info!(
-            "MultiGpuDispatcher: {} GPU(s) available",
-            workers.len()
-        );
+        tracing::info!("MultiGpuDispatcher: {} GPU(s) available", workers.len());
 
         Self {
             workers,
@@ -172,8 +169,9 @@ impl MultiGpuDispatcher {
             }
         }
         // CPU fallback
-        self.cpu_fallback
-            .scale_image(input, src_width, src_height, dst_width, dst_height, format, filter)
+        self.cpu_fallback.scale_image(
+            input, src_width, src_height, dst_width, dst_height, format, filter,
+        )
     }
 
     /// Dispatch color conversion to the best available backend.
@@ -192,8 +190,9 @@ impl MultiGpuDispatcher {
         if let Some(idx) = self.select_worker() {
             let worker = &self.workers[idx];
             worker.load.fetch_add(1, Ordering::Relaxed);
-            let result =
-                worker.backend.convert_color(input, width, height, src_format, dst_format);
+            let result = worker
+                .backend
+                .convert_color(input, width, height, src_format, dst_format);
             worker.load.fetch_sub(1, Ordering::Relaxed);
             match result {
                 Ok(v) => return Ok(v),
@@ -246,15 +245,7 @@ mod tests {
         let disp = MultiGpuDispatcher::new(MultiGpuStrategy::RoundRobin);
         // 4×4 Rgb24 image filled with 128.
         let input = vec![128u8; 4 * 4 * 3];
-        let result = disp.scale_image(
-            &input,
-            4,
-            4,
-            2,
-            2,
-            PixelFormat::Rgb24,
-            ScaleFilter::Nearest,
-        );
+        let result = disp.scale_image(&input, 4, 4, 2, 2, PixelFormat::Rgb24, ScaleFilter::Nearest);
         assert!(result.is_ok(), "scale_image failed: {:?}", result.err());
         let out = result.expect("scale_image should succeed");
         assert_eq!(out.len(), 2 * 2 * 3);

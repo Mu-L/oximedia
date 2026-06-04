@@ -256,16 +256,24 @@ impl NleFormatSelector {
         }
 
         match nle {
-            Nle::PremierePro => ProxyCodecRecommendation::new("prores_proxy", "mov", 4_500, proxy_res)
-                .with_fallback("h264"),
+            Nle::PremierePro => {
+                ProxyCodecRecommendation::new("prores_proxy", "mov", 4_500, proxy_res)
+                    .with_fallback("h264")
+            }
 
-            Nle::DaVinciResolve => ProxyCodecRecommendation::new("dnxhr_lb", "mxf", 3_600, proxy_res)
-                .with_fallback("prores_proxy"),
+            Nle::DaVinciResolve => {
+                ProxyCodecRecommendation::new("dnxhr_lb", "mxf", 3_600, proxy_res)
+                    .with_fallback("prores_proxy")
+            }
 
-            Nle::FinalCutPro => ProxyCodecRecommendation::new("prores_proxy", "mov", 4_500, proxy_res),
+            Nle::FinalCutPro => {
+                ProxyCodecRecommendation::new("prores_proxy", "mov", 4_500, proxy_res)
+            }
 
-            Nle::AvidMediaComposer => ProxyCodecRecommendation::new("dnxhd", "mxf", 3_600, proxy_res)
-                .with_fallback("dnxhr_lb"),
+            Nle::AvidMediaComposer => {
+                ProxyCodecRecommendation::new("dnxhd", "mxf", 3_600, proxy_res)
+                    .with_fallback("dnxhr_lb")
+            }
 
             Nle::VegasPro => ProxyCodecRecommendation::new("h264", "mp4", 5_000, proxy_res)
                 .with_fallback("prores_proxy"),
@@ -284,13 +292,21 @@ impl NleFormatSelector {
     }
 
     /// Recommend based on project file path (auto-detect NLE).
-    pub fn recommend_from_project(&self, project_path: &str, source_width: u32) -> ProxyCodecRecommendation {
+    pub fn recommend_from_project(
+        &self,
+        project_path: &str,
+        source_width: u32,
+    ) -> ProxyCodecRecommendation {
         let nle = detect_nle_from_project(project_path);
         self.recommend(nle, source_width)
     }
 
     /// Recommend based on application name (auto-detect NLE).
-    pub fn recommend_from_app(&self, app_name: &str, source_width: u32) -> ProxyCodecRecommendation {
+    pub fn recommend_from_app(
+        &self,
+        app_name: &str,
+        source_width: u32,
+    ) -> ProxyCodecRecommendation {
         let nle = detect_nle_from_app_name(app_name);
         self.recommend(nle, source_width)
     }
@@ -365,10 +381,19 @@ mod tests {
 
     #[test]
     fn test_detect_from_app_name() {
-        assert_eq!(detect_nle_from_app_name("Adobe Premiere Pro 2024"), Nle::PremierePro);
-        assert_eq!(detect_nle_from_app_name("DaVinci Resolve Studio"), Nle::DaVinciResolve);
+        assert_eq!(
+            detect_nle_from_app_name("Adobe Premiere Pro 2024"),
+            Nle::PremierePro
+        );
+        assert_eq!(
+            detect_nle_from_app_name("DaVinci Resolve Studio"),
+            Nle::DaVinciResolve
+        );
         assert_eq!(detect_nle_from_app_name("Final Cut Pro"), Nle::FinalCutPro);
-        assert_eq!(detect_nle_from_app_name("Avid Media Composer"), Nle::AvidMediaComposer);
+        assert_eq!(
+            detect_nle_from_app_name("Avid Media Composer"),
+            Nle::AvidMediaComposer
+        );
         assert_eq!(detect_nle_from_app_name("VEGAS Pro 21"), Nle::VegasPro);
         assert_eq!(detect_nle_from_app_name("HitFilm Express"), Nle::HitFilm);
         assert_eq!(detect_nle_from_app_name("Unknown Editor"), Nle::Generic);
@@ -456,7 +481,10 @@ mod tests {
         assert_eq!(SourceResolution::from_width(640), SourceResolution::Sd);
         assert_eq!(SourceResolution::from_width(1920), SourceResolution::Hd);
         assert_eq!(SourceResolution::from_width(3840), SourceResolution::Uhd);
-        assert_eq!(SourceResolution::from_width(7680), SourceResolution::HigherThan4K);
+        assert_eq!(
+            SourceResolution::from_width(7680),
+            SourceResolution::HigherThan4K
+        );
     }
 
     #[test]

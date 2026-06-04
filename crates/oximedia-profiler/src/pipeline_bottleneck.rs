@@ -316,8 +316,11 @@ mod tests {
         fill(&mut a, "decode", 16_667, 100);
         let report = a.analyze(16_667);
         assert_eq!(report.slowest_stage, "decode");
-        assert!((report.bottleneck_fraction - 1.0).abs() < 0.01,
-            "fraction was {}", report.bottleneck_fraction);
+        assert!(
+            (report.bottleneck_fraction - 1.0).abs() < 0.01,
+            "fraction was {}",
+            report.bottleneck_fraction
+        );
     }
 
     #[test]
@@ -336,8 +339,11 @@ mod tests {
         // p95 = 20_000 which is > 16_667
         fill(&mut a, "decode", 20_000, 100);
         let report = a.analyze(16_667);
-        assert!(report.bottleneck_fraction <= 1.0,
-            "fraction should be clamped; was {}", report.bottleneck_fraction);
+        assert!(
+            report.bottleneck_fraction <= 1.0,
+            "fraction should be clamped; was {}",
+            report.bottleneck_fraction
+        );
     }
 
     #[test]
@@ -346,8 +352,11 @@ mod tests {
         fill(&mut a, "denoise", 8_000, 100);
         let report = a.analyze(16_000);
         assert!(!report.suggestions.is_empty());
-        assert!(report.suggestions[0].contains("denoise"),
-            "suggestion was: {}", report.suggestions[0]);
+        assert!(
+            report.suggestions[0].contains("denoise"),
+            "suggestion was: {}",
+            report.suggestions[0]
+        );
     }
 
     #[test]

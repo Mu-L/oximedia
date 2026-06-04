@@ -27,8 +27,6 @@
 //! representation.  Colour frames must be converted before submission.  The
 //! conversion function [`rgb_to_luma`] is provided for convenience.
 
-#![allow(dead_code)]
-
 use std::collections::VecDeque;
 
 // ---------------------------------------------------------------------------
@@ -471,10 +469,7 @@ impl CompositeSceneAnalyser {
                     open.dominant_reason = reason;
                 }
                 // Force-close if the window has grown too large.
-                let window_len = open
-                    .last_sequence
-                    .saturating_sub(open.start_sequence)
-                    + 1;
+                let window_len = open.last_sequence.saturating_sub(open.start_sequence) + 1;
                 if window_len >= self.config.max_highlight_frames {
                     self.close_highlight();
                 }
@@ -493,10 +488,7 @@ impl CompositeSceneAnalyser {
     /// if it meets the minimum duration requirement.
     fn close_highlight(&mut self) {
         if let Some(open) = self.current.take() {
-            let frame_count = open
-                .last_sequence
-                .saturating_sub(open.start_sequence)
-                + 1;
+            let frame_count = open.last_sequence.saturating_sub(open.start_sequence) + 1;
             if frame_count >= self.config.min_highlight_frames {
                 let reason = if frame_count > 1 {
                     HighlightReason::Composite
@@ -706,7 +698,11 @@ mod tests {
         );
         let h = &highlights[0];
         assert!(h.score >= 0.10, "score should meet threshold: {}", h.score);
-        assert!(h.frame_count() >= 3, "highlight too short: {}", h.frame_count());
+        assert!(
+            h.frame_count() >= 3,
+            "highlight too short: {}",
+            h.frame_count()
+        );
     }
 
     #[test]
@@ -744,7 +740,7 @@ mod tests {
         let config = AnalyserConfig {
             composite_threshold: 0.01, // very low → almost every frame triggers
             min_highlight_frames: 1,
-            max_highlight_frames: 5,   // force-close after 5 frames
+            max_highlight_frames: 5, // force-close after 5 frames
             motion_threshold: 0.001,
             ..Default::default()
         };

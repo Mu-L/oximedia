@@ -5,6 +5,8 @@ pub mod emitter;
 pub mod rain;
 pub mod snow;
 pub mod sparks;
+/// Uniform spatial hash grid for O(1) amortized particle-neighbourhood queries.
+pub mod spatial_grid;
 pub mod system;
 
 pub use dust::{Dust, DustMode};

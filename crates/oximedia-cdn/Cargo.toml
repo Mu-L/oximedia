@@ -23,5 +23,8 @@ thiserror.workspace = true
 uuid.workspace = true
 sha2.workspace = true
 hmac.workspace = true
+parking_lot.workspace = true
+rstar.workspace = true
 
 [dev-dependencies]
+rand.workspace = true

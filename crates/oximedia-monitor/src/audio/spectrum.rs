@@ -79,11 +79,13 @@ impl SpectrumAnalyzer {
         // Fill buffer with latest samples
         if mono_samples.len() >= self.fft_size {
             let start = mono_samples.len() - self.fft_size;
-            self.buffer.copy_from_slice(&mono_samples[start..start + self.fft_size]);
+            self.buffer
+                .copy_from_slice(&mono_samples[start..start + self.fft_size]);
         } else {
             // Shift buffer and append new samples
             let shift_amount = self.fft_size - mono_samples.len();
-            self.buffer.copy_within(mono_samples.len()..self.fft_size, 0);
+            self.buffer
+                .copy_within(mono_samples.len()..self.fft_size, 0);
             self.buffer[shift_amount..].copy_from_slice(&mono_samples);
         }
 
@@ -108,7 +110,8 @@ impl SpectrumAnalyzer {
 
     fn compute_spectrum(&mut self) {
         // Apply window
-        let mut windowed: Vec<f32> = self.buffer
+        let windowed: Vec<f32> = self
+            .buffer
             .iter()
             .zip(&self.window)
             .map(|(s, w)| s * w)

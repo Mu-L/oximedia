@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Color temperature utilities for converting between Kelvin and chromaticity.
 //!
 //! Provides correlated color temperature (CCT) estimation, Planckian locus
@@ -174,8 +173,16 @@ pub fn kelvin_to_rgb_gains(kelvin: f64) -> [f64; 3] {
     let d65 = kelvin_to_chromaticity(6504.0);
 
     // Ratio of target / D65 chromaticity as a simple gain model
-    let rx = if target.x > 1e-12 { d65.x / target.x } else { 1.0 };
-    let ry = if target.y > 1e-12 { d65.y / target.y } else { 1.0 };
+    let rx = if target.x > 1e-12 {
+        d65.x / target.x
+    } else {
+        1.0
+    };
+    let ry = if target.y > 1e-12 {
+        d65.y / target.y
+    } else {
+        1.0
+    };
 
     // Map x-shift to R/B balance, y-shift to overall scale
     let r_gain = rx;
@@ -362,10 +369,7 @@ mod tests {
         let gains = kelvin_to_rgb_gains(6504.0);
         // At D65, gains should be close to [1, 1, 1]
         for &g in &gains {
-            assert!(
-                (g - 1.0).abs() < 0.05,
-                "D65 gain expected ~1.0, got {g}"
-            );
+            assert!((g - 1.0).abs() < 0.05, "D65 gain expected ~1.0, got {g}");
         }
     }
 
@@ -373,7 +377,10 @@ mod tests {
     fn test_kelvin_to_rgb_gains_warm() {
         let gains = kelvin_to_rgb_gains(2700.0);
         // Warm light: blue channel should be boosted relative to reference
-        assert!(gains[0] != gains[2], "R and B gains should differ for warm light");
+        assert!(
+            gains[0] != gains[2],
+            "R and B gains should differ for warm light"
+        );
     }
 
     #[test]

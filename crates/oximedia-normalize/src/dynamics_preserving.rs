@@ -483,9 +483,8 @@ impl DynamicsPreservingNormalizer {
                 let _high_env = env[2].process(high);
 
                 // Apply band gains and reconstruct
-                let output = low * band_gains_lin[0]
-                    + mid * band_gains_lin[1]
-                    + high * band_gains_lin[2];
+                let output =
+                    low * band_gains_lin[0] + mid * band_gains_lin[1] + high * band_gains_lin[2];
 
                 samples[idx] = output as f32;
             }
@@ -651,7 +650,10 @@ mod tests {
         let mut samples = make_sine(1000.0, 48000.0, 0.3, 9600);
         let result = norm.process(&mut samples);
         assert!(result.is_ok());
-        assert!(samples.iter().all(|s| s.is_finite()), "output must be finite");
+        assert!(
+            samples.iter().all(|s| s.is_finite()),
+            "output must be finite"
+        );
     }
 
     #[test]
@@ -706,7 +708,11 @@ mod tests {
         let mut samples = make_sine(1000.0, 48000.0, 0.3, 4800);
         let result = norm.process(&mut samples).expect("process ok");
         for band in &result.bands {
-            assert!(band.gain_db.is_finite(), "gain_db must be finite for {}", band.label);
+            assert!(
+                band.gain_db.is_finite(),
+                "gain_db must be finite for {}",
+                band.label
+            );
         }
     }
 
@@ -765,8 +771,14 @@ mod tests {
         }
         // RMS of 0.5-amplitude sine ≈ 0.5/√2 ≈ 0.354
         // LUFS ≈ -0.691 + 10*log10(0.354^2) ≈ -0.691 - 9.0 ≈ -9.7
-        assert!(last_lufs > -20.0, "envelope should track signal level: {last_lufs}");
-        assert!(last_lufs < 0.0, "envelope level should be negative dB: {last_lufs}");
+        assert!(
+            last_lufs > -20.0,
+            "envelope should track signal level: {last_lufs}"
+        );
+        assert!(
+            last_lufs < 0.0,
+            "envelope level should be negative dB: {last_lufs}"
+        );
     }
 
     #[test]

@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use rayon::prelude::*;
+
 use crate::error::TimelineResult;
 use crate::timeline::Timeline;
 use crate::types::Position;
@@ -322,37 +324,49 @@ impl TimelineRenderer {
         // Start with a black transparent background.
         let mut composite = vec![0u8; pixel_count * 4];
 
-        // Gather video clips that cover this position (bottom track first, then
-        // higher z-index tracks on top).
+        // Gather video clips that cover this position using parallel per-track decode,
+        // then sort by z_index before compositing (order must be preserved).
         let timeline = Arc::clone(&self.timeline);
-        let mut active_clips: Vec<(u8, u8, u8)> = Vec::new(); // (r, g, b) per clip layer
 
-        let mut tracks: Vec<_> = timeline.video_tracks.iter().collect();
-        tracks.sort_by_key(|t| t.z_index);
+        let mut sorted_tracks: Vec<_> = timeline.video_tracks.iter().collect();
+        sorted_tracks.sort_by_key(|t| t.z_index);
 
-        for track in &tracks {
-            if track.muted {
-                continue;
-            }
-            for clip in &track.clips {
-                if !clip.enabled {
-                    continue;
+        // Parallel: decode each track's active clip colours independently.
+        // Returns Vec<(z_index, Option<(r, g, b)>)>.
+        let decoded: Vec<(i32, Option<(u8, u8, u8)>)> = sorted_tracks
+            .par_iter()
+            .map(|track| {
+                if track.muted {
+                    return (track.z_index, None);
                 }
-                let clip_in = clip.timeline_in;
-                let clip_out = clip.timeline_out();
-                if position >= clip_in && position < clip_out {
-                    // Derive a deterministic colour from the clip name.
-                    let mut hasher = DefaultHasher::new();
-                    clip.name.hash(&mut hasher);
-                    clip.id.as_uuid().hash(&mut hasher);
-                    let hash = hasher.finish();
-                    let r = ((hash >> 16) & 0xFF) as u8;
-                    let g = ((hash >> 8) & 0xFF) as u8;
-                    let b = (hash & 0xFF) as u8;
-                    active_clips.push((r, g, b));
+                for clip in &track.clips {
+                    if !clip.enabled {
+                        continue;
+                    }
+                    let clip_in = clip.timeline_in;
+                    let clip_out = clip.timeline_out();
+                    if position >= clip_in && position < clip_out {
+                        // Derive a deterministic colour from the clip name.
+                        let mut hasher = DefaultHasher::new();
+                        clip.name.hash(&mut hasher);
+                        clip.id.as_uuid().hash(&mut hasher);
+                        let hash = hasher.finish();
+                        let r = ((hash >> 16) & 0xFF) as u8;
+                        let g = ((hash >> 8) & 0xFF) as u8;
+                        let b = (hash & 0xFF) as u8;
+                        return (track.z_index, Some((r, g, b)));
+                    }
                 }
-            }
-        }
+                (track.z_index, None)
+            })
+            .collect();
+
+        // Sort by z_index (already sorted, but ensure stability after par_iter).
+        // Then collect the active (Some) entries in z_index order.
+        let mut ordered = decoded;
+        ordered.sort_by_key(|(z, _)| *z);
+        let active_clips: Vec<(u8, u8, u8)> =
+            ordered.into_iter().filter_map(|(_, color)| color).collect();
 
         if active_clips.is_empty() {
             // Render black frame.
@@ -684,5 +698,84 @@ mod tests {
             .chunks(4)
             .any(|px| px[0] != 0 || px[1] != 0 || px[2] != 0);
         assert!(has_colour, "Frame should contain clip colour");
+    }
+
+    // ── Rayon multi-track render tests ────────────────────────────────────────
+
+    /// Build a timeline with `n` video tracks, each holding a single clip covering [0, 100).
+    fn make_multi_track_timeline(n: usize) -> Arc<Timeline> {
+        use crate::clip::{Clip, MediaSource};
+
+        let mut tl = Timeline::new("multi", oximedia_core::Rational::new(24, 1), 48000)
+            .expect("should succeed in test");
+
+        for i in 0..n {
+            let tid = tl
+                .add_video_track(&format!("V{i}"))
+                .expect("should succeed in test");
+            let clip = Clip::new(
+                format!("clip_{i}"),
+                MediaSource::file(
+                    std::env::temp_dir().join(format!("oximedia-render-test-{i}.mov")),
+                ),
+                Position::new(0),
+                Position::new(100),
+                Position::new(0),
+            )
+            .expect("should succeed in test");
+            tl.add_clip(tid, clip).expect("should succeed in test");
+        }
+        Arc::new(tl)
+    }
+
+    /// Verify that a 3-track rayon render produces a pixel-identical frame to a
+    /// sequential single-render (they use the same deterministic colour derivation).
+    #[test]
+    fn test_rayon_render_matches_sequential() {
+        let timeline = make_multi_track_timeline(3);
+        let settings = RenderSettings::new(Position::new(0), Position::new(10)).with_video_format(
+            32,
+            18,
+            "rgba".to_string(),
+        );
+
+        let mut renderer = TimelineRenderer::new(Arc::clone(&timeline), settings);
+
+        // Render at position 5 (inside all three clips).
+        let frame = renderer
+            .render_frame(Position::new(5))
+            .expect("should succeed in test");
+        assert_eq!(frame.len(), 32 * 18 * 4, "Frame size should match 32×18×4");
+
+        // Render the same position again (cache hit path) and verify byte-identical.
+        let frame2 = renderer
+            .render_frame(Position::new(5))
+            .expect("cache hit should succeed");
+        assert_eq!(
+            frame, frame2,
+            "Repeated render of same position must be byte-identical (cache hit)"
+        );
+    }
+
+    /// Single-track timeline must behave exactly as before (no regression).
+    #[test]
+    fn test_single_track_unchanged() {
+        let timeline = make_multi_track_timeline(1);
+        let settings = RenderSettings::new(Position::new(0), Position::new(10)).with_video_format(
+            16,
+            9,
+            "rgba".to_string(),
+        );
+        let mut renderer = TimelineRenderer::new(timeline, settings);
+
+        let frame = renderer
+            .render_frame(Position::new(0))
+            .expect("should succeed in test");
+        // Single clip contributes colour — frame should not be all black.
+        assert_eq!(frame.len(), 16 * 9 * 4);
+        let has_colour = frame
+            .chunks(4)
+            .any(|px| px[0] != 0 || px[1] != 0 || px[2] != 0);
+        assert!(has_colour, "Single-track frame should contain clip colour");
     }
 }

@@ -156,9 +156,7 @@ impl JitterEstimator {
     pub fn record_packet(&mut self, send_ms: u64, arrival_ms: u64) {
         self.packet_count += 1;
 
-        if let (Some(prev_arrival), Some(prev_send)) =
-            (self.prev_arrival_ms, self.prev_send_ms)
-        {
+        if let (Some(prev_arrival), Some(prev_send)) = (self.prev_arrival_ms, self.prev_send_ms) {
             // d = (arrival_i − arrival_{i−1}) − (send_i − send_{i−1})
             let recv_diff = arrival_ms as i64 - prev_arrival as i64;
             let send_diff = send_ms as i64 - prev_send as i64;
@@ -590,7 +588,7 @@ mod tests {
         s.record_video_frame(1500, 33, 33);
         s.record_video_frame(1500, 66, 1000);
         let dur = s.active_duration().expect("duration");
-        assert_eq!(dur, Duration::from_millis(1000));
+        assert_eq!(dur, Duration::from_secs(1));
     }
 
     #[test]

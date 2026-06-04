@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Gradient fill system for broadcast graphics.
 //!
 //! Provides linear, radial, and conic gradient fills for shapes and backgrounds.
@@ -579,6 +578,47 @@ impl GradientFill {
             Self::Conic(g) => g.stop_count(),
         }
     }
+
+    /// Render the gradient into a flat RGBA8 buffer of `width × height` pixels.
+    ///
+    /// Scanlines are computed in parallel via rayon for large surfaces.  The
+    /// function is deterministic: calling it twice with the same arguments
+    /// produces byte-identical output.
+    ///
+    /// # Returns
+    /// A `Vec<u8>` of length `width * height * 4` in RGBA8 row-major order.
+    #[must_use]
+    pub fn render_to_rgba(&self, width: u32, height: u32) -> Vec<u8> {
+        use rayon::prelude::*;
+
+        if width == 0 || height == 0 {
+            return Vec::new();
+        }
+
+        let w = width as f32;
+        let h = height as f32;
+        let row_bytes = width as usize * 4;
+        let mut buf = vec![0u8; width as usize * height as usize * 4];
+
+        buf.par_chunks_mut(row_bytes)
+            .enumerate()
+            .for_each(|(row, row_buf)| {
+                for col in 0..width as usize {
+                    // Normalised coordinates — centre of the pixel.
+                    let px = (col as f32 + 0.5) / w;
+                    let py = (row as f32 + 0.5) / h;
+                    // `sample_at` expects absolute pixel coords and the surface size.
+                    let color = self.sample_at(px * w, py * h, w, h);
+                    let offset = col * 4;
+                    row_buf[offset] = (color.r * 255.0 + 0.5) as u8;
+                    row_buf[offset + 1] = (color.g * 255.0 + 0.5) as u8;
+                    row_buf[offset + 2] = (color.b * 255.0 + 0.5) as u8;
+                    row_buf[offset + 3] = (color.a * 255.0 + 0.5) as u8;
+                }
+            });
+
+        buf
+    }
 }
 
 /// Predefined gradient presets for broadcast use.
@@ -860,5 +900,37 @@ mod tests {
         assert!(c.r >= 0.0 && c.r <= 1.0);
         assert!(c.g >= 0.0 && c.g <= 1.0);
         assert!(c.b >= 0.0 && c.b <= 1.0);
+    }
+
+    /// `render_to_rgba` must be deterministic: two calls return byte-identical results.
+    #[test]
+    fn test_gradient_render_to_rgba_serial_vs_parallel() {
+        let fill = GradientFill::Linear(LinearGradient::horizontal(
+            GradientColor::black(),
+            GradientColor::white(),
+        ));
+        let buf1 = fill.render_to_rgba(64, 32);
+        let buf2 = fill.render_to_rgba(64, 32);
+        assert_eq!(buf1, buf2, "render_to_rgba must be deterministic");
+        // Sanity: output is not all-zero for a non-trivial gradient.
+        assert!(
+            buf1.iter().any(|&b| b > 0),
+            "gradient pixels should be non-zero"
+        );
+    }
+
+    /// `render_to_rgba` must return exactly `width * height * 4` bytes.
+    #[test]
+    fn test_gradient_render_dimensions() {
+        let fill = GradientFill::Radial(RadialGradient::centered(
+            GradientColor::white(),
+            GradientColor::black(),
+        ));
+        let buf = fill.render_to_rgba(16, 8);
+        assert_eq!(
+            buf.len(),
+            16 * 8 * 4,
+            "buffer length must be width*height*4"
+        );
     }
 }

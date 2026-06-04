@@ -109,6 +109,40 @@ pub mod template_variables;
 pub mod bezier_path;
 pub mod text_on_path;
 
+// Orphan batch 1 — foundational / dependency-free modules
+pub mod dirty_region;
+pub mod draw_batch;
+pub mod image_filter;
+pub mod layout_margins;
+pub mod porter_duff;
+
+// Orphan batch 2 — standalone rendering helpers
+pub mod color_correction;
+pub mod color_temperature;
+pub mod drop_shadow;
+pub mod nine_slice;
+pub mod progress_bar;
+pub mod svg_overlay;
+
+// Orphan batch 3 — scene management, GPU dispatch, text effects, safe area
+pub mod glyph_cache;
+pub mod gpu_compute;
+pub mod safe_area;
+pub mod scene_graph;
+pub mod text_effects;
+
+// Orphan batch 4 — text rendering effects and wrap, transition effects
+pub mod text_effects_inline;
+pub mod text_outline;
+pub mod text_render_effects;
+pub mod text_wrap;
+pub mod transition_effect;
+
+// Orphan batch 5 — motion paths, video wall, scoreboard data binding
+pub mod motion_path;
+pub mod scoreboard_datasource;
+pub mod video_wall;
+
 #[cfg(all(feature = "server", not(target_arch = "wasm32")))]
 pub mod control;
 

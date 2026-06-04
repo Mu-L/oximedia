@@ -8,6 +8,7 @@ pub mod crest;
 pub mod fft_frame;
 pub mod flatness;
 pub mod flux;
+pub mod overlap_save;
 pub mod rolloff;
 pub mod zcr;
 
@@ -24,6 +25,9 @@ pub use flatness::spectral_flatness;
 pub use flux::{
     detect_onsets_from_flux, spectral_flux, spectral_flux_hwr, spectral_flux_hwr_track,
     spectral_flux_normalised, spectral_flux_track,
+};
+pub use overlap_save::{
+    overlap_save_power_envelope, overlap_save_spectra, OlaBlock, OverlapSaveAnalyzer,
 };
 pub use rolloff::{
     spectral_rolloff, spectral_rolloff_85, spectral_rolloff_95, spectral_rolloff_track,

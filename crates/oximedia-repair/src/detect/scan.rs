@@ -252,7 +252,10 @@ fn detect_packet_corruption(chunk: &[u8], base_offset: u64) -> Result<Vec<Issue>
             });
         }
 
-        i += 1;
+        // Advance by 4: packet headers are 4-byte aligned so sliding
+        // one byte at a time produces ~4× redundant reads with no extra
+        // detection value, and takes ~38s on a 5 MiB file under load.
+        i += 4;
     }
 
     Ok(issues)

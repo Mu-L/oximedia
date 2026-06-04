@@ -147,19 +147,13 @@ impl JndMap {
     /// Get the minimum JND threshold (most sensitive region).
     #[must_use]
     pub fn min_threshold(&self) -> f32 {
-        self.data
-            .iter()
-            .copied()
-            .fold(f32::INFINITY, f32::min)
+        self.data.iter().copied().fold(f32::INFINITY, f32::min)
     }
 
     /// Get the maximum JND threshold (least sensitive region).
     #[must_use]
     pub fn max_threshold(&self) -> f32 {
-        self.data
-            .iter()
-            .copied()
-            .fold(f32::NEG_INFINITY, f32::max)
+        self.data.iter().copied().fold(f32::NEG_INFINITY, f32::max)
     }
 }
 
@@ -284,11 +278,11 @@ fn compute_max_gradient(
         f32::from(data[ny * stride + nx])
     };
 
-    let gx = -get(-1, -1) - 2.0 * get(-1, 0) - get(-1, 1)
-           + get(1, -1) + 2.0 * get(1, 0) + get(1, 1);
+    let gx =
+        -get(-1, -1) - 2.0 * get(-1, 0) - get(-1, 1) + get(1, -1) + 2.0 * get(1, 0) + get(1, 1);
 
-    let gy = -get(-1, -1) - 2.0 * get(0, -1) - get(1, -1)
-           + get(-1, 1) + 2.0 * get(0, 1) + get(1, 1);
+    let gy =
+        -get(-1, -1) - 2.0 * get(0, -1) - get(1, -1) + get(-1, 1) + 2.0 * get(0, 1) + get(1, 1);
 
     (gx * gx + gy * gy).sqrt()
 }
@@ -368,8 +362,16 @@ pub fn perceptual_denoise(
             let in_data: &[u8] = input_plane.data.as_ref();
 
             // Scale factor for chroma planes (JND map is at luma resolution)
-            let scale_x = if w > 0 { jnd_map.width as f32 / w as f32 } else { 1.0 };
-            let scale_y = if h > 0 { jnd_map.height as f32 / h as f32 } else { 1.0 };
+            let scale_x = if w > 0 {
+                jnd_map.width as f32 / w as f32
+            } else {
+                1.0
+            };
+            let scale_y = if h > 0 {
+                jnd_map.height as f32 / h as f32
+            } else {
+                1.0
+            };
 
             let filter_radius: usize = 2;
 
@@ -382,7 +384,8 @@ pub fn perceptual_denoise(
 
                     // Convert JND threshold to local filter strength
                     // Higher JND = region can tolerate more change = stronger filtering
-                    let local_strength = (jnd_threshold / 20.0).clamp(0.0, 1.0) * config.base_strength;
+                    let local_strength =
+                        (jnd_threshold / 20.0).clamp(0.0, 1.0) * config.base_strength;
 
                     if local_strength < 0.01 {
                         // Very sensitive region: skip filtering
@@ -632,7 +635,10 @@ mod tests {
     #[test]
     fn test_contrast_masking_low() {
         let m = contrast_masking(0.5);
-        assert!((m - 0.0).abs() < f32::EPSILON, "Low contrast should give zero masking");
+        assert!(
+            (m - 0.0).abs() < f32::EPSILON,
+            "Low contrast should give zero masking"
+        );
     }
 
     #[test]
@@ -645,7 +651,10 @@ mod tests {
     #[test]
     fn test_texture_masking_smooth() {
         let m = texture_masking(0.0);
-        assert!((m - 0.0).abs() < f32::EPSILON, "Smooth region: no texture masking");
+        assert!(
+            (m - 0.0).abs() < f32::EPSILON,
+            "Smooth region: no texture masking"
+        );
     }
 
     #[test]
@@ -710,7 +719,10 @@ mod tests {
         // Patterned frame should have variation in JND thresholds
         let min = map.min_threshold();
         let max = map.max_threshold();
-        assert!(max > min, "Patterned frame should have varying JND thresholds");
+        assert!(
+            max > min,
+            "Patterned frame should have varying JND thresholds"
+        );
     }
 
     #[test]
@@ -747,10 +759,10 @@ mod tests {
         let conservative = PerceptualConfig::conservative();
         let aggressive = PerceptualConfig::aggressive();
 
-        let cons_result = perceptual_denoise(&frame, &conservative)
-            .expect("conservative should succeed");
-        let aggr_result = perceptual_denoise(&frame, &aggressive)
-            .expect("aggressive should succeed");
+        let cons_result =
+            perceptual_denoise(&frame, &conservative).expect("conservative should succeed");
+        let aggr_result =
+            perceptual_denoise(&frame, &aggressive).expect("aggressive should succeed");
 
         // Conservative should change less than aggressive
         let cons_diff = compute_total_change(&frame, &cons_result);
@@ -765,8 +777,7 @@ mod tests {
     fn test_perceptual_error_metric() {
         let original = make_patterned_frame(64, 64);
         let config = PerceptualConfig::default();
-        let denoised = perceptual_denoise(&original, &config)
-            .expect("denoise should succeed");
+        let denoised = perceptual_denoise(&original, &config).expect("denoise should succeed");
         let report = perceptual_error_metric(&original, &denoised, &config)
             .expect("error metric should succeed");
         assert!(report.mean_jnd_ratio >= 0.0);
@@ -777,8 +788,8 @@ mod tests {
     fn test_perceptual_error_identical_frames() {
         let frame = make_patterned_frame(32, 32);
         let config = PerceptualConfig::default();
-        let report = perceptual_error_metric(&frame, &frame, &config)
-            .expect("error metric should succeed");
+        let report =
+            perceptual_error_metric(&frame, &frame, &config).expect("error metric should succeed");
         assert!(
             (report.mean_jnd_ratio - 0.0).abs() < f32::EPSILON,
             "Identical frames should have zero error"

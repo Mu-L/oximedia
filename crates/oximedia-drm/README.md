@@ -1,13 +1,13 @@
 # oximedia-drm
 
 ![Status: Stable](https://img.shields.io/badge/status-stable-green)
-![Version: 0.1.7](https://img.shields.io/badge/version-0.1.7-blue)
+![Version: 0.1.8](https://img.shields.io/badge/version-0.1.8-blue)
 
 DRM (Digital Rights Management) and encryption support for OxiMedia streaming, implementing CENC and supporting Widevine, PlayReady, FairPlay, and W3C Clear Key.
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.7 — 2026-05-16 — 734 tests
+Version: 0.1.8 — 2026-05-29 — 734 tests
 
 ## Features
 
@@ -42,9 +42,9 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-drm = "0.1.7"
+oximedia-drm = "0.1.8"
 # Enable specific DRM systems:
-oximedia-drm = { version = "0.1.7", features = ["all-drm"] }
+oximedia-drm = { version = "0.1.8", features = ["all-drm"] }
 ```
 
 ## Feature Flags

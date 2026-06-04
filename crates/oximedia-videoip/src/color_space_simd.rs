@@ -105,6 +105,7 @@ fn uyvy_to_planar_scalar(src: &[u8], npix: usize, nchroma: usize) -> (Vec<u8>, V
 /// interleaved U/V bytes — then deinterleaves U and V with pshufb.
 #[cfg(target_arch = "x86_64")]
 #[allow(unsafe_code)]
+#[allow(clippy::cast_ptr_alignment)]
 #[target_feature(enable = "ssse3")]
 unsafe fn uyvy_to_planar_ssse3(
     src: &[u8],
@@ -142,7 +143,7 @@ unsafe fn uyvy_to_planar_ssse3(
 
     for _ in 0..chunks {
         // SAFETY: offset is within src.len() (chunks * 16 <= src.len()).
-        let chunk = _mm_loadu_si128(src.as_ptr().add(offset) as *const __m128i);
+        let chunk = _mm_loadu_si128(src.as_ptr().add(offset).cast::<__m128i>());
 
         // Extract Y (8 bytes) into the low 64 bits.
         let y_vec = _mm_shuffle_epi8(chunk, y_mask);
@@ -154,12 +155,12 @@ unsafe fn uyvy_to_planar_ssse3(
         // Store via stack buffers to avoid unsafe pointer writes into Vec.
         let mut y_buf = [0u8; 16];
         let mut uv_buf = [0u8; 16];
-        _mm_storeu_si128(y_buf.as_mut_ptr() as *mut __m128i, y_vec);
-        _mm_storeu_si128(uv_buf.as_mut_ptr() as *mut __m128i, u_vec);
+        _mm_storeu_si128(y_buf.as_mut_ptr().cast::<__m128i>(), y_vec);
+        _mm_storeu_si128(uv_buf.as_mut_ptr().cast::<__m128i>(), u_vec);
         y.extend_from_slice(&y_buf[..8]);
         u.extend_from_slice(&uv_buf[..4]);
 
-        _mm_storeu_si128(uv_buf.as_mut_ptr() as *mut __m128i, v_vec);
+        _mm_storeu_si128(uv_buf.as_mut_ptr().cast::<__m128i>(), v_vec);
         v.extend_from_slice(&uv_buf[..4]);
 
         offset += 16;

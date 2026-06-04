@@ -354,17 +354,21 @@ impl RpuStatistics {
     /// Find the scene with the highest peak luminance.
     #[must_use]
     pub fn brightest_scene(&self) -> Option<&SceneStats> {
-        self.scene_stats
-            .iter()
-            .max_by(|a, b| a.l1_max_max.partial_cmp(&b.l1_max_max).unwrap_or(std::cmp::Ordering::Equal))
+        self.scene_stats.iter().max_by(|a, b| {
+            a.l1_max_max
+                .partial_cmp(&b.l1_max_max)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     }
 
     /// Find the scene with the lowest peak luminance.
     #[must_use]
     pub fn darkest_scene(&self) -> Option<&SceneStats> {
-        self.scene_stats
-            .iter()
-            .min_by(|a, b| a.l1_max_max.partial_cmp(&b.l1_max_max).unwrap_or(std::cmp::Ordering::Equal))
+        self.scene_stats.iter().min_by(|a, b| {
+            a.l1_max_max
+                .partial_cmp(&b.l1_max_max)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     }
 
     /// Compute the average dynamic range across all scenes.
@@ -445,8 +449,8 @@ mod tests {
     fn test_brightness_classification() {
         let shots = vec![
             make_shot(0, 23, 0.0, 0.05, 0.05),   // dark
-            make_shot(24, 47, 0.01, 0.30, 0.60),  // high brightness
-            make_shot(48, 71, 0.0, 0.05, 0.08),   // dark
+            make_shot(24, 47, 0.01, 0.30, 0.60), // high brightness
+            make_shot(48, 71, 0.0, 0.05, 0.08),  // dark
         ];
         let stats = RpuStatistics::from_shots(&shots);
         assert_eq!(stats.overall.dark_scenes, 2);
@@ -474,7 +478,9 @@ mod tests {
         ];
         let stats = RpuStatistics::from_shots(&shots);
 
-        let brightest = stats.brightest_scene().expect("should have brightest scene");
+        let brightest = stats
+            .brightest_scene()
+            .expect("should have brightest scene");
         assert!((brightest.l1_max_max - 0.90).abs() < 1e-5);
 
         let darkest = stats.darkest_scene().expect("should have darkest scene");

@@ -6,7 +6,7 @@
 
 #![forbid(unsafe_code)]
 
-use super::bitpack::BitPacker;
+use super::bitpack::{BitPacker, BitReader};
 use crate::AudioResult;
 
 /// Residue encoder for Vorbis.
@@ -143,6 +143,123 @@ impl ResidueEncoder {
         } else {
             32 - magnitude.leading_zeros() as usize
         }
+    }
+
+    /// Read one run token from the bitstream.
+    ///
+    /// Returns the run length (total count including the initial placement).
+    /// Returns `Ok(None)` at EOF; `Ok(Some(k))` on success.
+    fn read_run(reader: &mut BitReader<'_>) -> AudioResult<Option<usize>> {
+        if reader.is_exhausted() {
+            return Ok(None);
+        }
+        let flag = match reader.read_bits(2) {
+            Ok(v) => v,
+            Err(_) => return Ok(None),
+        };
+        if flag & 1 == 0 {
+            // Short run (flag == 0b00): next 2 bits are count.
+            let count = reader.read_bits(2).unwrap_or(0) as usize;
+            Ok(Some(count))
+        } else {
+            // Long run (flag == 0b01): next 8 bits are (count - 4).
+            let count = reader.read_bits(8).unwrap_or(0) as usize + 4;
+            Ok(Some(count))
+        }
+    }
+
+    /// Read one value token from the bitstream.
+    ///
+    /// Returns the decoded i32 (possibly 0) or `None` at EOF.
+    #[allow(clippy::cast_sign_loss)]
+    fn read_value(reader: &mut BitReader<'_>) -> AudioResult<Option<i32>> {
+        if reader.is_exhausted() {
+            return Ok(None);
+        }
+        let nonzero_flag = match reader.read_bit() {
+            Ok(v) => v,
+            Err(_) => return Ok(None),
+        };
+        if !nonzero_flag {
+            return Ok(Some(0));
+        }
+        // Non-zero: sign (1 bit) + bit_count (4 bits) + magnitude (bit_count bits).
+        let negative = reader.read_bit().unwrap_or(false);
+        let bit_count = reader.read_bits(4).unwrap_or(0) as u8;
+        let magnitude = if bit_count == 0 {
+            0u32
+        } else {
+            reader.read_bits(bit_count).unwrap_or(0)
+        };
+        let value = if negative {
+            -(magnitude as i32)
+        } else {
+            magnitude as i32
+        };
+        Ok(Some(value))
+    }
+
+    /// Decode residue coefficients encoded by [`ResidueEncoder::encode`].
+    ///
+    /// This mirrors the internal OxiMedia RLE+scalar format written by `encode()`.
+    /// It is NOT Vorbis I spec §8.6.4 partition VQ (the encoder does not produce
+    /// spec-compliant residue bitstreams).
+    ///
+    /// The encoder emits pairs of `(value, run_count)` tokens where `run_count` is
+    /// the total number of times this value appears (≥ 1).  An initial zero-run
+    /// (when leading coefficients are zero) is emitted as just `run_count` with
+    /// the implicit value of zero.  When the first coefficient is non-zero, the
+    /// leading zero-run is omitted entirely.
+    ///
+    /// # Errors
+    ///
+    /// Returns error only for internal logic errors; bitstream truncation is handled
+    /// gracefully by filling the remainder of `coeffs` with zeros.
+    #[allow(clippy::cast_sign_loss, clippy::cast_precision_loss)]
+    pub fn decode_rle(
+        reader: &mut BitReader<'_>,
+        quant_step: f32,
+        n: usize,
+    ) -> AudioResult<Vec<f32>> {
+        let mut coeffs = vec![0.0f32; n];
+        let mut pos = 0usize;
+
+        // The encoder emits: ([run_of_zeros]? (value run)*)
+        // We decode as (value, run) pairs where value defaults to 0 when no value
+        // precedes a leading zero-run.  Both leading-run and value-first forms are
+        // handled by always reading a value then a run per iteration.
+
+        while pos < n {
+            if reader.is_exhausted() {
+                break;
+            }
+
+            // Phase A: read a value.
+            let current_value = match Self::read_value(reader)? {
+                None => break,
+                Some(v) => v,
+            };
+            if pos < n {
+                coeffs[pos] = Self::dequantize(current_value, quant_step);
+                pos += 1;
+            }
+
+            // Phase B: read the run count (total occurrences including first).
+            let total_count = match Self::read_run(reader)? {
+                None => break,
+                Some(c) => c,
+            };
+            let extra = total_count.saturating_sub(1);
+            for _ in 0..extra {
+                if pos >= n {
+                    break;
+                }
+                coeffs[pos] = Self::dequantize(current_value, quant_step);
+                pos += 1;
+            }
+        }
+
+        Ok(coeffs)
     }
 
     /// Compute rate-distortion optimization.

@@ -32,9 +32,7 @@ impl RightsWindow {
     ///
     /// A worldwide territory (`"*"`) overlaps with every other territory.
     fn territory_overlaps(&self, other: &RightsWindow) -> bool {
-        self.territory == "*"
-            || other.territory == "*"
-            || self.territory == other.territory
+        self.territory == "*" || other.territory == "*" || self.territory == other.territory
     }
 
     /// Returns `true` if this window's time range overlaps with `other`.
@@ -80,38 +78,26 @@ mod tests {
 
     #[test]
     fn test_no_overlap_different_territory() {
-        let windows = vec![
-            win(1, "US", 0, 100),
-            win(2, "GB", 0, 100),
-        ];
+        let windows = vec![win(1, "US", 0, 100), win(2, "GB", 0, 100)];
         assert!(RightsConflictDetector::find_overlaps(&windows).is_empty());
     }
 
     #[test]
     fn test_no_overlap_adjacent_time() {
-        let windows = vec![
-            win(1, "US", 0, 100),
-            win(2, "US", 100, 200),
-        ];
+        let windows = vec![win(1, "US", 0, 100), win(2, "US", 100, 200)];
         assert!(RightsConflictDetector::find_overlaps(&windows).is_empty());
     }
 
     #[test]
     fn test_overlap_same_territory() {
-        let windows = vec![
-            win(1, "US", 0, 200),
-            win(2, "US", 100, 300),
-        ];
+        let windows = vec![win(1, "US", 0, 200), win(2, "US", 100, 300)];
         let result = RightsConflictDetector::find_overlaps(&windows);
         assert_eq!(result, vec![(0, 1)]);
     }
 
     #[test]
     fn test_overlap_worldwide_wildcard() {
-        let windows = vec![
-            win(1, "*", 0, 200),
-            win(2, "US", 100, 300),
-        ];
+        let windows = vec![win(1, "*", 0, 200), win(2, "US", 100, 300)];
         let result = RightsConflictDetector::find_overlaps(&windows);
         assert_eq!(result, vec![(0, 1)]);
     }
@@ -142,10 +128,7 @@ mod tests {
 
     #[test]
     fn test_worldwide_vs_worldwide_overlaps() {
-        let windows = vec![
-            win(1, "*", 0, 200),
-            win(2, "*", 100, 300),
-        ];
+        let windows = vec![win(1, "*", 0, 200), win(2, "*", 100, 300)];
         let result = RightsConflictDetector::find_overlaps(&windows);
         assert_eq!(result, vec![(0, 1)]);
     }
@@ -153,10 +136,7 @@ mod tests {
     #[test]
     fn test_time_overlap_one_contains_other() {
         // Window 2 is entirely inside window 1.
-        let windows = vec![
-            win(1, "DE", 0, 1000),
-            win(2, "DE", 100, 200),
-        ];
+        let windows = vec![win(1, "DE", 0, 1000), win(2, "DE", 100, 200)];
         let result = RightsConflictDetector::find_overlaps(&windows);
         assert_eq!(result, vec![(0, 1)]);
     }
@@ -164,10 +144,7 @@ mod tests {
     #[test]
     fn test_non_overlapping_time_with_same_territory() {
         // Gap between windows: end of first equals start of second (exclusive range).
-        let windows = vec![
-            win(1, "FR", 0, 50),
-            win(2, "FR", 50, 100),
-        ];
+        let windows = vec![win(1, "FR", 0, 50), win(2, "FR", 50, 100)];
         assert!(RightsConflictDetector::find_overlaps(&windows).is_empty());
     }
 

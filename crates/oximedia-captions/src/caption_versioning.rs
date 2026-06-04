@@ -214,7 +214,13 @@ mod tests {
     #[test]
     fn test_record_and_count() {
         let mut h = VersionHistory::new();
-        h.record("cap-1", RevisionKind::TextEdit, "Fixed typo", "alice", ts(0));
+        h.record(
+            "cap-1",
+            RevisionKind::TextEdit,
+            "Fixed typo",
+            "alice",
+            ts(0),
+        );
         h.record("cap-2", RevisionKind::Insert, "Added cue", "bob", ts(1));
         assert_eq!(h.len(), 2);
     }

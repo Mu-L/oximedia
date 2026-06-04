@@ -185,10 +185,7 @@ pub fn check_landmark_consistency(frames: &[FaceLandmarks]) -> LandmarkConsisten
         return LandmarkConsistency {
             inter_frame_deviation: 0.0,
             blink_anomaly: false,
-            asymmetry: frames
-                .first()
-                .map(|f| f.asymmetry_score())
-                .unwrap_or(0.0),
+            asymmetry: frames.first().map(|f| f.asymmetry_score()).unwrap_or(0.0),
         };
     }
 
@@ -291,7 +288,10 @@ impl DeepFakeScore {
         // --- Blink anomaly component ---
         if consistency.blink_anomaly {
             score += 0.40;
-            indicators.push("Unnatural blink pattern detected (>50% eye-openness change in 1 frame)".to_string());
+            indicators.push(
+                "Unnatural blink pattern detected (>50% eye-openness change in 1 frame)"
+                    .to_string(),
+            );
         }
 
         // --- Asymmetry component ---
@@ -382,16 +382,8 @@ mod tests {
         // A truly "near-zero" result requires mean_left ≈ mean_right, which only happens
         // when all points cluster near the centre.
         // Instead verify that a heavily skewed face scores higher than a balanced one.
-        let balanced = FaceLandmarks::new(vec![
-            (99.0, 100.0),
-            (101.0, 100.0),
-            (100.0, 120.0),
-        ]);
-        let skewed = FaceLandmarks::new(vec![
-            (10.0, 100.0),
-            (200.0, 100.0),
-            (190.0, 120.0),
-        ]);
+        let balanced = FaceLandmarks::new(vec![(99.0, 100.0), (101.0, 100.0), (100.0, 120.0)]);
+        let skewed = FaceLandmarks::new(vec![(10.0, 100.0), (200.0, 100.0), (190.0, 120.0)]);
         let asym_balanced = balanced.asymmetry_score();
         let asym_skewed = skewed.asymmetry_score();
         assert!(
@@ -438,7 +430,10 @@ mod tests {
             .map(|i| face_at(100.0 + i as f32 * 0.1, 100.0))
             .collect();
         let result = check_landmark_consistency(&frames);
-        assert!(!result.blink_anomaly, "Small natural motion should not be blink anomaly");
+        assert!(
+            !result.blink_anomaly,
+            "Small natural motion should not be blink anomaly"
+        );
         assert!(result.inter_frame_deviation < 5.0);
     }
 
@@ -461,7 +456,10 @@ mod tests {
             (115.0, 140.0),
         ]);
         let result = check_landmark_consistency(&[frame_a, frame_b]);
-        assert!(result.blink_anomaly, "Large eye-y change should trigger blink anomaly");
+        assert!(
+            result.blink_anomaly,
+            "Large eye-y change should trigger blink anomaly"
+        );
     }
 
     #[test]

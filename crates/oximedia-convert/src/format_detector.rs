@@ -371,6 +371,96 @@ impl FormatDetector {
     }
 }
 
+// ── Fast magic-byte detection ─────────────────────────────────────────────────
+
+/// Identify a [`MediaFormat`] by inspecting only the first **16 bytes** of a
+/// file header.  This is substantially faster than reading the whole file
+/// because no seek or full I/O is required.
+///
+/// Returns `None` when fewer than 4 bytes are supplied or the signature is not
+/// recognised.
+///
+/// Supported signatures (in priority order):
+///
+/// | Format | Signature |
+/// |--------|-----------|
+/// | MP4/MOV | `ftyp` at offset 4 |
+/// | MKV/WebM | `\x1A\x45\xDF\xA3` |
+/// | AVI | `RIFF` + `AVI ` |
+/// | WAV | `RIFF` + `WAVE` |
+/// | FLAC | `fLaC` |
+/// | OGG | `OggS` |
+/// | MP3 | `ID3` or `\xFF\xFB` sync |
+/// | JPEG | `\xFF\xD8\xFF` |
+/// | PNG | `\x89PNG\r\n\x1A\n` |
+#[must_use]
+pub fn detect_by_magic_bytes(buf: &[u8]) -> Option<MediaFormat> {
+    if buf.len() < 4 {
+        return None;
+    }
+
+    // MP4 / MOV: ISO Base Media file — "ftyp" box at bytes 4–7.
+    // We need at least 8 bytes for this check.
+    if buf.len() >= 8 && &buf[4..8] == b"ftyp" {
+        // Further disambiguate MOV vs MP4 by the major brand (bytes 8–11).
+        if buf.len() >= 12 && &buf[8..12] == b"qt  " {
+            return Some(MediaFormat::Mov);
+        }
+        return Some(MediaFormat::Mp4);
+    }
+
+    // Matroska / WebM: EBML header magic.
+    if buf[0..4] == [0x1A, 0x45, 0xDF, 0xA3] {
+        // Both Matroska and WebM share the same EBML header; report as Mkv
+        // (the distinction requires reading the DocType element further in).
+        return Some(MediaFormat::Mkv);
+    }
+
+    // RIFF-based formats — need at least 12 bytes to read the sub-type.
+    if buf.len() >= 12 && &buf[0..4] == b"RIFF" {
+        let sub_type = &buf[8..12];
+        if sub_type == b"AVI " {
+            return Some(MediaFormat::Avi);
+        }
+        if sub_type == b"WAVE" {
+            return Some(MediaFormat::Wav);
+        }
+    }
+
+    // FLAC
+    if &buf[0..4] == b"fLaC" {
+        return Some(MediaFormat::Flac);
+    }
+
+    // OGG
+    if &buf[0..4] == b"OggS" {
+        return Some(MediaFormat::Ogg);
+    }
+
+    // MP3 — ID3 tag header
+    if buf.len() >= 3 && &buf[0..3] == b"ID3" {
+        return Some(MediaFormat::Mp3);
+    }
+
+    // MP3 — raw MPEG frame sync bytes (0xFF 0xFB / 0xFF 0xFA / 0xFF 0xF3 …)
+    // The sync word is 0xFF followed by a byte with bits 7–5 all set.
+    if buf.len() >= 2 && buf[0] == 0xFF && (buf[1] & 0xE0 == 0xE0) {
+        return Some(MediaFormat::Mp3);
+    }
+
+    // JPEG — SOI marker
+    if buf.len() >= 3 && buf[0] == 0xFF && buf[1] == 0xD8 && buf[2] == 0xFF {
+        return Some(MediaFormat::Jpeg);
+    }
+
+    // PNG — 8-byte signature
+    if buf.len() >= 8 && buf[0..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
+        return Some(MediaFormat::Png);
+    }
+
+    None
+}
+
 // ── unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -483,5 +573,129 @@ mod tests {
         let d = detector();
         let info = d.format_info(MediaFormat::Mkv);
         assert!(info.supports_subtitles);
+    }
+
+    // ── detect_by_magic_bytes ─────────────────────────────────────────────────
+
+    #[test]
+    fn magic_mp4_ftyp() {
+        // Minimal MP4 header: 4 size bytes then "ftyp" then brand "isom"
+        let buf = [
+            0x00, 0x00, 0x00, 0x20, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm', 0x00, 0x00,
+            0x00, 0x01,
+        ];
+        assert_eq!(detect_by_magic_bytes(&buf), Some(MediaFormat::Mp4));
+    }
+
+    #[test]
+    fn magic_mov_qt_brand() {
+        let buf = [
+            0x00, 0x00, 0x00, 0x14, b'f', b't', b'y', b'p', b'q', b't', b' ', b' ', 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        assert_eq!(detect_by_magic_bytes(&buf), Some(MediaFormat::Mov));
+    }
+
+    #[test]
+    fn magic_mkv_ebml_header() {
+        let buf = [
+            0x1A, 0x45, 0xDF, 0xA3, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F, 0x42, 0x86,
+            0x81, 0x01,
+        ];
+        assert_eq!(detect_by_magic_bytes(&buf), Some(MediaFormat::Mkv));
+    }
+
+    #[test]
+    fn magic_webm_same_as_mkv() {
+        // WebM uses the same EBML magic as Matroska; both detected as Mkv
+        let buf = [
+            0x1A, 0x45, 0xDF, 0xA3, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F, 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        assert_eq!(detect_by_magic_bytes(&buf), Some(MediaFormat::Mkv));
+    }
+
+    #[test]
+    fn magic_avi_riff_avi() {
+        let buf = [
+            b'R', b'I', b'F', b'F', 0x24, 0x00, 0x00, 0x00, b'A', b'V', b'I', b' ', 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        assert_eq!(detect_by_magic_bytes(&buf), Some(MediaFormat::Avi));
+    }
+
+    #[test]
+    fn magic_wav_riff_wave() {
+        let buf = [
+            b'R', b'I', b'F', b'F', 0x24, 0x00, 0x00, 0x00, b'W', b'A', b'V', b'E', 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        assert_eq!(detect_by_magic_bytes(&buf), Some(MediaFormat::Wav));
+    }
+
+    #[test]
+    fn magic_flac() {
+        let buf = [
+            b'f', b'L', b'a', b'C', 0x00, 0x00, 0x00, 0x22, 0x00, 0x00, 0x0A, 0xC4, 0x00, 0x00,
+            0x0A, 0xC4,
+        ];
+        assert_eq!(detect_by_magic_bytes(&buf), Some(MediaFormat::Flac));
+    }
+
+    #[test]
+    fn magic_ogg() {
+        let buf = [
+            b'O', b'g', b'g', b'S', 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        assert_eq!(detect_by_magic_bytes(&buf), Some(MediaFormat::Ogg));
+    }
+
+    #[test]
+    fn magic_mp3_id3() {
+        let buf = [
+            b'I', b'D', b'3', 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        assert_eq!(detect_by_magic_bytes(&buf), Some(MediaFormat::Mp3));
+    }
+
+    #[test]
+    fn magic_mp3_sync_bytes() {
+        // 0xFF 0xFB = MPEG-1 Layer 3, no CRC, 128 kbps
+        let buf = [
+            0xFF, 0xFB, 0x90, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        assert_eq!(detect_by_magic_bytes(&buf), Some(MediaFormat::Mp3));
+    }
+
+    #[test]
+    fn magic_jpeg() {
+        let buf = [
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00,
+            0x00, 0x01,
+        ];
+        assert_eq!(detect_by_magic_bytes(&buf), Some(MediaFormat::Jpeg));
+    }
+
+    #[test]
+    fn magic_png() {
+        let buf = [
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52,
+        ];
+        assert_eq!(detect_by_magic_bytes(&buf), Some(MediaFormat::Png));
+    }
+
+    #[test]
+    fn magic_too_short_returns_none() {
+        assert_eq!(detect_by_magic_bytes(&[0xFF, 0xD8]), None);
+    }
+
+    #[test]
+    fn magic_unknown_data_returns_none() {
+        let buf = [0x00u8; 16];
+        assert_eq!(detect_by_magic_bytes(&buf), None);
     }
 }

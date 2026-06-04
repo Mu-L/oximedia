@@ -24,6 +24,62 @@ use crate::error::{AutoError, AutoResult};
 use oximedia_core::Timestamp;
 use std::collections::HashMap;
 
+/// Stable identifier for a scene used as a cache key.
+///
+/// Scenes are identified by their start and end PTS values, which are
+/// immutable after construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SceneId {
+    /// Start PTS in milliseconds.
+    pub start_pts: i64,
+    /// End PTS in milliseconds.
+    pub end_pts: i64,
+}
+
+impl SceneId {
+    /// Construct a `SceneId` from timestamps.
+    #[must_use]
+    pub fn new(start: Timestamp, end: Timestamp) -> Self {
+        Self {
+            start_pts: start.pts,
+            end_pts: end.pts,
+        }
+    }
+}
+
+/// Per-scene feature component scores (before weighting).
+///
+/// These are the raw, weight-independent scores derived from [`SceneFeatures`].
+/// Caching this struct allows a weight change to skip raw feature computation
+/// and only re-apply the weight vector.
+#[derive(Debug, Clone)]
+pub struct SceneComponentScores {
+    /// Raw motion intensity score.
+    pub motion: f64,
+    /// Raw face coverage score.
+    pub face: f64,
+    /// Raw audio peak score.
+    pub audio_peak: f64,
+    /// Raw audio energy score.
+    pub audio_energy: f64,
+    /// Raw color diversity score.
+    pub color: f64,
+    /// Raw edge density score.
+    pub edge: f64,
+    /// Raw contrast score.
+    pub contrast: f64,
+    /// Raw sharpness score.
+    pub sharpness: f64,
+    /// Raw object diversity score.
+    pub object: f64,
+    /// Cached content type (classification is deterministic from features).
+    pub content_type: ContentType,
+    /// Cached sentiment (deterministic from features).
+    pub sentiment: Sentiment,
+    /// Cached face count (needed for title generation).
+    pub face_count: usize,
+}
+
 /// Scene importance score (0.0 to 1.0).
 pub type ImportanceScore = f64;
 
@@ -534,6 +590,12 @@ pub struct SceneScorer {
     config: ScoringConfig,
     /// Temporal context configuration.
     pub temporal_context: TemporalContextConfig,
+    /// Cache of per-scene component scores keyed by [`SceneId`].
+    ///
+    /// Stores the raw, weight-independent feature sub-scores so that a config
+    /// change only needs to re-apply the weight vector rather than re-derive
+    /// components from raw [`SceneFeatures`].
+    feature_cache: HashMap<SceneId, SceneComponentScores>,
 }
 
 impl SceneScorer {
@@ -543,6 +605,7 @@ impl SceneScorer {
         Self {
             config,
             temporal_context: TemporalContextConfig::default(),
+            feature_cache: HashMap::new(),
         }
     }
 
@@ -559,43 +622,147 @@ impl SceneScorer {
         Self::new(ScoringConfig::default())
     }
 
-    /// Score a scene based on its features.
+    /// Invalidate the entire feature cache.
+    ///
+    /// Call this when the underlying scene data has changed and the cached
+    /// component scores may no longer be valid.
+    pub fn invalidate_cache(&mut self) {
+        self.feature_cache.clear();
+    }
+
+    /// Remove a single scene from the feature cache.
+    ///
+    /// Useful when only one scene's raw data has been mutated.
+    pub fn clear_scene(&mut self, id: SceneId) {
+        self.feature_cache.remove(&id);
+    }
+
+    /// Extract raw component scores from [`SceneFeatures`] without applying weights.
+    ///
+    /// These values are cached; the weighted combination is applied separately
+    /// in [`Self::score_scene`] so that a weight change only needs to re-apply
+    /// the weight vector rather than recompute from raw feature data.
+    fn extract_components(&self, features: &SceneFeatures) -> SceneComponentScores {
+        let content_type = if self.config.enable_classification {
+            self.classify_content(features)
+        } else {
+            ContentType::Unknown
+        };
+        let sentiment = if self.config.enable_sentiment {
+            self.detect_sentiment(features)
+        } else {
+            Sentiment::Neutral
+        };
+        SceneComponentScores {
+            motion: features.motion_intensity,
+            face: features.face_coverage,
+            audio_peak: features.audio_peak,
+            audio_energy: features.audio_energy,
+            color: features.color_diversity,
+            edge: features.edge_density,
+            contrast: features.contrast,
+            sharpness: features.sharpness,
+            object: features.object_diversity,
+            content_type,
+            sentiment,
+            face_count: features.face_count,
+        }
+    }
+
+    /// Apply a weight vector to cached component scores to produce a weighted sum.
+    fn apply_weights(components: &SceneComponentScores, weights: &FeatureWeights) -> f64 {
+        let mut score = 0.0_f64;
+        let mut total_weight = 0.0_f64;
+
+        score += components.motion * weights.motion;
+        total_weight += weights.motion;
+
+        score += components.face * weights.face;
+        total_weight += weights.face;
+
+        score += components.audio_peak * weights.audio_peak;
+        total_weight += weights.audio_peak;
+
+        score += components.audio_energy * weights.audio_energy;
+        total_weight += weights.audio_energy;
+
+        score += components.color * weights.color;
+        total_weight += weights.color;
+
+        score += components.edge * weights.edge;
+        total_weight += weights.edge;
+
+        score += components.contrast * weights.contrast;
+        total_weight += weights.contrast;
+
+        score += components.sharpness * weights.sharpness;
+        total_weight += weights.sharpness;
+
+        score += components.object * weights.object;
+        total_weight += weights.object;
+
+        if total_weight > 0.0 {
+            score / total_weight
+        } else {
+            0.0
+        }
+    }
+
+    /// Score a scene based on its features, using a cache to avoid redundant
+    /// component extraction when only the weight configuration has changed.
+    ///
+    /// **Cache semantics:**
+    /// - First call for a `(start, end)` pair: extract components from `features`,
+    ///   populate the cache, then apply the weight vector.
+    /// - Subsequent calls with the same `(start, end)`: re-apply the current
+    ///   weight vector to the cached components (no raw feature work).
+    ///
+    /// The cache key is [`SceneId`] derived from `(start, end)` timestamps.
+    /// Call [`Self::invalidate_cache`] or [`Self::clear_scene`] if the
+    /// underlying scene data changes.
     pub fn score_scene(
-        &self,
+        &mut self,
         start: Timestamp,
         end: Timestamp,
         features: SceneFeatures,
     ) -> AutoResult<ScoredScene> {
         self.config.validate()?;
 
-        // Compute base score from features
-        let base_score = features.composite_score(&self.config.feature_weights);
+        let id = SceneId::new(start, end);
 
-        // Classify content type
-        let content_type = if self.config.enable_classification {
-            self.classify_content(&features)
+        // Check cache — if hit, re-apply weight vector to cached components.
+        // If miss, extract components, populate cache, then apply weights.
+        let components = if let Some(cached) = self.feature_cache.get(&id) {
+            cached.clone()
         } else {
-            ContentType::Unknown
+            let c = self.extract_components(&features);
+            self.feature_cache.insert(id, c.clone());
+            c
         };
 
-        // Apply content type base importance
-        let type_adjusted_score = base_score * 0.7 + content_type.base_importance() * 0.3;
+        // Fast path: re-apply current weight vector to cached component scores.
+        let base_score = Self::apply_weights(&components, &self.config.feature_weights);
 
-        // Detect sentiment
-        let sentiment = if self.config.enable_sentiment {
-            self.detect_sentiment(&features)
-        } else {
-            Sentiment::Neutral
-        };
+        // Apply content type base importance.
+        let type_adjusted_score =
+            base_score * 0.7 + components.content_type.base_importance() * 0.3;
 
-        // Generate title suggestion
+        // Generate title suggestion (uses cached components, cheap string work).
         let suggested_title = if self.config.enable_auto_titling {
-            Some(self.generate_title(content_type, sentiment, &features))
+            // Reconstruct a minimal feature view for title generation.
+            let face_count = components.face_count;
+            Some(self.generate_title(components.content_type, components.sentiment, face_count))
         } else {
             None
         };
 
-        let mut scene = ScoredScene::new(start, end, type_adjusted_score, content_type, sentiment);
+        let mut scene = ScoredScene::new(
+            start,
+            end,
+            type_adjusted_score,
+            components.content_type,
+            components.sentiment,
+        );
         scene.features = features;
         scene.suggested_title = suggested_title;
 
@@ -611,7 +778,7 @@ impl SceneScorer {
     ///
     /// Returns an error if the underlying scene scoring fails.
     pub fn score_scene_with_context(
-        &self,
+        &mut self,
         start: Timestamp,
         end: Timestamp,
         features: SceneFeatures,
@@ -700,12 +867,16 @@ impl SceneScorer {
     }
 
     /// Generate a suggested title for the scene.
+    ///
+    /// Takes `face_count` as a plain integer so the method can be called with
+    /// the cached value from [`SceneComponentScores`] without borrowing raw
+    /// [`SceneFeatures`].
     #[must_use]
     fn generate_title(
         &self,
         content_type: ContentType,
         sentiment: Sentiment,
-        features: &SceneFeatures,
+        face_count: usize,
     ) -> String {
         let type_str = match content_type {
             ContentType::Action => "Action Sequence",
@@ -727,15 +898,11 @@ impl SceneScorer {
         };
 
         // Add face count if relevant
-        let face_note = if features.face_count > 0 {
+        let face_note = if face_count > 0 {
             format!(
                 " - {} {}",
-                features.face_count,
-                if features.face_count == 1 {
-                    "person"
-                } else {
-                    "people"
-                }
+                face_count,
+                if face_count == 1 { "person" } else { "people" }
             )
         } else {
             String::new()
@@ -783,14 +950,14 @@ impl Default for SceneScorer {
 /// is adjusted relative to its `neighbor_radius` neighbors.
 #[allow(dead_code)]
 pub fn batch_score_scenes(
-    scorer: &SceneScorer,
+    scorer: &mut SceneScorer,
     scene_data: &[(Timestamp, Timestamp, SceneFeatures)],
 ) -> AutoResult<Vec<ScoredScene>> {
-    // First pass: compute raw scores
-    let raw: Vec<ScoredScene> = scene_data
-        .iter()
-        .map(|(start, end, features)| scorer.score_scene(*start, *end, features.clone()))
-        .collect::<AutoResult<Vec<_>>>()?;
+    // First pass: compute raw scores (also populates the feature cache).
+    let mut raw: Vec<ScoredScene> = Vec::with_capacity(scene_data.len());
+    for (start, end, features) in scene_data {
+        raw.push(scorer.score_scene(*start, *end, features.clone())?);
+    }
 
     if !scorer.temporal_context.enabled {
         return Ok(raw);
@@ -838,5 +1005,180 @@ pub fn normalize_scores(scenes: &mut [ScoredScene]) {
         for scene in scenes {
             scene.score = (scene.adjusted_score() / max_score).clamp(0.0, 1.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oximedia_core::Rational;
+
+    fn make_ts(pts: i64) -> Timestamp {
+        Timestamp::new(pts, Rational::new(1, 1000))
+    }
+
+    fn make_features(motion: f64, face_count: usize) -> SceneFeatures {
+        SceneFeatures {
+            motion_intensity: motion,
+            face_count,
+            face_coverage: if face_count > 0 { 0.3 } else { 0.0 },
+            audio_peak: 0.5,
+            audio_energy: 0.4,
+            color_diversity: 0.6,
+            edge_density: 0.5,
+            brightness_mean: 0.5,
+            contrast: 0.5,
+            sharpness: 0.7,
+            object_count: 2,
+            object_diversity: 0.4,
+            temporal_stability: 0.6,
+        }
+    }
+
+    /// Score 5 scenes, then score the same 5 scenes again and assert identical results.
+    #[test]
+    fn test_scorer_cache_same_as_fresh() {
+        let config = ScoringConfig::default();
+        let mut scorer = SceneScorer::new(config);
+
+        let scenes: Vec<(Timestamp, Timestamp, SceneFeatures)> = (0..5)
+            .map(|i| {
+                let start = make_ts(i * 2000);
+                let end = make_ts(i * 2000 + 1500);
+                let features = make_features(0.1 * i as f64 + 0.1, i as usize);
+                (start, end, features)
+            })
+            .collect();
+
+        // First pass: populates cache.
+        let first_pass: Vec<f64> = scenes
+            .iter()
+            .map(|(s, e, f)| {
+                scorer
+                    .score_scene(*s, *e, f.clone())
+                    .expect("score_scene should succeed")
+                    .score
+            })
+            .collect();
+
+        // Second pass: cache hit for every scene.
+        let second_pass: Vec<f64> = scenes
+            .iter()
+            .map(|(s, e, f)| {
+                scorer
+                    .score_scene(*s, *e, f.clone())
+                    .expect("score_scene should succeed")
+                    .score
+            })
+            .collect();
+
+        assert_eq!(
+            first_pass, second_pass,
+            "cached scores must match fresh scores"
+        );
+    }
+
+    /// Score a scene, change the weight config, score again — score changes but
+    /// components must not be recomputed (cache entry count stays the same).
+    #[test]
+    fn test_scorer_cache_weight_change() {
+        let config = ScoringConfig::default();
+        let mut scorer = SceneScorer::new(config);
+
+        let start = make_ts(0);
+        let end = make_ts(2000);
+        let features = make_features(0.8, 2);
+
+        let score_before = scorer
+            .score_scene(start, end, features.clone())
+            .expect("score_scene should succeed")
+            .score;
+
+        // Cache now has 1 entry.
+        let cache_size_before = scorer.feature_cache.len();
+        assert_eq!(cache_size_before, 1, "cache should have exactly 1 entry");
+
+        // Modify weights: significantly boost motion.
+        scorer.config.feature_weights.motion = 10.0;
+        scorer.config.feature_weights.face = 0.1;
+
+        let score_after = scorer
+            .score_scene(start, end, features)
+            .expect("score_scene should succeed")
+            .score;
+
+        // Score changed because weights changed.
+        assert_ne!(
+            score_before, score_after,
+            "score should change when weights change"
+        );
+
+        // Cache still has 1 entry — components were not recomputed.
+        assert_eq!(
+            scorer.feature_cache.len(),
+            1,
+            "cache size should stay at 1 after weight-only change"
+        );
+    }
+
+    /// Invalidate after scoring, assert the next call recomputes (scores
+    /// unchanged on same data, but cache entry is re-populated).
+    #[test]
+    fn test_scorer_cache_invalidation() {
+        let config = ScoringConfig::default();
+        let mut scorer = SceneScorer::new(config);
+
+        let start = make_ts(0);
+        let end = make_ts(3000);
+        let features = make_features(0.5, 1);
+
+        let score_first = scorer
+            .score_scene(start, end, features.clone())
+            .expect("score_scene should succeed")
+            .score;
+
+        assert_eq!(scorer.feature_cache.len(), 1);
+
+        // Invalidate entire cache.
+        scorer.invalidate_cache();
+        assert_eq!(
+            scorer.feature_cache.len(),
+            0,
+            "cache should be empty after invalidation"
+        );
+
+        // Next call must recompute and re-populate the cache.
+        let score_after_invalidate = scorer
+            .score_scene(start, end, features)
+            .expect("score_scene should succeed")
+            .score;
+
+        assert!(
+            (score_first - score_after_invalidate).abs() < 1e-12,
+            "score must be identical after invalidation with same data"
+        );
+        assert_eq!(
+            scorer.feature_cache.len(),
+            1,
+            "cache must have 1 entry after re-scoring"
+        );
+    }
+
+    /// `clear_scene` removes only the targeted entry.
+    #[test]
+    fn test_scorer_clear_scene() {
+        let config = ScoringConfig::default();
+        let mut scorer = SceneScorer::new(config);
+
+        let s0 = (make_ts(0), make_ts(1000), make_features(0.3, 0));
+        let s1 = (make_ts(1000), make_ts(2000), make_features(0.6, 1));
+
+        scorer.score_scene(s0.0, s0.1, s0.2.clone()).unwrap();
+        scorer.score_scene(s1.0, s1.1, s1.2.clone()).unwrap();
+        assert_eq!(scorer.feature_cache.len(), 2);
+
+        scorer.clear_scene(SceneId::new(s0.0, s0.1));
+        assert_eq!(scorer.feature_cache.len(), 1);
+        assert!(scorer.feature_cache.contains_key(&SceneId::new(s1.0, s1.1)));
     }
 }

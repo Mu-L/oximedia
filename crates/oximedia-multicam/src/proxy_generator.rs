@@ -170,21 +170,21 @@ impl MultiAngleProxyGenerator {
     fn angle_colour(angle_id: usize) -> [u8; 3] {
         // 16-colour palette derived from the HSV colour wheel at S=0.8, V=0.8.
         const PALETTE: [[u8; 3]; 16] = [
-            [204,  51,  51], // 0  red
-            [204, 128,  51], // 1  orange
-            [204, 204,  51], // 2  yellow
-            [128, 204,  51], // 3  yellow-green
-            [ 51, 204,  51], // 4  green
-            [ 51, 204, 128], // 5  spring green
-            [ 51, 204, 204], // 6  cyan
-            [ 51, 128, 204], // 7  azure
-            [ 51,  51, 204], // 8  blue
-            [128,  51, 204], // 9  violet
-            [204,  51, 204], // 10 magenta
-            [204,  51, 128], // 11 rose
+            [204, 51, 51],   // 0  red
+            [204, 128, 51],  // 1  orange
+            [204, 204, 51],  // 2  yellow
+            [128, 204, 51],  // 3  yellow-green
+            [51, 204, 51],   // 4  green
+            [51, 204, 128],  // 5  spring green
+            [51, 204, 204],  // 6  cyan
+            [51, 128, 204],  // 7  azure
+            [51, 51, 204],   // 8  blue
+            [128, 51, 204],  // 9  violet
+            [204, 51, 204],  // 10 magenta
+            [204, 51, 128],  // 11 rose
             [153, 153, 153], // 12 light grey
             [102, 102, 102], // 13 mid grey
-            [ 51,  51,  51], // 14 dark grey
+            [51, 51, 51],    // 14 dark grey
             [230, 179, 102], // 15 tan
         ];
         PALETTE[angle_id % PALETTE.len()]
@@ -207,7 +207,10 @@ mod tests {
         };
         let gen = MultiAngleProxyGenerator::new(cfg);
         let proxy = gen.generate_stub(0, 10);
-        assert!(proxy.is_valid(), "Stub data length should match declared dimensions");
+        assert!(
+            proxy.is_valid(),
+            "Stub data length should match declared dimensions"
+        );
         assert_eq!(proxy.data.len(), 16 * 9 * 4);
     }
 

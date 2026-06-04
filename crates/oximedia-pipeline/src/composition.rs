@@ -150,7 +150,12 @@ impl ComposedNode {
     /// Returns `PipelineError::NodeNotFound` if a boundary references a node
     /// that is not in the inner graph.
     pub fn validate(&self) -> Result<(), PipelineError> {
-        for bp in self.boundary.inputs.iter().chain(self.boundary.outputs.iter()) {
+        for bp in self
+            .boundary
+            .inputs
+            .iter()
+            .chain(self.boundary.outputs.iter())
+        {
             if !self.inner.nodes.contains_key(&bp.inner_node) {
                 return Err(PipelineError::NodeNotFound(format!(
                     "ComposedNode '{}' boundary references missing inner node {}",
@@ -297,12 +302,7 @@ impl PipelineComposer {
             .map(|bp| (bp.external_name.clone(), bp.stream.clone()))
             .collect();
 
-        let default_stream = StreamSpec::video(
-            crate::node::FrameFormat::Yuv420p,
-            0,
-            0,
-            25,
-        );
+        let default_stream = StreamSpec::video(crate::node::FrameFormat::Yuv420p, 0, 0, 25);
         let first_in_stream = input_pads
             .first()
             .map(|(_, s)| s.clone())
@@ -316,7 +316,10 @@ impl PipelineComposer {
         // Build a Parametric filter config wrapping a noop Hflip as base.
         let props = std::collections::HashMap::from([
             ("composed_name".to_string(), composed.name.clone()),
-            ("inner_node_count".to_string(), composed.node_count().to_string()),
+            (
+                "inner_node_count".to_string(),
+                composed.node_count().to_string(),
+            ),
         ]);
         let base_config = FilterConfig::Custom {
             name: "composed_block".to_string(),
@@ -461,8 +464,7 @@ mod tests {
         let cn = ComposedNode::new("block", inner, boundary);
 
         let mut parent = PipelineGraph::new();
-        PipelineComposer::merge_into(&mut parent, &cn, &HashMap::new())
-            .expect("merge_into ok");
+        PipelineComposer::merge_into(&mut parent, &cn, &HashMap::new()).expect("merge_into ok");
 
         assert_eq!(parent.node_count(), inner_node_count);
     }

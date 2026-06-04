@@ -92,10 +92,7 @@ impl SubclipSpec {
 ///
 /// Returns one [`SubclipSpec`] per detected scene, ordered chronologically.
 #[must_use]
-pub fn boundaries_to_subclips(
-    boundaries: &[SceneBoundary],
-    total_frames: u64,
-) -> Vec<SubclipSpec> {
+pub fn boundaries_to_subclips(boundaries: &[SceneBoundary], total_frames: u64) -> Vec<SubclipSpec> {
     if total_frames == 0 {
         return Vec::new();
     }
@@ -278,11 +275,7 @@ impl HistogramSceneDetector {
             if h1.len() != h2.len() || h1.is_empty() {
                 continue;
             }
-            let intersection: f32 = h1
-                .iter()
-                .zip(h2.iter())
-                .map(|(a, b)| a.min(*b))
-                .sum();
+            let intersection: f32 = h1.iter().zip(h2.iter()).map(|(a, b)| a.min(*b)).sum();
 
             let frame = i as u64;
             if (frame - last_boundary) < self.min_scene_length {
@@ -379,10 +372,7 @@ mod tests {
     #[test]
     fn test_histogram_cut_detected() {
         // Frame 0: all-red histogram; frame 1: all-blue histogram.
-        let hist = vec![
-            vec![1.0_f32, 0.0, 0.0, 0.0],
-            vec![0.0_f32, 0.0, 0.0, 1.0],
-        ];
+        let hist = vec![vec![1.0_f32, 0.0, 0.0, 0.0], vec![0.0_f32, 0.0, 0.0, 1.0]];
         let det = HistogramSceneDetector::new(0.3);
         let bd = det.detect(&hist);
         assert_eq!(bd.len(), 1);
@@ -423,8 +413,16 @@ mod tests {
     #[test]
     fn test_subclip_labels() {
         let bd = vec![
-            SceneBoundary { frame_number: 30, score: 0.5, transition: TransitionType::Cut },
-            SceneBoundary { frame_number: 60, score: 0.5, transition: TransitionType::Cut },
+            SceneBoundary {
+                frame_number: 30,
+                score: 0.5,
+                transition: TransitionType::Cut,
+            },
+            SceneBoundary {
+                frame_number: 60,
+                score: 0.5,
+                transition: TransitionType::Cut,
+            },
         ];
         let subs = boundaries_to_subclips(&bd, 90);
         assert_eq!(subs[0].label, "Scene 1");

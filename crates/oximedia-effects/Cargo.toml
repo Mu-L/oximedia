@@ -22,5 +22,9 @@ thiserror.workspace = true
 oxifft = { workspace = true }
 rubato = "2.0"
 scirs2-core = { workspace = true }
+fundsp = { workspace = true, optional = true }
+
+[features]
+fundsp = ["dep:fundsp"]
 
 [dev-dependencies]

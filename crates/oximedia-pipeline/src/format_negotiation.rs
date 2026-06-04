@@ -258,10 +258,7 @@ impl FormatNegotiator {
 
                             // Create a format-conversion filter node.
                             let conv_node = NodeSpec::filter(
-                                format!(
-                                    "__fmt_conv_{}_{}",
-                                    from_node_spec.name, to_node_spec.name
-                                ),
+                                format!("__fmt_conv_{}_{}", from_node_spec.name, to_node_spec.name),
                                 FilterConfig::Format(target),
                                 base_spec,
                                 conv_spec,
@@ -323,10 +320,7 @@ impl FormatNegotiator {
 
     /// Convenience wrapper that returns only the negotiated graph (discards the
     /// report).
-    pub fn negotiate_graph(
-        &self,
-        graph: PipelineGraph,
-    ) -> Result<PipelineGraph, PipelineError> {
+    pub fn negotiate_graph(&self, graph: PipelineGraph) -> Result<PipelineGraph, PipelineError> {
         self.negotiate(graph).map(|(g, _)| g)
     }
 
@@ -381,7 +375,11 @@ mod tests {
         sink_fmt: FrameFormat,
     ) -> (PipelineGraph, NodeId, NodeId) {
         let mut g = PipelineGraph::new();
-        let src = NodeSpec::source("src", SourceConfig::File("in.mkv".into()), video_spec(src_fmt));
+        let src = NodeSpec::source(
+            "src",
+            SourceConfig::File("in.mkv".into()),
+            video_spec(src_fmt),
+        );
         let sink = NodeSpec::sink("sink", SinkConfig::Null, video_spec(sink_fmt));
         let s = g.add_node(src);
         let sk = g.add_node(sink);
@@ -429,7 +427,11 @@ mod tests {
             SourceConfig::File("in.mp4".into()),
             video_spec(FrameFormat::Yuv420p),
         );
-        let sink = NodeSpec::sink("sink", SinkConfig::Null, audio_spec(FrameFormat::S16Interleaved));
+        let sink = NodeSpec::sink(
+            "sink",
+            SinkConfig::Null,
+            audio_spec(FrameFormat::S16Interleaved),
+        );
         let s = g.add_node(src);
         let sk = g.add_node(sink);
         g.edges.push(GEdge {
@@ -439,7 +441,9 @@ mod tests {
             to_pad: "default".into(),
         });
         let neg = FormatNegotiator::new();
-        let (_, report) = neg.negotiate(g).expect("should not fail with default config");
+        let (_, report) = neg
+            .negotiate(g)
+            .expect("should not fail with default config");
         assert!(!report.is_compatible());
         assert_eq!(report.incompatible_edges.len(), 1);
     }
@@ -486,7 +490,9 @@ mod tests {
         );
         assert_eq!(
             FormatCompatibility::check(FrameFormat::Yuv420p, FrameFormat::Rgb24),
-            NeedsConversion { target: FrameFormat::Rgb24 }
+            NeedsConversion {
+                target: FrameFormat::Rgb24
+            }
         );
         assert_eq!(
             FormatCompatibility::check(FrameFormat::Yuv420p, FrameFormat::S16Interleaved),

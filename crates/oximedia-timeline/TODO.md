@@ -18,7 +18,12 @@
 - [x] Extend `multicam` to support angle switching based on timecode match (not just frame position) (verified 2026-05-16; src/multicam.rs:381 add_switch_by_timecode, sync_angles_by_timecode:486)
 - [x] Improve `snap_grid` to support magnetic snap to clip boundaries, markers, and playhead position
 - [x] Add `clip_metadata` support for embedded media metadata (codec info, color space, audio channels) (verified 2026-05-16; src/clip_metadata.rs:732 lines)
-- [ ] Extend `transition_engine` to support asymmetric transitions (different in/out curves) (verified-open 2026-05-16: no asymmetric/in_ease/out_ease in transition_engine.rs)
+- [x] Extend transition_engine to support asymmetric transitions (different in/out curves) (done 2026-06-01)
+  - **Goal:** Allow different easing functions for the incoming and outgoing halves of a transition.
+  - **Design:** `src/transition_engine.rs:52` `TransitionEngine` / `apply` uses a single progress curve. Add `in_ease: EasingFn` and `out_ease: EasingFn` fields to `TransitionInput` (or equivalent config). In `apply`, split `progress` at 0.5: first half uses `in_ease(progress*2)`, second half uses `out_ease((progress-0.5)*2)`. Default to symmetric (same curve for both) for backward compatibility.
+  - **Files:** `src/transition_engine.rs`, `TODO.md`.
+  - **Tests:** asymmetric transition at progress=0.25 uses `in_ease` curve output; at progress=0.75 uses `out_ease`; symmetric default produces identical output to current behavior.
+  - **Risk:** backward compatibility — ensure all existing callers get symmetric default; easing function signature must match.
 - [x] Add linked clip groups in `track` where moving one clip auto-moves linked clips on other tracks (verified 2026-05-16; src/linked_clips.rs:541 lines)
 - [x] Implement `timeline_lock` per-track locking (currently likely timeline-level) for collaborative editing (verified 2026-05-16; src/timeline_lock.rs:122 lock_track fn, lock_range fn:107)
 - [x] Extend `keyframe_animation` with bezier curve interpolation for smooth easing
@@ -40,7 +45,12 @@
 - [ ] Use memory-mapped audio file access in `audio` mixer for large project with many audio clips (verified-open 2026-05-16: no mmap in audio.rs)
 - [x] Implement incremental render in `renderer` that only re-composites tracks with changed clips (verified 2026-05-16; src/incremental_render.rs:729 lines)
 - [x] Add lazy clip loading in `import` that defers media probing until clip is first accessed on timeline (verified 2026-05-16; src/lazy_clip.rs:600 lines)
-- [ ] Parallelize multi-track rendering in `render` using rayon for compositing independent track layers (verified-open 2026-05-16: no rayon/par_iter in render.rs)
+- [x] Parallelize multi-track rendering in render using rayon (done 2026-06-01)
+  - **Goal:** Decode independent video tracks in parallel, then composite in z_index order.
+  - **Design:** `src/render.rs:309` `render_video_at` loops video tracks sequentially at :333. Use `rayon::par_iter` over independent tracks to run per-track decode in parallel; collect results, then composite in z_index order sequentially (compositing order must be preserved). `rayon` is already a dep.
+  - **Files:** `src/render.rs`, `TODO.md`.
+  - **Tests:** parallel output == sequential output (pixel-exact or near-exact on synthetic data); single-track case unchanged; 3-track z_index ordering preserved.
+  - **Risk:** z_index sort must happen AFTER parallel decode, before compositing; assert stability.
 
 ## Testing
 - [ ] Add integration test for full edit workflow: create timeline -> add tracks -> insert clips -> add transition -> export EDL -> verify output

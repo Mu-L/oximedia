@@ -258,8 +258,7 @@ mod tests {
         // 10 blocks at −23 LUFS (typical broadcast target)
         let config = Bs2132Config::new(48000.0, 2, 5.0);
         let blocks = make_blocks_at_lufs(-23.0, 10);
-        let result = compute_bs2132_loudness(&blocks, &config)
-            .expect("should succeed");
+        let result = compute_bs2132_loudness(&blocks, &config).expect("should succeed");
 
         assert!(result.valid);
         assert!(result.short_form_applied);
@@ -275,8 +274,7 @@ mod tests {
         let config = Bs2132Config::new(48000.0, 2, 5.0);
         // Only 2 blocks that pass absolute gate
         let blocks = make_blocks_at_lufs(-20.0, 2);
-        let result = compute_bs2132_loudness(&blocks, &config)
-            .expect("should succeed");
+        let result = compute_bs2132_loudness(&blocks, &config).expect("should succeed");
         assert!(result.valid);
         assert!(result.short_form_applied);
         // Relative gate was skipped: rel == abs
@@ -288,8 +286,7 @@ mod tests {
         // Long-form: content > 30 s → standard −10 LU relative gate
         let config = Bs2132Config::new(48000.0, 2, 60.0);
         let blocks = make_blocks_at_lufs(-23.0, 30);
-        let result = compute_bs2132_loudness(&blocks, &config)
-            .expect("should succeed");
+        let result = compute_bs2132_loudness(&blocks, &config).expect("should succeed");
         assert!(result.valid);
         assert!(!result.short_form_applied);
     }

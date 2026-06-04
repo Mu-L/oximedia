@@ -298,7 +298,8 @@ impl ClipVersionHistory {
         let seq = self.next_seq;
         self.next_seq += 1;
         self.redo_stack.clear();
-        self.undo_stack.push(VersionEntry::new(seq, operation, label));
+        self.undo_stack
+            .push(VersionEntry::new(seq, operation, label));
         // Trim to max depth
         if let Some(max) = self.max_depth {
             if self.undo_stack.len() > max {
@@ -318,7 +319,8 @@ impl ClipVersionHistory {
         let inverse = entry.operation.invert();
         let seq = self.next_seq;
         self.next_seq += 1;
-        self.redo_stack.push(VersionEntry::new(seq, entry.operation, entry.label));
+        self.redo_stack
+            .push(VersionEntry::new(seq, entry.operation, entry.label));
         Some(inverse)
     }
 
@@ -331,7 +333,8 @@ impl ClipVersionHistory {
         let op = entry.operation.clone();
         let seq = self.next_seq;
         self.next_seq += 1;
-        self.undo_stack.push(VersionEntry::new(seq, entry.operation, entry.label));
+        self.undo_stack
+            .push(VersionEntry::new(seq, entry.operation, entry.label));
         Some(op)
     }
 
@@ -469,7 +472,9 @@ mod tests {
         });
         assert_eq!(h.undo_count(), 1);
         let inv = h.undo().expect("should undo");
-        assert!(matches!(inv, ClipEditOperation::NameChanged { before, after } if before == "new" && after == "old"));
+        assert!(
+            matches!(inv, ClipEditOperation::NameChanged { before, after } if before == "new" && after == "old")
+        );
         assert_eq!(h.undo_count(), 0);
         assert_eq!(h.redo_count(), 1);
     }
@@ -483,7 +488,10 @@ mod tests {
         });
         h.undo();
         let op = h.redo().expect("should redo");
-        assert!(matches!(op, ClipEditOperation::FavoriteToggled { after: true, .. }));
+        assert!(matches!(
+            op,
+            ClipEditOperation::FavoriteToggled { after: true, .. }
+        ));
         assert_eq!(h.undo_count(), 1);
         assert_eq!(h.redo_count(), 0);
     }
@@ -506,16 +514,27 @@ mod tests {
     #[test]
     fn test_max_depth_trims_oldest() {
         let mut h = ClipVersionHistory::with_max_depth("c1".to_string(), 2);
-        h.push(ClipEditOperation::RatingChanged { before: 0, after: 3 });
-        h.push(ClipEditOperation::RatingChanged { before: 3, after: 4 });
-        h.push(ClipEditOperation::RatingChanged { before: 4, after: 5 });
+        h.push(ClipEditOperation::RatingChanged {
+            before: 0,
+            after: 3,
+        });
+        h.push(ClipEditOperation::RatingChanged {
+            before: 3,
+            after: 4,
+        });
+        h.push(ClipEditOperation::RatingChanged {
+            before: 4,
+            after: 5,
+        });
         // Only the last 2 entries should remain
         assert_eq!(h.undo_count(), 2);
     }
 
     #[test]
     fn test_invert_keyword_added() {
-        let op = ClipEditOperation::KeywordAdded { keyword: "kw".to_string() };
+        let op = ClipEditOperation::KeywordAdded {
+            keyword: "kw".to_string(),
+        };
         let inv = op.invert();
         assert!(matches!(inv, ClipEditOperation::KeywordRemoved { keyword } if keyword == "kw"));
     }
@@ -523,14 +542,20 @@ mod tests {
     #[test]
     fn test_version_store_multi_clip() {
         let mut store = VersionStore::new();
-        store.push("clip-a", ClipEditOperation::NameChanged {
-            before: "a".to_string(),
-            after: "A".to_string(),
-        });
-        store.push("clip-b", ClipEditOperation::NameChanged {
-            before: "b".to_string(),
-            after: "B".to_string(),
-        });
+        store.push(
+            "clip-a",
+            ClipEditOperation::NameChanged {
+                before: "a".to_string(),
+                after: "A".to_string(),
+            },
+        );
+        store.push(
+            "clip-b",
+            ClipEditOperation::NameChanged {
+                before: "b".to_string(),
+                after: "B".to_string(),
+            },
+        );
         assert_eq!(store.clip_count(), 2);
         let inv = store.undo("clip-a").expect("should undo clip-a");
         assert!(matches!(inv, ClipEditOperation::NameChanged { after, .. } if after == "a"));

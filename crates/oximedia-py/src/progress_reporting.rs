@@ -127,8 +127,12 @@ impl PyProgressEvent {
     fn __repr__(&self) -> String {
         format!(
             "PyProgressEvent(phase={:?}, {:.1}%, {}/{}, eta={:?}, throughput={:.1}/s)",
-            self.phase, self.percentage, self.steps_done, self.total_steps,
-            self.eta_seconds, self.throughput
+            self.phase,
+            self.percentage,
+            self.steps_done,
+            self.total_steps,
+            self.eta_seconds,
+            self.throughput
         )
     }
 
@@ -200,11 +204,7 @@ impl ProgressReporter {
     ///     Minimum steps between callback invocations. Defaults to 1.
     #[new]
     #[pyo3(signature = (total_steps=100, callback=None, report_interval=1))]
-    pub fn new(
-        total_steps: u64,
-        callback: Option<Py<PyAny>>,
-        report_interval: u64,
-    ) -> Self {
+    pub fn new(total_steps: u64, callback: Option<Py<PyAny>>, report_interval: u64) -> Self {
         Self {
             total_steps: total_steps.max(1),
             steps_done: 0,
@@ -392,17 +392,21 @@ mod tests {
         assert_eq!(ProgressPhase::Idle.label(), "idle");
         assert_eq!(ProgressPhase::Encoding.label(), "encoding");
         assert_eq!(ProgressPhase::Complete.label(), "complete");
-        assert_eq!(
-            ProgressPhase::Custom("my_phase".into()).label(),
-            "my_phase"
-        );
+        assert_eq!(ProgressPhase::Custom("my_phase".into()).label(), "my_phase");
     }
 
     #[test]
     fn test_progress_phase_roundtrip() {
         let labels = [
-            "idle", "init", "analyzing", "encoding", "decoding",
-            "transcoding", "muxing", "finalizing", "complete",
+            "idle",
+            "init",
+            "analyzing",
+            "encoding",
+            "decoding",
+            "transcoding",
+            "muxing",
+            "finalizing",
+            "complete",
         ];
         for label in labels {
             let phase = ProgressPhase::from_label(label);

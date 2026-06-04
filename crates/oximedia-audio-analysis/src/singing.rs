@@ -54,7 +54,10 @@ impl SingingAnalyzer {
     #[must_use]
     pub fn new(config: AnalysisConfig) -> Self {
         let pitch_tracker = PitchTracker::new(config.clone());
-        Self { config, pitch_tracker }
+        Self {
+            config,
+            pitch_tracker,
+        }
     }
 
     /// Detect singing voice in audio and return detection result.
@@ -67,7 +70,8 @@ impl SingingAnalyzer {
         }
 
         let pitch_result = self.pitch_tracker.track(samples, sample_rate)?;
-        let vibrato = crate::pitch::detect_vibrato(&pitch_result, self.config.hop_size, sample_rate);
+        let vibrato =
+            crate::pitch::detect_vibrato(&pitch_result, self.config.hop_size, sample_rate);
 
         let pitch_stability = compute_pitch_stability(&pitch_result);
         let voicing_continuity = pitch_result.voicing_rate;
@@ -104,7 +108,8 @@ impl SingingAnalyzer {
         }
 
         let pitch_result = self.pitch_tracker.track(samples, sample_rate)?;
-        let vibrato = crate::pitch::detect_vibrato(&pitch_result, self.config.hop_size, sample_rate);
+        let vibrato =
+            crate::pitch::detect_vibrato(&pitch_result, self.config.hop_size, sample_rate);
 
         let pitch_stability = compute_pitch_stability(&pitch_result);
         let intonation = compute_intonation_score(&pitch_result);
@@ -273,8 +278,8 @@ fn compute_dynamic_consistency(samples: &[f32], hop_size: usize) -> f32 {
         return 0.0;
     }
 
-    let variance = rms_values.iter().map(|&r| (r - mean).powi(2)).sum::<f32>()
-        / rms_values.len() as f32;
+    let variance =
+        rms_values.iter().map(|&r| (r - mean).powi(2)).sum::<f32>() / rms_values.len() as f32;
     let cv = variance.sqrt() / mean;
 
     (1.0 - (cv * 3.0).min(1.0)).max(0.0)
@@ -336,7 +341,10 @@ mod tests {
             voicing_rate: 1.0,
         };
         let stab = compute_pitch_stability(&pr);
-        assert!(stab > 0.9, "Constant pitch should have very high stability: {stab}");
+        assert!(
+            stab > 0.9,
+            "Constant pitch should have very high stability: {stab}"
+        );
     }
 
     #[test]
@@ -351,13 +359,19 @@ mod tests {
             voicing_rate: 1.0,
         };
         let score = compute_intonation_score(&pr);
-        assert!(score > 0.9, "440 Hz should have near-perfect intonation: {score}");
+        assert!(
+            score > 0.9,
+            "440 Hz should have near-perfect intonation: {score}"
+        );
     }
 
     #[test]
     fn test_dynamic_consistency_constant_amplitude() {
         let samples: Vec<f32> = vec![0.5; 4096];
         let score = compute_dynamic_consistency(&samples, 512);
-        assert!(score > 0.8, "Constant amplitude should have high dynamic consistency: {score}");
+        assert!(
+            score > 0.8,
+            "Constant amplitude should have high dynamic consistency: {score}"
+        );
     }
 }

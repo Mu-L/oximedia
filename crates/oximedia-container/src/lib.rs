@@ -202,6 +202,8 @@ pub mod fragment;
 pub mod media_header;
 pub mod metadata;
 pub mod mkv_cluster;
+#[cfg(feature = "mmap")]
+pub mod mmap_source;
 pub mod multi_angle;
 pub mod mux;
 pub mod ogg_page;
@@ -224,6 +226,9 @@ pub mod track_header;
 pub mod track_info;
 pub mod tracks;
 
+// Re-export Matroska block-level addition types at crate root
+pub use demux::matroska::matroska_v4::{BlockAddIdType, BlockMore};
+
 // Re-export main types at crate root
 pub use container_probe::{
     percentile, probe_detailed, DetailedContainerInfo, DetailedStreamInfo, DetailedStreamStats,
@@ -238,6 +243,9 @@ pub use demux::mpegts::scte35::{
     SpliceDescriptor, SpliceInfoSection, SpliceInsert, SpliceTime, SCTE35_DEFAULT_PID,
 };
 pub use demux::Demuxer;
+pub use demux::{
+    BufferStats, BufferedPacket, PacketBuffer, ReadAheadBuffer, DEFAULT_READ_AHEAD_SIZE,
+};
 pub use format::ContainerFormat;
 pub use metadata::batch::{BatchMetadataUpdate, BatchResult};
 pub use mux::mpegts::scte35::{
@@ -247,8 +255,8 @@ pub use mux::{Muxer, MuxerConfig};
 pub use packet::{Packet, PacketFlags};
 pub use probe::{probe_format, ProbeResult};
 pub use seek::{
-    DecodeSkipCursor, MultiTrackSeeker, MultiTrackSeekerError, PtsSeekResult, SampleAccurateSeeker,
-    SampleIndexEntry, SeekAccuracy, SeekFlags, SeekIndex, SeekIndexEntry, SeekPlan, SeekResult,
-    SeekTarget, TrackIndex,
+    ClosedLoopSeekError, DecodeSkipCursor, MultiTrackSeeker, MultiTrackSeekerError, PtsSeekResult,
+    SampleAccurateSeeker, SampleIndex, SampleIndexEntry, SeekAccuracy, SeekFlags, SeekIndex,
+    SeekIndexEntry, SeekMode, SeekPlan, SeekResult, SeekTarget, TrackIndex,
 };
 pub use stream::{CodecParams, Metadata, StreamInfo};

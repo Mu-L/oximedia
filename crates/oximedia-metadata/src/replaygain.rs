@@ -242,19 +242,19 @@ impl ReplayGain {
 
         // Try standard keys (used across Vorbis, APE, ID3v2 TXXX)
         if let Some(val) = get_text(metadata, "REPLAYGAIN_TRACK_GAIN") {
-            rg.track_gain_db = parse_gain(&val);
+            rg.track_gain_db = parse_gain(val);
         }
         if let Some(val) = get_text(metadata, "REPLAYGAIN_TRACK_PEAK") {
-            rg.track_peak = parse_peak(&val);
+            rg.track_peak = parse_peak(val);
         }
         if let Some(val) = get_text(metadata, "REPLAYGAIN_ALBUM_GAIN") {
-            rg.album_gain_db = parse_gain(&val);
+            rg.album_gain_db = parse_gain(val);
         }
         if let Some(val) = get_text(metadata, "REPLAYGAIN_ALBUM_PEAK") {
-            rg.album_peak = parse_peak(&val);
+            rg.album_peak = parse_peak(val);
         }
         if let Some(val) = get_text(metadata, "REPLAYGAIN_REFERENCE_LOUDNESS") {
-            if let Some(lufs) = parse_gain(&val) {
+            if let Some(lufs) = parse_gain(val) {
                 rg.reference_loudness = lufs;
             }
         }
@@ -373,16 +373,13 @@ pub fn compute_album_gain(tracks: &[ReplayGain]) -> Result<ReplayGain, Error> {
     }
 
     if count == 0 {
-        return Err(Error::ParseError(
-            "No tracks have gain data".to_string(),
-        ));
+        return Err(Error::ParseError("No tracks have gain data".to_string()));
     }
 
     let avg_energy = sum_linear_energy / f64::from(count);
     let album_gain = linear_to_db(avg_energy.sqrt());
 
-    let mut rg = ReplayGain::new()
-        .with_album_gain(album_gain);
+    let mut rg = ReplayGain::new().with_album_gain(album_gain);
 
     if max_peak > 0.0 {
         rg = rg.with_album_peak(max_peak);
@@ -502,15 +499,11 @@ mod tests {
     #[test]
     fn test_replaygain_clip_detection() {
         // Peak 0.9, gain +3 dB => linear ~1.413, 0.9 * 1.413 = 1.27 > 1.0 => clips
-        let rg = ReplayGain::new()
-            .with_track_gain(3.0)
-            .with_track_peak(0.9);
+        let rg = ReplayGain::new().with_track_gain(3.0).with_track_peak(0.9);
         assert!(rg.track_would_clip());
 
         // Peak 0.5, gain +3 dB => 0.5 * 1.413 = 0.71 < 1.0 => no clip
-        let rg2 = ReplayGain::new()
-            .with_track_gain(3.0)
-            .with_track_peak(0.5);
+        let rg2 = ReplayGain::new().with_track_gain(3.0).with_track_peak(0.5);
         assert!(!rg2.track_would_clip());
 
         // No data => no clip
@@ -520,18 +513,14 @@ mod tests {
 
     #[test]
     fn test_replaygain_album_clip_detection() {
-        let rg = ReplayGain::new()
-            .with_album_gain(6.0)
-            .with_album_peak(0.8);
+        let rg = ReplayGain::new().with_album_gain(6.0).with_album_peak(0.8);
         // 0.8 * 10^(6/20) = 0.8 * ~1.995 = ~1.596 > 1.0
         assert!(rg.album_would_clip());
     }
 
     #[test]
     fn test_replaygain_safe_gain() {
-        let rg = ReplayGain::new()
-            .with_track_gain(6.0)
-            .with_track_peak(0.9);
+        let rg = ReplayGain::new().with_track_gain(6.0).with_track_peak(0.9);
 
         let safe = rg.safe_track_gain_db().expect("should have value");
         // Max gain for peak 0.9: 20*log10(1/0.9) ≈ 0.915 dB
@@ -541,9 +530,7 @@ mod tests {
 
     #[test]
     fn test_replaygain_safe_gain_no_clip() {
-        let rg = ReplayGain::new()
-            .with_track_gain(-6.0)
-            .with_track_peak(0.5);
+        let rg = ReplayGain::new().with_track_gain(-6.0).with_track_peak(0.5);
 
         let safe = rg.safe_track_gain_db().expect("should have value");
         // -6.0 dB is well within safe range, should remain unchanged
@@ -650,7 +637,9 @@ mod tests {
     fn test_compute_album_gain_mixed() {
         let tracks = vec![
             ReplayGain::new().with_track_gain(-3.0).with_track_peak(0.8),
-            ReplayGain::new().with_track_gain(-9.0).with_track_peak(0.95),
+            ReplayGain::new()
+                .with_track_gain(-9.0)
+                .with_track_peak(0.95),
         ];
 
         let album = compute_album_gain(&tracks).expect("should succeed");

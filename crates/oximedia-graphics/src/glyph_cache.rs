@@ -330,8 +330,7 @@ impl GlyphCache {
     ///
     /// Useful when a font is unloaded or replaced at runtime.
     pub fn invalidate_font(&mut self, font_family: &str) {
-        self.entries
-            .retain(|k, _| k.font_family != font_family);
+        self.entries.retain(|k, _| k.font_family != font_family);
     }
 
     /// Remove all cached glyphs of a given size.
@@ -453,14 +452,13 @@ impl GlyphAtlas {
         for row in 0..glyph.height {
             let src_start = (row as usize) * (glyph.width as usize) * 4;
             let dst_row = self.pen_y + row;
-            let dst_start = (dst_row as usize) * (self.atlas_width as usize) * 4
-                + (self.pen_x as usize) * 4;
+            let dst_start =
+                (dst_row as usize) * (self.atlas_width as usize) * 4 + (self.pen_x as usize) * 4;
             let count = (glyph.width as usize) * 4;
             let src_end = src_start + count;
             let dst_end = dst_start + count;
             if src_end <= glyph.data.len() && dst_end <= self.data.len() {
-                self.data[dst_start..dst_end]
-                    .copy_from_slice(&glyph.data[src_start..src_end]);
+                self.data[dst_start..dst_end].copy_from_slice(&glyph.data[src_start..src_end]);
             }
         }
 
@@ -575,7 +573,7 @@ mod tests {
         assert_eq!(g.data[0], 255); // R
         assert_eq!(g.data[1], 0); // G
         assert_eq!(g.data[2], 0); // B
-        // alpha = 128 * 255 / 255 = 128
+                                  // alpha = 128 * 255 / 255 = 128
         assert_eq!(g.data[3], 128);
     }
 

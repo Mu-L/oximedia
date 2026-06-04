@@ -210,10 +210,7 @@ mod tests {
         let mut p = FileProgress::new(1_000_000);
         p.advance(250_000);
         let eta = p.eta_secs(1.0).expect("should have ETA");
-        assert!(
-            (eta - 3.0).abs() < 0.01,
-            "ETA should be ~3s, got {eta:.4}"
-        );
+        assert!((eta - 3.0).abs() < 0.01, "ETA should be ~3s, got {eta:.4}");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! SIMD/vectorization status tracking and reporting for acceleration pipelines.
 
 /// Whether a loop or operation has been vectorized.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum VectorizationStatus {
     /// Fully vectorized using the widest available SIMD registers.
     FullyVectorized {
@@ -71,9 +71,7 @@ impl VectorizableLoop {
         match &self.status {
             VectorizationStatus::FullyVectorized { width } => *width as f32,
             VectorizationStatus::PartiallyVectorized { fraction, width } => {
-                let vec_part = *fraction * *width as f32;
-                let scalar_part = (1.0 - fraction) * 1.0_f32;
-                // harmonic-style blend
+                // Harmonic-style blend of vectorized and scalar throughputs.
                 1.0 / ((*fraction / *width as f32) + (1.0 - fraction) / 1.0)
             }
             VectorizationStatus::Scalar | VectorizationStatus::BlockedByDependency => 1.0,
@@ -163,7 +161,10 @@ mod tests {
 
     #[test]
     fn test_status_partial_is_vectorized() {
-        let s = VectorizationStatus::PartiallyVectorized { fraction: 0.5, width: 4 };
+        let s = VectorizationStatus::PartiallyVectorized {
+            fraction: 0.5,
+            width: 4,
+        };
         assert!(s.is_vectorized());
     }
 
@@ -204,7 +205,10 @@ mod tests {
         let lp = VectorizableLoop::new(
             "partial",
             500,
-            VectorizationStatus::PartiallyVectorized { fraction: 0.8, width: 4 },
+            VectorizationStatus::PartiallyVectorized {
+                fraction: 0.8,
+                width: 4,
+            },
         );
         assert!(lp.estimated_speedup() > 1.0);
     }
@@ -223,7 +227,11 @@ mod tests {
             100,
             VectorizationStatus::FullyVectorized { width: 4 },
         ));
-        report.add_loop(VectorizableLoop::new("lp2", 50, VectorizationStatus::Scalar));
+        report.add_loop(VectorizableLoop::new(
+            "lp2",
+            50,
+            VectorizationStatus::Scalar,
+        ));
         assert_eq!(report.loop_count(), 2);
     }
 

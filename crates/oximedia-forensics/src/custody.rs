@@ -116,11 +116,7 @@ impl ChainOfCustody {
     /// (or `0` if this is the first event) and the event payload.
     pub fn add_event(&mut self, action: &str, actor: u64, ts: u64) {
         let seq = self.events.len() as u64;
-        let prev_checksum = self
-            .events
-            .last()
-            .map(|e| e.checksum)
-            .unwrap_or(0);
+        let prev_checksum = self.events.last().map(|e| e.checksum).unwrap_or(0);
 
         let checksum = hash_event(prev_checksum, self.asset_id, seq, actor, action, ts);
 

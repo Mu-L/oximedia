@@ -438,8 +438,14 @@ impl VersionTree {
             });
         }
 
-        let merge_version =
-            AssetVersion::new_merge(asset_id_a, parent_a_id, parent_b_id, semver, label, created_by);
+        let merge_version = AssetVersion::new_merge(
+            asset_id_a,
+            parent_a_id,
+            parent_b_id,
+            semver,
+            label,
+            created_by,
+        );
         let merge_id = merge_version.id;
         self.versions.insert(merge_id, merge_version);
         self.head_id = Some(merge_id);
@@ -507,7 +513,11 @@ impl VersionTree {
         let mut current = version_id;
         loop {
             path.push(current);
-            match self.versions.get(&current).and_then(|v| v.parent_ids.first()) {
+            match self
+                .versions
+                .get(&current)
+                .and_then(|v| v.parent_ids.first())
+            {
                 Some(&parent) => current = parent,
                 None => break,
             }
@@ -702,7 +712,8 @@ mod tests {
             VersionChangeType::Fix,
             "Fixed colour cast in the shadows",
         );
-        tree.add_changelog_entry(entry).expect("add_changelog_entry should succeed");
+        tree.add_changelog_entry(entry)
+            .expect("add_changelog_entry should succeed");
 
         let entries = tree.changelog_for(&root_id);
         assert_eq!(entries.len(), 1);

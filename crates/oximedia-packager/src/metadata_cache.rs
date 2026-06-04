@@ -244,8 +244,7 @@ impl MetadataCache {
             None => return 0,
         };
         let before = self.entries.len();
-        self.entries
-            .retain(|_, e| e.inserted_at.elapsed() <= ttl);
+        self.entries.retain(|_, e| e.inserted_at.elapsed() <= ttl);
         before - self.entries.len()
     }
 
@@ -269,9 +268,7 @@ impl MetadataCache {
     /// Hit count for the given path.  Returns `0` if not in the cache.
     #[must_use]
     pub fn hit_count(&self, path: &str) -> u64 {
-        self.entries
-            .get(path)
-            .map_or(0, |e| e.hit_count)
+        self.entries.get(path).map_or(0, |e| e.hit_count)
     }
 
     // Evict the entry with the oldest insertion time.

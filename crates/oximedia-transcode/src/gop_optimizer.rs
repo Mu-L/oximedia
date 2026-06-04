@@ -326,7 +326,9 @@ mod tests {
             .with_cut_threshold(0.4);
         let cuts = vec![make_cut(50, 0.9)];
         let placements = compute_i_frame_placements(200, &cuts, &config);
-        assert!(placements.iter().any(|p| p.frame == 50 && p.reason == IFrameReason::SceneCut));
+        assert!(placements
+            .iter()
+            .any(|p| p.frame == 50 && p.reason == IFrameReason::SceneCut));
     }
 
     #[test]
@@ -341,8 +343,7 @@ mod tests {
 
     #[test]
     fn test_periodic_insertion() {
-        let config = GopConfig::new(5, 10000, 60)
-            .with_policy(GopPlacementPolicy::FixedOnly);
+        let config = GopConfig::new(5, 10000, 60).with_policy(GopPlacementPolicy::FixedOnly);
         let placements = compute_i_frame_placements(200, &[], &config);
         // Should have I-frames at 0, 60, 120, 180
         assert!(placements.iter().any(|p| p.frame == 60));
@@ -376,15 +377,16 @@ mod tests {
         let placements = compute_i_frame_placements(300, &[], &config);
         // Should have synthetic I-frames at 30, 60, 90, … to cap gap at 30
         assert!(
-            placements.iter().any(|p| p.frame == 30 && p.reason == IFrameReason::Periodic),
+            placements
+                .iter()
+                .any(|p| p.frame == 30 && p.reason == IFrameReason::Periodic),
             "synthetic I-frame at 30 expected"
         );
     }
 
     #[test]
     fn test_no_duplicate_frames() {
-        let config = GopConfig::new(5, 1000, 60)
-            .with_policy(GopPlacementPolicy::CutsPlusFixed);
+        let config = GopConfig::new(5, 1000, 60).with_policy(GopPlacementPolicy::CutsPlusFixed);
         // Cut exactly on a periodic boundary
         let cuts = vec![make_cut(60, 0.9)];
         let placements = compute_i_frame_placements(200, &cuts, &config);

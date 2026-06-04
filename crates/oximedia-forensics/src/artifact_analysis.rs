@@ -238,7 +238,10 @@ mod tests {
     fn test_blockiness_solid_frame_near_zero() {
         let frame = solid_frame(64, 64, 128);
         let score = CompressionArtifactAnalyzer::blockiness(&frame, 64, 64);
-        assert!(score < 0.05, "Solid frame should have near-zero blockiness: {score}");
+        assert!(
+            score < 0.05,
+            "Solid frame should have near-zero blockiness: {score}"
+        );
     }
 
     #[test]
@@ -287,7 +290,10 @@ mod tests {
     fn test_double_jpeg_solid_frame_near_zero() {
         let frame = solid_frame(64, 64, 200);
         let score = CompressionArtifactAnalyzer::double_jpeg_suspicion(&frame, 64, 64);
-        assert!(score < 0.1, "Solid frame double-JPEG suspicion should be low: {score}");
+        assert!(
+            score < 0.1,
+            "Solid frame double-JPEG suspicion should be low: {score}"
+        );
     }
 
     #[test]

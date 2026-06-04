@@ -27,6 +27,12 @@ impl Auid {
         Self(*bytes)
     }
 
+    /// Const constructor — useful for compile-time property keys.
+    #[must_use]
+    pub const fn from_bytes_const(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
     /// Create from UUID
     #[must_use]
     pub fn from_uuid(uuid: Uuid) -> Self {

@@ -602,6 +602,7 @@ fn sad_16x16_scalar(block1: &[u8], block2: &[u8]) -> u32 {
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "sse2")]
 #[allow(unsafe_code)]
+#[allow(clippy::cast_ptr_alignment)]
 unsafe fn sad_16x16_sse2_impl(block1: &[u8], block2: &[u8]) -> u32 {
     #[cfg(target_arch = "x86")]
     use std::arch::x86::*;
@@ -616,8 +617,8 @@ unsafe fn sad_16x16_sse2_impl(block1: &[u8], block2: &[u8]) -> u32 {
         // SAFETY: slices are at least 256 bytes; base + 16 <= 256.
         let p1 = block1.as_ptr().add(base);
         let p2 = block2.as_ptr().add(base);
-        let v1 = _mm_loadu_si128(p1 as *const __m128i);
-        let v2 = _mm_loadu_si128(p2 as *const __m128i);
+        let v1 = _mm_loadu_si128(p1.cast::<__m128i>());
+        let v2 = _mm_loadu_si128(p2.cast::<__m128i>());
         // _mm_sad_epu8: computes |a-b| for 16 byte pairs, horizontally sums
         // them into two 16-bit values in the low 16 bits of each 64-bit lane.
         let sad_row = _mm_sad_epu8(v1, v2);

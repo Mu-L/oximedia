@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Color blindness simulation for accessibility preview and validation.
 //!
 //! This module implements perceptually-accurate simulation of the three primary
@@ -292,7 +291,12 @@ impl ColorBlindSimulator {
             let r = lin[0] + severity * (lum - lin[0]);
             let g = lin[1] + severity * (lum - lin[1]);
             let b = lin[2] + severity * (lum - lin[2]);
-            return Rgba::rgba(linear_to_srgb(r), linear_to_srgb(g), linear_to_srgb(b), pixel.a);
+            return Rgba::rgba(
+                linear_to_srgb(r),
+                linear_to_srgb(g),
+                linear_to_srgb(b),
+                pixel.a,
+            );
         }
 
         // Select pre-multiplied direct RGB simulation matrix (severity = 1.0).
@@ -516,8 +520,7 @@ mod tests {
                 // verify all channels remain within 6 lsb of each other.
                 let min_c = out.r.min(out.g).min(out.b) as i32;
                 let max_c = out.r.max(out.g).max(out.b) as i32;
-                assert!(max_c - min_c <= 6,
-                    "grey not preserved for {cvd}: {out:?}");
+                assert!(max_c - min_c <= 6, "grey not preserved for {cvd}: {out:?}");
             }
         }
     }
@@ -533,8 +536,8 @@ mod tests {
     #[test]
     fn test_zero_severity_is_identity() {
         let pixel = Rgba::rgb(255, 100, 30);
-        let config = SimulationConfig::with_severity(CvdType::Protanopia, 0.0)
-            .expect("valid config");
+        let config =
+            SimulationConfig::with_severity(CvdType::Protanopia, 0.0).expect("valid config");
         let sim = ColorBlindSimulator::new(config);
         let out = sim.simulate_pixel(pixel);
         // With severity 0 the simulation is a no-op and the sRGB→linear→sRGB
@@ -542,8 +545,10 @@ mod tests {
         let dr = (pixel.r as i32 - out.r as i32).abs();
         let dg = (pixel.g as i32 - out.g as i32).abs();
         let db = (pixel.b as i32 - out.b as i32).abs();
-        assert!(dr <= 2 && dg <= 2 && db <= 2,
-            "severity=0 should be near-identity; got {out:?} from {pixel:?}");
+        assert!(
+            dr <= 2 && dg <= 2 && db <= 2,
+            "severity=0 should be near-identity; got {out:?} from {pixel:?}"
+        );
     }
 
     #[test]
@@ -591,7 +596,11 @@ mod tests {
     fn test_image_simulation_dimensions() {
         let sim = ColorBlindSimulator::for_type(CvdType::Tritanopia);
         let image: Vec<Vec<Rgba>> = (0..4)
-            .map(|row| (0..6).map(|col| Rgba::rgb(row * 40, col * 40, 128)).collect())
+            .map(|row| {
+                (0..6)
+                    .map(|col| Rgba::rgb(row * 40, col * 40, 128))
+                    .collect()
+            })
             .collect();
         let out = sim.simulate_image(&image);
         assert_eq!(out.len(), 4);
@@ -621,7 +630,10 @@ mod tests {
         assert!(orig_cr > 0.0, "original contrast ratio must be positive");
         assert!(sim_cr > 0.0, "simulated contrast ratio must be positive");
         // The key test: red and green appear different under simulation (not zero).
-        assert!(sim_cr.is_finite(), "simulated contrast ratio must be finite");
+        assert!(
+            sim_cr.is_finite(),
+            "simulated contrast ratio must be finite"
+        );
     }
 
     #[test]
@@ -642,13 +654,8 @@ mod tests {
         let sim = ColorBlindSimulator::for_type(CvdType::Protanopia);
         let orig: Vec<u8> = (0..40).map(|i| i as u8).collect();
         let simulated = sim.simulate_buffer(&orig).expect("ok");
-        let summary = SimulationSummary::from_buffers(
-            CvdType::Protanopia,
-            1.0,
-            &orig,
-            &simulated,
-        )
-        .expect("ok");
+        let summary = SimulationSummary::from_buffers(CvdType::Protanopia, 1.0, &orig, &simulated)
+            .expect("ok");
         assert_eq!(summary.pixel_count, 10);
         let display = summary.to_string();
         assert!(display.contains("Protanopia"), "got: {display}");

@@ -1,7 +1,11 @@
 # oximedia-mir TODO
 
+## 0.1.8 Wave 5 — 2026-05-29
+
+- [x] Register 22 orphan modules (audio_similarity, chroma_cache, chromagram, cover_art_features, dj_features, genre_classify_new, harmonic_percussive, harmonic_spectral, instrument_classifier, lsh_similarity, lyrics_align, melody_extract, melody_extractor, multitrack, onset_peak, section_segmenter, similarity_search, subgenre, tempo_stability, thumbnail, watermark, watermark_detect) + chromagram cfix (Goertzel refactor, A4 440Hz pipeline test, dead_code attribute removed from subgenre.rs) — 1081 tests, 0 warnings
+
 ## Current Status
-- 52 source files/directories covering tempo, beat, key, chord, melody, structure, genre, mood, spectral, rhythm, harmonic analysis
+- 74 source files/directories covering tempo, beat, key, chord, melody, structure, genre, mood, spectral, rhythm, harmonic analysis
 - Additional modules: fingerprint, playlist, cover_detect, chorus_detect, vocal_detect, instrument_detection, source_separation, fade_detect, tuning_detect
 - Feature-gated per analysis type (tempo, beat, key, chord, melody, structure, genre, mood, spectral, rhythm, harmonic)
 - MirAnalyzer provides unified analysis pipeline returning AnalysisResult with all enabled features
@@ -29,14 +33,14 @@
 - [x] Replace rustfft with OxiFFT (COOLJAPAN policy) in spectral analysis
 - [x] Remove ndarray dependency -- use Vec<f32> with manual stride operations
 - [x] Parallelize independent analysis branches in MirAnalyzer::analyze() using rayon (tempo/key/spectral are independent)
-- [ ] Add early-exit in TempoDetector when confidence exceeds threshold to avoid full autocorrelation scan (verified-open 2026-05-16: no confidence-based break in beat_tracker.rs or beat_tracking.rs)
+- [x] Add early-exit in TempoDetector when confidence exceeds threshold to avoid full autocorrelation scan (implemented 2026-06-01: bounded_acf_with_early_exit in tempo/utils.rs; TempoDetector::detect fast-path at conf≥0.8)
 - [x] Cache chromagram computation so chord_recognition and key_detection share the same chroma features (verified 2026-05-16; src/chroma_cache.rs:157 ChromaCache lazy compute, CachedChromagram:13)
 
 ## Testing
-- [ ] Add test with known-BPM audio (e.g., synthesized 120 BPM click track) verifying TempoDetector accuracy
-- [ ] Test key detection against known musical keys (C major scale, A minor arpeggio)
-- [ ] Add regression test for chord recognition with isolated major/minor triads
-- [ ] Test structure analysis with synthetic audio that has clear verse/chorus boundaries (volume/timbre changes)
+- [x] Add test with known-BPM audio (e.g., synthesized 120 BPM click track) verifying TempoDetector accuracy (2026-06-01: test_early_exit_clean_tempo + test_acf_120bpm_click_track in tempo/detect.rs)
+- [x] Test key detection against known musical keys (C major scale, A minor arpeggio) (2026-06-01: test_key_detection in tempo/detect.rs)
+- [x] Add regression test for chord recognition with isolated major/minor triads (2026-06-01: test_chord_recognition in tempo/detect.rs)
+- [x] Test structure analysis with synthetic audio that has clear verse/chorus boundaries (volume/timbre changes) (2026-06-01: test_structure_boundaries in tempo/detect.rs)
 - [ ] Validate MelodyExtractor output for monophonic sine sweep input
 
 ## Documentation

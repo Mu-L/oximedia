@@ -4,7 +4,7 @@
 //!
 //! # Overview
 //!
-//! [`LogAnalyzer`] ingests raw access-log lines conforming to a configurable
+//! `LogAnalyzer` ingests raw access-log lines conforming to a configurable
 //! format, stores them in a rolling time-window, and provides:
 //!
 //! - Per-path and per-edge request counters.
