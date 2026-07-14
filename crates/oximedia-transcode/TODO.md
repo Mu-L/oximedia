@@ -34,11 +34,11 @@
 - [x] Profile and optimize `bitrate_estimator` to use running statistics instead of full-pass analysis (implemented 2026-05-15: BitrateEstimator now embeds BitrateRunningAnalyzer using Welford online algorithm via running_stats.rs; new public module running_stats; tests: test_running_stats_matches_batch_computation, test_running_stats_incremental_update; 1203/1203 tests pass)
 
 ## Testing
-- [ ] Add integration tests for full transcode round-trip (encode then decode and verify frame checksums)
-- [ ] Add tests for `abr_ladder` verifying correct resolution/bitrate rungs for HLS and DASH profiles
-- [ ] Test `normalization` module with actual audio samples for EBU R128 compliance
-- [ ] Add fuzz testing for `validation` module with malformed input paths and configurations
-- [ ] Test `parallel` encoding produces bit-identical output to single-threaded encoding
+- [x] Add integration tests for full transcode round-trip (encode then decode and verify frame checksums) (verified 2026-06-05; tests/transcode_roundtrip.rs:36 test_yuv_passthrough_roundtrip_preserves_bytes — 12 frames through ChecksumEncoder, payload==input; tests/transcode_roundtrip.rs:71 test_scale_then_checksum_deterministic_across_runs)
+- [x] Add tests for `abr_ladder` verifying correct resolution/bitrate rungs for HLS and DASH profiles (verified 2026-06-05; tests/abr_ladder_spec.rs:55 test_hls_standard_ladder_passes_hls_spec maps AbrLadder::hls_standard→EncodeLadder→LadderSpec::Hls; tests/abr_ladder_spec.rs:76 test_aggressive_ladder_passes_dash_and_has_uhd_rung asserts ≥2160p & ≥15Mbps UHD rung + LadderSpec::Dash; tests/abr_ladder_spec.rs:111 ascending-order rejection)
+- [x] Test `normalization` module with actual audio samples for EBU R128 compliance (verified 2026-06-05; tests/transcode_roundtrip.rs:151 test_normalization_r128_round_trip_within_half_lu — real oximedia_audio R128Meter measure→AudioNormalizer::calculate_gain min() contract→apply→re-measure within ±0.5 LU of −23; tests/transcode_roundtrip.rs:196 calculate_gain==min(loudness,peak))
+- [x] Add fuzz testing for `validation` module with malformed input paths and configurations (verified 2026-06-05; tests/transcode_roundtrip.rs:280 test_validation_fuzz_table_never_panics — resolution/frame-rate/codec-container matches! table; tests/transcode_roundtrip.rs:229 test_validation_input_paths_against_temp_files non-empty/empty/missing temp files)
+- [x] Test `parallel` encoding produces bit-identical output to single-threaded encoding (verified 2026-06-05; tests/parallel_determinism.rs:56 test_av1_tile_encode_byte_identical_across_thread_counts 4-thread vs 1-thread byte-identical; tests/parallel_determinism.rs:101 assemble order-independent; tests/parallel_determinism.rs:140 test_transcode_context_pool_size_invariant identical PassStats+output across rayon pool sizes)
 
 ## Documentation
 - [ ] Add architecture diagram showing pipeline stage flow (demux -> decode -> filter -> encode -> mux)

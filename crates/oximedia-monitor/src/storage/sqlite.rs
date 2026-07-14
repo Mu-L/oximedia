@@ -2,11 +2,133 @@
 
 use crate::error::MonitorResult;
 use chrono::{DateTime, Utc};
-use parking_lot::Mutex;
-use rusqlite::{params, Connection};
+use oxisql_core::{ToSqlValue, Value};
+use oxisql_sqlite_compat::SqliteConnectionBlocking;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+// ---------------------------------------------------------------------------
+// Error helpers
+// ---------------------------------------------------------------------------
+
+fn map_oxi(e: impl std::fmt::Display) -> crate::error::MonitorError {
+    crate::error::MonitorError::Storage(e.to_string())
+}
+
+/// Returns `true` when the given engine error is the oxisqlite 0.3.0
+/// "feature not supported" signal — i.e. a settable PRAGMA the engine does
+/// not recognise (`"Not a valid pragma name"`) or `VACUUM`
+/// (`"VACUUM not supported yet"`).
+///
+/// These are optional tuning/maintenance operations; treating them as a no-op
+/// success is graceful degradation, not fabrication. Real data errors
+/// (constraint violations, type mismatches, missing tables, …) never match
+/// this predicate and are propagated unchanged.
+fn is_unsupported_pragma_or_vacuum(e: &impl std::fmt::Display) -> bool {
+    let msg = e.to_string().to_ascii_lowercase();
+    msg.contains("not a valid pragma name") || msg.contains("not supported yet")
+}
+
+/// Drive a blocking closure, optionally exiting the Tokio async context first.
+///
+/// `SqliteConnectionBlocking::execute / query / execute_batch` internally call
+/// `tokio::runtime::Runtime::block_on` via `block_local`.  That call panics if
+/// this thread is already inside a running Tokio runtime.  `block_in_place`
+/// temporarily moves the thread out of the multi-thread scheduler, allowing
+/// `block_on` to succeed.  When there is no current runtime (plain `#[test]`)
+/// we call through directly.
+///
+/// Requires a `multi_thread` Tokio runtime when one is present — all async
+/// test fixtures that exercise the storage path must use
+/// `#[tokio::test(flavor = "multi_thread")]`.
+fn run_blocking<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::task::block_in_place(f)
+    } else {
+        f()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Column helpers
+// ---------------------------------------------------------------------------
+
+fn col_i64(row: &oxisql_core::Row, idx: usize) -> MonitorResult<i64> {
+    match row.get_by_index(idx) {
+        Some(Value::I64(n)) => Ok(*n),
+        Some(other) => Err(crate::error::MonitorError::Storage(format!(
+            "column {idx}: expected integer, got {}",
+            other.type_name()
+        ))),
+        None => Err(crate::error::MonitorError::Storage(format!(
+            "column {idx} missing from result row"
+        ))),
+    }
+}
+
+fn col_real(row: &oxisql_core::Row, idx: usize) -> MonitorResult<f64> {
+    match row.get_by_index(idx) {
+        Some(Value::F64(f)) => Ok(*f),
+        Some(Value::I64(n)) => Ok(*n as f64),
+        Some(other) => Err(crate::error::MonitorError::Storage(format!(
+            "column {idx}: expected real, got {}",
+            other.type_name()
+        ))),
+        None => Err(crate::error::MonitorError::Storage(format!(
+            "column {idx} missing from result row"
+        ))),
+    }
+}
+
+fn col_text(row: &oxisql_core::Row, idx: usize) -> MonitorResult<String> {
+    match row.get_by_index(idx) {
+        Some(Value::Text(s)) => Ok(s.clone()),
+        Some(other) => Err(crate::error::MonitorError::Storage(format!(
+            "column {idx}: expected text, got {}",
+            other.type_name()
+        ))),
+        None => Err(crate::error::MonitorError::Storage(format!(
+            "column {idx} missing from result row"
+        ))),
+    }
+}
+
+fn col_opt_text(row: &oxisql_core::Row, idx: usize) -> MonitorResult<Option<String>> {
+    match row.get_by_index(idx) {
+        Some(Value::Null) | None => Ok(None),
+        Some(Value::Text(s)) => Ok(Some(s.clone())),
+        Some(other) => Err(crate::error::MonitorError::Storage(format!(
+            "column {idx}: expected text or null, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Inner state shared behind Arc<Mutex<…>>
+// ---------------------------------------------------------------------------
+
+struct Inner {
+    conn: SqliteConnectionBlocking,
+}
+
+impl Inner {
+    fn exec(&self, sql: &str, params: &[&dyn ToSqlValue]) -> MonitorResult<u64> {
+        run_blocking(|| self.conn.execute(sql, params).map_err(map_oxi))
+    }
+
+    fn query(&self, sql: &str, params: &[&dyn ToSqlValue]) -> MonitorResult<Vec<oxisql_core::Row>> {
+        run_blocking(|| self.conn.query(sql, params).map_err(map_oxi))
+    }
+
+    fn execute_batch(&self, sql: &str) -> MonitorResult<()> {
+        run_blocking(|| self.conn.execute_batch(sql).map(|_| ()).map_err(map_oxi))
+    }
+}
 
 /// A time series point.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,7 +146,7 @@ pub struct TimeSeriesPoint {
 /// `SQLite` storage for time series data.
 #[derive(Clone)]
 pub struct SqliteStorage {
-    conn: Arc<Mutex<Connection>>,
+    inner: Arc<Mutex<Inner>>,
 }
 
 impl SqliteStorage {
@@ -39,10 +161,14 @@ impl SqliteStorage {
             std::fs::create_dir_all(parent)?;
         }
 
-        let conn = Connection::open(path)?;
+        let path_str = path.as_ref().to_string_lossy().into_owned();
+        let conn = SqliteConnectionBlocking::open(&path_str).map_err(map_oxi)?;
 
-        // Create tables
-        conn.execute(
+        let inner = Inner { conn };
+
+        // Create tables and indices. Route through `Inner::execute_batch` so
+        // the call is safe whether or not an active Tokio runtime is present.
+        inner.execute_batch(
             "CREATE TABLE IF NOT EXISTS metrics (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 metric_name TEXT NOT NULL,
@@ -50,26 +176,10 @@ impl SqliteStorage {
                 value REAL NOT NULL,
                 labels TEXT,
                 UNIQUE(metric_name, timestamp, labels)
-            )",
-            [],
-        )?;
-
-        // Create indices for faster queries
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_metrics_name_time
-             ON metrics(metric_name, timestamp)",
-            [],
-        )?;
-
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_metrics_time
-             ON metrics(timestamp)",
-            [],
-        )?;
-
-        // Create aggregated tables
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS metrics_1min (
+            );
+            CREATE INDEX IF NOT EXISTS idx_metrics_name_time ON metrics(metric_name, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_metrics_time ON metrics(timestamp);
+            CREATE TABLE IF NOT EXISTS metrics_1min (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 metric_name TEXT NOT NULL,
                 timestamp INTEGER NOT NULL,
@@ -80,12 +190,8 @@ impl SqliteStorage {
                 count INTEGER NOT NULL,
                 labels TEXT,
                 UNIQUE(metric_name, timestamp, labels)
-            )",
-            [],
-        )?;
-
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS metrics_1hour (
+            );
+            CREATE TABLE IF NOT EXISTS metrics_1hour (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 metric_name TEXT NOT NULL,
                 timestamp INTEGER NOT NULL,
@@ -96,12 +202,8 @@ impl SqliteStorage {
                 count INTEGER NOT NULL,
                 labels TEXT,
                 UNIQUE(metric_name, timestamp, labels)
-            )",
-            [],
-        )?;
-
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS metrics_1day (
+            );
+            CREATE TABLE IF NOT EXISTS metrics_1day (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 metric_name TEXT NOT NULL,
                 timestamp INTEGER NOT NULL,
@@ -112,25 +214,22 @@ impl SqliteStorage {
                 count INTEGER NOT NULL,
                 labels TEXT,
                 UNIQUE(metric_name, timestamp, labels)
-            )",
-            [],
+            );",
         )?;
-
-        // Enable WAL mode for better concurrent read/write performance.
-        // WAL allows readers and the writer to proceed concurrently, which is
-        // important when high-frequency metric writes occur alongside dashboard queries.
-        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
-
-        // Set a busy timeout so that write contention results in a retry rather
-        // than an immediate SQLITE_BUSY error.
-        conn.execute_batch("PRAGMA busy_timeout=5000;")?;
-
-        // Increase the page cache to reduce I/O for time-series scans.
-        conn.execute_batch("PRAGMA cache_size=-8000;")?; // 8 MB
 
         Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
+            inner: Arc::new(Mutex::new(inner)),
         })
+    }
+
+    fn with_inner<F, T>(&self, f: F) -> MonitorResult<T>
+    where
+        F: FnOnce(&Inner) -> MonitorResult<T>,
+    {
+        let guard = self.inner.lock().map_err(|_| {
+            crate::error::MonitorError::Storage("SqliteStorage mutex poisoned".into())
+        })?;
+        f(&guard)
     }
 
     /// Insert a time series point.
@@ -139,127 +238,95 @@ impl SqliteStorage {
     ///
     /// Returns an error if insertion fails.
     pub fn insert(&self, point: &TimeSeriesPoint) -> MonitorResult<()> {
-        let conn = self.conn.lock();
-
-        conn.execute(
-            "INSERT OR REPLACE INTO metrics (metric_name, timestamp, value, labels)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                point.metric_name,
-                point.timestamp.timestamp(),
-                point.value,
-                point.labels,
-            ],
-        )?;
-
-        Ok(())
+        self.with_inner(|inner| {
+            let ts = point.timestamp.timestamp();
+            let labels_ref: Option<&str> = point.labels.as_deref();
+            inner.exec(
+                "INSERT OR REPLACE INTO metrics (metric_name, timestamp, value, labels) VALUES ($1, $2, $3, $4)",
+                &[&point.metric_name, &ts, &point.value, &labels_ref],
+            )?;
+            Ok(())
+        })
     }
 
-    /// Insert multiple time series points in a single transaction.
-    ///
-    /// Batching writes into a single transaction is significantly faster than
-    /// issuing individual `INSERT` statements because SQLite acquires the write
-    /// lock only once and writes the WAL only once per `COMMIT`.  Use this
-    /// method whenever more than a handful of points are available.
+    /// Insert multiple time series points sequentially.
     ///
     /// # Errors
     ///
-    /// Returns an error if insertion or the commit fails.  On error the
-    /// transaction is automatically rolled back.
+    /// Returns an error if insertion fails.
     pub fn insert_batch(&self, points: &[TimeSeriesPoint]) -> MonitorResult<()> {
         if points.is_empty() {
             return Ok(());
         }
-        let conn = self.conn.lock();
-
-        let tx = conn.unchecked_transaction()?;
-
-        for point in points {
-            tx.execute(
-                "INSERT OR REPLACE INTO metrics (metric_name, timestamp, value, labels)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    point.metric_name,
-                    point.timestamp.timestamp(),
-                    point.value,
-                    point.labels,
-                ],
-            )?;
-        }
-
-        tx.commit()?;
-
-        Ok(())
+        self.with_inner(|inner| {
+            for point in points {
+                let ts = point.timestamp.timestamp();
+                let labels_ref: Option<&str> = point.labels.as_deref();
+                inner.exec(
+                    "INSERT OR REPLACE INTO metrics (metric_name, timestamp, value, labels) VALUES ($1, $2, $3, $4)",
+                    &[&point.metric_name, &ts, &point.value, &labels_ref],
+                )?;
+            }
+            Ok(())
+        })
     }
 
-    /// Insert multiple downsampled aggregate rows into the 1-minute table in
-    /// a single transaction.
-    ///
-    /// This is the recommended write path for the metric downsampler when
-    /// flushing minute-level aggregates to persistent storage.  All rows are
-    /// committed atomically; if any row fails the entire batch is rolled back.
+    /// Insert multiple downsampled aggregate rows into the 1-minute table.
     ///
     /// # Errors
     ///
-    /// Returns an error if insertion or the commit fails.
+    /// Returns an error if insertion fails.
     pub fn insert_1min_batch(&self, rows: &[AggregateRow]) -> MonitorResult<()> {
         self.insert_aggregate_batch("metrics_1min", rows)
     }
 
-    /// Insert multiple downsampled aggregate rows into the 1-hour table in
-    /// a single transaction.
+    /// Insert multiple downsampled aggregate rows into the 1-hour table.
     ///
     /// # Errors
     ///
-    /// Returns an error if insertion or the commit fails.
+    /// Returns an error if insertion fails.
     pub fn insert_1hour_batch(&self, rows: &[AggregateRow]) -> MonitorResult<()> {
         self.insert_aggregate_batch("metrics_1hour", rows)
     }
 
-    /// Insert multiple downsampled aggregate rows into the 1-day table in
-    /// a single transaction.
+    /// Insert multiple downsampled aggregate rows into the 1-day table.
     ///
     /// # Errors
     ///
-    /// Returns an error if insertion or the commit fails.
+    /// Returns an error if insertion fails.
     pub fn insert_1day_batch(&self, rows: &[AggregateRow]) -> MonitorResult<()> {
         self.insert_aggregate_batch("metrics_1day", rows)
     }
 
-    /// Internal helper: batch INSERT into any aggregate table within a single
-    /// transaction.
     fn insert_aggregate_batch(&self, table: &str, rows: &[AggregateRow]) -> MonitorResult<()> {
         if rows.is_empty() {
             return Ok(());
         }
-
-        let conn = self.conn.lock();
-        let tx = conn.unchecked_transaction()?;
-
-        let sql = format!(
-            "INSERT OR REPLACE INTO {table}
-             (metric_name, timestamp, min_value, max_value, avg_value, sum_value, count, labels)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
-        );
-
-        for row in rows {
-            tx.execute(
-                &sql,
-                params![
-                    row.metric_name,
-                    row.timestamp.timestamp(),
-                    row.min_value,
-                    row.max_value,
-                    row.avg_value,
-                    row.sum_value,
-                    row.count,
-                    row.labels,
-                ],
-            )?;
-        }
-
-        tx.commit()?;
-        Ok(())
+        self.with_inner(|inner| {
+            let sql = format!(
+                "INSERT OR REPLACE INTO {table}
+                 (metric_name, timestamp, min_value, max_value, avg_value, sum_value, count, labels)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+            );
+            for row in rows {
+                let ts = row.timestamp.timestamp();
+                let labels_ref: Option<&str> = row.labels.as_deref();
+                inner.exec(
+                    &sql,
+                    &[
+                        &row.metric_name,
+                        &ts,
+                        &row.min_value,
+                        &row.max_value,
+                        &row.avg_value,
+                        &row.sum_value,
+                        &row.count,
+                        &labels_ref,
+                    ],
+                )?;
+            }
+            Ok(())
+        })
     }
 
     /// Query time series points.
@@ -273,44 +340,35 @@ impl SqliteStorage {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> MonitorResult<Vec<TimeSeriesPoint>> {
-        let conn = self.conn.lock();
+        self.with_inner(|inner| {
+            let ts_start = start.timestamp();
+            let ts_end = end.timestamp();
+            let oxi_rows = inner.query(
+                "SELECT metric_name, timestamp, value, labels FROM metrics WHERE metric_name = $1 AND timestamp >= $2 AND timestamp <= $3 ORDER BY timestamp ASC",
+                &[&metric_name, &ts_start, &ts_end],
+            )?;
 
-        let mut stmt = conn.prepare(
-            "SELECT metric_name, timestamp, value, labels
-             FROM metrics
-             WHERE metric_name = ?1 AND timestamp >= ?2 AND timestamp <= ?3
-             ORDER BY timestamp ASC",
-        )?;
+            let mut points = Vec::with_capacity(oxi_rows.len());
+            for row in &oxi_rows {
+                let metric_name_v = col_text(row, 0)?;
+                let ts_secs = col_i64(row, 1)?;
+                let value = col_real(row, 2)?;
+                let labels = col_opt_text(row, 3)?;
 
-        let rows = stmt.query_map(
-            params![metric_name, start.timestamp(), end.timestamp()],
-            |row| {
-                let ts_secs: i64 = row.get(1)?;
                 let timestamp = DateTime::from_timestamp(ts_secs, 0).ok_or_else(|| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        1,
-                        rusqlite::types::Type::Integer,
-                        Box::new(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("timestamp value {ts_secs} is out of valid DateTime range"),
-                        )),
-                    )
+                    crate::error::MonitorError::Storage(format!(
+                        "timestamp value {ts_secs} is out of valid DateTime range"
+                    ))
                 })?;
-                Ok(TimeSeriesPoint {
-                    metric_name: row.get(0)?,
+                points.push(TimeSeriesPoint {
+                    metric_name: metric_name_v,
                     timestamp,
-                    value: row.get(2)?,
-                    labels: row.get(3)?,
-                })
-            },
-        )?;
-
-        let mut points = Vec::new();
-        for row in rows {
-            points.push(row?);
-        }
-
-        Ok(points)
+                    value,
+                    labels,
+                });
+            }
+            Ok(points)
+        })
     }
 
     /// Query aggregated data from 1-minute table.
@@ -362,50 +420,43 @@ impl SqliteStorage {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> MonitorResult<Vec<AggregateRow>> {
-        let conn = self.conn.lock();
+        self.with_inner(|inner| {
+            let ts_start = start.timestamp();
+            let ts_end = end.timestamp();
+            let sql = format!(
+                "SELECT metric_name, timestamp, min_value, max_value, avg_value, sum_value, count, labels FROM {table} WHERE metric_name = $1 AND timestamp >= $2 AND timestamp <= $3 ORDER BY timestamp ASC"
+            );
+            let oxi_rows = inner.query(&sql, &[&metric_name, &ts_start, &ts_end])?;
 
-        let query = format!(
-            "SELECT metric_name, timestamp, min_value, max_value, avg_value, sum_value, count, labels
-             FROM {table}
-             WHERE metric_name = ?1 AND timestamp >= ?2 AND timestamp <= ?3
-             ORDER BY timestamp ASC"
-        );
+            let mut aggregates = Vec::with_capacity(oxi_rows.len());
+            for row in &oxi_rows {
+                let metric_name_v = col_text(row, 0)?;
+                let ts_secs = col_i64(row, 1)?;
+                let min_value = col_real(row, 2)?;
+                let max_value = col_real(row, 3)?;
+                let avg_value = col_real(row, 4)?;
+                let sum_value = col_real(row, 5)?;
+                let count = col_i64(row, 6)?;
+                let labels = col_opt_text(row, 7)?;
 
-        let mut stmt = conn.prepare(&query)?;
-
-        let rows = stmt.query_map(
-            params![metric_name, start.timestamp(), end.timestamp()],
-            |row| {
-                let ts_secs: i64 = row.get(1)?;
                 let timestamp = DateTime::from_timestamp(ts_secs, 0).ok_or_else(|| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        1,
-                        rusqlite::types::Type::Integer,
-                        Box::new(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("timestamp value {ts_secs} is out of valid DateTime range"),
-                        )),
-                    )
+                    crate::error::MonitorError::Storage(format!(
+                        "timestamp value {ts_secs} is out of valid DateTime range"
+                    ))
                 })?;
-                Ok(AggregateRow {
-                    metric_name: row.get(0)?,
+                aggregates.push(AggregateRow {
+                    metric_name: metric_name_v,
                     timestamp,
-                    min_value: row.get(2)?,
-                    max_value: row.get(3)?,
-                    avg_value: row.get(4)?,
-                    sum_value: row.get(5)?,
-                    count: row.get(6)?,
-                    labels: row.get(7)?,
-                })
-            },
-        )?;
-
-        let mut aggregates = Vec::new();
-        for row in rows {
-            aggregates.push(row?);
-        }
-
-        Ok(aggregates)
+                    min_value,
+                    max_value,
+                    avg_value,
+                    sum_value,
+                    count,
+                    labels,
+                });
+            }
+            Ok(aggregates)
+        })
     }
 
     /// Delete old data points before the given timestamp.
@@ -414,14 +465,10 @@ impl SqliteStorage {
     ///
     /// Returns an error if deletion fails.
     pub fn delete_before(&self, timestamp: DateTime<Utc>) -> MonitorResult<usize> {
-        let conn = self.conn.lock();
-
-        let deleted = conn.execute(
-            "DELETE FROM metrics WHERE timestamp < ?1",
-            params![timestamp.timestamp()],
-        )?;
-
-        Ok(deleted)
+        let ts = timestamp.timestamp();
+        let affected = self
+            .with_inner(|inner| inner.exec("DELETE FROM metrics WHERE timestamp < $1", &[&ts]))?;
+        Ok(affected as usize)
     }
 
     /// Delete old rows from the 1-minute aggregate table.
@@ -456,10 +503,10 @@ impl SqliteStorage {
         table: &str,
         timestamp: DateTime<Utc>,
     ) -> MonitorResult<usize> {
-        let conn = self.conn.lock();
-        let sql = format!("DELETE FROM {table} WHERE timestamp < ?1");
-        let deleted = conn.execute(&sql, params![timestamp.timestamp()])?;
-        Ok(deleted)
+        let ts = timestamp.timestamp();
+        let sql = format!("DELETE FROM {table} WHERE timestamp < $1");
+        let affected = self.with_inner(|inner| inner.exec(&sql, &[&ts]))?;
+        Ok(affected as usize)
     }
 
     /// Get the database size in bytes.
@@ -468,26 +515,52 @@ impl SqliteStorage {
     ///
     /// Returns an error if query fails.
     pub fn size(&self) -> MonitorResult<u64> {
-        let conn = self.conn.lock();
-
-        let size: i64 = conn.query_row(
-            "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()",
-            [],
-            |row| row.get(0),
-        )?;
-
-        Ok(size as u64)
+        // Query page_count and page_size separately to avoid correlated subquery
+        let page_count = self.with_inner(|inner| {
+            let rows = inner.query("PRAGMA page_count", &[])?;
+            match rows.first().and_then(|r| r.get_by_index(0)) {
+                Some(Value::I64(n)) => Ok(*n),
+                Some(Value::Null) | None => Ok(0_i64),
+                Some(other) => Err(crate::error::MonitorError::Storage(format!(
+                    "page_count: unexpected {}",
+                    other.type_name()
+                ))),
+            }
+        })?;
+        let page_size = self.with_inner(|inner| {
+            let rows = inner.query("PRAGMA page_size", &[])?;
+            match rows.first().and_then(|r| r.get_by_index(0)) {
+                Some(Value::I64(n)) => Ok(*n),
+                Some(Value::Null) | None => Ok(4096_i64),
+                Some(other) => Err(crate::error::MonitorError::Storage(format!(
+                    "page_size: unexpected {}",
+                    other.type_name()
+                ))),
+            }
+        })?;
+        Ok((page_count * page_size) as u64)
     }
 
     /// Vacuum the database to reclaim space.
     ///
+    /// `VACUUM` is an optional maintenance operation. The oxisqlite 0.3.0
+    /// engine does not implement it and rejects the statement with
+    /// `"VACUUM not supported yet"`; in that case this method degrades
+    /// gracefully to a no-op success rather than failing. Any other error
+    /// (e.g. a genuine I/O failure) is propagated.
+    ///
     /// # Errors
     ///
-    /// Returns an error if vacuum fails.
+    /// Returns an error if vacuum fails for a reason other than the engine
+    /// not supporting `VACUUM`.
     pub fn vacuum(&self) -> MonitorResult<()> {
-        let conn = self.conn.lock();
-        conn.execute("VACUUM", [])?;
-        Ok(())
+        self.with_inner(
+            |inner| match run_blocking(|| inner.conn.execute("VACUUM", &[])) {
+                Ok(_) => Ok(()),
+                Err(e) if is_unsupported_pragma_or_vacuum(&e) => Ok(()),
+                Err(e) => Err(map_oxi(e)),
+            },
+        )
     }
 
     /// Get the count of metrics.
@@ -496,11 +569,17 @@ impl SqliteStorage {
     ///
     /// Returns an error if query fails.
     pub fn count(&self) -> MonitorResult<usize> {
-        let conn = self.conn.lock();
-
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM metrics", [], |row| row.get(0))?;
-
-        Ok(count as usize)
+        self.with_inner(|inner| {
+            let rows = inner.query("SELECT COUNT(*) FROM metrics", &[])?;
+            match rows.first().and_then(|r| r.get_by_index(0)) {
+                Some(Value::I64(n)) => Ok(*n as usize),
+                Some(Value::Null) | None => Ok(0),
+                Some(other) => Err(crate::error::MonitorError::Storage(format!(
+                    "count: unexpected {}",
+                    other.type_name()
+                ))),
+            }
+        })
     }
 }
 

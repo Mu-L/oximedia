@@ -14,7 +14,7 @@
 //!   index, then call [`VpIndexedVisual::search_knn`] or
 //!   [`VpIndexedVisual::search_radius`] in O(log n) time.
 //! * **Dirty flag**: after any insertion the tree is marked dirty and falls back
-//!   to a brute-force linear scan.  After [`rebuild_tree`] the fast path is
+//!   to a brute-force linear scan.  After [`VpIndexedVisual::rebuild_tree`] the fast path is
 //!   active again.
 //!
 //! # Example
@@ -176,7 +176,7 @@ impl VpIndexedVisual {
     /// Find the `k` nearest neighbours to `query`.
     ///
     /// Uses the VP-tree when clean; falls back to a brute-force linear scan
-    /// when dirty (after insertions since the last [`rebuild_tree`]).
+    /// when dirty (after insertions since the last [`Self::rebuild_tree`]).
     ///
     /// Returns results sorted by distance ascending (most similar first).
     #[must_use]

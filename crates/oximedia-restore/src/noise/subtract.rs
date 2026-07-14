@@ -2,7 +2,7 @@
 
 use crate::error::RestoreResult;
 use crate::noise::profile::NoiseProfile;
-use crate::utils::spectral::{apply_window, FftProcessor, WindowFunction};
+use crate::utils::spectral::{window_coefficients, FftProcessor, WindowFunction};
 
 /// Spectral subtraction configuration.
 #[derive(Debug, Clone)]
@@ -135,8 +135,14 @@ impl SpectralSubtraction {
         }
 
         let fft = FftProcessor::new(self.fft_size);
+        // Same Hann window for analysis and synthesis → weighted overlap-add
+        // (WOLA).  Normalise by the accumulated `Σ w[i]²` so that a
+        // unity-gain (empty/zero noise profile) configuration reconstructs the
+        // input exactly, instead of leaving the position-dependent gain error
+        // a raw frame-count divisor would.
+        let window = window_coefficients(self.fft_size, WindowFunction::Hann);
         let mut output = vec![0.0; samples.len()];
-        let mut overlap_count = vec![0.0; samples.len()];
+        let mut window_sum = vec![0.0f32; samples.len()];
 
         let spectral_floor = db_to_linear(self.config.spectral_floor_db);
 
@@ -144,21 +150,30 @@ impl SpectralSubtraction {
         while pos + self.fft_size <= samples.len() {
             // Extract and window frame
             let mut frame = samples[pos..pos + self.fft_size].to_vec();
-            apply_window(&mut frame, WindowFunction::Hann);
+            for (s, &w) in frame.iter_mut().zip(window.iter()) {
+                *s *= w;
+            }
 
             // Forward FFT
             let spectrum = fft.forward(&frame)?;
             let magnitude = fft.magnitude(&spectrum);
             let phase = fft.phase(&spectrum);
 
-            // Spectral subtraction
-            let mut processed_mag = vec![0.0; magnitude.len()];
+            // Spectral subtraction.
+            //
+            // The input is real, so the full N-point spectrum is Hermitian:
+            // `X[N-k] == conj(X[k])`.  The noise profile only spans the unique
+            // half `[0, N/2]` (length `N/2 + 1`).  We compute the suppression
+            // gain on that half and **mirror it onto the conjugate bins**
+            // (`N-k`) so the processed spectrum stays Hermitian — otherwise the
+            // upper half is left untouched (or zeroed) and the inverse FFT's
+            // real part collapses to half amplitude.
+            let half = self.fft_size / 2;
+            let mut processed_mag = magnitude.clone();
+            for i in 0..=half {
+                let mag = magnitude[i];
+                let noise_mag = self.noise_profile.magnitude.get(i).copied().unwrap_or(0.0);
 
-            for (i, (&mag, &noise_mag)) in magnitude
-                .iter()
-                .zip(self.noise_profile.magnitude.iter())
-                .enumerate()
-            {
                 // Subtract noise with oversubtraction factor
                 let subtracted = mag - self.config.oversubtraction_factor * noise_mag;
 
@@ -178,30 +193,33 @@ impl SpectralSubtraction {
                 self.prev_gain[i] = smoothed_gain;
 
                 processed_mag[i] = mag * smoothed_gain;
+                // Mirror onto the conjugate-symmetric bin to preserve Hermitian
+                // symmetry (skip DC and Nyquist, which are self-conjugate).
+                if i > 0 && i < half {
+                    let mirror = self.fft_size - i;
+                    processed_mag[mirror] = magnitude[mirror] * smoothed_gain;
+                }
             }
 
-            // Reconstruct complex spectrum
+            // Reconstruct complex spectrum (Hermitian-preserving)
             let processed_spectrum = FftProcessor::from_polar(&processed_mag, &phase)?;
 
             // Inverse FFT
             let processed_frame = fft.inverse(&processed_spectrum)?;
 
-            // Apply window again and overlap-add
-            let mut windowed = processed_frame;
-            apply_window(&mut windowed, WindowFunction::Hann);
-
-            for (i, &sample) in windowed.iter().enumerate() {
-                output[pos + i] += sample;
-                overlap_count[pos + i] += 1.0;
+            // Apply synthesis window and weighted overlap-add
+            for (i, (&sample, &w)) in processed_frame.iter().zip(window.iter()).enumerate() {
+                output[pos + i] += sample * w;
+                window_sum[pos + i] += w * w;
             }
 
             pos += self.hop_size;
         }
 
-        // Normalize by overlap count
-        for (i, &count) in overlap_count.iter().enumerate() {
-            if count > 0.0 {
-                output[i] /= count;
+        // Normalize by the window-overlap-squared sum (WOLA).
+        for (i, &wsum) in window_sum.iter().enumerate() {
+            if wsum > f32::EPSILON {
+                output[i] /= wsum;
             }
         }
 
@@ -252,15 +270,20 @@ impl AdaptiveSpectralSubtraction {
         }
 
         let fft = FftProcessor::new(self.fft_size);
+        // WOLA reconstruction: see `SpectralSubtraction::process` for the
+        // rationale behind normalising by `Σ w[i]²` rather than the frame count.
+        let window = window_coefficients(self.fft_size, WindowFunction::Hann);
         let mut output = vec![0.0; samples.len()];
-        let mut overlap_count = vec![0.0; samples.len()];
+        let mut window_sum = vec![0.0f32; samples.len()];
 
         let spectral_floor = db_to_linear(self.config.spectral_floor_db);
 
         let mut pos = 0;
         while pos + self.fft_size <= samples.len() {
             let mut frame = samples[pos..pos + self.fft_size].to_vec();
-            apply_window(&mut frame, WindowFunction::Hann);
+            for (s, &w) in frame.iter_mut().zip(window.iter()) {
+                *s *= w;
+            }
 
             let spectrum = fft.forward(&frame)?;
             let magnitude = fft.magnitude(&spectrum);
@@ -270,25 +293,24 @@ impl AdaptiveSpectralSubtraction {
             let energy: f32 = magnitude.iter().map(|&m| m * m).sum();
             let is_speech = energy > self.vad_threshold;
 
-            // Update noise profile during non-speech
+            // Update noise profile during non-speech (unique half only)
+            let half = self.fft_size / 2;
             if !is_speech {
                 let alpha = 0.05; // Update rate
-                for (i, &mag) in magnitude.iter().enumerate() {
+                for i in 0..=half {
                     if i < self.noise_profile.magnitude.len() {
                         self.noise_profile.magnitude[i] =
-                            alpha * mag + (1.0 - alpha) * self.noise_profile.magnitude[i];
+                            alpha * magnitude[i] + (1.0 - alpha) * self.noise_profile.magnitude[i];
                     }
                 }
             }
 
-            // Spectral subtraction
-            let mut processed_mag = vec![0.0; magnitude.len()];
-
-            for (i, (&mag, &noise_mag)) in magnitude
-                .iter()
-                .zip(self.noise_profile.magnitude.iter())
-                .enumerate()
-            {
+            // Spectral subtraction with Hermitian-preserving conjugate mirroring
+            // (see `SpectralSubtraction::process` for the rationale).
+            let mut processed_mag = magnitude.clone();
+            for i in 0..=half {
+                let mag = magnitude[i];
+                let noise_mag = self.noise_profile.magnitude.get(i).copied().unwrap_or(0.0);
                 let subtracted = mag - self.config.oversubtraction_factor * noise_mag;
                 let floored = subtracted.max(spectral_floor * mag);
 
@@ -303,25 +325,26 @@ impl AdaptiveSpectralSubtraction {
                 self.prev_gain[i] = smoothed_gain;
 
                 processed_mag[i] = mag * smoothed_gain;
+                if i > 0 && i < half {
+                    let mirror = self.fft_size - i;
+                    processed_mag[mirror] = magnitude[mirror] * smoothed_gain;
+                }
             }
 
             let processed_spectrum = FftProcessor::from_polar(&processed_mag, &phase)?;
             let processed_frame = fft.inverse(&processed_spectrum)?;
 
-            let mut windowed = processed_frame;
-            apply_window(&mut windowed, WindowFunction::Hann);
-
-            for (i, &sample) in windowed.iter().enumerate() {
-                output[pos + i] += sample;
-                overlap_count[pos + i] += 1.0;
+            for (i, (&sample, &w)) in processed_frame.iter().zip(window.iter()).enumerate() {
+                output[pos + i] += sample * w;
+                window_sum[pos + i] += w * w;
             }
 
             pos += self.hop_size;
         }
 
-        for (i, &count) in overlap_count.iter().enumerate() {
-            if count > 0.0 {
-                output[i] /= count;
+        for (i, &wsum) in window_sum.iter().enumerate() {
+            if wsum > f32::EPSILON {
+                output[i] /= wsum;
             }
         }
 

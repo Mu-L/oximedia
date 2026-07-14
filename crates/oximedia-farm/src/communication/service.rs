@@ -236,7 +236,7 @@ mod tests {
         FarmCoordinatorService::new(job_queue, worker_registry, scheduler)
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_worker_registration() {
         let service = create_test_service();
 
@@ -260,7 +260,7 @@ mod tests {
         assert!(response.into_inner().success);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_heartbeat() {
         let service = create_test_service();
 
@@ -301,7 +301,7 @@ mod tests {
         assert!(response.into_inner().success);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_unregister_worker() {
         let service = create_test_service();
 

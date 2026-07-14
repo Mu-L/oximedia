@@ -313,7 +313,7 @@ fn measure_sine_integrated_lufs(
             .flat_map(|i| {
                 let t = i as f64 / sr;
                 let val = amplitude * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();
-                std::iter::repeat(val).take(channels)
+                std::iter::repeat_n(val, channels)
             })
             .take(chunk_len)
             .collect();
@@ -559,6 +559,154 @@ fn r128_compliance_check_via_loudness_meter() {
 
     // The compliance check should return a valid status (not panic)
     let _status = meter.check_compliance();
+}
+
+// ---------------------------------------------------------------------------
+// EBU R128 absolute calibration (golden values)
+//
+// These pin the headline BS.1770-4 calibration after the loudness power
+// double-weighting bug fix in `loudness/gate.rs`. The helper runs the FULL
+// K-weighted `R128Meter` path, so the ITU-R BS.1770-4 K-weighting pre-filter
+// is applied before gating. Contrary to the common "0 dB at 1 kHz" shorthand,
+// the K-weighting magnitude at 1 kHz / 48 kHz is **+3.4554 dB** (the curve only
+// crosses 0 dB near ~2 kHz). For a 1 kHz sine of amplitude A the unweighted
+// per-channel mean square is A²/2, the K-weighted channel energy is
+// z_i = (A²/2)·|H_K(1 kHz)|² = (A²/2)·2.21586, and the gated loudness is
+// L = −0.691 + 10·log10(Σ Gi·z_i):
+//   * mono  (G = 1):       L = −0.691 + 10·log10(A²/2)        + 3.4554
+//   * stereo (G = 1 + 1):  L = −0.691 + 10·log10(2·A²/2)      + 3.4554
+//                            = mono + 10·log10(2)             (Δ = +3.0103 LU)
+//
+// Unweighted reference (mono), then the measured K-weighted golden value:
+//   A = 1.0 → −0.691 + 10·log10(0.5)    = −3.701  → −3.701  + 3.4554 = −0.246 LUFS
+//   A = 0.5 → −0.691 + 10·log10(0.125)  = −9.722  → −9.722  + 3.4554 = −6.267 LUFS
+//   A = 0.1 → −0.691 + 10·log10(0.005)  = −23.701 → −23.701 + 3.4554 = −20.246 LUFS
+// The +3.0103 LU mono→stereo channel-sum delta is independent of K-weighting.
+// ---------------------------------------------------------------------------
+
+/// EBU R128 calibration: 1 kHz mono sine at amplitude 1.0 reads −0.25 LUFS
+/// (unweighted −3.70 + K-weighting +3.4554 dB at 1 kHz).
+#[test]
+fn r128_calibration_mono_amp_1_0() {
+    let lufs = measure_sine_integrated_lufs(1.0, 48000, 1, 4.0);
+    assert!(
+        (lufs - (-0.246)).abs() < 0.5,
+        "mono amp 1.0 must read ≈ −0.25 LUFS (BS.1770 K-weighted calibration), got {lufs:.3}"
+    );
+}
+
+/// EBU R128 calibration: 1 kHz mono sine at amplitude 0.5 reads −6.27 LUFS
+/// (unweighted −9.72 + K-weighting +3.4554 dB at 1 kHz).
+#[test]
+fn r128_calibration_mono_amp_0_5() {
+    let lufs = measure_sine_integrated_lufs(0.5, 48000, 1, 4.0);
+    assert!(
+        (lufs - (-6.267)).abs() < 0.5,
+        "mono amp 0.5 must read ≈ −6.27 LUFS (K-weighted), got {lufs:.3}"
+    );
+}
+
+/// EBU R128 calibration: 1 kHz mono sine at amplitude 0.1 (−20 dBFS peak) reads
+/// −20.25 LUFS (unweighted −23.70 + K-weighting +3.4554 dB at 1 kHz). This is
+/// the headline calibration the gate.rs `frames`-divisor fix restores.
+#[test]
+fn r128_calibration_mono_amp_0_1_headline() {
+    let lufs = measure_sine_integrated_lufs(0.1, 48000, 1, 4.0);
+    assert!(
+        (lufs - (-20.246)).abs() < 0.5,
+        "mono amp 0.1 (−20 dBFS) must read ≈ −20.25 LUFS (K-weighted), got {lufs:.3}"
+    );
+}
+
+/// EBU R128 calibration: stereo (equal channels) is exactly +3.0103 LU above
+/// mono (two unity-weight channels SUM their powers), and the absolute stereo
+/// amp-0.1 reading is ≈ −20.69 LUFS.
+#[test]
+fn r128_calibration_stereo_channel_sum_plus_3db() {
+    let mono = measure_sine_integrated_lufs(0.1, 48000, 1, 4.0);
+    let stereo = measure_sine_integrated_lufs(0.1, 48000, 2, 4.0);
+
+    assert!(
+        mono.is_finite() && stereo.is_finite(),
+        "both mono ({mono}) and stereo ({stereo}) must be finite"
+    );
+    // The mono→stereo channel-power-sum delta is independent of K-weighting
+    // (both channels carry the same 1 kHz tone, so |H_K|² cancels in the diff).
+    assert!(
+        ((stereo - mono) - 3.0103).abs() < 0.3,
+        "stereo must be +3.0103 LU above mono (channel-power sum), got Δ={:.3}",
+        stereo - mono
+    );
+    // Absolute: K-weighted mono −20.246 + 3.0103 = −17.235 LUFS.
+    assert!(
+        (stereo - (-17.235)).abs() < 0.5,
+        "stereo amp 0.1 must read ≈ −17.24 LUFS (K-weighted), got {stereo:.3}"
+    );
+}
+
+/// EBU R128 calibration: pure silence (amp 0) is below the absolute gate, so the
+/// integrated loudness is −∞ (negative infinite).
+#[test]
+fn r128_calibration_silence_is_neg_inf() {
+    let lufs = measure_sine_integrated_lufs(0.0, 48000, 1, 4.0);
+    assert!(
+        lufs.is_infinite() && lufs < 0.0,
+        "silence must give −∞ integrated loudness, got {lufs}"
+    );
+}
+
+/// EBU R128 calibration: a near-silent amp 1e-4 tone (≈ −80 dBFS, well below the
+/// −70 LUFS absolute gate) yields an ungated (−∞) integrated loudness.
+#[test]
+fn r128_calibration_near_silent_below_gate_is_neg_inf() {
+    let lufs = measure_sine_integrated_lufs(1e-4, 48000, 1, 4.0);
+    assert!(
+        lufs.is_infinite() && lufs < 0.0,
+        "amp 1e-4 (≈ −80 dBFS) is below the −70 LUFS gate → −∞, got {lufs}"
+    );
+}
+
+/// Direct unit test on `GatingProcessor::calculate_block_power`: with no
+/// K-weighting in the path, the block mean square of a constant-amplitude
+/// signal must equal `Σ Gi·a²` — i.e. `a²` for mono and `2·a²` for stereo.
+/// This locks the divisor (`frames`, NOT `weight_sum·frames`) independent of
+/// the filter bank.
+#[test]
+fn gating_block_power_divisor_is_frames_only() {
+    use oximedia_audio::loudness::GatingProcessor;
+
+    let a = 0.37_f64;
+    let n = 4096usize;
+
+    // Mono: power == a²  (one unity-weight channel).
+    let mono = GatingProcessor::new(48000.0, 1);
+    let mono_samples = vec![a; n];
+    let mono_power = mono.calculate_block_power(&mono_samples);
+    assert!(
+        (mono_power - a * a).abs() < 1e-9,
+        "mono block power must equal a²={:.9}, got {mono_power:.9}",
+        a * a
+    );
+
+    // Stereo: power == 2·a²  (two unity-weight channels summed).
+    let stereo = GatingProcessor::new(48000.0, 2);
+    let stereo_samples = vec![a; n * 2]; // interleaved [a, a, a, a, ...]
+    let stereo_power = stereo.calculate_block_power(&stereo_samples);
+    assert!(
+        (stereo_power - 2.0 * a * a).abs() < 1e-9,
+        "stereo block power must equal 2·a²={:.9}, got {stereo_power:.9}",
+        2.0 * a * a
+    );
+
+    // The planar path must agree with the interleaved path.
+    let ch0 = vec![a; n];
+    let ch1 = vec![a; n];
+    let planar_power = stereo.calculate_block_power_planar(&[&ch0, &ch1]);
+    assert!(
+        (planar_power - 2.0 * a * a).abs() < 1e-9,
+        "planar stereo block power must equal 2·a²={:.9}, got {planar_power:.9}",
+        2.0 * a * a
+    );
 }
 
 // ---------------------------------------------------------------------------

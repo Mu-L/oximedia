@@ -41,8 +41,23 @@ use std::f64::consts::PI;
 /// Absolute gate threshold (LUFS).
 const ABSOLUTE_GATE: f64 = -70.0;
 
-/// Relative gate offset (LU).
+/// Relative gate offset (LU) used for Integrated Loudness gating
+/// (ITU-R BS.1770-4 §3 / EBU R128).
 const RELATIVE_GATE_OFFSET: f64 = -10.0;
+
+/// Relative gate offset (LU) used for Loudness Range (LRA) gating.
+///
+/// EBU Tech 3342 §3.1 mandates a *wider* relative gate of −20 LU (as opposed
+/// to the −10 LU offset used for Integrated Loudness) so that the lower edge
+/// of the loudness-range distribution tracks the weakest "real" signal rather
+/// than the noise floor.
+const LRA_RELATIVE_GATE_OFFSET: f64 = -20.0;
+
+/// Lower percentile (10th) used by the Loudness Range algorithm.
+const LRA_PERCENTILE_LOW: f64 = 0.10;
+
+/// Upper percentile (95th) used by the Loudness Range algorithm.
+const LRA_PERCENTILE_HIGH: f64 = 0.95;
 
 /// Reference sample rate for which table coefficients are given.
 const REF_SAMPLE_RATE: f64 = 48_000.0;
@@ -668,30 +683,62 @@ impl EbuR128Meter {
         Self::power_to_lufs(rel_mean)
     }
 
-    /// Loudness range (LRA) in LU.
+    /// Loudness range (LRA) in LU, per EBU Tech 3342 §3.1.
     ///
-    /// Computed as the difference between the 95th and 10th percentiles of the
-    /// distribution of short-term loudness values that pass the absolute gate.
+    /// The algorithm applies a *cascaded* gating scheme to the distribution of
+    /// gating-block loudness values, then reports the spread between the 10th
+    /// and 95th percentiles of what remains:
+    ///
+    /// 1. **Absolute gate** – discard blocks below −70 LUFS (`ABSOLUTE_GATE`).
+    /// 2. **Relative gate** – compute the mean power of the absolute-gated
+    ///    blocks, convert to LUFS, and discard blocks more than 20 LU below
+    ///    that mean (`LRA_RELATIVE_GATE_OFFSET`). This relative-gate offset
+    ///    is intentionally wider than the −10 LU offset used by
+    ///    [`Self::integrated_lufs`] — it exists so that quiet
+    ///    background/atmosphere sections do not inflate the reported range.
+    /// 3. **Percentile range** – sort the doubly-gated loudness values and
+    ///    return `p95 − p10`.
+    ///
+    /// Returns `0.0` if fewer than two blocks survive gating (there is no
+    /// meaningful range to report).
     pub fn loudness_range_lu(&self) -> f64 {
-        // Collect all gating block loudness values that pass the absolute gate.
-        let mut lufs_vals: Vec<f64> = self
+        // Stage 1: absolute gate.
+        let abs_gated: Vec<(f64, f64)> = self
             .gating_blocks
             .iter()
-            .map(|&(lufs, _)| lufs)
-            .filter(|&lufs| lufs >= ABSOLUTE_GATE && lufs.is_finite())
+            .copied()
+            .filter(|&(lufs, _)| lufs >= ABSOLUTE_GATE && lufs.is_finite())
             .collect();
 
-        if lufs_vals.len() < 2 {
+        if abs_gated.len() < 2 {
             return 0.0;
         }
 
-        lufs_vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let n = lufs_vals.len();
+        let abs_mean: f64 = abs_gated.iter().map(|&(_, p)| p).sum::<f64>() / abs_gated.len() as f64;
+        let abs_lufs = Self::power_to_lufs(abs_mean);
 
-        let idx10 = ((n as f64 * 0.10).floor() as usize).min(n - 1);
-        let idx95 = ((n as f64 * 0.95).floor() as usize).min(n - 1);
+        // Stage 2: relative gate, −20 LU below the absolute-gated mean.
+        let rel_gate = abs_lufs + LRA_RELATIVE_GATE_OFFSET;
+        let mut rel_gated: Vec<f64> = abs_gated
+            .iter()
+            .filter(|&&(lufs, _)| lufs >= rel_gate)
+            .map(|&(lufs, _)| lufs)
+            .collect();
 
-        lufs_vals[idx95] - lufs_vals[idx10]
+        if rel_gated.len() < 2 {
+            return 0.0;
+        }
+
+        // Stage 3: percentile range of the doubly-gated distribution.
+        rel_gated.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = rel_gated.len();
+
+        let idx10 = (((n - 1) as f64) * LRA_PERCENTILE_LOW).round() as usize;
+        let idx95 = (((n - 1) as f64) * LRA_PERCENTILE_HIGH).round() as usize;
+        let idx10 = idx10.min(n - 1);
+        let idx95 = idx95.min(n - 1);
+
+        rel_gated[idx95] - rel_gated[idx10]
     }
 
     /// Maximum true peak in dBTP detected since creation or last reset.
@@ -879,6 +926,31 @@ mod tests {
         (0..n_samples)
             .map(|n| (amplitude * (2.0 * PI * freq_hz * n as f64 / fs).sin()) as f32)
             .collect()
+    }
+
+    /// Build an interleaved stereo signal made of concatenated sine-wave
+    /// segments, each `seg_duration_secs` long, applied in phase and at equal
+    /// level to both channels ("dual mono"), matching the construction of the
+    /// EBU Tech 3342 §4 "minimum requirements test signals".
+    ///
+    /// `segments_dbfs` gives the per-channel peak level (in dBFS) of each
+    /// consecutive segment.
+    fn stereo_sine_segments(
+        freq_hz: f64,
+        segments_dbfs: &[f64],
+        seg_duration_secs: f64,
+        sample_rate: u32,
+    ) -> Vec<f32> {
+        let n_per_seg = (f64::from(sample_rate) * seg_duration_secs) as usize;
+        let mut interleaved = Vec::with_capacity(segments_dbfs.len() * n_per_seg * 2);
+        for &dbfs in segments_dbfs {
+            let mono = mono_sine(freq_hz, dbfs, sample_rate, n_per_seg);
+            for s in mono {
+                interleaved.push(s); // L
+                interleaved.push(s); // R (identical, in phase)
+            }
+        }
+        interleaved
     }
 
     // ── K-weighting filter tests ──────────────────────────────────────────────
@@ -1188,6 +1260,84 @@ mod tests {
         // LRA can be 0 when there is < 2 gating blocks.
         let lra = meter.loudness_range_lu();
         assert!(lra >= 0.0, "LRA must be non-negative");
+    }
+
+    // ── EBU Tech 3342 "minimum requirements" LRA conformance tests ────────────
+    //
+    // Reference: EBU Tech 3342 (November 2023), §4 "Minimum requirements,
+    // compliance test", Table 1. Each test signal is a stereo, in-phase,
+    // dual-mono sine wave made of consecutive 20 s segments at the stated
+    // per-channel peak dBFS levels; the expected LRA is given with a ±1 LU
+    // tolerance. These are the exact reference signals/values published by
+    // the EBU PLOUD group for validating "EBU Mode" loudness meters.
+
+    /// EBU Tech 3342 Table 1, test case 1: −20.0 dBFS then −30.0 dBFS
+    /// (10 dB apart) → expected LRA = 10 ±1 LU.
+    #[test]
+    fn test_lra_ebu_tech3342_case1() {
+        let sr = 48_000_u32;
+        let mut meter = EbuR128Meter::new(sr, 2);
+        let samples = stereo_sine_segments(1_000.0, &[-20.0, -30.0], 20.0, sr);
+        meter.process(&samples);
+
+        let lra = meter.loudness_range_lu();
+        assert!(
+            (lra - 10.0).abs() <= 1.0,
+            "EBU Tech 3342 case 1: expected LRA = 10 ±1 LU, got {lra:.2} LU"
+        );
+    }
+
+    /// EBU Tech 3342 Table 1, test case 2: −20.0 dBFS then −15.0 dBFS
+    /// (5 dB apart) → expected LRA = 5 ±1 LU.
+    #[test]
+    fn test_lra_ebu_tech3342_case2() {
+        let sr = 48_000_u32;
+        let mut meter = EbuR128Meter::new(sr, 2);
+        let samples = stereo_sine_segments(1_000.0, &[-20.0, -15.0], 20.0, sr);
+        meter.process(&samples);
+
+        let lra = meter.loudness_range_lu();
+        assert!(
+            (lra - 5.0).abs() <= 1.0,
+            "EBU Tech 3342 case 2: expected LRA = 5 ±1 LU, got {lra:.2} LU"
+        );
+    }
+
+    /// EBU Tech 3342 Table 1, test case 3: −40.0 dBFS then −20.0 dBFS
+    /// (20 dB apart) → expected LRA = 20 ±1 LU.
+    #[test]
+    fn test_lra_ebu_tech3342_case3() {
+        let sr = 48_000_u32;
+        let mut meter = EbuR128Meter::new(sr, 2);
+        let samples = stereo_sine_segments(1_000.0, &[-40.0, -20.0], 20.0, sr);
+        meter.process(&samples);
+
+        let lra = meter.loudness_range_lu();
+        assert!(
+            (lra - 20.0).abs() <= 1.0,
+            "EBU Tech 3342 case 3: expected LRA = 20 ±1 LU, got {lra:.2} LU"
+        );
+    }
+
+    /// EBU Tech 3342 Table 1, test case 4: five 20 s segments at
+    /// −50.0, −35.0, −20.0, −35.0, −50.0 dBFS → expected LRA = 15 ±1 LU.
+    ///
+    /// This case only passes when the −20 LU relative gate (Tech 3342 §3.1)
+    /// is applied in addition to the −70 LUFS absolute gate: the two −50 dBFS
+    /// "tails" sit well above the absolute gate but must be excluded by the
+    /// relative gate, or the measured range balloons to ~30 LU.
+    #[test]
+    fn test_lra_ebu_tech3342_case4() {
+        let sr = 48_000_u32;
+        let mut meter = EbuR128Meter::new(sr, 2);
+        let samples = stereo_sine_segments(1_000.0, &[-50.0, -35.0, -20.0, -35.0, -50.0], 20.0, sr);
+        meter.process(&samples);
+
+        let lra = meter.loudness_range_lu();
+        assert!(
+            (lra - 15.0).abs() <= 1.0,
+            "EBU Tech 3342 case 4: expected LRA = 15 ±1 LU, got {lra:.2} LU"
+        );
     }
 
     #[test]

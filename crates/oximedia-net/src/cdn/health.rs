@@ -505,6 +505,12 @@ impl HealthChecker {
 
     /// Performs HTTP health check.
     async fn perform_http_check(&self, provider: &CdnProvider) -> NetResult<()> {
+        // Ensure the process-wide Pure-Rust `rustls-rustcrypto` provider is
+        // installed before building the TLS-capable `reqwest::Client` below
+        // (idempotent; safe even if another entry point already installed
+        // one).
+        crate::tls_provider::install_default_crypto_provider();
+
         let client = reqwest::Client::builder()
             .timeout(self.config.timeout)
             .build()

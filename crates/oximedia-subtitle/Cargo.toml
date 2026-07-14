@@ -25,10 +25,10 @@ serde = { workspace = true, features = ["derive"] }
 rayon.workspace = true
 
 # Font rendering and text layout
-fontdue = "0.9"
-ab_glyph = "0.2"
+fontdue.workspace = true
+ab_glyph.workspace = true
 unicode-bidi = "0.3"
-unicode-segmentation = "1.13"
+unicode-segmentation = { workspace = true }
 
 # XML parsing for TTML
 quick-xml = { workspace = true }

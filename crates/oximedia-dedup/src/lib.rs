@@ -21,7 +21,11 @@
 //!
 //! # Example
 //!
-//! ```
+//! The full indexing pipeline below uses `DuplicateDetector`, which is only
+//! available with the `sqlite` feature enabled (it backs the persistent index
+//! with SQLite). The example is therefore marked `ignore` in the default build.
+//!
+//! ```ignore
 //! use oximedia_dedup::{DuplicateDetector, DetectionStrategy, DedupConfig};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -129,6 +133,7 @@ pub mod perceptual_hash;
 pub mod persistent_cache;
 pub mod phash;
 pub mod progress;
+pub mod quality;
 pub mod report;
 pub mod rolling_hash;
 pub mod segment_dedup;
@@ -260,12 +265,16 @@ pub enum DedupError {
     /// Database error
     #[cfg(feature = "sqlite")]
     #[error("Database error: {0}")]
-    Database(#[from] sqlx::Error),
+    Database(#[from] oxisql_core::OxiSqlError),
 
     /// Database error (non-sqlite variant)
     #[cfg(not(feature = "sqlite"))]
     #[error("Database error: {0}")]
     Database(String),
+
+    /// Miscellaneous error not covered by a more specific variant.
+    #[error("{0}")]
+    Other(String),
 
     /// Hashing error
     #[error("Hashing error: {0}")]

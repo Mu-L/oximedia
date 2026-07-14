@@ -3,12 +3,25 @@
 //! Vorbis is a patent-free, fully open general-purpose compressed audio format
 //! by the Xiph.Org Foundation.  This module provides:
 //!
-//! - **`VorbisEncoder`** — psychoacoustic lossy encoder: window, MDCT, psychoacoustic
-//!   masking, floor curve, residue vector quantisation, Huffman packing.
-//! - **`VorbisDecoder`** — packet decoder that reconstructs PCM from Vorbis packets.
+//! - **`VorbisEncoder`** — lossy encoder: window, MDCT, floor curve, residue
+//!   quantisation, packed into an *OxiMedia simplified packet format*.
+//! - **`VorbisDecoder`** — packet decoder that reconstructs PCM from packets
+//!   produced by `VorbisEncoder`.
 //!
-//! The implementation follows the Vorbis I specification
+//! Header layouts follow the Vorbis I specification
 //! (<https://xiph.org/vorbis/doc/Vorbis_I_spec.html>).
+//!
+//! # Honest status: full Vorbis I decode is NOT implemented
+//!
+//! Per `docs/codec_status.md`, full Vorbis I decoding (setup-header
+//! codebook/floor/residue parsing, reverse codebook decode, floor-curve
+//! reconstruction, channel coupling, window switching) is **not
+//! implemented** and is deferred to 0.2.0. The encoder/decoder pair in this
+//! module round-trips only the OxiMedia simplified packet format; streams
+//! from standards-compliant encoders (libvorbis etc.) are rejected with an
+//! honest `CodecError::UnsupportedFeature` at the setup header instead of
+//! silently producing empty or garbage PCM. See
+//! [`decoder`] for details.
 //!
 //! # Quick start
 //!

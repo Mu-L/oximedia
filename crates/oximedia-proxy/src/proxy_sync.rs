@@ -690,4 +690,96 @@ mod tests {
         let _ = std::fs::remove_dir(&dst_root);
         let _ = std::fs::remove_dir(&src_root);
     }
+
+    /// Simulates a network interruption during a proxy-database migration:
+    /// the first `import_with_rebase` pass only sees *some* of the proxy
+    /// files at the destination (as if the transfer was cut off partway
+    /// through copying), reports the rest as missing, and then — once the
+    /// remaining files "arrive" (simulating the transfer resuming) — a
+    /// second `import_with_rebase` pass against the same export/new_root
+    /// resolves every previously-missing entry. This is the real resume
+    /// mechanism the `proxy_sync` migration API provides: re-running
+    /// `import_with_rebase` is idempotent and simply re-checks disk state,
+    /// so nothing needs to track "what already succeeded" — a caller can
+    /// safely retry after a truncated transfer completes.
+    #[test]
+    fn test_proxy_sync_resume_after_truncated_transfer() {
+        let tmp = std::env::temp_dir();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+
+        let src_root = tmp.join(format!("proxy_resume_src_{unique}"));
+        let dst_root = tmp.join(format!("proxy_resume_dst_{unique}"));
+        std::fs::create_dir_all(&src_root).expect("create src dir");
+        std::fs::create_dir_all(&dst_root).expect("create dst dir");
+
+        // Five proxy entries in the export snapshot, as if migrating a whole
+        // project's proxy database to a new workstation.
+        let entries: Vec<MigrationProxyEntry> = (0..5)
+            .map(|i| MigrationProxyEntry {
+                source_path: src_root.join(format!("clip{i:02}.mov")),
+                proxy_path: src_root.join(format!("clip{i:02}_proxy.mp4")),
+                media_id: Some(format!("media-{i:02}")),
+            })
+            .collect();
+        let export = ProxyDbExport::new(entries, src_root.clone());
+
+        // ── "Network interruption": only the first 2 of 5 proxy files made
+        // it across before the transfer was cut off. ───────────────────────
+        for i in 0..2 {
+            let dst_path = dst_root.join(format!("clip{i:02}_proxy.mp4"));
+            std::fs::write(&dst_path, b"partial transfer data").expect("write partial proxy");
+        }
+
+        let (_rebased_partial, partial_result) = export.import_with_rebase(&dst_root);
+        assert_eq!(
+            partial_result.entries_relinked, 2,
+            "only the 2 files that survived the truncated transfer should be found"
+        );
+        assert_eq!(
+            partial_result.entries_missing.len(),
+            3,
+            "the 3 files that never arrived must be reported missing"
+        );
+
+        // ── "Resume": the remaining 3 proxy files finish copying. ──────────
+        for i in 2..5 {
+            let dst_path = dst_root.join(format!("clip{i:02}_proxy.mp4"));
+            std::fs::write(&dst_path, b"resumed transfer data").expect("write resumed proxy");
+        }
+
+        // Re-running import_with_rebase against the identical export/new_root
+        // is the resume operation: it is idempotent and now finds everything.
+        let (rebased_full, resumed_result) = export.import_with_rebase(&dst_root);
+        assert_eq!(
+            resumed_result.entries_relinked, 5,
+            "after resume, all 5 entries must be relinked"
+        );
+        assert!(
+            resumed_result.entries_missing.is_empty(),
+            "after resume, no entries should remain missing, got: {:?}",
+            resumed_result.entries_missing
+        );
+        assert_eq!(rebased_full.len(), 5);
+        for (i, entry) in rebased_full.iter().enumerate() {
+            assert_eq!(
+                entry.proxy_path,
+                dst_root.join(format!("clip{i:02}_proxy.mp4"))
+            );
+            assert!(
+                entry.proxy_path.exists(),
+                "resumed proxy file must exist on disk: {}",
+                entry.proxy_path.display()
+            );
+        }
+
+        // Clean up.
+        for i in 0..5 {
+            let _ = std::fs::remove_file(dst_root.join(format!("clip{i:02}_proxy.mp4")));
+        }
+        let _ = std::fs::remove_dir(&dst_root);
+        let _ = std::fs::remove_dir(&src_root);
+    }
 }

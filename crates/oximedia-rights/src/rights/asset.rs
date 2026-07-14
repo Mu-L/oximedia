@@ -5,8 +5,6 @@ use crate::database::RightsDatabase;
 use crate::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-#[cfg(not(target_arch = "wasm32"))]
-use sqlx::Row;
 use uuid::Uuid;
 
 /// Type of media asset
@@ -95,27 +93,51 @@ impl Asset {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Decode an `assets` row into an [`Asset`].
+    fn from_row(r: &oxisql_core::Row) -> Result<Self> {
+        let created_at_s: String = r.try_get("created_at")?;
+        let created_at = DateTime::parse_from_rfc3339(&created_at_s)
+            .map_err(|e| crate::RightsError::InvalidLicense(format!("Invalid created_at: {e}")))?
+            .with_timezone(&Utc);
+        let updated_at_s: String = r.try_get("updated_at")?;
+        let updated_at = DateTime::parse_from_rfc3339(&updated_at_s)
+            .map_err(|e| crate::RightsError::InvalidLicense(format!("Invalid updated_at: {e}")))?
+            .with_timezone(&Utc);
+        let asset_type_s: String = r.try_get("asset_type")?;
+        Ok(Asset {
+            id: r.try_get("id")?,
+            name: r.try_get("name")?,
+            asset_type: AssetType::from_str(&asset_type_s),
+            description: r.try_get("description")?,
+            created_at,
+            updated_at,
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     /// Save asset to database
     pub async fn save(&self, db: &RightsDatabase) -> Result<()> {
-        sqlx::query(
-            r"
+        db.pool()
+            .execute(
+                r"
             INSERT INTO assets (id, name, asset_type, description, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 asset_type = excluded.asset_type,
                 description = excluded.description,
                 updated_at = excluded.updated_at
             ",
-        )
-        .bind(&self.id)
-        .bind(&self.name)
-        .bind(self.asset_type.as_str())
-        .bind(&self.description)
-        .bind(self.created_at.to_rfc3339())
-        .bind(self.updated_at.to_rfc3339())
-        .execute(db.pool())
-        .await?;
+                &[
+                    &self.id,
+                    &self.name,
+                    &self.asset_type.as_str(),
+                    &self.description,
+                    &self.created_at.to_rfc3339(),
+                    &self.updated_at.to_rfc3339(),
+                ],
+            )
+            .await?;
 
         Ok(())
     }
@@ -123,82 +145,43 @@ impl Asset {
     #[cfg(not(target_arch = "wasm32"))]
     /// Load asset from database by ID
     pub async fn load(db: &RightsDatabase, id: &str) -> Result<Option<Self>> {
-        let row = sqlx::query(
-            r"
+        let row = db
+            .pool()
+            .query_optional(
+                r"
             SELECT id, name, asset_type, description, created_at, updated_at
-            FROM assets WHERE id = ?
+            FROM assets WHERE id = $1
             ",
-        )
-        .bind(id)
-        .fetch_optional(db.pool())
-        .await?;
+                &[&id],
+            )
+            .await?;
 
-        row.map(|r| {
-            let created_at = DateTime::parse_from_rfc3339(r.get("created_at"))
-                .map_err(|e| {
-                    crate::RightsError::InvalidLicense(format!("Invalid created_at: {e}"))
-                })?
-                .with_timezone(&Utc);
-            let updated_at = DateTime::parse_from_rfc3339(r.get("updated_at"))
-                .map_err(|e| {
-                    crate::RightsError::InvalidLicense(format!("Invalid updated_at: {e}"))
-                })?
-                .with_timezone(&Utc);
-            Ok(Asset {
-                id: r.get("id"),
-                name: r.get("name"),
-                asset_type: AssetType::from_str(r.get("asset_type")),
-                description: r.get("description"),
-                created_at,
-                updated_at,
-            })
-        })
-        .transpose()
+        row.map(|r| Self::from_row(&r)).transpose()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     /// List all assets
     pub async fn list(db: &RightsDatabase) -> Result<Vec<Self>> {
-        let rows = sqlx::query(
-            r"
+        let rows = db
+            .pool()
+            .query(
+                r"
             SELECT id, name, asset_type, description, created_at, updated_at
             FROM assets
             ORDER BY created_at DESC
             ",
-        )
-        .fetch_all(db.pool())
-        .await?;
+                &[],
+            )
+            .await?;
 
-        rows.into_iter()
-            .map(|r| {
-                let created_at = DateTime::parse_from_rfc3339(r.get("created_at"))
-                    .map_err(|e| {
-                        crate::RightsError::InvalidLicense(format!("Invalid created_at: {e}"))
-                    })?
-                    .with_timezone(&Utc);
-                let updated_at = DateTime::parse_from_rfc3339(r.get("updated_at"))
-                    .map_err(|e| {
-                        crate::RightsError::InvalidLicense(format!("Invalid updated_at: {e}"))
-                    })?
-                    .with_timezone(&Utc);
-                Ok(Asset {
-                    id: r.get("id"),
-                    name: r.get("name"),
-                    asset_type: AssetType::from_str(r.get("asset_type")),
-                    description: r.get("description"),
-                    created_at,
-                    updated_at,
-                })
-            })
-            .collect()
+        rows.iter().map(Self::from_row).collect()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     /// Delete asset from database
     pub async fn delete(db: &RightsDatabase, id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM assets WHERE id = ?")
-            .bind(id)
-            .execute(db.pool())
+        db.pool()
+            .execute("DELETE FROM assets WHERE id = $1", &[&id])
             .await?;
         Ok(())
     }

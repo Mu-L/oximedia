@@ -381,14 +381,14 @@ async fn run(cli: Cli) -> Result<()> {
             input,
             detail,
             streams,
-            hash: _hash,
+            hash,
             quality_snapshot: _quality_snapshot,
             format,
             chapters,
             metadata,
         } => {
             probe_file(
-                &input, detail, streams, &format, chapters, metadata, cli.ndjson,
+                &input, detail, streams, hash, &format, chapters, metadata, cli.ndjson,
             )
             .await
         }
@@ -424,7 +424,7 @@ async fn run(cli: Cli) -> Result<()> {
             resume,
             audio_filter: _audio_filter,
             map: _map,
-            normalize_audio: _normalize_audio,
+            normalize_audio,
         } => {
             let options = transcode::TranscodeOptions {
                 input,
@@ -446,6 +446,7 @@ async fn run(cli: Cli) -> Result<()> {
                 threads,
                 overwrite,
                 resume,
+                normalize_audio,
                 progress_format: cli.progress,
             };
             transcode::transcode(options).await
@@ -971,6 +972,14 @@ async fn run(cli: Cli) -> Result<()> {
 /// Main entry point for the OxiMedia CLI.
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
+    // Install the Pure-Rust `rustls-rustcrypto` crypto provider as the
+    // process-wide default before any subcommand can open a TLS connection
+    // (cloud storage, distributed rendering, monitoring exporters, ...). The
+    // workspace builds `reqwest`/`rustls` without a compiled-in default
+    // provider (`rustls-no-provider`) to keep the default build Pure Rust,
+    // so this must run first or the first TLS use would panic. Idempotent.
+    oximedia_net::install_default_crypto_provider();
+
     let cli = Cli::parse();
 
     // Disable colours before anything else — must run before any Colorize use.

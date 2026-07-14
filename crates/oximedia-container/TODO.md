@@ -58,10 +58,10 @@
 - [x] Optimize EBML variable-length integer parsing in `demux/matroska/ebml.rs` with lookup tables (verified: ebml.rs:VINT_LEN_TABLE+VINT_MASK_TABLE)
 - [x] Cache cluster/cue positions in `cue/` for faster random-access seeking in Matroska (verified: cue/cache.rs:54:CuePositionCache, find_cluster_before, BTreeMap)
 - [x] Parallelize mux writing in `mux/matroska/writer.rs` for multi-stream interleaving (verified: mux/matroska/interleave.rs:thread::scope parallel encode, sort-by-pts)
-- [ ] Optimize `pts_dts.rs` timestamp rewriting with batch processing
+- [x] Optimize `pts_dts.rs` timestamp rewriting with batch processing (Wave 22: rewrite_timestamps_batch+rebase_timestamps_to_zero free functions in pts_dts.rs; 11 new unit tests)
 
 ## Testing
-- [ ] Add conformance tests for Matroska demuxer against Matroska test suite files
+- [x] Add conformance tests for Matroska demuxer against Matroska test suite files (Wave 22: 7 new EBML conformance tests in it_mkv_conformance.rs — Matroska DocType probe/round-trip, hard-coded minimal MKV fixture, malformed/truncated EBML, header-only, wrong DocType; total 15 tests)
 - [x] Test MP4 demuxer with fragmented MP4 (fMP4) and progressive MP4 variants
 - [x] Add round-trip test: demux -> mux -> demux -> verify packet-level equality for all formats
 - [x] Test MPEG-TS demuxer with real broadcast streams containing multiple programs
@@ -69,6 +69,6 @@
 - [x] Test `metadata/vorbis.rs` Vorbis comment handling with edge cases (empty tags, unicode)
 
 ## Documentation
-- [ ] Document container format support matrix (which codecs in which containers)
-- [ ] Add seeking strategy documentation (keyframe vs. sample-accurate vs. byte-offset)
-- [ ] Document streaming output modes (HLS, DASH, CMAF) with configuration examples
+- [x] Document container format support matrix (which codecs in which containers) — rustdoc table in `lib.rs` "Container Format Support Matrix" section (2026-06-24)
+- [x] Add seeking strategy documentation (keyframe vs. sample-accurate vs. byte-offset) — rustdoc in `lib.rs` "Seeking Strategies" section with runnable `SeekIndex`/`SeekTarget` examples (2026-06-24)
+- [x] Document streaming output modes (HLS, DASH, CMAF) with configuration examples — rustdoc in `lib.rs` "Streaming Output Modes" section with `no_run`/runnable examples for `SegmentWriter`, `emit_mpd`, `CmafChunkedEncoder` (2026-06-24)

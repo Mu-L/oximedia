@@ -66,8 +66,10 @@ pub struct StreamingServerConfig {
 impl Default for StreamingServerConfig {
     fn default() -> Self {
         Self {
-            rtmp_bind_addr: "0.0.0.0:1935".parse().expect("valid address"),
-            http_bind_addr: "0.0.0.0:8080".parse().expect("valid address"),
+            // Built directly from octets/port rather than `str::parse`, so
+            // this is infallible by construction (no `.expect()` needed).
+            rtmp_bind_addr: SocketAddr::from(([0, 0, 0, 0], 1935)),
+            http_bind_addr: SocketAddr::from(([0, 0, 0, 0], 8080)),
             hls: HlsConfig::default(),
             dash: DashConfig::default(),
             dvr: DvrConfig::default(),
@@ -225,7 +227,7 @@ impl StreamingServer {
         };
 
         let webhook_notifier = if config.enable_webhooks {
-            Some(Arc::new(WebhookNotifier::new(config.webhook.clone())))
+            Some(Arc::new(WebhookNotifier::new(config.webhook.clone())?))
         } else {
             None
         };

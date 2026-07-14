@@ -12,7 +12,7 @@
 - [x] Extend `cache_invalidation` with tag-based invalidation (purge by content tag, not just path/glob)
 - [x] Add `edge_manager` node weight support for heterogeneous capacity (some PoPs larger than others) (done — weighted_score at src/edge_manager.rs:110, best_node_by_capacity at :238)
 - [x] Implement soft-purge in `cache_invalidation` that marks stale but serves while revalidating (implemented 2026-05-31: SoftPurge, StaleCacheEntry, soft_purge/is_stale/serve_while_stale on InvalidationManager)
-- [ ] Extend `geo_routing` with anycast simulation support for DNS-based routing (verified-open 2026-05-16: not yet implemented)
+- [x] Extend `geo_routing` with anycast simulation support for DNS-based routing (implemented 2026-06-04: AnycastRouter/AnycastGroup/VirtualIp in anycast.rs; withdraw_pop/announce_pop/resolve)
 - [x] Add `cdn_metrics` per-content-type breakdown (video, audio, image, manifest) (implemented 2026-05-31: ContentCategory, ContentTypeMetrics, ContentTypeMetricsStore)
 - [x] Improve `origin_failover` with circuit breaker pattern (half-open state for recovery detection)
 
@@ -29,15 +29,15 @@
 ## Performance
 - [x] Replace `std::sync::RwLock` with `parking_lot::RwLock` in `CdnManager` for better performance (verified 2026-05-16; src/multi_cdn.rs:25 parking_lot::Mutex used for EWMA latency)
 - [x] Use lock-free atomic counters in `cdn_metrics` instead of mutex-protected fields
-- [ ] Implement connection pooling simulation in `origin_failover` for origin keep-alive reuse (verified-open 2026-05-16: not yet implemented)
+- [x] Implement connection pooling simulation in `origin_failover` for origin keep-alive reuse (implemented 2026-06-04: ConnectionPool/PooledConn with acquire/release/idle_len; max_idle eviction; reused/created counters)
 - [x] Cache Haversine distance calculations in `geo_routing` for repeated client-to-edge lookups (implemented 2026-05-31: HaversineCache with (i64×4) rounded-key HashMap per GeoRouter)
 - [x] Use a spatial index (R-tree) in `geo_routing` for O(log n) nearest-edge lookup instead of linear scan (implemented 2026-05-31: RtreeEdgeIndex/EdgePoint wrapping rstar::RTree; lazy-built when fleet > 16)
 
 ## Testing
 - [x] Add concurrent invalidation stress test with 1000+ requests and multiple processing nodes (implemented 2026-05-31: 16 threads × 100 requests = 1600 total, test_concurrent_invalidation_stress)
 - [ ] Test `origin_failover` recovery: mark origin failed, simulate health check success, verify re-selection
-- [ ] Add `geo_routing` test with edge cases: equidistant PoPs, antipodal points, same-location client/edge
-- [ ] Test `cdn_metrics` Prometheus output format against Prometheus parser specification
+- [x] Add `geo_routing` test with edge cases: equidistant PoPs, antipodal points, same-location client/edge (implemented 2026-06-06: stable id-tiebreak fix at src/geo_routing.rs:463 makes equidistant selection deterministic & insertion-order-independent; test_assign_edge_equidistant_deterministic at src/geo_routing.rs:997, test_assign_edge_equidistant_id_tiebreak_flips:1058, test_haversine_antipodal_finite:1083, test_assign_edge_zero_distance_exact_colocation:1117)
+- [x] Test `cdn_metrics` Prometheus output format against Prometheus parser specification (implemented 2026-06-06: hand-rolled lenient exposition parser, no new dep; test_prometheus_help_type_ordered HELP→TYPE→sample at src/cdn_metrics.rs:908, test_prometheus_no_duplicate_series:979, test_prometheus_counter_total_suffix:1009, test_prometheus_sample_lines_wellformed:1043, test_prometheus_gauge_value_matches_hit_ratio:1087)
 - [x] Add `CdnManager` integration test covering full lifecycle: add edges, configure origins, route, invalidate (implemented 2026-05-31: test_cdn_manager_lifecycle)
 - [ ] Test `cache_invalidation` rate limiting enforcement under burst conditions
 

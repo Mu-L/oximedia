@@ -505,4 +505,148 @@ mod tests {
         let data3 = Handshake::create_random_data(43);
         assert_ne!(data1, data3);
     }
+
+    #[test]
+    fn test_handshake_c0c1_byte_layout() {
+        let mut hs = Handshake::new();
+        // epoch = 100 = 0x0000_0064
+        hs.set_epoch(0x0000_0064);
+
+        let bytes = hs.generate_c0c1();
+
+        // C0: version byte must be 0x03
+        assert_eq!(bytes[0], RTMP_VERSION, "C0 version must be 0x03");
+
+        // C1 timestamp (big-endian u32 = 100 = 0x00_00_00_64)
+        assert_eq!(
+            &bytes[1..5],
+            &[0x00, 0x00, 0x00, 0x64],
+            "C1 timestamp must be big-endian 100"
+        );
+
+        // C1 zero field
+        assert_eq!(
+            &bytes[5..9],
+            &[0x00, 0x00, 0x00, 0x00],
+            "C1 zero field must be all zeros"
+        );
+
+        // Total length: 1 (C0) + 1536 (C1) = 1537
+        assert_eq!(
+            bytes.len(),
+            C0_SIZE + HANDSHAKE_SIZE,
+            "C0+C1 total length must be 1537"
+        );
+    }
+
+    #[test]
+    fn test_server_handshake_s0s1s2_byte_layout() {
+        let mut server = Handshake::new();
+        server.set_epoch(0); // server epoch = 0
+
+        // Build synthetic C0+C1: version=0x03, client timestamp=5, zero field, rest=0
+        let mut c0c1 = vec![0u8; C0_SIZE + HANDSHAKE_SIZE];
+        c0c1[0] = RTMP_VERSION; // C0
+                                // C1 timestamp = 5 in big-endian at bytes [1..5]
+        c0c1[1] = 0x00;
+        c0c1[2] = 0x00;
+        c0c1[3] = 0x00;
+        c0c1[4] = 0x05;
+        // bytes [5..9] remain zero (C1 zero field)
+        // remaining bytes remain zero (C1 random)
+
+        server
+            .parse_c0c1(&c0c1)
+            .expect("parse_c0c1 must succeed on valid C0+C1");
+
+        let result = server.generate_s0s1s2();
+
+        // S0: version
+        assert_eq!(result[0], RTMP_VERSION, "S0 must be 0x03");
+
+        // Total length: 1 (S0) + 1536 (S1) + 1536 (S2) = 3073
+        assert_eq!(
+            result.len(),
+            C0_SIZE + HANDSHAKE_SIZE * 2,
+            "S0+S1+S2 total length must be 3073"
+        );
+
+        // S1 timestamp = server epoch = 0 (big-endian at bytes [1..5])
+        assert_eq!(
+            &result[1..5],
+            &[0x00, 0x00, 0x00, 0x00],
+            "S1 timestamp must be server epoch (0)"
+        );
+
+        // S1 zero field (bytes [5..9])
+        assert_eq!(
+            &result[5..9],
+            &[0x00, 0x00, 0x00, 0x00],
+            "S1 zero field must be all zeros"
+        );
+
+        // S2 starts at byte 1537 (C0_SIZE + HANDSHAKE_SIZE).
+        // S2[0..4] echoes client timestamp (5) in big-endian.
+        let s2_start = C0_SIZE + HANDSHAKE_SIZE;
+        assert_eq!(
+            &result[s2_start..s2_start + 4],
+            &[0x00, 0x00, 0x00, 0x05],
+            "S2 must echo client timestamp (5)"
+        );
+    }
+
+    #[test]
+    fn test_handshake_reference_roundtrip_bytes() {
+        // Verify the complete C0C1 → S0S1S2 → C2 roundtrip with known epoch values
+        // and check that C2 echoes the server's S1 timestamp byte-exactly.
+        let mut client = Handshake::new();
+        let mut server = Handshake::new();
+
+        // client epoch=100 (0xC8 = 200 for server makes sense; use 100 and 200)
+        client.set_epoch(100);
+        server.set_epoch(200);
+
+        // Client → Server: C0+C1
+        let c0c1 = client.generate_c0c1();
+
+        // Verify C1 timestamp encodes client epoch (100 = 0x64)
+        assert_eq!(
+            &c0c1[1..5],
+            &[0x00, 0x00, 0x00, 0x64],
+            "C1 timestamp must encode client epoch 100"
+        );
+
+        // Server processes C0+C1 and produces S0+S1+S2
+        server
+            .parse_c0c1(&c0c1)
+            .expect("server must parse C0+C1 without error");
+        let s0s1s2 = server.generate_s0s1s2();
+
+        // S1 timestamp must encode server epoch (200 = 0xC8)
+        assert_eq!(
+            &s0s1s2[1..5],
+            &[0x00, 0x00, 0x00, 0xC8],
+            "S1 timestamp must encode server epoch 200"
+        );
+
+        // Client processes S0+S1 and produces C2
+        client
+            .parse_s0s1(&s0s1s2)
+            .expect("client must parse S0+S1 without error");
+        let c2 = client.generate_c2();
+
+        // C2[0..4] echoes server's S1 timestamp (200 = 0x00_00_00_C8)
+        assert_eq!(
+            &c2[0..4],
+            &[0x00, 0x00, 0x00, 0xC8],
+            "C2 must echo server S1 timestamp (200)"
+        );
+
+        // C2 total length must be HANDSHAKE_SIZE (1536)
+        assert_eq!(
+            c2.len(),
+            HANDSHAKE_SIZE,
+            "C2 must be exactly HANDSHAKE_SIZE bytes"
+        );
+    }
 }

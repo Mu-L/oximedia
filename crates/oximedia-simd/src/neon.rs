@@ -200,6 +200,11 @@ pub mod neon {
     /// Returns uint8x8_t with values saturated to [0, 255].
     #[inline]
     fn compute_y_8px(r: uint8x8_t, g: uint8x8_t, b: uint8x8_t) -> uint8x8_t {
+        // SAFETY: every intrinsic below operates purely on register values
+        // (uint8x8_t/uint16x8_t) passed and returned by value — no pointers,
+        // no memory access. NEON is mandatory on aarch64 (this whole `neon`
+        // sub-module is `#[cfg(target_arch = "aarch64")]`), so the target
+        // feature is always present.
         // Widen uint8x8 → uint16x8 for 16-bit accumulation.
         let r16 = unsafe { vmovl_u8(r) };
         let g16 = unsafe { vmovl_u8(g) };
@@ -221,6 +226,11 @@ pub mod neon {
     /// Returns the 4 U values packed into the low 4 bytes of a uint8x8_t.
     #[inline]
     fn compute_u_4px(r: uint8x8_t, g: uint8x8_t, b: uint8x8_t) -> uint8x8_t {
+        // SAFETY: every intrinsic below operates purely on register values
+        // (uint8x8_t/uint16x8_t/int16x8_t) passed and returned by value — no
+        // pointers, no memory access. NEON is mandatory on aarch64 (this
+        // whole `neon` sub-module is `#[cfg(target_arch = "aarch64")]`), so
+        // the target feature is always present.
         // Work with the low 4 lanes (the even-indexed pixels from the original 8).
         let r16 = unsafe { vmovl_u8(r) }; // uint16x8, use low half
         let g16 = unsafe { vmovl_u8(g) };
@@ -256,6 +266,11 @@ pub mod neon {
     /// Returns the 4 V values packed into the low 4 bytes of a uint8x8_t.
     #[inline]
     fn compute_v_4px(r: uint8x8_t, g: uint8x8_t, b: uint8x8_t) -> uint8x8_t {
+        // SAFETY: every intrinsic below operates purely on register values
+        // (uint8x8_t/uint16x8_t/int16x8_t) passed and returned by value — no
+        // pointers, no memory access. NEON is mandatory on aarch64 (this
+        // whole `neon` sub-module is `#[cfg(target_arch = "aarch64")]`), so
+        // the target feature is always present.
         let r16 = unsafe { vmovl_u8(r) };
         let g16 = unsafe { vmovl_u8(g) };
         let b16 = unsafe { vmovl_u8(b) };
@@ -323,6 +338,7 @@ pub mod neon {
         let len = a.len().min(b.len());
         let chunks = len / 4;
 
+        // SAFETY: zero-initializing a register with no memory access; always sound.
         let mut acc = unsafe { vmovq_n_f32(0.0f32) };
 
         for i in 0..chunks {
@@ -336,6 +352,8 @@ pub mod neon {
         }
 
         // Horizontal reduction: uint32x4 → scalar
+        // SAFETY: all operations below are register-only (no pointers/memory
+        // access) on `acc`, which was fully initialized above.
         let lo = unsafe { vget_low_f32(acc) };
         let hi = unsafe { vget_high_f32(acc) };
         let s = unsafe { vpadd_f32(lo, hi) };

@@ -2,6 +2,58 @@
 //!
 //! Tracks the creation chain, modification history, and source attribution
 //! of media assets to establish a verified chain of custody.
+//!
+//! # Data model
+//!
+//! - [`ChainOfCustody`] is the root record for one media asset (`asset_id`).
+//!   It pairs an immutable [`SourceAttribution`] (who created the asset,
+//!   when, under what license/copyright) with an append-only, ordered
+//!   `Vec<`[`CustodyEvent`]`>` timeline.
+//! - Each [`CustodyEvent`] records **who** (`actor`), **what**
+//!   ([`CustodyEventType`]: `Creation`, `Transfer`, `Modification`,
+//!   `Access`, `Verification`, `Archival`, `Export`, `OwnershipChange`),
+//!   **when** (`timestamp_ms`), **where** (`location`: device/system/URL),
+//!   and optionally a `content_hash` snapshot of the asset at that point —
+//!   analogous to an evidence log entry in a physical chain-of-custody
+//!   form.
+//! - [`ProvenanceRegistry`] indexes many [`ChainOfCustody`] records by
+//!   `asset_id`, so a caller managing a media library can look up, update,
+//!   or audit ([`ProvenanceRegistry::find_broken_chains`],
+//!   [`ProvenanceRegistry::find_modified_assets`]) every asset's custody
+//!   trail in one place.
+//!
+//! Unlike [`crate::custody`]'s hash-chained `ChainOfCustody` (which
+//! cryptographically links each event to its predecessor via an FNV-1a
+//! checksum for tamper-evidence of the *log itself*), this module's model
+//! favors a richer, queryable event schema — multiple event types, a
+//! dedicated [`SourceAttribution`], and per-event free-text
+//! `description` — at the cost of not itself being cryptographically
+//! sealed. Pick the hash-chained model when the custody log's own
+//! integrity must be provable; pick this model when you need structured
+//! provenance queries (current custodian, event-type filtering, multi-asset
+//! registries).
+//!
+//! # Verification process
+//!
+//! [`ChainOfCustody::add_event`] appends the new event and immediately
+//! re-runs `verify_chain`, which walks every adjacent event pair and
+//! records a [`ChainBreak`] wherever `events[i].timestamp_ms` is *earlier*
+//! than `events[i - 1].timestamp_ms` (a [`BreakType::ChronologicalViolation`]
+//! — evidence cannot be handed back in time). `chain_intact` is simply
+//! `chain_breaks.is_empty()` after that scan, so it always reflects the
+//! *entire* history, not just the most recent hop — a break introduced in
+//! the middle of a long chain is still detected even if every event before
+//! and after it is individually well-ordered (see
+//! `test_multi_hop_chain_detects_break_in_the_middle`). Two additional
+//! [`BreakType`] variants (`HashMismatch`, `TimeGap`, `UnknownActor`) are
+//! defined for callers layering stronger checks (e.g. hash verification
+//! against `content_hash`, or gap-duration policies) on top of this
+//! baseline chronological check; `verify_chain` does not currently populate
+//! them itself. To audit an asset end-to-end, combine `chain_intact` with
+//! [`ChainOfCustody::has_modifications`] (were any `Modification` /
+//! `OwnershipChange` events recorded?) and
+//! [`ChainOfCustody::current_custodian`] (who is the last recorded
+//! custodian, from the most recent `Transfer`/`OwnershipChange` event).
 
 #![allow(dead_code)]
 #![allow(clippy::cast_precision_loss)]
@@ -575,5 +627,195 @@ mod tests {
         let removed = registry.remove("a1");
         assert!(removed.is_some());
         assert_eq!(registry.asset_count(), 0);
+    }
+
+    // ── Multi-step / multi-hop custody transfer scenarios ─────────────────────
+
+    /// A five-party evidence handoff: Creation → four sequential Transfers.
+    /// The current custodian must track the *last* transfer at every hop, and
+    /// the chain must stay intact throughout since all timestamps increase
+    /// monotonically.
+    #[test]
+    fn test_multi_hop_transfer_chain_tracks_current_custodian_at_each_hop() {
+        let mut chain = ChainOfCustody::new("evidence-1", make_attribution("evidence-1"));
+
+        chain.add_event(make_event("e0", 1000, CustodyEventType::Creation));
+        assert!(chain.current_custodian().is_none());
+
+        let hops = [
+            "Photographer",
+            "Field Investigator",
+            "Evidence Locker",
+            "Forensic Lab",
+        ];
+        for (i, actor) in hops.iter().enumerate() {
+            let mut evt = make_event(
+                &format!("hop{i}"),
+                2000 + (i as u64) * 1000,
+                CustodyEventType::Transfer,
+            );
+            evt.actor = (*actor).to_string();
+            chain.add_event(evt);
+
+            // After each hop, the custodian must be exactly this hop's actor.
+            assert_eq!(
+                chain.current_custodian(),
+                Some(*actor),
+                "custodian mismatch after hop {i}"
+            );
+            assert!(
+                chain.chain_intact,
+                "chain must remain intact after monotonic hop {i}"
+            );
+        }
+
+        // Creation + 4 transfers.
+        assert_eq!(chain.event_count(), 5);
+        assert_eq!(chain.events_of_type(CustodyEventType::Transfer).len(), 4);
+        assert!(chain.chain_breaks.is_empty());
+    }
+
+    /// A long custody chain that interleaves Transfer, Modification, Access,
+    /// and Verification events across many hops must still report
+    /// `has_modifications() == true` (sticky once any modification occurs)
+    /// while continuing to track the latest custodian through subsequent
+    /// non-transfer hops.
+    #[test]
+    fn test_multi_hop_chain_with_interleaved_modifications_and_access() {
+        let mut chain = ChainOfCustody::new("evidence-2", make_attribution("evidence-2"));
+
+        chain.add_event(make_event("e0", 1000, CustodyEventType::Creation));
+
+        let mut alice = make_event("e1", 2000, CustodyEventType::Transfer);
+        alice.actor = "Alice".to_string();
+        chain.add_event(alice);
+        assert!(!chain.has_modifications());
+
+        chain.add_event(make_event("e2", 2500, CustodyEventType::Access));
+        // Access does not change custodian or modification status.
+        assert_eq!(chain.current_custodian(), Some("Alice"));
+        assert!(!chain.has_modifications());
+
+        chain.add_event(make_event("e3", 3000, CustodyEventType::Modification));
+        assert!(chain.has_modifications());
+        // Modification alone is not a Transfer/OwnershipChange, so custodian
+        // stays the last transfer actor (Alice).
+        assert_eq!(chain.current_custodian(), Some("Alice"));
+
+        let mut bob = make_event("e4", 4000, CustodyEventType::Transfer);
+        bob.actor = "Bob".to_string();
+        chain.add_event(bob);
+        assert_eq!(chain.current_custodian(), Some("Bob"));
+
+        chain.add_event(make_event("e5", 5000, CustodyEventType::Verification));
+        assert_eq!(chain.current_custodian(), Some("Bob"));
+
+        let mut carol = make_event("e6", 6000, CustodyEventType::OwnershipChange);
+        carol.actor = "Carol".to_string();
+        chain.add_event(carol);
+        assert_eq!(chain.current_custodian(), Some("Carol"));
+
+        // Sticky modification flag persists to the end of the chain.
+        assert!(chain.has_modifications());
+        assert!(chain.chain_intact);
+        assert_eq!(chain.event_count(), 7);
+    }
+
+    /// A break introduced mid-chain (an out-of-order timestamp at hop 3 of 5)
+    /// must be detected even though the hops before and after it are each
+    /// individually monotonic — i.e. `verify_chain` must scan the whole
+    /// sequence, not just the last transition.
+    #[test]
+    fn test_multi_hop_chain_detects_break_in_the_middle() {
+        let mut chain = ChainOfCustody::new("evidence-3", make_attribution("evidence-3"));
+
+        chain.add_event(make_event("e0", 1000, CustodyEventType::Creation));
+        chain.add_event(make_event("e1", 2000, CustodyEventType::Transfer)); // hop 1: ok
+        chain.add_event(make_event("e2", 3000, CustodyEventType::Transfer)); // hop 2: ok
+        chain.add_event(make_event("e3", 1500, CustodyEventType::Transfer)); // hop 3: BREAK (earlier than e2)
+        chain.add_event(make_event("e4", 4000, CustodyEventType::Transfer)); // hop 4: ok relative to e3.. but chain already broken
+
+        assert!(!chain.chain_intact);
+        assert_eq!(chain.chain_breaks.len(), 1);
+        assert_eq!(
+            chain.chain_breaks[0].break_type,
+            BreakType::ChronologicalViolation
+        );
+        // The break is anchored between event index 2 (e2) and 3 (e3).
+        assert_eq!(chain.chain_breaks[0].after_event_index, 2);
+
+        // Despite the break, the chain still records every hop and the final
+        // custodian is still derivable from the last Transfer event added.
+        assert_eq!(chain.event_count(), 5);
+        assert_eq!(chain.current_custodian(), Some("actor"));
+    }
+
+    /// Registering several assets, each with its own multi-hop transfer
+    /// chain, must let the registry independently track per-asset custodian,
+    /// modification, and chain-integrity state.
+    #[test]
+    fn test_provenance_registry_tracks_independent_multi_hop_chains() {
+        let mut registry = ProvenanceRegistry::new();
+
+        // Asset A: clean 3-hop transfer chain.
+        let mut chain_a = ChainOfCustody::new("asset-a", make_attribution("asset-a"));
+        chain_a.add_event(make_event("a0", 1000, CustodyEventType::Creation));
+        registry.register(chain_a);
+        for (i, actor) in ["A1", "A2", "A3"].iter().enumerate() {
+            let mut evt = make_event(
+                &format!("a{}", i + 1),
+                2000 + (i as u64) * 1000,
+                CustodyEventType::Transfer,
+            );
+            evt.actor = (*actor).to_string();
+            assert!(registry.add_event("asset-a", evt));
+        }
+
+        // Asset B: 2-hop chain with a modification in between.
+        let mut chain_b = ChainOfCustody::new("asset-b", make_attribution("asset-b"));
+        chain_b.add_event(make_event("b0", 1000, CustodyEventType::Creation));
+        registry.register(chain_b);
+        assert!(registry.add_event(
+            "asset-b",
+            make_event("b1", 2000, CustodyEventType::Transfer)
+        ));
+        assert!(registry.add_event(
+            "asset-b",
+            make_event("b2", 3000, CustodyEventType::Modification)
+        ));
+
+        // Asset C: broken chain (out-of-order transfer).
+        let mut chain_c = ChainOfCustody::new("asset-c", make_attribution("asset-c"));
+        chain_c.add_event(make_event("c0", 5000, CustodyEventType::Creation));
+        registry.register(chain_c);
+        assert!(registry.add_event(
+            "asset-c",
+            make_event("c1", 1000, CustodyEventType::Transfer)
+        ));
+
+        assert_eq!(registry.asset_count(), 3);
+
+        assert_eq!(
+            registry
+                .get("asset-a")
+                .expect("asset-a must exist")
+                .current_custodian(),
+            Some("A3")
+        );
+        assert!(!registry
+            .get("asset-a")
+            .expect("asset-a must exist")
+            .has_modifications());
+
+        assert!(registry
+            .get("asset-b")
+            .expect("asset-b must exist")
+            .has_modifications());
+
+        let broken = registry.find_broken_chains();
+        assert_eq!(broken, vec!["asset-c"]);
+
+        let modified = registry.find_modified_assets();
+        assert_eq!(modified, vec!["asset-b"]);
     }
 }

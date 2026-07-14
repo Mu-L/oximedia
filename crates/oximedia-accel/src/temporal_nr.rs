@@ -468,7 +468,9 @@ mod gpu_impl {
                     AccelError::Synchronization(format!("temporal NR map failed: {e:?}"))
                 })?;
 
-            let data = buf_slice.get_mapped_range();
+            let data = buf_slice.get_mapped_range().map_err(|e| {
+                AccelError::MemoryMap(format!("temporal NR buffer map failed: {e}"))
+            })?;
             let out: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&data).to_vec();
             drop(data);
             readback.unmap();
@@ -640,6 +642,8 @@ mod tests {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false,
+            // native/trusted context; limit-bucketing is only a browser-fingerprinting mitigation
+            apply_limit_buckets: false,
         }))
         .ok()?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {

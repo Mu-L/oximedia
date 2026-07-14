@@ -1256,4 +1256,436 @@ mod tests {
             .matched_fields
             .contains(&"description".to_string()));
     }
+
+    // -----------------------------------------------------------------------
+    // BM25 scoring accuracy tests — known-relevance corpus
+    //
+    // These tests pin the score ordering and magnitude properties against a
+    // small but fully-specified corpus where the expected relevance ordering
+    // is unambiguous.  They act as regression guards for the TF×IDF weighting
+    // coefficients (title ×3, tags ×2, description ×1) and IDF semantics.
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a full asset record (title, description, tags).
+    fn make_full_asset(id: &str, title: &str, description: &str, tags: &[&str]) -> IndexedAsset {
+        IndexedAsset {
+            id: id.to_string(),
+            tags: tags.iter().map(|s| s.to_string()).collect(),
+            auto_tags: Vec::new(),
+            title: title.to_string(),
+            description: description.to_string(),
+            duration_secs: None,
+            width: None,
+            format: None,
+            collection_ids: Vec::new(),
+            ingested_at: 1_000_000,
+        }
+    }
+
+    /// **IDF property**: a term that appears in only one document should score
+    /// strictly higher than a term that appears in every document, assuming
+    /// the same TF and field weight.
+    ///
+    /// Corpus:
+    ///   a1: title = "rare exclusive footage"
+    ///   a2: title = "common everyday footage"
+    ///   a3: title = "common daily footage"
+    ///
+    /// Query "rare" matches only a1 → IDF is high.
+    /// Query "common" matches a2 and a3 → IDF is lower.
+    /// Query "footage" matches all 3 → IDF is lowest.
+    ///
+    /// We verify: score(a1 | "rare") > score(a2 | "footage").
+    #[test]
+    fn test_bm25_idf_rare_term_scores_higher_than_common_term() {
+        let mut idx = SmartSearchIndex::new();
+        idx.index_asset(make_full_asset("a1", "rare exclusive footage", "", &[]));
+        idx.index_asset(make_full_asset("a2", "common everyday footage", "", &[]));
+        idx.index_asset(make_full_asset("a3", "common daily footage", "", &[]));
+
+        // Score of the rare-term match.
+        let rare_results = idx.search("rare", &SearchFilter::default(), 10);
+        assert_eq!(rare_results.len(), 1, "only a1 should match 'rare'");
+        let score_rare = rare_results[0].score;
+
+        // Score of the ubiquitous-term match (footage appears in all 3 docs).
+        let footage_results = idx.search("footage", &SearchFilter::default(), 10);
+        // All three docs match "footage", but a1's score should be its per-doc score.
+        let score_footage_a1 = footage_results
+            .iter()
+            .find(|r| r.asset_id == "a1")
+            .expect("a1 must appear in footage results")
+            .score;
+
+        assert!(
+            score_rare > score_footage_a1,
+            "IDF: rare term (df=1) must score higher than ubiquitous term (df=3); \
+             score_rare={score_rare:.4} score_footage_a1={score_footage_a1:.4}"
+        );
+    }
+
+    /// **TF property**: more occurrences of the query term in the same field
+    /// yield a higher score.
+    ///
+    /// Corpus:
+    ///   a1: title = "ocean ocean ocean deep dive"   ← 3 occurrences of "ocean"
+    ///   a2: title = "ocean surface tour"            ← 1 occurrence of "ocean"
+    ///
+    /// Both docs are the only ones with "ocean", so IDF is identical.
+    /// a1 has TF = 3/5, a2 has TF = 1/3 → a1 must rank first.
+    #[test]
+    fn test_bm25_tf_higher_frequency_ranks_first() {
+        let mut idx = SmartSearchIndex::new();
+        // a1: 3 occurrences out of 5 tokens → TF = 0.60
+        idx.index_asset(make_full_asset(
+            "a1",
+            "ocean ocean ocean deep dive",
+            "",
+            &[],
+        ));
+        // a2: 1 occurrence out of 3 tokens → TF = 0.33
+        idx.index_asset(make_full_asset("a2", "ocean surface tour", "", &[]));
+
+        let results = idx.search("ocean", &SearchFilter::default(), 10);
+        assert_eq!(results.len(), 2, "both docs must match 'ocean'");
+        // a1 should rank first due to higher TF.
+        assert_eq!(
+            results[0].asset_id,
+            "a1",
+            "higher TF document must rank first; order: {:?}",
+            results.iter().map(|r| &r.asset_id).collect::<Vec<_>>()
+        );
+        assert!(
+            results[0].score > results[1].score,
+            "a1 score ({}) must exceed a2 score ({})",
+            results[0].score,
+            results[1].score
+        );
+    }
+
+    /// **Field weight property**: the same query term in the title (weight ×3)
+    /// must produce a strictly higher score than in the description (weight ×1),
+    /// all else being equal.
+    ///
+    /// Corpus:
+    ///   a1: title = "volcano documentary"         ← term in title
+    ///   a2: title = "nature film",
+    ///       description = "volcano documentary"   ← same term in description only
+    ///
+    /// Both have identical token count and IDF. a1 uses weight 3; a2 uses weight 1.
+    #[test]
+    fn test_bm25_title_weight_beats_description_weight() {
+        let mut idx = SmartSearchIndex::new();
+        idx.index_asset(make_full_asset("a1", "volcano documentary", "", &[]));
+        idx.index_asset(make_full_asset(
+            "a2",
+            "nature film",
+            "volcano documentary",
+            &[],
+        ));
+
+        let results = idx.search("volcano", &SearchFilter::default(), 10);
+        assert_eq!(results.len(), 2, "both docs contain 'volcano'");
+
+        let score_a1 = results
+            .iter()
+            .find(|r| r.asset_id == "a1")
+            .expect("a1 must be in results")
+            .score;
+        let score_a2 = results
+            .iter()
+            .find(|r| r.asset_id == "a2")
+            .expect("a2 must be in results")
+            .score;
+
+        assert!(
+            score_a1 > score_a2,
+            "title field weight (×3) must exceed description weight (×1); \
+             score_a1={score_a1:.4} score_a2={score_a2:.4}"
+        );
+    }
+
+    /// **Tag weight property**: the same query term in a tag (weight ×2)
+    /// must score above the description (weight ×1) but below the title (weight ×3).
+    ///
+    /// Corpus:
+    ///   a_title: title = "glacier"          ← weight 3
+    ///   a_tag:   tags  = ["glacier"]        ← weight 2
+    ///   a_desc:  description = "glacier"    ← weight 1
+    ///
+    /// All three are the only holders of "glacier" so IDF is identical.
+    #[test]
+    fn test_bm25_field_weight_ordering_title_tag_description() {
+        let mut idx = SmartSearchIndex::new();
+        idx.index_asset(make_full_asset("a_title", "glacier", "", &[]));
+        idx.index_asset(make_full_asset("a_tag", "video", "", &["glacier"]));
+        idx.index_asset(make_full_asset("a_desc", "video", "glacier", &[]));
+
+        let results = idx.search("glacier", &SearchFilter::default(), 10);
+        assert_eq!(results.len(), 3, "all three docs must match 'glacier'");
+
+        // Extract scores by asset_id.
+        let score = |id: &str| -> f32 {
+            results
+                .iter()
+                .find(|r| r.asset_id == id)
+                .map(|r| r.score)
+                .unwrap_or_else(|| panic!("{id} not found in results"))
+        };
+
+        let s_title = score("a_title");
+        let s_tag = score("a_tag");
+        let s_desc = score("a_desc");
+
+        assert!(
+            s_title > s_tag,
+            "title weight (×3) > tag weight (×2); s_title={s_title:.4} s_tag={s_tag:.4}"
+        );
+        assert!(
+            s_tag > s_desc,
+            "tag weight (×2) > description weight (×1); s_tag={s_tag:.4} s_desc={s_desc:.4}"
+        );
+    }
+
+    /// **Multi-term query scoring**: a document matching both query terms must
+    /// outscore a document matching only one, assuming the same IDF and field.
+    ///
+    /// Corpus:
+    ///   a1: title = "arctic expedition footage"   ← matches both "arctic" and "footage"
+    ///   a2: title = "tropical footage only"       ← matches only "footage"
+    ///
+    /// Query: "arctic footage".
+    #[test]
+    fn test_bm25_multi_term_both_matches_outscores_single_match() {
+        let mut idx = SmartSearchIndex::new();
+        idx.index_asset(make_full_asset("a1", "arctic expedition footage", "", &[]));
+        idx.index_asset(make_full_asset("a2", "tropical footage only", "", &[]));
+
+        let results = idx.search("arctic footage", &SearchFilter::default(), 10);
+        assert!(results.len() >= 1, "at least a1 must match");
+
+        let score_a1 = results
+            .iter()
+            .find(|r| r.asset_id == "a1")
+            .expect("a1 must appear")
+            .score;
+
+        if let Some(res_a2) = results.iter().find(|r| r.asset_id == "a2") {
+            assert!(
+                score_a1 > res_a2.score,
+                "two-term match must beat single-term match; \
+                 score_a1={score_a1:.4} score_a2={:.4}",
+                res_a2.score
+            );
+        }
+        // a1 must be the top result.
+        assert_eq!(results[0].asset_id, "a1", "two-term match must rank first");
+    }
+
+    /// **Precision@K test with known relevance judgments**.
+    ///
+    /// Corpus of 6 assets; ground truth for query "nature wildlife":
+    ///   Relevant (grade ≥ 1): nature_doc, wildlife_cam, ecology_study
+    ///   Non-relevant:         city_tour, sports_reel, cooking_show
+    ///
+    /// We require precision@3 (top 3 results are all relevant) = 1.0.
+    #[test]
+    fn test_bm25_precision_at_k_known_relevance_corpus() {
+        let mut idx = SmartSearchIndex::new();
+
+        // Relevant docs — all contain the query terms in prominent positions.
+        idx.index_asset(make_full_asset(
+            "nature_doc",
+            "nature wildlife documentary",
+            "Explores wild habitats",
+            &["nature", "wildlife", "documentary"],
+        ));
+        idx.index_asset(make_full_asset(
+            "wildlife_cam",
+            "wildlife camera trapping nature study",
+            "Camera traps capture wildlife in nature",
+            &["wildlife", "nature", "camera-trap"],
+        ));
+        idx.index_asset(make_full_asset(
+            "ecology_study",
+            "ecology and nature wildlife survey",
+            "A scientific survey of wildlife populations",
+            &["ecology", "nature", "wildlife"],
+        ));
+
+        // Non-relevant docs — no "nature" or "wildlife" in title/tags/description.
+        idx.index_asset(make_full_asset(
+            "city_tour",
+            "city skyline tour",
+            "Urban architecture and streets",
+            &["city", "urban", "architecture"],
+        ));
+        idx.index_asset(make_full_asset(
+            "sports_reel",
+            "highlight sports reel",
+            "Football match highlights",
+            &["sports", "football", "highlights"],
+        ));
+        idx.index_asset(make_full_asset(
+            "cooking_show",
+            "cooking show episode",
+            "Chef prepares Mediterranean dishes",
+            &["cooking", "food", "chef"],
+        ));
+
+        // Ground truth — the three relevant IDs.
+        let relevant: std::collections::HashSet<&str> =
+            ["nature_doc", "wildlife_cam", "ecology_study"]
+                .iter()
+                .copied()
+                .collect();
+
+        let results = idx.search("nature wildlife", &SearchFilter::default(), 3);
+        assert_eq!(
+            results.len(),
+            3,
+            "must return 3 results for precision@3 test"
+        );
+
+        // Precision@3 must be exactly 1.0 (all top-3 are relevant).
+        let hits: usize = results
+            .iter()
+            .filter(|r| relevant.contains(r.asset_id.as_str()))
+            .count();
+        assert_eq!(
+            hits,
+            3,
+            "precision@3 must be 3/3=1.0; top-3 result IDs: {:?}",
+            results.iter().map(|r| &r.asset_id).collect::<Vec<_>>()
+        );
+    }
+
+    /// **nDCG-inspired ordering test**.
+    ///
+    /// A document that matches the query in the title AND has a matching tag
+    /// (total signal: weight 3 + weight 2 = 5) must rank above one that only
+    /// matches in the description (weight 1).
+    ///
+    /// We validate this as a proxy for the nDCG ordering property: the highest-
+    /// relevance document (strongest signal) appears at rank 1.
+    #[test]
+    fn test_bm25_ndcg_title_plus_tag_beats_description_only() {
+        let mut idx = SmartSearchIndex::new();
+
+        // a1: "summit" appears in title (×3) AND as a tag (×2) → total weight 5
+        idx.index_asset(make_full_asset(
+            "a1",
+            "summit expedition film",
+            "an adventure documentary",
+            &["summit", "adventure"],
+        ));
+        // a2: "summit" appears only in description (×1)
+        idx.index_asset(make_full_asset(
+            "a2",
+            "mountain adventure",
+            "a summit climbing expedition",
+            &["mountain", "adventure"],
+        ));
+        // a3: no "summit" at all — must not appear in results.
+        idx.index_asset(make_full_asset("a3", "ocean dive", "", &["underwater"]));
+
+        let results = idx.search("summit", &SearchFilter::default(), 10);
+
+        assert_eq!(
+            results.len(),
+            2,
+            "only a1 and a2 contain 'summit'; results={:?}",
+            results.iter().map(|r| &r.asset_id).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            results[0].asset_id,
+            "a1",
+            "title+tag combined weight must rank a1 first; actual ranking: {:?}",
+            results.iter().map(|r| &r.asset_id).collect::<Vec<_>>()
+        );
+        assert!(
+            results[0].score > results[1].score,
+            "score gap must be positive: a1={:.4} a2={:.4}",
+            results[0].score,
+            results[1].score
+        );
+    }
+
+    /// **Matched-fields metadata correctness**.
+    ///
+    /// Verify that `matched_fields` accurately records which field(s) contributed
+    /// to the score — no phantom fields and no missed fields.
+    #[test]
+    fn test_bm25_matched_fields_completeness_and_accuracy() {
+        let mut idx = SmartSearchIndex::new();
+
+        // "rain" only in description.
+        let mut a1 = make_asset("a1", "weather film", &[]);
+        a1.description = "heavy rain and thunder".to_string();
+        idx.index_asset(a1);
+
+        // "storm" only in title.
+        idx.index_asset(make_full_asset("a2", "storm chaser documentary", "", &[]));
+
+        // "wind" only in tag.
+        idx.index_asset(make_full_asset("a3", "outdoor video", "", &["wind"]));
+
+        // "rain" → must report description only.
+        let rain = idx.search("rain", &SearchFilter::default(), 10);
+        assert_eq!(rain.len(), 1);
+        assert!(rain[0].matched_fields.contains(&"description".to_string()));
+        assert!(!rain[0].matched_fields.contains(&"title".to_string()));
+        assert!(!rain[0].matched_fields.contains(&"tags".to_string()));
+
+        // "storm" → must report title only.
+        let storm = idx.search("storm", &SearchFilter::default(), 10);
+        assert_eq!(storm.len(), 1);
+        assert!(storm[0].matched_fields.contains(&"title".to_string()));
+        assert!(!storm[0].matched_fields.contains(&"description".to_string()));
+
+        // "wind" → must report tags only.
+        let wind = idx.search("wind", &SearchFilter::default(), 10);
+        assert_eq!(wind.len(), 1);
+        assert!(wind[0].matched_fields.contains(&"tags".to_string()));
+        assert!(!wind[0].matched_fields.contains(&"title".to_string()));
+    }
+
+    /// **Score monotonicity**: adding a relevant document to an otherwise
+    /// irrelevant corpus must not reduce the score of an existing relevant
+    /// document (IDF denominator grows but the existing doc's df doesn't).
+    ///
+    /// Adding a non-matching doc for "forest" increases N (corpus size) while
+    /// keeping df("forest") = 1, which strictly increases IDF and therefore
+    /// increases the score of the relevant document.
+    #[test]
+    fn test_bm25_score_increases_as_corpus_grows_with_irrelevant_docs() {
+        let mut idx = SmartSearchIndex::new();
+        idx.index_asset(make_full_asset("a1", "forest trail footage", "", &[]));
+
+        let results_small = idx.search("forest", &SearchFilter::default(), 10);
+        let score_small = results_small[0].score;
+
+        // Add 5 irrelevant docs (no "forest").
+        for i in 0..5_u32 {
+            idx.index_asset(make_full_asset(
+                &format!("irr{i}"),
+                "urban landscape tour",
+                "",
+                &[],
+            ));
+        }
+
+        let results_large = idx.search("forest", &SearchFilter::default(), 10);
+        let score_large = results_large
+            .iter()
+            .find(|r| r.asset_id == "a1")
+            .expect("a1 must still be found after corpus expansion")
+            .score;
+
+        assert!(
+            score_large >= score_small,
+            "IDF must increase (or stay equal) as irrelevant docs are added; \
+             score_small={score_small:.4} score_large={score_large:.4}"
+        );
+    }
 }

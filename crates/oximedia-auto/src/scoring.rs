@@ -229,7 +229,48 @@ impl SceneFeatures {
     }
 }
 
-/// Weights for different feature components.
+/// Weights for different feature components in scene scoring.
+///
+/// Each weight scales the contribution of a single feature to the final scene
+/// importance score.  All weights are non-negative; a value of `0.0` disables
+/// the corresponding feature entirely.  The scorer normalises by the sum of
+/// all weights so absolute magnitudes do not matter — only the *ratios* between
+/// weights influence the result.
+///
+/// # Tuning Guidelines
+///
+/// The default weights (`motion=1.5`, `face=1.2`, `audio_peak=1.3`, …) are
+/// balanced for general highlight detection.  Below are starting-point presets
+/// for common content types; tune from there with real content:
+///
+/// ## Sports / Action
+/// Prioritise motion and audio intensity; de-emphasise face and sharpness.
+/// ```ignore
+/// FeatureWeights { motion: 2.5, face: 0.8, audio_peak: 2.0, audio_energy: 1.5,
+///                  color: 0.5, edge: 0.6, contrast: 0.4, sharpness: 0.6, object: 0.6 }
+/// ```
+///
+/// ## Interview / Documentary
+/// Prioritise face coverage and spoken-word audio; motion matters less.
+/// ```ignore
+/// FeatureWeights { motion: 0.5, face: 2.5, audio_peak: 1.5, audio_energy: 0.8,
+///                  color: 0.6, edge: 0.5, contrast: 0.5, sharpness: 1.0, object: 0.8 }
+/// ```
+///
+/// ## Music Video
+/// Balance motion with strong audio cues and rich colour.
+/// ```ignore
+/// FeatureWeights { motion: 1.8, face: 1.0, audio_peak: 2.2, audio_energy: 1.8,
+///                  color: 1.2, edge: 0.8, contrast: 0.8, sharpness: 0.6, object: 0.5 }
+/// ```
+///
+/// ## Nature / B-roll
+/// Visual quality (colour, sharpness, contrast) drives importance; audio is
+/// secondary and motion should be low to avoid wind-shake false positives.
+/// ```ignore
+/// FeatureWeights { motion: 0.6, face: 0.3, audio_peak: 0.5, audio_energy: 0.4,
+///                  color: 2.0, edge: 1.2, contrast: 1.5, sharpness: 1.8, object: 1.0 }
+/// ```
 #[derive(Debug, Clone)]
 pub struct FeatureWeights {
     /// Motion importance weight.
@@ -585,6 +626,7 @@ impl Default for TemporalContextConfig {
 }
 
 /// Scene scorer for importance analysis.
+#[derive(Clone)]
 pub struct SceneScorer {
     /// Configuration.
     config: ScoringConfig,

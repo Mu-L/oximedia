@@ -6,15 +6,29 @@ This directory contains fuzzing targets for the OxiMedia media processing librar
 
 The fuzzing infrastructure tests:
 
-### Container Parsers (5 targets)
+### Container Parsers (7 targets)
 - **matroska_parser** - Matroska/WebM demuxer (EBML, clusters, lacing)
 - **ogg_parser** - Ogg container demuxer (page parsing, CRC, stream demux)
 - **flac_parser** - FLAC container demuxer (metadata, frame headers)
 - **mp4_parser** - MP4/ISOBMFF demuxer (boxes, sample tables)
 - **wav_parser** - WAV/RIFF demuxer (chunk parsing)
+- **y4m_parser** - Y4M/YUV4MPEG2 demuxer (stream header, frame reads)
+- **aaf_parser** - AAF reader (CFB structured storage, object model, essence)
 
-### Video Codecs (4 targets)
+### Image Formats (3 targets)
+- **tiff_parser** - TIFF reader (IFDs, strips/tiles, BigTIFF, compression)
+- **exr_parser** - OpenEXR reader (attributes, scanline/tiled, multi-part)
+- **jpegxl_decoder** - JPEG-XL decoder (codestream + ISOBMFF, modular/ANS, animation)
+
+### Subtitle / Caption Parsers (4 targets)
+- **srt_parser** - SubRip parser (cue blocks, timestamps, formatting tags)
+- **ass_parser** - ASS/SSA parser (sections, format lines, override tags)
+- **webvtt_parser** - WebVTT parser (cues, settings, NOTE/STYLE/REGION)
+- **ttml_parser** - TTML/IMSC parser (XML, time expressions, TTML2 documents)
+
+### Video Codecs (5 targets)
 - **av1_decoder** - AV1 decoder (OBU parsing, tiles, entropy decoding)
+- **ffv1_decoder** - FFV1 decoder (config record, range coder, slices)
 - **vp9_decoder** - VP9 decoder (superframes, probability updates)
 - **vp8_decoder** - VP8 decoder (boolean decoder, partitions)
 - **theora_decoder** - Theora decoder (VP3-based, DCT, Huffman coding)
@@ -32,7 +46,7 @@ The fuzzing infrastructure tests:
 - **dash_parser** - DASH MPD parser (XML, periods, representations)
 - **rtmp_parser** - RTMP protocol parser (AMF0, chunk headers)
 
-Total: **16 fuzz targets**
+Total: **26 fuzz targets**
 
 ## Requirements
 

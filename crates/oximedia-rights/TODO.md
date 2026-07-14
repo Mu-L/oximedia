@@ -4,7 +4,7 @@
 - 40 modules (13 subdirectory modules) covering rights tracking, license management, expiration handling, territory restrictions, usage tracking, clearance workflows, royalty calculation, watermarking, DRM metadata, audit trails, compliance reporting
 - Core types: RightsManager (with SQLx database backend), RightsError enum with 13 variants
 - Conditional compilation: `database` module and `RightsManager` excluded on wasm32
-- Dependencies: oximedia-core, oximedia-watermark, sqlx, chrono, uuid, serde
+- Dependencies: oximedia-core, oximedia-watermark, oxisql-sqlite-compat (Pure-Rust SQLite), chrono, uuid, serde
 
 ## Enhancements
 - [x] Add in-memory `RightsManager` alternative for wasm32 targets using HashMap-based storage (implemented 2026-05-15; src/in_memory_manager.rs — InMemoryRightsManager with LicenseRecord HashMap, check_rights, add_license, revoke_license, list_active_licenses, check_rights_batch; 35+ tests)

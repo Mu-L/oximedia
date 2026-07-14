@@ -2,7 +2,7 @@
 //!
 //! Allocating a fresh `Vec<f32>` for each channel on every `process()` call
 //! produces garbage-collector pressure and latency jitter on the audio thread.
-//! This module provides a [`ChannelBufferSet`] that owns a contiguous slab of
+//! This module provides a [`ChannelBufferSet`](crate::channel_prealloc::ChannelBufferSet) that owns a contiguous slab of
 //! `f32` memory divided into fixed-size blocks — one per channel slot.  The
 //! mixer allocates the slab once, then borrows mutable sub-slices during each
 //! processing block with zero heap activity.
@@ -25,7 +25,7 @@
 //!
 //! # Thread Safety
 //!
-//! [`ChannelBufferSet`] is intentionally **not** `Sync` — it is designed for
+//! [`ChannelBufferSet`](crate::channel_prealloc::ChannelBufferSet) is intentionally **not** `Sync` — it is designed for
 //! single-threaded use on the audio callback.  For parallel channel processing
 //! (e.g. rayon) see `parallel_mix`.
 //!
@@ -133,8 +133,8 @@ impl SlotAllocator {
 
 /// A slab of pre-allocated `f32` audio buffers, one per channel slot.
 ///
-/// Create once with `max_channels` and `block_size`, then call [`get`] /
-/// [`get_mut`] per channel during each audio callback without any heap
+/// Create once with `max_channels` and `block_size`, then call [`get`](ChannelBufferSet::get) /
+/// [`get_mut`](ChannelBufferSet::get_mut) per channel during each audio callback without any heap
 /// allocation.
 pub struct ChannelBufferSet {
     /// Contiguous storage: `max_channels × block_size` samples.

@@ -290,7 +290,10 @@ impl StreamingAnalyzer {
             .iter()
             .zip(window.iter().take(frame_slice.len()))
             .map(|(&s, &w)| s * w)
-            .chain(std::iter::repeat(0.0_f32).take(win.saturating_sub(frame_slice.len())))
+            .chain(std::iter::repeat_n(
+                0.0_f32,
+                win.saturating_sub(frame_slice.len()),
+            ))
             .take(win)
             .collect();
 

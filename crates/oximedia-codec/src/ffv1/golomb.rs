@@ -256,7 +256,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore]
     fn test_golomb_roundtrip_zero() {
         let mut enc = GolombEncoder::new();
         enc.write_signed(0, 0);
@@ -268,7 +267,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_golomb_roundtrip_positive() {
         for k in 0..4u32 {
             for value in [1, 2, 3, 5, 10, 50, 100] {
@@ -284,7 +282,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_golomb_roundtrip_negative() {
         for k in 0..4u32 {
             for value in [-1, -2, -3, -5, -10, -50, -100] {
@@ -300,7 +297,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_golomb_roundtrip_sequence() {
         let values = [0, 1, -1, 2, -2, 10, -10, 0, 5, -3];
         let k = 2;
@@ -319,7 +315,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_golomb_context_adaptation() {
         let mut ctx = GolombContext::new();
         assert_eq!(ctx.k(), 0);
@@ -339,7 +334,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_golomb_context_decay() {
         let mut ctx = GolombContext::new();
         // Feed enough values to trigger decay
@@ -351,7 +345,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_golomb_decoder_eof() {
         let data = [0u8; 1];
         let mut dec = GolombDecoder::new(&data);
@@ -368,7 +361,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_golomb_encoder_bits() {
         let mut enc = GolombEncoder::new();
         // Value 0 with k=0: interleaved unsigned = 0, quotient=0, so "1" (1 bit)

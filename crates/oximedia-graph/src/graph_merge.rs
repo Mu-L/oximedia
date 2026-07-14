@@ -232,11 +232,40 @@ impl MergeGraph {
 
         match config.conflict_strategy {
             ConflictStrategy::Remap => {
-                let mut next_id = self.next_id().0;
+                // Reserve every id that will survive the merge so a remapped id
+                // can never collide with one of them. This is the union of:
+                //   * all ids already present in `self`, and
+                //   * the *non-conflicting* ids from `other` (which keep their
+                //     original id and are inserted as-is below).
+                //
+                // Without this reservation, a freshly-allocated remap id could
+                // equal a non-conflicting `other` id, and the later
+                // `self.nodes.insert(new_id, ..)` would silently overwrite that
+                // node (a HashMap-iteration-order-dependent node loss).
+                let mut reserved: HashSet<usize> = self.nodes.keys().map(|k| k.0).collect();
+                for &old_id in other.nodes.keys() {
+                    if !self.nodes.contains_key(&old_id) {
+                        reserved.insert(old_id.0);
+                    }
+                }
+
+                // Seed the allocation counter past the highest id seen in
+                // *either* graph so the initial candidates are already beyond
+                // every original id; `reserved` then skips any survivor.
+                let self_max = self.nodes.keys().map(|k| k.0).max().unwrap_or(0);
+                let other_max = other.nodes.keys().map(|k| k.0).max().unwrap_or(0);
+                let mut next_id = self_max.max(other_max).saturating_add(1);
+
                 for (&old_id, node) in &other.nodes {
                     if self.nodes.contains_key(&old_id) {
+                        // Allocate the next free id, skipping any reserved
+                        // survivor id and any id we have already handed out.
+                        while reserved.contains(&next_id) {
+                            next_id = next_id.saturating_add(1);
+                        }
                         let new_id = MergeNodeId(next_id);
-                        next_id += 1;
+                        reserved.insert(next_id);
+                        next_id = next_id.saturating_add(1);
                         mapping.add(old_id, new_id);
                         let mut new_node = node.clone();
                         new_node.id = new_id;

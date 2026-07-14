@@ -13,7 +13,7 @@
 //! 4. Return the best model found.
 
 use crate::features::MatchPair;
-use crate::{AlignError, AlignResult};
+use crate::{prosac, AlignError, AlignResult};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -31,6 +31,11 @@ pub struct ParallelRansacConfig {
     pub early_termination_ratio: f64,
     /// Number of iterations per parallel batch.
     pub batch_size: usize,
+    /// RANSAC confidence level (0.0 to 1.0) for adaptive iteration bound.
+    ///
+    /// Higher values require more iterations to guarantee the bound.
+    /// Default: 0.99.
+    pub confidence: f64,
 }
 
 impl Default for ParallelRansacConfig {
@@ -41,6 +46,7 @@ impl Default for ParallelRansacConfig {
             min_inliers: 8,
             early_termination_ratio: 0.8,
             batch_size: 100,
+            confidence: 0.99,
         }
     }
 }
@@ -203,6 +209,31 @@ impl ParallelRansac {
             if terminated.load(Ordering::Relaxed) {
                 early_terminated = true;
                 break;
+            }
+
+            // Adaptive iteration bound: recompute max iterations needed
+            // from the current best inlier ratio after each batch.
+            let current_best = global_best_inliers.load(Ordering::Relaxed);
+            if current_best > 0 {
+                let inlier_ratio = current_best as f64 / total.max(1) as f64;
+
+                // If essentially all matches are inliers, we can stop immediately.
+                if inlier_ratio >= 1.0 - 1e-9 {
+                    early_terminated = true;
+                    break;
+                }
+
+                let n_adaptive = prosac::adaptive_max_iterations(
+                    inlier_ratio.max(1e-6),
+                    min_s,
+                    self.config.confidence,
+                )
+                .ceil() as usize;
+
+                if total_iterations >= n_adaptive {
+                    early_terminated = true;
+                    break;
+                }
             }
         }
 
@@ -674,5 +705,212 @@ mod tests {
         };
         assert!(result.early_terminated);
         assert_eq!(result.iterations, 50);
+    }
+
+    // -- Adaptive iteration bound tests ------------------------------------------
+
+    /// LCG step — advances the PRNG state and returns a value in [0, 1).
+    fn lcg_f64(rng: &mut u64) -> f64 {
+        *rng = rng
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((*rng >> 11) as f64) / ((u64::MAX >> 11) as f64)
+    }
+
+    /// Build matches for a known affine transform [tx, ty] with a given
+    /// inlier fraction. Outliers have pseudo-random destination points that
+    /// do not correspond to any coherent affine, preventing the outlier majority
+    /// from forming a "better" model than the true inlier cluster.
+    fn make_matches_with_outliers(
+        tx: f64,
+        ty: f64,
+        n: usize,
+        inlier_fraction: f64,
+    ) -> Vec<MatchPair> {
+        let n_inliers = ((n as f64 * inlier_fraction).round() as usize).max(1);
+        let mut rng: u64 = 0xDEAD_BEEF_1234_5678;
+        let mut matches = Vec::with_capacity(n);
+        for i in 0..n {
+            let x = (i as f64 * 17.3) % 120.0;
+            let y = (i as f64 * 29.7) % 120.0;
+            let (dest_x, dest_y) = if i < n_inliers {
+                (x + tx, y + ty)
+            } else {
+                // Random destination not consistent with any single affine,
+                // so no large outlier subset forms a coherent model.
+                let rx = lcg_f64(&mut rng) * 800.0;
+                let ry = lcg_f64(&mut rng) * 800.0;
+                (rx, ry)
+            };
+            matches.push(MatchPair::new(
+                i,
+                i,
+                i as u32,
+                Point2D::new(x, y),
+                Point2D::new(dest_x, dest_y),
+            ));
+        }
+        matches
+    }
+
+    /// 99% inlier ratio → adaptive bound should be very small; RANSAC terminates
+    /// well before `max_iterations`.
+    #[test]
+    fn test_adaptive_bound_reduces_iterations_high_inlier() {
+        let max_iters = 500;
+        let ransac = ParallelRansac::new(
+            ParallelRansacConfig {
+                threshold: 5.0,
+                max_iterations: max_iters,
+                min_inliers: 5,
+                early_termination_ratio: 1.1, // disable ratio-based early term
+                batch_size: 50,
+                confidence: 0.99,
+            },
+            ParallelModelType::Affine,
+        );
+
+        // 200 matches with 99% inliers on a (tx=7, ty=3) affine
+        let matches = make_matches_with_outliers(7.0, 3.0, 200, 0.99);
+        let result = ransac.estimate(&matches).expect("should succeed");
+
+        assert!(
+            result.iterations < max_iters,
+            "Expected adaptive termination; iterations={} max={}",
+            result.iterations,
+            max_iters
+        );
+        // Model accuracy: tx ≈ 7, ty ≈ 3 within 0.1px
+        assert!(
+            (result.params[2] - 7.0).abs() < 0.1,
+            "tx error: params[2]={}",
+            result.params[2]
+        );
+        assert!(
+            (result.params[5] - 3.0).abs() < 0.1,
+            "ty error: params[5]={}",
+            result.params[5]
+        );
+    }
+
+    /// 10% inlier ratio → adaptive bound is ~4600 iterations, far above
+    /// `max_iterations=200`, so RANSAC must run to the max.
+    #[test]
+    fn test_adaptive_bound_runs_to_max_low_inlier() {
+        let max_iters = 200;
+        // Use large threshold so the sparse inlier cluster is genuinely found,
+        // but with only 10% ratio the adaptive N stays huge (>>max_iters).
+        let ransac = ParallelRansac::new(
+            ParallelRansacConfig {
+                threshold: 3.0,
+                max_iterations: max_iters,
+                min_inliers: 3,
+                early_termination_ratio: 1.1, // disable ratio-based early term
+                batch_size: 50,
+                confidence: 0.99,
+            },
+            ParallelModelType::Affine,
+        );
+
+        // 200 matches with only 10% inliers on (tx=2, ty=2) — within threshold=3.0
+        // Outliers are offset by 200px (well outside threshold).
+        let matches = make_matches_with_outliers(2.0, 2.0, 200, 0.10);
+        // For 10% inlier ratio with min_samples=3:
+        // n_adaptive = ceil(log(0.01)/log(1 - 0.1^3)) ≈ ceil(4605) = 4605 >> 200
+        // So RANSAC should run all the way to max_iterations.
+        let result = ransac.estimate(&matches).expect("estimate ok");
+
+        assert_eq!(
+            result.iterations, max_iters,
+            "Expected full run to max; iterations={} max={}",
+            result.iterations, max_iters
+        );
+    }
+
+    /// Lower confidence → fewer iterations needed. Same 80%-inlier data,
+    /// confidence=0.95 should use strictly fewer iterations than confidence=0.999.
+    #[test]
+    fn test_adaptive_confidence_sensitivity() {
+        let max_iters = 500;
+
+        let make_ransac = |confidence: f64| {
+            ParallelRansac::new(
+                ParallelRansacConfig {
+                    threshold: 5.0,
+                    max_iterations: max_iters,
+                    min_inliers: 5,
+                    early_termination_ratio: 1.1, // disable ratio-based early term
+                    batch_size: 10,
+                    confidence,
+                },
+                ParallelModelType::Affine,
+            )
+        };
+
+        let matches = make_matches_with_outliers(4.0, 2.0, 200, 0.80);
+
+        let result_low = make_ransac(0.95).estimate(&matches).expect("low conf ok");
+        let result_high = make_ransac(0.999).estimate(&matches).expect("high conf ok");
+
+        assert!(
+            result_low.iterations <= result_high.iterations,
+            "confidence=0.95 should use <= iterations than confidence=0.999; \
+             low={} high={}",
+            result_low.iterations,
+            result_high.iterations
+        );
+    }
+
+    /// Model accuracy must be unchanged when adaptive bound is active vs when it
+    /// is effectively disabled (max_iterations very large).
+    #[test]
+    fn test_model_accuracy_unchanged_with_adaptive() {
+        let tx = 12.0_f64;
+        let ty = -7.0_f64;
+        let matches = make_matches_with_outliers(tx, ty, 200, 0.95);
+
+        let base_ransac = ParallelRansac::new(
+            ParallelRansacConfig {
+                threshold: 5.0,
+                max_iterations: 2000,
+                min_inliers: 5,
+                early_termination_ratio: 1.1, // disable ratio-based early term
+                batch_size: 100,
+                confidence: 0.9999, // very high confidence → adaptive bound near max
+            },
+            ParallelModelType::Affine,
+        );
+
+        let adaptive_ransac = ParallelRansac::new(
+            ParallelRansacConfig {
+                threshold: 5.0,
+                max_iterations: 2000,
+                min_inliers: 5,
+                early_termination_ratio: 1.1,
+                batch_size: 100,
+                confidence: 0.99,
+            },
+            ParallelModelType::Affine,
+        );
+
+        let base_result = base_ransac.estimate(&matches).expect("base ok");
+        let adaptive_result = adaptive_ransac.estimate(&matches).expect("adaptive ok");
+
+        // Both should recover the affine translation within 0.5px tolerance.
+        for (label, params) in [
+            ("base", &base_result.params),
+            ("adaptive", &adaptive_result.params),
+        ] {
+            assert!(
+                (params[2] - tx).abs() < 0.5,
+                "{label}: tx error, params[2]={}",
+                params[2]
+            );
+            assert!(
+                (params[5] - ty).abs() < 0.5,
+                "{label}: ty error, params[5]={}",
+                params[5]
+            );
+        }
     }
 }

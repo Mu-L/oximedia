@@ -33,9 +33,17 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SimpleWalOp {
     /// Store data at key.
-    Put { key: String, data: Vec<u8> },
+    Put {
+        /// Object key to write.
+        key: String,
+        /// Raw bytes to store at `key`.
+        data: Vec<u8>,
+    },
     /// Remove key.
-    Delete { key: String },
+    Delete {
+        /// Object key to remove.
+        key: String,
+    },
 }
 
 /// Binary serializer / deserializer for WAL entries.

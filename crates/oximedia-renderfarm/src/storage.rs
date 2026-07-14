@@ -237,16 +237,30 @@ impl StorageManager {
         self.chunk_store.values().map(|v| v.len() as u64).sum()
     }
 
-    /// Compress data using lz4_flex (pure Rust replacement for zstd)
+    /// Compress data using `oxiarc_lz4` (Pure Rust LZ4 frame format)
     fn compress_data(&self, data: &[u8]) -> Result<Vec<u8>> {
-        Ok(lz4_flex::compress_prepend_size(data))
+        oxiarc_lz4::compress(data).map_err(|e| Error::Storage(format!("Compression failed: {e}")))
     }
 
-    /// Decompress data using lz4_flex
+    /// Decompress data using `oxiarc_lz4`
     fn decompress_data(&self, data: &[u8]) -> Result<Vec<u8>> {
-        let decompressed = lz4_flex::decompress_size_prepended(data)
-            .map_err(|e| Error::Storage(format!("Decompression failed: {e}")))?;
-        Ok(decompressed)
+        // The LZ4 frame format is self-describing, but `decompress` takes a
+        // `max_output` safety bound. Grow it progressively to handle arbitrary
+        // compression ratios without storing the original size separately.
+        let mut max_output = data.len().saturating_mul(16).max(65_536);
+        loop {
+            match oxiarc_lz4::decompress(data, max_output) {
+                Ok(decompressed) => return Ok(decompressed),
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("exceeds maximum size") && max_output < 256 * 1024 * 1024 {
+                        max_output = max_output.saturating_mul(4);
+                    } else {
+                        return Err(Error::Storage(format!("Decompression failed: {e}")));
+                    }
+                }
+            }
+        }
     }
 
     /// Deduplicate data by chunking
@@ -495,6 +509,35 @@ mod tests {
 
         let stats = manager.get_stats();
         assert_eq!(stats.total_files, 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_compress_decompress_roundtrip() -> Result<()> {
+        let config = StorageConfig::default();
+        let manager = StorageManager::new(config);
+
+        // Mixed, non-trivially-compressible payload to exercise the LZ4 frame
+        // round-trip beyond the all-zeros case covered by `test_compression`.
+        let data: Vec<u8> = (0..4096u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+
+        let compressed = manager.compress_data(&data)?;
+        let restored = manager.decompress_data(&compressed)?;
+        assert_eq!(
+            restored, data,
+            "LZ4 compress/decompress round-trip mismatch"
+        );
+
+        // Empty input must also round-trip.
+        let empty_compressed = manager.compress_data(&[])?;
+        let empty_restored = manager.decompress_data(&empty_compressed)?;
+        assert!(
+            empty_restored.is_empty(),
+            "empty round-trip should yield empty output"
+        );
 
         Ok(())
     }

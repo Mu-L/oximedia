@@ -11,7 +11,7 @@
 //!    `255` = solid glyph pixel and `0` = transparent background.
 //! 2. [`render_outline`] erodes/dilates the mask with a square structuring element
 //!    and composites the outline color beneath the glyph fill.
-//! 3. [`render_drop_shadow`] blurs a copy of the mask with a box blur, offsets it
+//! 3. [`generate_shadow_mask`] blurs a copy of the mask with a box blur, offsets it
 //!    by `(offset_x, offset_y)`, and composites it beneath the fill layer.
 //! 4. [`render_text_with_effects`] combines both in the correct paint order:
 //!    shadow → outline → glyph fill → compose onto the destination RGBA buffer.

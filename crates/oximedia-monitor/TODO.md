@@ -33,10 +33,10 @@
 - [x] Use dashmap more aggressively for hot-path metric lookups instead of Arc<Mutex<HashMap>> (verified: metrics/registry.rs:Arc<DashMap>, no Mutex<HashMap> in hot path)
 - [x] Implement metric downsampling for historical data (keep 1s resolution for 1h, 1m for 24h, 5m for 30d) (verified: metric_downsample.rs:20:RetentionPolicy, :22:resolution_ms, multi-tier tiers vec)
 - [x] Add connection pooling for SQLite to reduce open/close overhead in concurrent access (verified: sqlite_pool.rs:228:SqlitePool, :80:PoolConfig, PooledConnection)
-- [ ] Profile and optimize sysinfo collection -- skip metrics that are not enabled in config
+- [x] Profile and optimize sysinfo collection -- skip metrics that are not enabled in config (verified: SystemMetricsConfig per-category gating in system.rs; with_config/new_with_options/new constructors; 4 new tests)
 
 ## Testing
-- [ ] Add integration test for the full alert pipeline: metric threshold -> rule evaluation -> notification dispatch
+- [x] Add integration test for the full alert pipeline: metric threshold -> rule evaluation -> notification dispatch (2026-06-22; wired AlertManager::evaluate_metric -- rule eval -> AlertChannel dispatch, edge-triggered with dedup + recovery -- and added 8 e2e tests in tests/alert_pipeline_dispatch.rs using a capturing AlertChannel sink)
 - [ ] Test SLO tracking with synthetic uptime data (99.9% SLO with simulated downtime)
 - [ ] Add test for capacity_planner with linear growth trend data verifying forecast accuracy
 - [ ] Test metric_export Prometheus format output against promtool lint

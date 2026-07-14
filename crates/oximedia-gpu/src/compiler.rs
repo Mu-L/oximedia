@@ -3,7 +3,7 @@
 //! This module provides utilities for compiling shaders at runtime,
 //! including error handling, preprocessor support, and optimization.
 
-use crate::{GpuDevice, GpuError, Result};
+use crate::{GpuDevice, GpuError, Result, Shared};
 use std::collections::HashMap;
 use wgpu::ShaderModule;
 
@@ -155,7 +155,7 @@ impl Default for ShaderPreprocessor {
 
 /// Shader compiler with caching and optimization
 pub struct ShaderCompiler {
-    device: std::sync::Arc<wgpu::Device>,
+    device: Shared<wgpu::Device>,
     preprocessor: ShaderPreprocessor,
 }
 
@@ -164,7 +164,7 @@ impl ShaderCompiler {
     #[must_use]
     pub fn new(device: &GpuDevice) -> Self {
         Self {
-            device: std::sync::Arc::clone(device.device()),
+            device: device.device().clone(),
             preprocessor: ShaderPreprocessor::new(),
         }
     }

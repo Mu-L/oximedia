@@ -758,7 +758,7 @@ mod tests {
     fn test_scene_cut_no_boost_when_no_cut() {
         // Smooth pan: all frames identical → SAD == 0 → no QP boost.
         let frame = vec![128u8; 64 * 64];
-        let frames: Vec<&[u8]> = std::iter::repeat(frame.as_slice()).take(10).collect();
+        let frames: Vec<&[u8]> = std::iter::repeat_n(frame.as_slice(), 10).collect();
         let qps = scene_cut_aware_qp_curve(&frames, 64, 64, 26, 8);
 
         assert_eq!(qps.len(), 10);

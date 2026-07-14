@@ -300,8 +300,8 @@ mod tests {
         assert_eq!(state.broadcaster.receiver_count(), 0);
     }
 
-    #[test]
-    fn test_broadcast_event() {
+    #[tokio::test]
+    async fn test_broadcast_event() {
         let monitoring = Arc::new(MonitoringService::new());
         let state = WebSocketState::new(monitoring);
 
@@ -310,21 +310,17 @@ mod tests {
         let workflow_id = WorkflowId::new();
         state.broadcast_workflow_started(workflow_id, "test-workflow".to_string());
 
-        tokio::runtime::Runtime::new()
-            .expect("should succeed in test")
-            .block_on(async {
-                let event = rx.recv().await.expect("should succeed in test");
-                match event {
-                    WorkflowEvent::WorkflowStarted {
-                        workflow_id: id,
-                        workflow_name,
-                    } => {
-                        assert_eq!(id, workflow_id);
-                        assert_eq!(workflow_name, "test-workflow");
-                    }
-                    _ => panic!("Wrong event type"),
-                }
-            });
+        let event = rx.recv().await.expect("should succeed in test");
+        match event {
+            WorkflowEvent::WorkflowStarted {
+                workflow_id: id,
+                workflow_name,
+            } => {
+                assert_eq!(id, workflow_id);
+                assert_eq!(workflow_name, "test-workflow");
+            }
+            _ => panic!("Wrong event type"),
+        }
     }
 
     #[test]

@@ -835,4 +835,290 @@ mod tests {
         let m = ContentTypeMetrics::default();
         assert!((m.avg_ttfb_ms() - 0.0).abs() < 1e-15);
     }
+
+    // ── Prometheus text-exposition format conformance ──────────────────────────
+    //
+    // A small hand-rolled lenient parser (NO external dependency) classifies
+    // each line of the exposition into one of:
+    //   * a `# HELP <name> <text>` comment,
+    //   * a `# TYPE <name> <type>` comment,
+    //   * a sample line `<name>[{labels}] <value>`,
+    //   * blank.
+    // We then assert the structural invariants Prometheus scrapers rely on.
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum PromLine<'a> {
+        Help { name: &'a str },
+        Type { name: &'a str, kind: &'a str },
+        Sample { series: String, value: &'a str },
+        Blank,
+    }
+
+    /// Lenient single-line parser for the Prometheus text format.
+    /// `series` is the metric name plus any `{labels}` block (the unique time
+    /// series identifier); `value` is the raw token after the final space.
+    fn parse_prom_line(line: &str) -> PromLine<'_> {
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            return PromLine::Blank;
+        }
+        if let Some(rest) = trimmed.strip_prefix("# HELP ") {
+            let name = rest.split_whitespace().next().unwrap_or("");
+            return PromLine::Help { name };
+        }
+        if let Some(rest) = trimmed.strip_prefix("# TYPE ") {
+            let mut it = rest.split_whitespace();
+            let name = it.next().unwrap_or("");
+            let kind = it.next().unwrap_or("");
+            return PromLine::Type { name, kind };
+        }
+        // Sample line: split on the LAST space → "<series> <value>".
+        let (series, value) = match trimmed.rsplit_once(' ') {
+            Some((s, v)) => (s, v),
+            None => (trimmed, ""),
+        };
+        PromLine::Sample {
+            series: series.to_string(),
+            value,
+        }
+    }
+
+    /// Extract the bare metric name from a series id (strip any `{...}` labels).
+    fn metric_name_of(series: &str) -> &str {
+        match series.find('{') {
+            Some(i) => &series[..i],
+            None => series,
+        }
+    }
+
+    /// A valid Prometheus metric name matches `[a-zA-Z_:][a-zA-Z0-9_:]*`.
+    fn is_valid_metric_name(name: &str) -> bool {
+        let mut chars = name.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_alphabetic() || c == '_' || c == ':' => {}
+            _ => return false,
+        }
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+    }
+
+    // 26. HELP/TYPE present and correctly ORDERED for every metric:
+    //     for each metric the exposition must contain `# HELP <name>` then
+    //     `# TYPE <name> <kind>` then at least one sample, in that order.
+    #[test]
+    fn test_prometheus_help_type_ordered() {
+        let m = CdnMetrics::new();
+        m.record_hit(1000);
+        m.record_miss(500);
+        m.record_error();
+        let prom = m.to_prometheus();
+
+        let lines: Vec<PromLine> = prom.lines().map(parse_prom_line).collect();
+
+        // Walk the exposition; track per-metric the indices of HELP/TYPE/Sample.
+        use std::collections::HashMap as Map;
+        let mut help_at: Map<&str, usize> = Map::new();
+        let mut type_at: Map<&str, usize> = Map::new();
+        let mut sample_at: Map<String, usize> = Map::new();
+
+        for (i, l) in lines.iter().enumerate() {
+            match l {
+                PromLine::Help { name } => {
+                    assert!(
+                        is_valid_metric_name(name),
+                        "invalid metric name in HELP: {name:?}"
+                    );
+                    help_at.entry(name).or_insert(i);
+                }
+                PromLine::Type { name, kind } => {
+                    assert!(
+                        is_valid_metric_name(name),
+                        "invalid metric name in TYPE: {name:?}"
+                    );
+                    assert!(
+                        matches!(
+                            *kind,
+                            "counter" | "gauge" | "histogram" | "summary" | "untyped"
+                        ),
+                        "unknown metric type {kind:?} for {name}"
+                    );
+                    type_at.entry(name).or_insert(i);
+                }
+                PromLine::Sample { series, .. } => {
+                    let name = metric_name_of(series);
+                    sample_at.entry(name.to_string()).or_insert(i);
+                }
+                PromLine::Blank => {}
+            }
+        }
+
+        // Every metric this implementation emits, with expected ordering.
+        for name in [
+            "cdn_requests_total",
+            "cdn_cache_hits_total",
+            "cdn_cache_misses_total",
+            "cdn_bytes_served_total",
+            "cdn_errors_total",
+            "cdn_cache_hit_ratio",
+        ] {
+            let h = *help_at
+                .get(name)
+                .unwrap_or_else(|| panic!("no HELP for {name}"));
+            let t = *type_at
+                .get(name)
+                .unwrap_or_else(|| panic!("no TYPE for {name}"));
+            let s = *sample_at
+                .get(name)
+                .unwrap_or_else(|| panic!("no sample for {name}"));
+            assert!(
+                h < t && t < s,
+                "ordering broken for {name}: HELP@{h} TYPE@{t} SAMPLE@{s}"
+            );
+        }
+    }
+
+    // 27. No duplicate time series: each unique `name{labels}` series appears
+    //     exactly once across the full registry scrape (global + edges). This is
+    //     the summary-style invariant this implementation guarantees — it emits
+    //     plain counters and one gauge (no native histogram `_bucket` lines), so
+    //     we pin the real "no duplicate series" property rather than a histogram
+    //     bucket sequence that this code does not produce.
+    #[test]
+    fn test_prometheus_no_duplicate_series() {
+        let reg = MetricsRegistry::new();
+        reg.record_hit("pop-a", 1024);
+        reg.record_miss("pop-a", 512);
+        reg.record_hit("pop-b", 2048);
+        reg.record_error("pop-b");
+        let prom = reg.to_prometheus();
+
+        use std::collections::HashMap as Map;
+        let mut seen: Map<String, usize> = Map::new();
+        for line in prom.lines() {
+            if let PromLine::Sample { series, .. } = parse_prom_line(line) {
+                *seen.entry(series).or_insert(0) += 1;
+            }
+        }
+        for (series, count) in &seen {
+            assert_eq!(
+                *count, 1,
+                "duplicate time series {series:?} appeared {count} times"
+            );
+        }
+        // Sanity: both edge nodes contributed distinct labeled series.
+        assert!(seen.keys().any(|s| s.contains(r#"node="pop-a""#)));
+        assert!(seen.keys().any(|s| s.contains(r#"node="pop-b""#)));
+    }
+
+    // 28. Counter naming convention: every metric typed `counter` carries the
+    //     `_total` suffix (Prometheus best practice), and the lone non-`_total`
+    //     metric is the `gauge` ratio.
+    #[test]
+    fn test_prometheus_counter_total_suffix() {
+        let m = CdnMetrics::new();
+        m.record_hit(1);
+        let prom = m.to_prometheus();
+
+        // Build name → kind from the TYPE lines.
+        use std::collections::HashMap as Map;
+        let mut kinds: Map<&str, &str> = Map::new();
+        for line in prom.lines() {
+            if let PromLine::Type { name, kind } = parse_prom_line(line) {
+                kinds.insert(name, kind);
+            }
+        }
+        assert!(!kinds.is_empty(), "no TYPE lines parsed");
+        for (name, kind) in &kinds {
+            match *kind {
+                "counter" => assert!(
+                    name.ends_with("_total"),
+                    "counter {name} must end with _total"
+                ),
+                "gauge" => assert!(
+                    !name.ends_with("_total"),
+                    "gauge {name} should not use _total suffix"
+                ),
+                other => panic!("unexpected metric kind {other} for {name}"),
+            }
+        }
+    }
+
+    // 29. Well-formed sample lines (lenient round-trip): every sample line is
+    //     `name[{labels}] value` where the name is a valid Prometheus metric
+    //     name and the value parses as a finite f64. Covers both the unlabeled
+    //     global series and the labeled per-edge series.
+    #[test]
+    fn test_prometheus_sample_lines_wellformed() {
+        let reg = MetricsRegistry::new();
+        reg.record_hit("edge-xyz", 1_073_741_824); // 1 GiB → exercises large values
+        reg.record_miss("edge-xyz", 0);
+        let prom = reg.to_prometheus();
+
+        let mut sample_count = 0usize;
+        for line in prom.lines() {
+            match parse_prom_line(line) {
+                PromLine::Sample { series, value } => {
+                    sample_count += 1;
+                    let name = metric_name_of(&series);
+                    assert!(
+                        is_valid_metric_name(name),
+                        "sample series {series:?} has invalid metric name {name:?}"
+                    );
+                    // Labels block, if present, must be balanced `{...}`.
+                    if let Some(open) = series.find('{') {
+                        assert!(
+                            series.ends_with('}'),
+                            "unbalanced label block in {series:?}"
+                        );
+                        assert!(
+                            open < series.len() - 1,
+                            "empty/odd label block in {series:?}"
+                        );
+                    }
+                    let parsed: f64 = value
+                        .parse()
+                        .unwrap_or_else(|_| panic!("value {value:?} not a number in {series:?}"));
+                    assert!(
+                        parsed.is_finite(),
+                        "sample value must be finite: {series} = {value}"
+                    );
+                }
+                PromLine::Help { name } | PromLine::Type { name, .. } => {
+                    assert!(is_valid_metric_name(name), "bad name in comment: {name:?}");
+                }
+                PromLine::Blank => {}
+            }
+        }
+        assert!(sample_count > 0, "expected at least one sample line");
+    }
+
+    // 30. The gauge sample value tracks hit_ratio and is formatted to 6 decimals
+    //     (real behavior of `emit_gauge`). 2 hits / 3 total = 0.666667.
+    #[test]
+    fn test_prometheus_gauge_value_matches_hit_ratio() {
+        let m = CdnMetrics::new();
+        m.record_hit(0);
+        m.record_hit(0);
+        m.record_miss(0);
+        let prom = m.to_prometheus();
+
+        let mut gauge_val: Option<f64> = None;
+        for line in prom.lines() {
+            if let PromLine::Sample { series, value } = parse_prom_line(line) {
+                if metric_name_of(&series) == "cdn_cache_hit_ratio" {
+                    gauge_val = value.parse().ok();
+                }
+            }
+        }
+        let v = gauge_val.expect("cdn_cache_hit_ratio sample missing");
+        assert!(
+            (v - m.hit_ratio()).abs() < 1e-6,
+            "gauge {v} should match hit_ratio {}",
+            m.hit_ratio()
+        );
+        // Confirm 6-decimal rendering (0.666667), not e.g. 0.6666666667.
+        assert!(
+            prom.contains("cdn_cache_hit_ratio 0.666667"),
+            "expected 6-decimal gauge rendering in:\n{prom}"
+        );
+    }
 }

@@ -32,11 +32,11 @@
 - [x] Pool `FrameBuffer` allocations in `detect_shots` to reduce allocation pressure on long sequences (implemented at frame_buffer.rs: FrameBufferPool + acquire/release, used in lib.rs detect_shots, Wave 14 Slice G)
 
 ## Testing
-- [ ] Add integration tests for `detect_shots` with synthetic frame sequences containing known cuts and dissolves
-- [ ] Test `continuity::ContinuityChecker` with crafted jump-cut and axis-crossing scenarios
-- [ ] Add round-trip tests for `export::edl` and `export::shotlist` (export then re-import)
-- [ ] Test `scene::SceneDetector` with multi-scene sequences having distinct visual characteristics
-- [ ] Add property-based tests for `pattern::RhythmAnalyzer` with varying shot duration distributions
+- [x] Add integration tests for `detect_shots` with synthetic frame sequences containing known cuts and dissolves (tests/detect_synthetic.rs:60 cut_sequence_yields_three_shots_at_expected_starts, :122 identical_frames_collapse_to_single_shot, :155 dissolve_ramp_scores_higher_than_abrupt_triplet, :194 dissolve_detector_below_minimum_returns_sentinel)
+- [x] Test `continuity::ContinuityChecker` with crafted jump-cut and axis-crossing scenarios (tests/structure_analysis.rs:67 jump_cut_detected_for_identical_consecutive_shots, :103 axis_crossing_detected_for_opposed_pans_only, :144 distinct_shots_without_movement_have_no_issues)
+- [x] Add round-trip tests for `export::edl` and `export::shotlist` (export then re-import) (tests/export_roundtrip.rs:139 shots_json_roundtrip_is_identity, :160 scenes_json_roundtrip_is_identity; note: EDL/CSV/FCP-XML/Resolve exporters are export-only with no re-importer in this crate, so the lossless round-trip is pinned via the JSON interchange path)
+- [x] Test `scene::SceneDetector` with multi-scene sequences having distinct visual characteristics (tests/structure_analysis.rs:180 fade_transitions_partition_shots_into_scenes, :211 scene_boundary_requires_both_coverage_and_type_change)
+- [x] Add property-based tests for `pattern::RhythmAnalyzer` with varying shot duration distributions (tests/structure_analysis.rs:241 rhythm_known_durations_produce_exact_metrics exact closed-form, :330 rhythm_invariants_hold_for_random_durations seeded SplitMix64 over 500 random vectors)
 
 ## Documentation
 - [ ] Add architecture diagram showing the full detection pipeline (tracking -> estimation -> classification -> export)

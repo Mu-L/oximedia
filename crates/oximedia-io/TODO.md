@@ -56,12 +56,13 @@
   - **Risk:** thread-join on drop must flush remaining bytes; test EOF mid-buffer.
 
 ## Testing
-- [ ] Add tests for `write_journal.rs` crash recovery by simulating interrupted writes
-- [ ] Test `ring_buffer.rs` under concurrent producer/consumer with varying rates
-- [ ] Add `mmap.rs` tests with files larger than available RAM to verify windowed mapping
-- [ ] Test `format_detector.rs` with truncated files and zero-length inputs
-- [ ] Add throughput benchmarks for `copy_engine.rs` comparing buffered vs. mmap vs. splice paths
-- [ ] Test `progress_reader.rs` callback accuracy at various read granularities
+- [x] Add tests for `write_journal.rs` crash recovery by simulating interrupted writes (Wave 27)
+  - **Caveat:** `WriteJournal` is in-memory, serialize-only — there is NO persistence/`replay()` API. The test pins the *real* durability surface: the 40-byte `JournalEntry::to_bytes`/`from_bytes` codec. A torn write is modeled by truncating a concatenated entry stream mid-record; decoding in 40-byte frames recovers exactly the 7 intact records and rejects the 17-byte partial tail. Also covers zero-length file → 0 entries, and checkpoint-then-recover (checkpoint clears entries but preserves the seq counter). See `tests/io_reliability.rs`.
+- [x] Test `ring_buffer.rs` under concurrent producer/consumer with varying rates (Wave 27 — SPSC, 100k seeded xorshift bytes, partial-push loop + rate-varied consumer, exact FIFO order verified)
+- [x] Add `mmap.rs` tests with files larger than available RAM to verify windowed mapping (Wave 27 — `MmapFile` is an in-process simulation, so "larger than RAM" is modeled as 16×4 KiB windows advancing the region index; offset/length/slice/contiguity all asserted)
+- [x] Test `format_detector.rs` with truncated files and zero-length inputs (Wave 27 — empty/1-byte JPEG/7-byte PNG/11-byte RIFF-short/3-byte EBML all → Unknown, no panic; positive control full RIFF/WAVE → Wav conf 1.0)
+- [x] Add throughput benchmarks for `copy_engine.rs` comparing buffered vs. mmap vs. splice paths (Wave 27 — `benches/copy_engine_bench.rs`: Buffered/Chunked/ZeroCopy over a 4 MiB temp file + `SplicePipe::transfer` over cursors as the crate's portable "splice" dimension; harness=false, no cfg gate)
+- [x] Test `progress_reader.rs` callback accuracy at various read granularities (Wave 27 — granularities [1,7,64,4096,16384] all reach bytes_read==10_000 & fraction==1.0; report_interval=2500 fires >=4 times)
 
 ## Documentation
 - [ ] Add an I/O architecture diagram showing the source -> buffer -> pipeline -> writer flow

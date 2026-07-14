@@ -314,9 +314,13 @@ impl VideoScaler {
         match self.params.aspect_ratio {
             AspectRatioMode::Stretch => (self.params.width, self.params.height),
             AspectRatioMode::Letterbox | AspectRatioMode::Crop => {
+                // Guard against zero source dimensions: clamp to 1 to avoid NaN/infinity
+                // from floating-point division, which would produce saturated u32::MAX or 0.
+                let safe_src_width = src_width.max(1);
+                let safe_src_height = src_height.max(1);
                 // Compute the Display Aspect Ratio incorporating PAR.
-                let display_width = src_width as f64 * par.to_float();
-                let src_aspect = display_width / src_height as f64;
+                let display_width = safe_src_width as f64 * par.to_float();
+                let src_aspect = display_width / safe_src_height as f64;
                 let dst_aspect = self.params.width as f64 / self.params.height as f64;
 
                 if (src_aspect - dst_aspect).abs() < f64::EPSILON {
@@ -502,5 +506,89 @@ mod tests {
         let par = PixelAspectRatio::pal_16_9();
         assert_eq!(par.num, 16);
         assert_eq!(par.den, 11);
+    }
+
+    // ── Dimension fuzz tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_scale_1x1_src() {
+        // Tiny 1×1 source: result must be non-zero in both dimensions
+        let params = ScalingParams::new(1920, 1080).with_aspect_ratio(AspectRatioMode::Letterbox);
+        let scaler = VideoScaler::new(params);
+        let (w, h) = scaler.calculate_dimensions(1, 1);
+        assert!(w > 0, "width must be non-zero for 1×1 source; got {w}");
+        assert!(h > 0, "height must be non-zero for 1×1 source; got {h}");
+    }
+
+    #[test]
+    fn test_scale_8k_src() {
+        // 8K source into 1920×1080 target — result must fit within target
+        let params = ScalingParams::new(1920, 1080).with_aspect_ratio(AspectRatioMode::Letterbox);
+        let scaler = VideoScaler::new(params);
+        let (w, h) = scaler.calculate_dimensions(7680, 4320);
+        // For 16:9→16:9 stretch case the scaler outputs (1920, 1080) exactly
+        assert!(
+            w <= 1920,
+            "width {w} must fit within target 1920 for 8K downscale"
+        );
+        assert!(
+            h <= 1080,
+            "height {h} must fit within target 1080 for 8K downscale"
+        );
+    }
+
+    #[test]
+    fn test_scale_tall_src() {
+        // Extremely tall (1×10000) source — result must be valid non-zero dimensions
+        let params = ScalingParams::new(1920, 1080).with_aspect_ratio(AspectRatioMode::Letterbox);
+        let scaler = VideoScaler::new(params);
+        let (w, h) = scaler.calculate_dimensions(1, 10000);
+        assert!(w > 0, "width must be non-zero for tall source; got {w}");
+        assert!(h > 0, "height must be non-zero for tall source; got {h}");
+    }
+
+    #[test]
+    fn test_scale_wide_src() {
+        // Extremely wide (10000×1) source — result must be valid non-zero dimensions
+        let params = ScalingParams::new(1920, 1080).with_aspect_ratio(AspectRatioMode::Letterbox);
+        let scaler = VideoScaler::new(params);
+        let (w, h) = scaler.calculate_dimensions(10000, 1);
+        assert!(w > 0, "width must be non-zero for wide source; got {w}");
+        assert!(h > 0, "height must be non-zero for wide source; got {h}");
+    }
+
+    #[test]
+    fn test_scale_zero_src_no_panic() {
+        // (0, 0) source: the `.max(1)` guard in calculate_dimensions_with_par ensures
+        // no NaN/infinity propagation. Stretch mode returns target directly;
+        // Letterbox mode uses clamped (1,1) source aspect → returns target dimensions.
+        let params_stretch =
+            ScalingParams::new(1920, 1080).with_aspect_ratio(AspectRatioMode::Stretch);
+        let scaler_stretch = VideoScaler::new(params_stretch);
+        let (w_s, h_s) = scaler_stretch.calculate_dimensions(0, 0);
+        assert_eq!((w_s, h_s), (1920, 1080), "Stretch(0,0) must return target");
+
+        let params_lb =
+            ScalingParams::new(1920, 1080).with_aspect_ratio(AspectRatioMode::Letterbox);
+        let scaler_lb = VideoScaler::new(params_lb);
+        let (w_lb, h_lb) = scaler_lb.calculate_dimensions(0, 0);
+        // 1×1 source aspect (1.0) < 16:9 (1.778) → fit width → h = 1920/1.0 = 1920
+        // Regardless of exact value: must be non-zero and not saturated
+        assert!(
+            w_lb > 0,
+            "Letterbox(0,0) width must be non-zero; got {w_lb}"
+        );
+        assert!(
+            h_lb > 0,
+            "Letterbox(0,0) height must be non-zero; got {h_lb}"
+        );
+        assert!(
+            w_lb <= u32::MAX / 2,
+            "Letterbox(0,0) width must not saturate; got {w_lb}"
+        );
+        assert!(
+            h_lb <= u32::MAX / 2,
+            "Letterbox(0,0) height must not saturate; got {h_lb}"
+        );
     }
 }

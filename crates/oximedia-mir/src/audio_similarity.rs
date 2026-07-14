@@ -9,10 +9,10 @@
 //!
 //! | Algorithm | Use case |
 //! |-----------|----------|
-//! | [`CosineSimilarity`] | Feature-vector dot-product similarity (tempo, spectral, timbral vectors) |
-//! | [`EarthMoverDistance`] | Comparing probability distributions (rhythm patterns, chroma histograms) |
-//! | [`SimilarityMatrix`] | All-pairs pairwise similarity for a track collection |
-//! | [`AudioSimilaritySearch`] | Ranked nearest-neighbour search against a corpus |
+//! | [`CosineSimilarity`](crate::audio_similarity::CosineSimilarity) | Feature-vector dot-product similarity (tempo, spectral, timbral vectors) |
+//! | [`EarthMoverDistance`](crate::audio_similarity::EarthMoverDistance) | Comparing probability distributions (rhythm patterns, chroma histograms) |
+//! | [`SimilarityMatrix`](crate::audio_similarity::SimilarityMatrix) | All-pairs pairwise similarity for a track collection |
+//! | [`AudioSimilaritySearch`](crate::audio_similarity::AudioSimilaritySearch) | Ranked nearest-neighbour search against a corpus |
 //!
 //! # Example
 //!

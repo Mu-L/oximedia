@@ -27,6 +27,16 @@ impl AlertCondition {
             _ => false,
         }
     }
+
+    /// Returns the configured threshold value when this is a threshold
+    /// condition, otherwise `None`.
+    #[must_use]
+    pub fn threshold(&self) -> Option<f64> {
+        match self {
+            Self::Threshold(t) => Some(t.value),
+            _ => None,
+        }
+    }
 }
 
 /// Comparison operator.

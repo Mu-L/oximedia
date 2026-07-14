@@ -5,7 +5,7 @@
 //!
 //! [`PluginCapabilitySet`] allows a plugin to declare the features and
 //! protocols it supports.  Two capability sets can be compared with
-//! [`PluginCapabilitySet::negotiate`] to obtain the intersection of
+//! [`PluginCapabilitySet::negotiated_caps`] to obtain the intersection of
 //! capabilities both parties support — a standard capability handshake
 //! used when establishing a plugin session or validating plugin
 //! compatibility.

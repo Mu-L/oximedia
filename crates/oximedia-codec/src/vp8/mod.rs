@@ -1,18 +1,26 @@
 //! VP8 codec implementation.
 //!
-//! This module provides a pure Rust VP8 decoder based on RFC 6386.
-//! VP8 is a royalty-free video codec developed by Google as part of
-//! the `WebM` project.
+//! This module provides a pure Rust VP8 bitstream parser and building
+//! blocks based on RFC 6386. VP8 is a royalty-free video codec developed
+//! by Google as part of the `WebM` project.
 //!
-//! # Features
+//! # Honest status: bitstream parsing only (decode deferred to 0.2.0)
+//!
+//! Per `docs/codec_status.md`, full VP8 pixel reconstruction is **not
+//! implemented** in this release. What works today:
 //!
 //! - Boolean arithmetic decoder for entropy coding
 //! - Frame header parsing for keyframes and inter frames
-//! - Reference frame management (last, golden, altref)
-//! - 4x4 DCT/IDCT transforms
-//! - Intra prediction (DC, V, H, TM modes)
-//! - Inter prediction with sub-pixel motion compensation
-//! - Loop filter (deblocking)
+//! - 4x4 DCT/IDCT and WHT transform primitives
+//! - Intra prediction helper routines (DC, V, H, TM modes)
+//! - Motion-compensation helper routines
+//! - Loop filter (deblocking) primitives
+//!
+//! These primitives are not yet wired into an end-to-end reconstruction
+//! pipeline, so `Vp8Decoder::send_packet` parses the frame header (making
+//! dimensions and output format available) and then returns an honest
+//! [`CodecError`](crate::error::CodecError)`::UnsupportedFeature` error
+//! instead of fabricating pixel data.
 //!
 //! # Codec Details
 //!
@@ -34,6 +42,7 @@
 //! ```
 //! use oximedia_codec::vp8::{Vp8Decoder, FrameHeader, FrameType};
 //! use oximedia_codec::traits::{VideoDecoder, DecoderConfig};
+//! use oximedia_codec::error::CodecError;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create a decoder
@@ -51,12 +60,13 @@
 //! assert_eq!(header.width, 320);
 //! assert_eq!(header.height, 240);
 //!
-//! // Decode a frame
-//! decoder.send_packet(&header_data, 0)?;
-//! if let Some(frame) = decoder.receive_frame()? {
-//!     assert_eq!(frame.width, 320);
-//!     assert_eq!(frame.height, 240);
-//! }
+//! // Pixel reconstruction is not implemented (parse-only, see module
+//! // docs): send_packet parses the header — dimensions become available —
+//! // and then reports the gap honestly instead of emitting fake frames.
+//! let result = decoder.send_packet(&header_data, 0);
+//! assert!(matches!(result, Err(CodecError::UnsupportedFeature(_))));
+//! assert_eq!(decoder.dimensions(), Some((320, 240)));
+//! assert!(decoder.receive_frame()?.is_none());
 //! # Ok(())
 //! # }
 //! ```

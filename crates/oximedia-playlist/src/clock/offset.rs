@@ -206,4 +206,33 @@ mod tests {
         let adjusted = manager.apply(now);
         assert!(adjusted > now);
     }
+
+    // ── Wave 27: deterministic drift / resync arithmetic ─────────────────────
+
+    /// A fixed, literal UTC instant — 2026-06-06T12:00:00Z — so the assertions
+    /// are deterministic and do not depend on `Utc::now()`.
+    fn fixed_instant() -> DateTime<Utc> {
+        DateTime::from_timestamp(1_780_488_000, 0).expect("valid fixed timestamp")
+    }
+
+    #[test]
+    fn test_drift_plus_100ms_resync() {
+        let base = fixed_instant();
+        let offset = TimeOffset::positive(Duration::from_millis(100));
+        let adjusted = offset.apply(base);
+        assert_eq!(adjusted, base + ChronoDuration::milliseconds(100));
+        // Sanity: exactly +100ms, no rounding drift.
+        assert_eq!((adjusted - base).num_milliseconds(), 100);
+    }
+
+    #[test]
+    fn test_drift_minus_100ms_resync() {
+        let base = fixed_instant();
+        let offset = TimeOffset::negative(Duration::from_millis(100));
+        let adjusted = offset.apply(base);
+        assert_eq!(adjusted, base - ChronoDuration::milliseconds(100));
+        // Symmetric to the positive case: exactly -100ms.
+        assert_eq!((adjusted - base).num_milliseconds(), -100);
+        assert_eq!(offset.as_signed_seconds(), 0); // sub-second magnitude
+    }
 }

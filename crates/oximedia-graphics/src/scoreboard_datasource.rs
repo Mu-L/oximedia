@@ -176,6 +176,8 @@ impl DataSource for MemoryDataSource {
 /// - [`apply_update`] / [`apply_updates`] for synchronous manual updates
 ///
 /// [`render_frame`]: ScoreboardRenderer::render_frame
+/// [`apply_update`]: ScoreboardRenderer::apply_update
+/// [`apply_updates`]: ScoreboardRenderer::apply_updates
 pub struct ScoreboardRenderer {
     config: ScoreboardConfig,
     /// Custom field store (e.g. "sponsor", "possession", …).
@@ -200,7 +202,7 @@ impl ScoreboardRenderer {
 
     /// Attach a live [`DataSource`].
     ///
-    /// The source will be polled on every call to [`render_frame`]. Any
+    /// The source will be polled on every call to [`Self::render_frame`]. Any
     /// previously attached source is replaced.
     pub fn attach_source(&mut self, source: Box<dyn DataSource>) {
         self.source = Some(source);
@@ -208,7 +210,7 @@ impl ScoreboardRenderer {
 
     /// Detach the current [`DataSource`], if any.
     ///
-    /// After calling this method, [`render_frame`] will no longer poll for
+    /// After calling this method, [`Self::render_frame`] will no longer poll for
     /// updates; the renderer keeps its last known state.
     pub fn detach_source(&mut self) {
         self.source = None;

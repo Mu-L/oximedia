@@ -5,15 +5,15 @@
 //! complements [`crate::trace_span`] (span lifecycle) and
 //! [`crate::w3c_trace_context`] (header propagation). It adds:
 //!
-//! - **[`TraceExporter`]** — batches completed spans and ships them to a
+//! - **[`TraceExporter`](crate::trace_exporter::TraceExporter)** — batches completed spans and ships them to a
 //!   Jaeger-compatible backend via the Jaeger Thrift-over-HTTP JSON endpoint
 //!   (`/api/traces`), or writes them to an in-memory sink for testing.
-//! - **[`SamplingStrategy`]** — pluggable sampling policies: always-on,
+//! - **[`SamplingStrategy`](crate::trace_exporter::SamplingStrategy)** — pluggable sampling policies: always-on,
 //!   probabilistic (0–100%), rate-limited (max N traces/second), and tail-based
 //!   (buffer all spans; decide after the root span completes).
-//! - **[`SpanBatch`]** — an owned collection of completed spans ready for
+//! - **[`SpanBatch`](crate::trace_exporter::SpanBatch)** — an owned collection of completed spans ready for
 //!   serialization.
-//! - **[`JaegerSpan`]** / **[`JaegerTrace`]** — Jaeger JSON wire format
+//! - **[`JaegerSpan`](crate::trace_exporter::JaegerSpan)** / **[`JaegerTrace`](crate::trace_exporter::JaegerTrace)** — Jaeger JSON wire format
 //!   structs with full serde support.
 //!
 //! # Architecture
@@ -475,7 +475,7 @@ impl SamplingStrategy {
     /// Decide whether to sample a span with the given parameters.
     ///
     /// For tail-based strategies this is a pre-filter at span start; final
-    /// decisions happen in [`SpanCollector::finish_trace`].
+    /// decisions happen in [`SpanCollector::record_span`](crate::trace_exporter::SpanCollector::record_span).
     #[must_use]
     pub fn should_sample(&self, trace_counter: u64, is_error: bool) -> bool {
         match self {

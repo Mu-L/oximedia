@@ -66,6 +66,11 @@
   - **Files:** `crates/oximedia-stream/src/stream_health.rs` (tests module).
   - **Tests:** Three new tests.
   - **Risk:** HealthIssue may not have exact "packet loss" variant; implementation maps to closest existing variant or proposes adding one.
+- [x] Add deterministic known-answer integration suite `tests/it_deterministic.rs` (Wave 29 / Slice 6, 2026-06-06; 13 tests, no production change)
+  - **SCTE-35:** `encode_splice_null(0)` pinned to the exact 16-byte section `[0xFC,0xB0,0x0F, 0x00 x13]`; command-type byte (offset 9) == 0x00; encode → `parse_splice_info` → re-encode byte-identity for tiers {0x000, 0x123, 0x0FFF} with `SpliceCommand::Null` + empty descriptors + tier round-trip; distinct tiers → distinct bytes.
+  - **HLS:** `HlsSkip{skipped_segments:5}.to_tag_line()` == `"#EXT-X-SKIP:SKIPPED-SEGMENTS=5"`; `build_media_playlist` version auto-coupling verified — WITH skip → `#EXT-X-VERSION:9` + skip line (never 3), WITHOUT skip → `#EXT-X-VERSION:3` + no skip line; playlist embeds the exact `to_tag_line()` string.
+  - **Multi-CDN WRR:** weights `[1,2,1]` over 100 `WeightedRoundRobin` picks → exact histogram A=25/B=50/C=25; two independent routers emit identical 100-pick sequences (no RNG); pattern period == total-weight (4) with B twice / A,C once per period; equal weights `[1,1,1]` over 99 → 33 each.
+  - **Files:** `crates/oximedia-stream/tests/it_deterministic.rs` (new). Gate: nextest 620/620, clippy --all-features --all-targets clean.
 
 ## Documentation
 - [x] Add streaming pipeline architecture diagram showing data flow from ingest to CDN delivery (implemented 2026-05-14)

@@ -136,8 +136,11 @@ impl WorkerCapabilities {
         // Simplified memory detection
         #[cfg(target_os = "linux")]
         {
-            if let Ok(info) = sys_info::mem_info() {
-                return info.total * 1024;
+            let mut sys = sysinfo::System::new();
+            sys.refresh_memory();
+            let total = sys.total_memory();
+            if total > 0 {
+                return total;
             }
         }
         4_294_967_296 // Default 4GB
@@ -232,13 +235,16 @@ impl LocalWorkerMetrics {
         // Update CPU and memory usage
         #[cfg(target_os = "linux")]
         {
-            if let Ok(load) = sys_info::loadavg() {
-                let cpu_percent = (load.one * 100.0) as u32;
-                self.cpu_usage.store(cpu_percent, Ordering::Relaxed);
-            }
+            let load = sysinfo::System::load_average();
+            let cpu_percent = (load.one * 100.0) as u32;
+            self.cpu_usage.store(cpu_percent, Ordering::Relaxed);
 
-            if let Ok(mem) = sys_info::mem_info() {
-                let mem_percent = ((mem.total - mem.avail) * 100 / mem.total) as u32;
+            let mut sys = sysinfo::System::new();
+            sys.refresh_memory();
+            let total = sys.total_memory();
+            if total > 0 {
+                let used = sys.used_memory();
+                let mem_percent = (used * 100 / total) as u32;
                 self.memory_usage.store(mem_percent, Ordering::Relaxed);
             }
         }

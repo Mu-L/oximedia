@@ -42,8 +42,8 @@
 ## Testing
 - [x] Add CIE standard illuminant round-trip tests (D50, D65, A, F2) in `white_point.rs` (verified 2026-06-01: src/illuminant_tests.rs:115+ covers all four illuminants)
 - [ ] Test ICC profile parsing against real-world profiles (sRGB IEC61966, Adobe RGB, ProPhoto)
-- [ ] Add accuracy benchmarks: verify sRGB-to-Rec.2020 conversion achieves dE < 1.0
-- [ ] Test ACES pipeline end-to-end: IDT -> ACEScg -> RRT -> sRGB ODT
+- [x] Add accuracy benchmarks: verify sRGB-to-Rec.2020 conversion achieves dE < 1.0
+- [x] Test ACES pipeline end-to-end: IDT -> ACEScg -> RRT -> sRGB ODT
 - [x] Add edge-case tests for out-of-gamut colors in `gamut_clip.rs` (verified 2026-06-01: src/gamut_clip.rs:351+ has negative/high OOG tests)
 - [x] Test color_blindness.rs simulation accuracy against Brettel/Vienot references (completed 2026-06-01: Wave 16 Slice C)
   - **Implemented:** Removed `#![allow(dead_code)]` from `src/color_blindness.rs` (root cause: all items already used).

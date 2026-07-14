@@ -56,10 +56,10 @@
 
 ## Testing
 - [x] Test audio sync with known-offset synthetic signals (1kHz tone with 100ms offset between channels)
-- [ ] Add test for auto switcher with synthetic frame scores verifying angle selection logic
-- [ ] Test PIP composition output dimensions and placement for all corner positions
-- [ ] Verify tally_system state transitions: preview -> program -> off lifecycle
-- [ ] Test ISO recording with simulated multi-angle input verifying per-angle file output
+- [x] Add test for auto switcher with synthetic frame scores verifying angle selection logic (impl 2026-06-06: `tests/auto_switcher.rs` — score→switch, confidence gate, hold cooldown, tie-break to highest index)
+- [x] Test PIP composition output dimensions and placement for all corner positions (impl 2026-06-06: `tests/pip_composition.rs` — all 4 corners + Custom + padding override + scale clamp + containment invariant @ 1080p/0.25 and 720p/0.5)
+- [x] Verify tally_system state transitions: preview -> program -> off lifecycle (impl 2026-06-06: `tests/tally_lifecycle.rs` — preview→program→off lifecycle + history + single-program bus invariant + clock-driven timestamps)
+- [x] Test ISO recording with simulated multi-angle input verifying per-angle file output (impl 2026-06-06: `tests/iso_recording.rs` — 4-angle lifecycle, no angle dropped, distinct per-angle file names, multi-quality ordering, dedup + double-start/stop guards)
 
 ## Documentation
 - [ ] Add multi-camera production workflow guide (setup -> sync -> edit -> export)

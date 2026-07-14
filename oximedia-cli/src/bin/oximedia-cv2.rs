@@ -481,6 +481,11 @@ enum Cmd {
 // ── Main ───────────────────────────────────────────────────────────────────────
 
 fn main() {
+    // Install the Pure-Rust `rustls-rustcrypto` crypto provider as the
+    // process-wide default before any TLS connection can be opened. See
+    // `oximedia_net::tls_provider` for details. Idempotent.
+    oximedia_net::install_default_crypto_provider();
+
     let cli = Cli::parse();
 
     if cli.list_functions {

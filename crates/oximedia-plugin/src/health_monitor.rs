@@ -4,7 +4,7 @@
 //! Plugin health monitoring.
 //!
 //! [`PluginHealthMonitor`] records per-call success/failure outcomes and
-//! duration measurements for a named plugin.  A [`health_score`] (0.0–1.0)
+//! duration measurements for a named plugin.  A [`PluginHealthMonitor::health_score`] (0.0–1.0)
 //! is computed on demand from the recorded history.
 //!
 //! The health score is a weighted combination of:

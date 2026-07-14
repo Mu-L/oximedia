@@ -364,9 +364,7 @@ fn compute_ndcg(qrels: &RelevanceJudgements, query_id: &str, top_k: &[&str], k: 
     if let Some(docs_map) = qrels.data.get(query_id) {
         let mut ideal: Vec<RelevanceGrade> = docs_map.values().copied().collect();
         ideal.sort_unstable_by(|a, b| b.cmp(a));
-        let ideal_top: Vec<&str> = std::iter::repeat("__ideal__")
-            .take(ideal.len().min(k))
-            .collect();
+        let ideal_top: Vec<&str> = std::iter::repeat_n("__ideal__", ideal.len().min(k)).collect();
         // We need to compute iDCG directly from the grade vector, not from doc
         // lookups, because the ideal docs are synthetic.
         let idcg: f64 = ideal

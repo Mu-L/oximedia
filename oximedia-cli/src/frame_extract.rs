@@ -479,7 +479,7 @@ fn repack_plane(plane: &oximedia_codec::Plane) -> Vec<u8> {
                 // Partial / corrupt row — copy what we have and pad with zeros.
                 let available = plane.data.len().saturating_sub(start);
                 out.extend_from_slice(&plane.data[start..start + available]);
-                out.extend(std::iter::repeat(0).take(width - available));
+                out.extend(std::iter::repeat_n(0, width - available));
             }
         }
         out
@@ -641,7 +641,7 @@ mod tests {
         for i in 0..frame_count {
             data.extend_from_slice(b"FRAME\n");
             let fill = (i & 0xFF) as u8;
-            data.extend(std::iter::repeat(fill).take(frame_size));
+            data.extend(std::iter::repeat_n(fill, frame_size));
         }
         data
     }

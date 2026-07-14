@@ -41,6 +41,8 @@
 #![warn(missing_docs)]
 #![allow(clippy::module_name_repetitions)]
 
+/// Anycast / DNS-based virtual-IP routing simulation (multi-PoP VIP groups).
+pub mod anycast;
 /// Per-client and per-origin bandwidth throttle with token-bucket shaping.
 pub mod bandwidth_throttle;
 pub mod cache_invalidation;

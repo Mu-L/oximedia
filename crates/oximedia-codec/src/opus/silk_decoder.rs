@@ -1160,6 +1160,91 @@ fn synthesise(
     output
 }
 
+/// Test/inspection hook: reconstruct **one** SILK subframe from a gain-normalised
+/// float excitation stream using the exact §4.2.7.9 synthesis math of
+/// [`synthesise`].
+///
+/// This exposes — without altering decoder behaviour — the per-sample
+/// reconstruction `output[t] = float_exc[t]·gain + ltp_value + lpc_synthesis`
+/// so the encoder-side NSQ (`super::silk_nsq::process_subframe`) can be
+/// cross-checked against decoder-side synthesis without round-tripping through
+/// the shell-coded bitstream (which would re-introduce the LCG dither and the
+/// ±20 / quantisation-offset bias that `silk_nsq::E_RAW_SCALE` deliberately
+/// approximates).
+///
+/// The per-sample operations are byte-for-byte the same instruction sequence as
+/// the inner loop of [`synthesise`]: the 5-tap long-term predictor is summed
+/// (from zero, in tap order `k = 0..5`) over the LPC-domain residual history,
+/// the residual `res = exc + ltp_value` is stored, and the short-term LPC
+/// synthesis folds `res` first, subtracting each `coeff_q12/4096 · prev_output`.
+///
+/// * `float_exc` — gain-normalised excitation (`pulse / E_RAW_SCALE`), one per sample.
+/// * `gain`      — linear subframe gain (the decoder's `gains_q16 / 65536`).
+/// * `lpc_q12`   — `order` LPC synthesis taps in Q12 (the decoder's `lpc_q12_*`).
+/// * `ltp_q7`    — 5-tap LTP filter in Q7; ignored when `lag == 0` (unvoiced).
+/// * `lag`       — integer pitch lag in samples; `0` disables LTP.
+///
+/// Returns `(output, residual)`: the LPC-synthesis output sample and the
+/// LPC-domain residual (`exc + ltp_value`) for each input sample, both computed
+/// from zeroed history — i.e. exactly what a fresh decoder subframe with these
+/// parameters yields. History is local so the helper is self-contained and
+/// deterministic.
+#[cfg(test)]
+pub(crate) fn reconstruct_subframe_from_excitation(
+    float_exc: &[f32],
+    gain: f32,
+    lpc_q12: &[i32],
+    ltp_q7: &[i32; 5],
+    lag: usize,
+) -> (Vec<f32>, Vec<f32>) {
+    let order = lpc_q12.len();
+    let n = float_exc.len();
+    let voiced = lag != 0;
+
+    // Leading residual history, long enough that the `pos - lag + 2 - k` reach
+    // of sample 0 stays in-bounds and zero — matching a fresh decoder frame
+    // whose `state.ltp_history` is all zeros.
+    let ltp_hist_len = lag + 8;
+    let mut res_buf = vec![0.0f32; ltp_hist_len + n];
+    let mut lpc_buf = vec![0.0f32; order + n];
+    let mut output = vec![0.0f32; n];
+    let mut residual = vec![0.0f32; n];
+
+    for i in 0..n {
+        let exc = float_exc[i] * gain;
+
+        // Long-term (pitch) prediction — identical indexing to `synthesise`.
+        let ltp_value = if voiced {
+            let pos = (ltp_hist_len + i) as isize;
+            let mut sum = 0.0f32;
+            for (k, &tap_q7) in ltp_q7.iter().enumerate() {
+                let idx = pos - lag as isize + 2 - k as isize;
+                if idx >= 0 && (idx as usize) < res_buf.len() {
+                    sum += res_buf[idx as usize] * (tap_q7 as f32 / 128.0);
+                }
+            }
+            sum
+        } else {
+            0.0
+        };
+
+        let res = exc + ltp_value;
+        res_buf[ltp_hist_len + i] = res;
+        residual[i] = res;
+
+        // Short-term LPC synthesis — `res` folded first, as in `synthesise`.
+        let mut acc = res;
+        for (j, &coeff_q12) in lpc_q12.iter().take(order).enumerate() {
+            let prev = lpc_buf[order + i - 1 - j];
+            acc -= prev * (coeff_q12 as f32 / 4096.0);
+        }
+        lpc_buf[order + i] = acc;
+        output[i] = acc;
+    }
+
+    (output, residual)
+}
+
 // ---------------------------------------------------------------------------
 // Pitch-contour codebooks (RFC 6716 §4.2.7.6.1, Tables 36-39)
 // ---------------------------------------------------------------------------

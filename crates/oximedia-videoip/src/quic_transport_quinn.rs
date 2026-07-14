@@ -21,19 +21,48 @@
 //!
 //! ## TLS / certificate handling
 //!
-//! `quinn` requires TLS.  We use `rustls` with the `rustls-rustcrypto` pure-Rust
-//! crypto provider (already in the workspace).  Self-signed certificates are
-//! generated via `rcgen`.
+//! `quinn` requires TLS.  Every `rustls::ClientConfig`/`ServerConfig` built by
+//! this module is constructed via `builder_with_provider(Arc::new(provider))`
+//! with an *explicit* `CryptoProvider` — never via the bare `builder()` /
+//! process-wide `CryptoProvider::install_default()` — so there is no reliance
+//! on ambient global state and no install-order footgun. Self-signed
+//! certificates are generated via `rcgen`.
 //!
 //! For loopback tests a custom `NoCertificateVerification` acceptor is installed
 //! so the client skips verification of the server's self-signed cert.
 //!
-//! ## Crypto policy
+//! ## Crypto policy — why `ring` is still used here (not `rustls-rustcrypto`)
 //!
-//! The `quic-quinn` feature uses `ring` (via quinn's `rustls-ring` feature) for
-//! cryptographic operations.  `ring` is a C dependency, which is why this feature
-//! is NOT in `default = []`.  Per the COOLJAPAN Pure Rust policy, C deps are
-//! acceptable only when feature-gated.  All default features remain 100 % pure Rust.
+//! `quic-quinn` is intentionally **not** in `default = []`, and its explicit
+//! provider is `rustls::crypto::ring::default_provider()` (`ring` is a
+//! C/assembly dependency). Two independent things were checked, both currently
+//! block using the workspace's Pure-Rust `rustls-rustcrypto` provider instead:
+//!
+//! 1. **Compile-time**: as of quinn 0.11.11 / quinn-proto 0.11.16 (latest on
+//!    crates.io), `quinn` has no vendor-neutral "bring your own `CryptoProvider`"
+//!    Cargo feature — `dep:rustls` itself is only pulled in by the `rustls-ring`
+//!    or `rustls-aws-lc-rs` feature, both of which compile a C/assembly crypto
+//!    backend unconditionally. There is no way to get `quinn` to depend on
+//!    `rustls` without also compiling one of those.
+//! 2. **Runtime**: even discounting (1), `rustls-rustcrypto` 0.0.2-alpha does
+//!    not implement QUIC support at all — every `Tls13CipherSuite` it defines
+//!    sets `quic: None` (see its `lib.rs`), which is rustls's documented way to
+//!    "opt out of QUIC support for this suite". `quinn_proto::crypto::rustls::
+//!    initial_suite_from_provider()` therefore finds no usable suite and
+//!    `QuicServerConfig`/`QuicClientConfig::try_from()` fail with
+//!    `NoInitialCipherSuite` ("no initial cipher suite found"). This was
+//!    verified directly: swapping the provider below to
+//!    `rustls_rustcrypto::provider()` makes
+//!    `test_quic_transport_sends_and_receives` fail with exactly that error.
+//!
+//! So `ring` is compiled **and** actually executed by this opt-in feature.
+//! Per the COOLJAPAN Pure Rust policy, C deps are acceptable when feature-gated
+//! and documented, which is the case here: `quic-quinn` stays out of
+//! `default = []` and all default features remain 100 % pure Rust (verified via
+//! `cargo tree -p oximedia-videoip -e no-dev`, which shows zero `ring`/`quinn`
+//! nodes without `--features quic-quinn`). Revisit this once either quinn gains
+//! a vendor-neutral rustls feature or `rustls-rustcrypto` implements
+//! `Tls13CipherSuite::quic`.
 
 #![cfg(feature = "quic-quinn")]
 
@@ -102,6 +131,9 @@ impl rustls::client::danger::ServerCertVerifier for NoCertVerification {
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         // Accept all common signature schemes — this verifier always returns Ok.
+        // Must match the provider used to build the surrounding ClientConfig
+        // in `QuicTransport::connect` (see module doc: `rustls-rustcrypto`
+        // cannot be used here because it has no QUIC support).
         rustls::crypto::ring::default_provider()
             .signature_verification_algorithms
             .supported_schemes()
@@ -237,8 +269,14 @@ impl QuicTransport {
             rustls::pki_types::PrivatePkcs8KeyDer::from(cfg.key_der.clone()),
         );
 
-        // Use the ring-backed crypto provider (enabled by the rustls-ring quinn feature).
-        let mut tls = rustls::ServerConfig::builder()
+        // Explicit `ring` provider (see module doc: quinn/quinn-proto require
+        // a QUIC-capable CryptoProvider, and `rustls-rustcrypto` does not
+        // implement QUIC support). Passed explicitly rather than relying on
+        // `CryptoProvider::install_default()` global process state.
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let mut tls = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .map_err(|e| VideoIpError::Transport(format!("TLS provider setup failed: {e}")))?
             .with_no_client_auth()
             .with_single_cert(vec![cert], key)
             .map_err(|e| VideoIpError::Transport(format!("TLS cert load failed: {e}")))?;
@@ -282,7 +320,10 @@ impl QuicTransport {
         remote: SocketAddr,
         server_name: &str,
     ) -> VideoIpResult<QuicConnection> {
-        let mut tls = rustls::ClientConfig::builder()
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let mut tls = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .map_err(|e| VideoIpError::Transport(format!("TLS provider setup failed: {e}")))?
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(NoCertVerification))
             .with_no_client_auth();
@@ -432,9 +473,10 @@ mod tests {
     /// Verify that a QuicTransport server and client can exchange datagrams.
     #[tokio::test]
     async fn test_quic_transport_sends_and_receives() {
-        // Install the ring crypto provider so rustls can function.
-        // `install_default` returns Err if already installed; ignore that with `let _`.
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        // No process-wide `CryptoProvider::install_default()` needed: both
+        // `QuicTransport::bind` and `QuicTransport::connect` build their
+        // rustls configs via `builder_with_provider(ring::default_provider())`
+        // explicitly, so there is no reliance on global default-provider state.
 
         // Server endpoint.
         let server_cfg =

@@ -310,6 +310,13 @@ impl TextSearchIndex {
 
     /// Commit pending changes
     ///
+    /// After the writer commit succeeds the [`IndexReader`] is reloaded
+    /// synchronously so that documents added since the previous commit are
+    /// immediately visible to subsequent [`Self::search`] calls. Without this
+    /// the reader's [`ReloadPolicy::OnCommitWithDelay`] would only refresh after
+    /// an unspecified delay, racing any search issued right after a commit (for
+    /// example during bulk import via `SearchEngine::index_documents_batch`).
+    ///
     /// # Errors
     ///
     /// Returns an error if commit fails
@@ -320,6 +327,13 @@ impl TextSearchIndex {
             .map_err(|_| SearchError::Other("Failed to acquire write lock".to_string()))?;
 
         writer.commit()?;
+        // Drop the write lock before reloading the reader; the reload only needs
+        // shared access to the committed segments.
+        drop(writer);
+
+        // Make the just-committed generation visible to searchers now, rather
+        // than after the policy's delay.
+        self.reader.reload()?;
 
         Ok(())
     }

@@ -114,8 +114,9 @@ impl ColorChecker {
     /// Get reference colors for X-Rite `ColorChecker` Classic 24.
     ///
     /// Reference values from X-Rite technical documentation.
+    #[must_use]
     #[allow(clippy::too_many_lines)]
-    pub(crate) fn classic24_reference() -> Vec<PatchColor> {
+    pub fn classic24_reference() -> Vec<PatchColor> {
         vec![
             // Row 1: Natural colors
             PatchColor {

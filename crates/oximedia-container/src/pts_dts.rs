@@ -73,6 +73,83 @@ impl PtsDts {
     }
 }
 
+/// Apply independent PTS and DTS offset corrections to a slice of [`PtsDts`]
+/// values in a single cache-friendly pass.
+///
+/// This is the primary batch entry point for remuxing and splicing operations
+/// where thousands of packet timestamps must be shifted by a constant delta
+/// (e.g. when concatenating two streams, rebasing a clip to zero, or correcting
+/// an initial PTS/DTS gap).
+///
+/// # Behaviour
+///
+/// - If `pts_offset` is non-zero:
+///   - `Some(p)` → `Some(p + pts_offset)`
+///   - `None`    → `Some(pts_offset)` (materialises a PTS when absent)
+/// - If `dts_offset` is non-zero:
+///   - `Some(d)` → `Some(d + dts_offset)`
+///   - `None`    → `Some(dts_offset)` (materialises a DTS when absent)
+/// - Zero offsets leave the corresponding field unchanged (including `None`).
+///
+/// # Example
+///
+/// ```
+/// use oximedia_container::pts_dts::{PtsDts, rewrite_timestamps_batch};
+///
+/// let mut batch = vec![
+///     PtsDts::new(0, 0),
+///     PtsDts::new(3600, 3600),
+///     PtsDts::pts_only(7200),
+/// ];
+///
+/// rewrite_timestamps_batch(&mut batch, 1000, 500);
+///
+/// assert_eq!(batch[0].pts, Some(1000));
+/// assert_eq!(batch[0].dts, Some(500));
+/// assert_eq!(batch[1].pts, Some(4600));
+/// assert_eq!(batch[2].pts, Some(8200));
+/// // DTS was None for batch[2], so it is materialised:
+/// assert_eq!(batch[2].dts, Some(500));
+/// ```
+pub fn rewrite_timestamps_batch(headers: &mut [PtsDts], pts_offset: i64, dts_offset: i64) {
+    // Fast-path: no-op when both offsets are zero to avoid touching cache lines.
+    if pts_offset == 0 && dts_offset == 0 {
+        return;
+    }
+    for h in headers.iter_mut() {
+        if pts_offset != 0 {
+            h.pts = Some(h.pts.map_or(pts_offset, |p| p + pts_offset));
+        }
+        if dts_offset != 0 {
+            h.dts = Some(h.dts.map_or(dts_offset, |d| d + dts_offset));
+        }
+    }
+}
+
+/// Rebase a slice of [`PtsDts`] values so that the earliest effective DTS
+/// (or PTS when DTS is absent) becomes zero, shifting all other timestamps by
+/// the same offset.
+///
+/// Returns the computed offset that was applied. Returns 0 when the slice is
+/// already anchored at zero, or when it is empty.
+///
+/// This is the idiomatic "rebase to zero" helper for use in splicing pipelines.
+pub fn rebase_timestamps_to_zero(headers: &mut [PtsDts]) -> i64 {
+    let min_ts = headers
+        .iter()
+        .filter_map(|h| h.dts.or(h.pts))
+        .min()
+        .unwrap_or(0);
+    if min_ts == 0 {
+        return 0;
+    }
+    // Negative min → shift forward (positive offset).
+    // Positive min → shift backward (negative offset).
+    let offset = -min_ts;
+    rewrite_timestamps_batch(headers, offset, offset);
+    offset
+}
+
 /// A packet entry stored in the reorder queue.
 #[derive(Debug, Clone)]
 pub struct PtsEntry {
@@ -336,5 +413,120 @@ mod tests {
         let fixed = repair.fix_negative_dts(ts);
         assert_eq!(fixed.dts, Some(90));
         assert_eq!(repair.repair_count(), 0);
+    }
+
+    // ─── Batch function tests ─────────────────────────────────────────────────
+
+    // 15. rewrite_timestamps_batch applies pts and dts offsets to all entries
+    #[test]
+    fn test_rewrite_timestamps_batch_both_offsets() {
+        let mut batch = vec![
+            PtsDts::new(0, 0),
+            PtsDts::new(3600, 3600),
+            PtsDts::new(7200, 7200),
+        ];
+        rewrite_timestamps_batch(&mut batch, 1000, 500);
+        assert_eq!(batch[0].pts, Some(1000));
+        assert_eq!(batch[0].dts, Some(500));
+        assert_eq!(batch[1].pts, Some(4600));
+        assert_eq!(batch[1].dts, Some(4100));
+        assert_eq!(batch[2].pts, Some(8200));
+        assert_eq!(batch[2].dts, Some(7700));
+    }
+
+    // 16. rewrite_timestamps_batch materialises PTS when None
+    #[test]
+    fn test_rewrite_timestamps_batch_materialises_pts() {
+        let mut batch = vec![PtsDts::none()];
+        rewrite_timestamps_batch(&mut batch, 500, 0);
+        assert_eq!(batch[0].pts, Some(500));
+        assert_eq!(batch[0].dts, None); // dts_offset == 0, so None stays None
+    }
+
+    // 17. rewrite_timestamps_batch materialises DTS when None
+    #[test]
+    fn test_rewrite_timestamps_batch_materialises_dts() {
+        let mut batch = vec![PtsDts::pts_only(1000)];
+        rewrite_timestamps_batch(&mut batch, 0, 200);
+        assert_eq!(batch[0].pts, Some(1000)); // pts_offset == 0 → unchanged
+        assert_eq!(batch[0].dts, Some(200));
+    }
+
+    // 18. rewrite_timestamps_batch no-op when both offsets are zero
+    #[test]
+    fn test_rewrite_timestamps_batch_zero_offsets_noop() {
+        let mut batch = vec![PtsDts::new(100, 90), PtsDts::none()];
+        rewrite_timestamps_batch(&mut batch, 0, 0);
+        assert_eq!(batch[0].pts, Some(100));
+        assert_eq!(batch[0].dts, Some(90));
+        assert_eq!(batch[1].pts, None);
+        assert_eq!(batch[1].dts, None);
+    }
+
+    // 19. rewrite_timestamps_batch with negative offset
+    #[test]
+    fn test_rewrite_timestamps_batch_negative_offset() {
+        let mut batch = vec![PtsDts::new(5000, 5000), PtsDts::new(10000, 10000)];
+        rewrite_timestamps_batch(&mut batch, -1000, -1000);
+        assert_eq!(batch[0].pts, Some(4000));
+        assert_eq!(batch[0].dts, Some(4000));
+        assert_eq!(batch[1].pts, Some(9000));
+    }
+
+    // 20. rewrite_timestamps_batch on empty slice is a no-op
+    #[test]
+    fn test_rewrite_timestamps_batch_empty() {
+        let mut batch: Vec<PtsDts> = Vec::new();
+        rewrite_timestamps_batch(&mut batch, 999, 999);
+        assert!(batch.is_empty());
+    }
+
+    // 21. rebase_timestamps_to_zero shifts positive earliest DTS to zero
+    #[test]
+    fn test_rebase_timestamps_to_zero_positive_min() {
+        let mut batch = vec![PtsDts::new(5000, 4500), PtsDts::new(10000, 9500)];
+        let offset = rebase_timestamps_to_zero(&mut batch);
+        assert_eq!(offset, -4500);
+        assert_eq!(batch[0].dts, Some(0));
+        assert_eq!(batch[0].pts, Some(500));
+        assert_eq!(batch[1].dts, Some(5000));
+    }
+
+    // 22. rebase_timestamps_to_zero shifts negative earliest DTS to zero
+    #[test]
+    fn test_rebase_timestamps_to_zero_negative_min() {
+        let mut batch = vec![PtsDts::new(0, -1000), PtsDts::new(3600, 2600)];
+        let offset = rebase_timestamps_to_zero(&mut batch);
+        assert_eq!(offset, 1000);
+        assert_eq!(batch[0].dts, Some(0));
+        assert_eq!(batch[0].pts, Some(1000));
+        assert_eq!(batch[1].dts, Some(3600));
+    }
+
+    // 23. rebase_timestamps_to_zero on already-zero batch returns 0
+    #[test]
+    fn test_rebase_timestamps_to_zero_already_zero() {
+        let mut batch = vec![PtsDts::new(0, 0), PtsDts::new(3600, 3600)];
+        let offset = rebase_timestamps_to_zero(&mut batch);
+        assert_eq!(offset, 0);
+        assert_eq!(batch[0].dts, Some(0));
+    }
+
+    // 24. rebase_timestamps_to_zero falls back to PTS when DTS absent
+    #[test]
+    fn test_rebase_timestamps_to_zero_uses_pts_when_dts_absent() {
+        let mut batch = vec![PtsDts::pts_only(2000), PtsDts::pts_only(5000)];
+        let offset = rebase_timestamps_to_zero(&mut batch);
+        assert_eq!(offset, -2000);
+        assert_eq!(batch[0].pts, Some(0));
+        assert_eq!(batch[0].dts, Some(-2000)); // materialised dts = None + offset
+    }
+
+    // 25. rebase_timestamps_to_zero on empty slice returns 0
+    #[test]
+    fn test_rebase_timestamps_to_zero_empty() {
+        let mut batch: Vec<PtsDts> = Vec::new();
+        let offset = rebase_timestamps_to_zero(&mut batch);
+        assert_eq!(offset, 0);
     }
 }

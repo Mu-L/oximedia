@@ -7,6 +7,80 @@ use sysinfo::{
     Components, CpuRefreshKind, Disks, MemoryRefreshKind, Networks, RefreshKind, System,
 };
 
+/// Fine-grained configuration controlling which metric categories are collected
+/// during each [`SystemMetricsCollector::collect`] call.
+///
+/// Each field independently gates one metric category, allowing callers to
+/// avoid expensive I/O (e.g. disk enumeration on macOS with many volumes) while
+/// still collecting unrelated metrics such as network or temperature.
+///
+/// # Examples
+///
+/// ```rust
+/// use oximedia_monitor::metrics::system::SystemMetricsConfig;
+///
+/// // Collect CPU and memory only:
+/// let config = SystemMetricsConfig::cpu_only();
+///
+/// // Collect network but not disk:
+/// let config = SystemMetricsConfig { disk: false, network: true, ..Default::default() };
+/// ```
+#[derive(Debug, Clone)]
+pub struct SystemMetricsConfig {
+    /// Collect CPU usage metrics.
+    pub cpu: bool,
+    /// Collect memory and swap metrics.
+    pub memory: bool,
+    /// Collect disk I/O and storage metrics.
+    ///
+    /// On systems with many mount points (e.g. macOS with app-wrapper volumes)
+    /// disk enumeration can be very slow.  Set this to `false` to skip it.
+    pub disk: bool,
+    /// Collect network interface metrics.
+    pub network: bool,
+    /// Collect component temperature metrics.
+    pub temperature: bool,
+    /// Collect GPU metrics (only meaningful when the `gpu` feature is enabled).
+    pub gpu: bool,
+}
+
+impl Default for SystemMetricsConfig {
+    fn default() -> Self {
+        Self {
+            cpu: true,
+            memory: true,
+            disk: true,
+            network: true,
+            temperature: true,
+            gpu: true,
+        }
+    }
+}
+
+impl SystemMetricsConfig {
+    /// Disable all metric categories.
+    #[must_use]
+    pub fn none() -> Self {
+        Self {
+            cpu: false,
+            memory: false,
+            disk: false,
+            network: false,
+            temperature: false,
+            gpu: false,
+        }
+    }
+
+    /// Enable only CPU metrics; all other categories are disabled.
+    #[must_use]
+    pub fn cpu_only() -> Self {
+        Self {
+            cpu: true,
+            ..Self::none()
+        }
+    }
+}
+
 /// System metrics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemMetrics {
@@ -232,16 +306,14 @@ pub struct SystemMetricsCollector {
     sys: System,
     disks: Disks,
     networks: Networks,
-    /// When `false`, disk enumeration and I/O queries are skipped in
-    /// [`collect`](Self::collect).  Useful on systems with many mount points
-    /// (e.g. macOS with app-wrapper volumes) where disk queries are very slow.
-    enable_disk_metrics: bool,
+    /// Per-category collection gates.
+    config: SystemMetricsConfig,
     #[cfg(feature = "gpu")]
     nvml: Option<nvml_wrapper::Nvml>,
 }
 
 impl SystemMetricsCollector {
-    /// Create a new system metrics collector with default settings.
+    /// Create a new system metrics collector with default settings (all categories enabled).
     ///
     /// Disk and network lists are initialised lazily: they will be populated
     /// on the first call to [`collect`](Self::collect).  This avoids
@@ -251,19 +323,39 @@ impl SystemMetricsCollector {
     ///
     /// Returns an error if initialization fails.
     pub fn new() -> MonitorResult<Self> {
-        Self::new_with_options(true)
+        Self::with_config(SystemMetricsConfig::default())
     }
 
-    /// Create a new system metrics collector with explicit options.
+    /// Create a new system metrics collector with a coarse boolean option.
     ///
-    /// `enable_disk_metrics` controls whether disk I/O and storage queries are
-    /// performed during [`collect`](Self::collect).  Setting this to `false`
-    /// is strongly recommended when running on macOS with many mounted volumes.
+    /// This is a backward-compatible shim over [`with_config`](Self::with_config).
+    /// `enable_disk_metrics` controls both the `disk` **and** `network` gates
+    /// (preserving the original coupled behaviour for callers that relied on the
+    /// old `enable_disk_metrics: bool` flag).
+    ///
+    /// Prefer [`with_config`](Self::with_config) for fine-grained control.
     ///
     /// # Errors
     ///
     /// Returns an error if initialization fails.
     pub fn new_with_options(enable_disk_metrics: bool) -> MonitorResult<Self> {
+        Self::with_config(SystemMetricsConfig {
+            disk: enable_disk_metrics,
+            network: enable_disk_metrics,
+            ..SystemMetricsConfig::default()
+        })
+    }
+
+    /// Create a new system metrics collector driven by a [`SystemMetricsConfig`].
+    ///
+    /// Each field in the config independently gates one metric category, so
+    /// callers can skip expensive I/O (disk enumeration, temperature polling)
+    /// without sacrificing unrelated metrics like CPU usage or network stats.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if initialization fails.
+    pub fn with_config(config: SystemMetricsConfig) -> MonitorResult<Self> {
         let sys = System::new_with_specifics(
             RefreshKind::nothing()
                 .with_cpu(CpuRefreshKind::everything())
@@ -279,7 +371,7 @@ impl SystemMetricsCollector {
             // scan is deferred to the first `collect()` call.
             disks: Disks::new(),
             networks: Networks::new(),
-            enable_disk_metrics,
+            config,
             #[cfg(feature = "gpu")]
             nvml,
         })
@@ -287,29 +379,84 @@ impl SystemMetricsCollector {
 
     /// Collect current system metrics.
     ///
+    /// Only the categories enabled in the collector's [`SystemMetricsConfig`]
+    /// trigger I/O.  Disabled categories return their zero/empty defaults.
+    ///
     /// # Errors
     ///
     /// Returns an error if collection fails.
     pub fn collect(&mut self) -> MonitorResult<SystemMetrics> {
-        self.sys.refresh_cpu_usage();
-        self.sys.refresh_memory();
-
-        if self.enable_disk_metrics {
+        if self.config.cpu {
+            self.sys.refresh_cpu_usage();
+        }
+        if self.config.memory {
+            self.sys.refresh_memory();
+        }
+        if self.config.disk {
             self.disks.refresh(true);
+        }
+        if self.config.network {
             self.networks.refresh(true);
         }
 
-        let cpu = self.collect_cpu_metrics();
-        let memory = self.collect_memory_metrics();
-        let disk = self.collect_disk_metrics();
-        let network = self.collect_network_metrics();
+        let cpu = if self.config.cpu {
+            self.collect_cpu_metrics()
+        } else {
+            CpuMetrics {
+                total_usage: 0.0,
+                per_core: Vec::new(),
+                cpu_count: 0,
+                load_average: (0.0, 0.0, 0.0),
+            }
+        };
+
+        let memory = if self.config.memory {
+            self.collect_memory_metrics()
+        } else {
+            MemoryMetrics {
+                total: 0,
+                used: 0,
+                available: 0,
+                free: 0,
+                swap_total: 0,
+                swap_used: 0,
+                swap_free: 0,
+            }
+        };
+
+        let disk = if self.config.disk {
+            self.collect_disk_metrics()
+        } else {
+            DiskMetrics {
+                disks: HashMap::new(),
+                total_read_bytes: 0,
+                total_write_bytes: 0,
+                total_read_ops: 0,
+                total_write_ops: 0,
+            }
+        };
+
+        let network = if self.config.network {
+            self.collect_network_metrics()
+        } else {
+            NetworkMetrics {
+                interfaces: HashMap::new(),
+                total_rx_bytes: 0,
+                total_tx_bytes: 0,
+                total_rx_packets: 0,
+                total_tx_packets: 0,
+            }
+        };
 
         #[cfg(feature = "gpu")]
-        let gpu = self.collect_gpu_metrics();
+        let gpu = if self.config.gpu {
+            self.collect_gpu_metrics()
+        } else {
+            None
+        };
 
         // Temperature collection creates a new Components list on every call.
-        // Skip it when disk metrics are disabled to keep collection fast.
-        let temperature = if self.enable_disk_metrics {
+        let temperature = if self.config.temperature {
             self.collect_temperature_metrics()
         } else {
             None
@@ -569,5 +716,98 @@ mod tests {
         };
 
         assert_eq!(stats.memory_usage_percent(), 75.0);
+    }
+
+    // ── SystemMetricsConfig gating tests ────────────────────────────────────
+
+    #[test]
+    fn test_config_cpu_only_skips_disk_and_network() {
+        let mut collector = SystemMetricsCollector::with_config(SystemMetricsConfig::cpu_only())
+            .expect("with_config should succeed");
+        let metrics = collector.collect().expect("collect should not fail");
+
+        // Disk and network fields must be empty / zero.
+        assert!(
+            metrics.disk.disks.is_empty(),
+            "disk.disks should be empty when disk config is disabled"
+        );
+        assert_eq!(
+            metrics.disk.total_read_bytes, 0,
+            "disk.total_read_bytes should be 0"
+        );
+        assert!(
+            metrics.network.interfaces.is_empty(),
+            "network.interfaces should be empty when network config is disabled"
+        );
+        assert_eq!(
+            metrics.network.total_rx_bytes, 0,
+            "network.total_rx_bytes should be 0"
+        );
+        assert!(
+            metrics.temperature.is_none(),
+            "temperature should be None when temperature config is disabled"
+        );
+    }
+
+    #[test]
+    fn test_config_network_independent_of_disk() {
+        // network: true, disk: false — network should run; no panic.
+        let cfg = SystemMetricsConfig {
+            disk: false,
+            network: true,
+            cpu: false,
+            memory: false,
+            temperature: false,
+            gpu: false,
+        };
+        let mut collector =
+            SystemMetricsCollector::with_config(cfg).expect("with_config should succeed");
+        let metrics = collector.collect().expect("collect should not panic");
+
+        // Disk must be empty.
+        assert!(
+            metrics.disk.disks.is_empty(),
+            "disk.disks must be empty when disk is disabled"
+        );
+        // Network collection should have run without panic; struct fields are valid.
+        // (On some CI hosts there may be zero interfaces; just ensure no panic and
+        // the struct is well-formed.)
+        let _ = metrics.network.total_rx_bytes;
+        let _ = metrics.network.total_tx_bytes;
+    }
+
+    #[test]
+    fn test_config_none_no_panic() {
+        let mut collector = SystemMetricsCollector::with_config(SystemMetricsConfig::none())
+            .expect("with_config should succeed");
+        let metrics = collector
+            .collect()
+            .expect("collect with none config should not panic");
+
+        assert_eq!(metrics.cpu.cpu_count, 0, "cpu_count should be 0");
+        assert_eq!(metrics.cpu.total_usage, 0.0, "total_usage should be 0.0");
+        assert_eq!(metrics.memory.total, 0, "memory.total should be 0");
+        assert!(metrics.disk.disks.is_empty(), "disk.disks should be empty");
+        assert!(
+            metrics.network.interfaces.is_empty(),
+            "network.interfaces should be empty"
+        );
+        assert!(metrics.temperature.is_none(), "temperature should be None");
+    }
+
+    #[test]
+    fn test_config_default_matches_original_behavior() {
+        // new() uses SystemMetricsConfig::default() — verify CPU and memory are collected.
+        let mut collector = SystemMetricsCollector::new().expect("new() should succeed");
+        let metrics = collector.collect().expect("collect should not fail");
+
+        assert!(
+            metrics.cpu.cpu_count > 0,
+            "default config should collect CPU (cpu_count > 0)"
+        );
+        assert!(
+            metrics.memory.total > 0,
+            "default config should collect memory (total > 0)"
+        );
     }
 }

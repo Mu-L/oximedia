@@ -71,7 +71,7 @@ pub enum ArchiveError {
 
     #[cfg(feature = "sqlite")]
     #[error("Database error: {0}")]
-    Database(#[from] sqlx::Error),
+    Database(#[from] oxisql_core::OxiSqlError),
 
     #[cfg(not(feature = "sqlite"))]
     #[error("Database error: {0}")]
@@ -170,7 +170,7 @@ impl Default for VerificationConfig {
 #[cfg(feature = "sqlite")]
 pub struct ArchiveVerifier {
     config: VerificationConfig,
-    db_pool: Option<sqlx::SqlitePool>,
+    db_pool: Option<oxisql_sqlite_compat::SqliteConnection>,
 }
 
 #[cfg(feature = "sqlite")]
@@ -193,8 +193,8 @@ impl ArchiveVerifier {
 
     /// Initialize the verifier (connects to database)
     pub async fn initialize(&mut self) -> ArchiveResult<()> {
-        let db_url = format!("sqlite:{}", self.config.database_path.display());
-        let pool = sqlx::SqlitePool::connect(&db_url).await?;
+        let db_path = self.config.database_path.to_string_lossy().to_string();
+        let pool = oxisql_sqlite_compat::SqliteConnection::open(&db_path).await?;
 
         // Create tables
         self.create_tables(&pool).await?;
@@ -204,8 +204,13 @@ impl ArchiveVerifier {
     }
 
     /// Create database tables
-    async fn create_tables(&self, pool: &sqlx::SqlitePool) -> ArchiveResult<()> {
-        sqlx::query(
+    async fn create_tables(
+        &self,
+        pool: &oxisql_sqlite_compat::SqliteConnection,
+    ) -> ArchiveResult<()> {
+        use oxisql_core::Connection;
+
+        pool.execute(
             r"
             CREATE TABLE IF NOT EXISTS checksums (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -219,11 +224,11 @@ impl ArchiveVerifier {
                 last_verified_at TEXT
             )
             ",
+            &[],
         )
-        .execute(pool)
         .await?;
 
-        sqlx::query(
+        pool.execute(
             r"
             CREATE TABLE IF NOT EXISTS fixity_checks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -237,11 +242,11 @@ impl ArchiveVerifier {
                 crc32_match BOOLEAN
             )
             ",
+            &[],
         )
-        .execute(pool)
         .await?;
 
-        sqlx::query(
+        pool.execute(
             r"
             CREATE TABLE IF NOT EXISTS premis_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -254,11 +259,11 @@ impl ArchiveVerifier {
                 linking_object_id TEXT NOT NULL
             )
             ",
+            &[],
         )
-        .execute(pool)
         .await?;
 
-        sqlx::query(
+        pool.execute(
             r"
             CREATE TABLE IF NOT EXISTS quarantine_records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -272,8 +277,8 @@ impl ArchiveVerifier {
                 restore_date TEXT
             )
             ",
+            &[],
         )
-        .execute(pool)
         .await?;
 
         Ok(())
@@ -290,7 +295,7 @@ impl ArchiveVerifier {
     }
 
     /// Get database pool
-    pub fn db_pool(&self) -> Option<&sqlx::SqlitePool> {
+    pub fn db_pool(&self) -> Option<&oxisql_sqlite_compat::SqliteConnection> {
         self.db_pool.as_ref()
     }
 

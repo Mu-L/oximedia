@@ -1,5 +1,3 @@
-// orphan: TODO — update stale paths before registration: requires `resvg` and `usvg` crate
-// dependencies that are not yet listed in Cargo.toml.
 //! SVG overlay rendering for broadcast graphics.
 //!
 //! Provides [`SvgOverlay`] which loads a Scalable Vector Graphics document via the

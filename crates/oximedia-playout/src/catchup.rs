@@ -133,12 +133,22 @@ pub struct StartoverSession {
 }
 
 impl StartoverSession {
+    /// Create a new start-over session that begins at the current wall-clock
+    /// time. Use [`StartoverSession::new_at`] when the program's start time is
+    /// known from an EPG entry or catch-up request.
     pub fn new(id: &str, recording_id: &str, viewer_id: &str) -> Self {
+        Self::new_at(id, recording_id, viewer_id, SystemTime::now())
+    }
+
+    /// Create a new start-over session anchored to an explicit `started_at`
+    /// time, e.g. the scheduled program start looked up from the EPG/schedule
+    /// or supplied by the catch-up request.
+    pub fn new_at(id: &str, recording_id: &str, viewer_id: &str, started_at: SystemTime) -> Self {
         Self {
             id: StartoverSessionId::new(id),
             recording_id: recording_id.to_string(),
             viewer_id: viewer_id.to_string(),
-            started_at: SystemTime::UNIX_EPOCH, // placeholder
+            started_at,
             offset: Duration::ZERO,
             state: StartoverState::Active,
         }

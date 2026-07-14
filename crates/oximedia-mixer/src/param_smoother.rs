@@ -3,13 +3,13 @@
 //! Audio parameters such as fader gain, pan, and send levels must change
 //! smoothly to avoid clicks and zipper noise.  This module provides:
 //!
-//! - [`LinearSmoother`] — linear ramp from current to target value over a
+//! - [`LinearSmoother`](crate::param_smoother::LinearSmoother) — linear ramp from current to target value over a
 //!   configurable number of samples.
-//! - [`ExponentialSmoother`] — one-pole IIR low-pass filter (exponential
+//! - [`ExponentialSmoother`](crate::param_smoother::ExponentialSmoother) — one-pole IIR low-pass filter (exponential
 //!   approach), commonly used for gain automation.
-//! - [`SharedParam`] — an `Arc<AtomicU32>` wrapper that lets a control thread
+//! - [`SharedParam`](crate::param_smoother::SharedParam) — an `Arc<AtomicU32>` wrapper that lets a control thread
 //!   write new target values while the audio thread reads them, with no locks.
-//! - [`SmoothedChannel`] — combines a `SharedParam` with a `LinearSmoother`
+//! - [`SmoothedChannel`](crate::param_smoother::SmoothedChannel) — combines a `SharedParam` with a `LinearSmoother`
 //!   so the audio thread automatically ramps to whatever value the UI thread
 //!   sets.
 //!

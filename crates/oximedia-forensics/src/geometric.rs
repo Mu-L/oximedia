@@ -2,6 +2,49 @@
 //!
 //! This module detects copy-move forgery, cloning, and geometric transformations
 //! using keypoint matching and block matching techniques.
+//!
+//! # Methodology
+//!
+//! [`detect_copy_move`] combines two independent, complementary
+//! approaches, since block matching and keypoint matching have different
+//! failure modes (block matching struggles with rotation/scale, keypoint
+//! matching struggles with flat, low-texture regions):
+//!
+//! - **Block matching** (`detect_copy_move_blocks`): the image is divided
+//!   into overlapping fixed-size blocks; each block's statistical/gradient
+//!   feature vector (`compute_block_features`) is compared against every
+//!   other block far enough away to rule out self-overlap
+//!   (`compute_feature_similarity`). Near-duplicate blocks are strong
+//!   evidence of a copy-move operation, since real photographic content
+//!   essentially never repeats pixel-for-pixel.
+//! - **Keypoint matching** (`detect_copy_move_keypoints`): a simplified
+//!   SIFT/ORB-like local-extrema keypoint detector (`extract_keypoints`)
+//!   finds distinctive interest points, describes their local neighborhood,
+//!   and matches descriptors across the image (`match_keypoints`), then
+//!   filters matches for geometric consistency
+//!   (`filter_geometric_matches`) to reject spurious coincidental matches.
+//!   This approach is more robust to the rotation/scaling that often
+//!   accompanies a pasted-in duplicate region than pure block matching.
+//!
+//! Both detectors' hit regions are merged into a single confidence score
+//! and a combined [`FlatArray2<f64>`] anomaly map (`create_copy_move_anomaly_map`).
+//!
+//! # References
+//!
+//! - J. Fridrich, D. Soukal, J. Lukáš, "Detection of Copy-Move Forgery in
+//!   Digital Images", Proceedings of Digital Forensic Research Workshop
+//!   (2003) — the original block-matching copy-move detection method.
+//! - D. G. Lowe, "Distinctive Image Features from Scale-Invariant
+//!   Keypoints", International Journal of Computer Vision, 60(2), 91–110
+//!   (2004) — the SIFT keypoint detector/descriptor this module's
+//!   simplified keypoint matcher is modeled after.
+//! - I. Amerini, L. Ballan, R. Caldelli, A. Del Bimbo, G. Serra, "A
+//!   SIFT-Based Forensic Method for Copy-Move Attack Detection and
+//!   Transformation Recovery", IEEE Transactions on Information Forensics
+//!   and Security, 6(3), 1099–1110 (2011) — applies SIFT-style keypoint
+//!   matching with geometric consistency filtering specifically to
+//!   copy-move forensics, as implemented in `detect_copy_move_keypoints`
+//!   and `filter_geometric_matches`.
 
 use crate::flat_array2::FlatArray2;
 use crate::{ForensicTest, ForensicsResult};
@@ -42,6 +85,11 @@ pub struct CopyMoveResult {
     pub confidence: f64,
     /// Number of matched features
     pub num_matches: usize,
+    /// Whether keypoint matching hit its accumulation cap
+    /// (`MAX_KEYPOINT_MATCHES`) and the match set is therefore truncated.
+    /// Always `false` for the block-matching path, which does not use the
+    /// capped index buffer.
+    pub matches_capped: bool,
 }
 
 /// Image region
@@ -89,6 +137,13 @@ pub fn detect_copy_move(image: &RgbImage) -> ForensicsResult<ForensicTest> {
         "Keypoint matching: {} matches",
         keypoint_result.num_matches
     ));
+    if keypoint_result.matches_capped {
+        test.add_finding(format!(
+            "Keypoint matching reached the {}-match cap; the reported match \
+             set is truncated, not exhaustive",
+            MAX_KEYPOINT_MATCHES
+        ));
+    }
 
     // Calculate confidence
     let confidence = (block_result.confidence + keypoint_result.confidence) / 2.0;
@@ -124,51 +179,70 @@ fn detect_copy_move_blocks(gray: &FlatArray2<f64>) -> ForensicsResult<CopyMoveRe
     let block_size = 16;
     let step = 8;
 
-    // Extract overlapping blocks
-    let mut blocks = Vec::new();
+    // Extract overlapping blocks, keeping both a feature vector (drives the
+    // fast candidate pre-filter) and the raw pixels (drive exact verification).
+    let mut blocks: Vec<(usize, usize, Vec<f64>, FlatArray2<f64>)> = Vec::new();
 
     for y in (0..height - block_size).step_by(step) {
         for x in (0..width - block_size).step_by(step) {
             let block = extract_gray_block(gray, x, y, block_size);
             let features = compute_block_features(&block);
-            blocks.push((x, y, features));
+            blocks.push((x, y, features, block));
         }
     }
 
-    // Find similar blocks
+    // Find duplicated blocks.
     let mut matches = Vec::new();
     let similarity_threshold = 0.95;
-    let min_distance = 40; // Minimum pixel distance to avoid self-matching
+    let min_distance = 40; // Minimum pixel distance to avoid self-matching.
+                           // Maximum mean-absolute pixel difference (in 0..255 gray levels) for a
+                           // candidate to count as a genuine duplicate. An exact copy has MAD 0,
+                           // whereas on a richly self-similar texture the closest non-duplicate blocks
+                           // empirically sit around MAD 1..2 (independent per-pixel sensor noise), so
+                           // 0.5 keeps true duplicates while rejecting coincidental look-alikes that
+                           // the lossy feature pre-filter lets through.
+    let max_block_mad = 0.5;
 
     for i in 0..blocks.len() {
         for j in i + 1..blocks.len() {
-            let (x1, y1, ref feat1) = blocks[i];
-            let (x2, y2, ref feat2) = blocks[j];
+            let (x1, y1, ref feat1, ref block1) = blocks[i];
+            let (x2, y2, ref feat2, ref block2) = blocks[j];
 
             let distance = ((x1 as i32 - x2 as i32).pow(2) + (y1 as i32 - y2 as i32).pow(2)) as f64;
             let distance = distance.sqrt();
 
-            if distance > min_distance as f64 {
-                let similarity = compute_feature_similarity(feat1, feat2);
-
-                if similarity > similarity_threshold {
-                    matches.push((
-                        Region {
-                            x: x1,
-                            y: y1,
-                            width: block_size,
-                            height: block_size,
-                        },
-                        Region {
-                            x: x2,
-                            y: y2,
-                            width: block_size,
-                            height: block_size,
-                        },
-                        similarity,
-                    ));
-                }
+            if distance <= min_distance as f64 {
+                continue;
             }
+
+            // Fast, lossy pre-filter on the feature vector...
+            let similarity = compute_feature_similarity(feat1, feat2);
+            if similarity <= similarity_threshold {
+                continue;
+            }
+
+            // ...then verify against the actual pixels. A feature vector is a
+            // lossy summary, so two genuinely different blocks can share one;
+            // the MAD check is what confines matches to true duplication.
+            if block_mad(block1, block2) > max_block_mad {
+                continue;
+            }
+
+            matches.push((
+                Region {
+                    x: x1,
+                    y: y1,
+                    width: block_size,
+                    height: block_size,
+                },
+                Region {
+                    x: x2,
+                    y: y2,
+                    width: block_size,
+                    height: block_size,
+                },
+                similarity,
+            ));
         }
     }
 
@@ -185,6 +259,9 @@ fn detect_copy_move_blocks(gray: &FlatArray2<f64>) -> ForensicsResult<CopyMoveRe
         regions: clustered,
         confidence,
         num_matches: matches.len(),
+        // Block matching accumulates region pairs directly, not through the
+        // capped index buffer, so its result is never truncated.
+        matches_capped: false,
     })
 }
 
@@ -202,6 +279,26 @@ fn extract_gray_block(gray: &FlatArray2<f64>, x: usize, y: usize, size: usize) -
     }
 
     block
+}
+
+/// Mean absolute difference between two equally-sized gray blocks (0..255).
+///
+/// Returns [`f64::MAX`] for mismatched/empty dimensions so a size mismatch can
+/// never be mistaken for a duplicate.
+fn block_mad(b1: &FlatArray2<f64>, b2: &FlatArray2<f64>) -> f64 {
+    let (h, w) = b1.dim();
+    if b2.dim() != (h, w) || h == 0 || w == 0 {
+        return f64::MAX;
+    }
+
+    let mut sum = 0.0;
+    for i in 0..h {
+        for j in 0..w {
+            sum += (b1[[i, j]] - b2[[i, j]]).abs();
+        }
+    }
+
+    sum / (h * w) as f64
 }
 
 /// Compute block features (DCT-like)
@@ -252,40 +349,46 @@ fn compute_block_features(block: &FlatArray2<f64>) -> Vec<f64> {
     features
 }
 
-/// Compute similarity between feature vectors
+/// Compute similarity between block feature vectors, in `[0, 1]` (1 =
+/// identical).
+///
+/// The previous measure was the absolute Pearson correlation of the feature
+/// vectors. That is *offset- and scale-invariant* (and, because of the
+/// `.abs()`, blind to sign), so it only compares the feature vector's *shape*:
+/// two blocks of completely different brightness could still score ~1.0. On a
+/// richly-textured image that made ~35% of all block pairs look "95% similar",
+/// flooding the detector with false copy-move matches. Copy-move duplicates
+/// are, by definition, near-*identical* in absolute terms, so we instead use a
+/// magnitude-aware relative L2 distance:
+///
+/// `sim = 1 − ‖f1 − f2‖ / (‖f1‖ + ‖f2‖)`
+///
+/// which is 1 for identical feature vectors and falls off as their absolute
+/// values diverge — so the `similarity_threshold` in `detect_copy_move_blocks`
+/// now means "these blocks are genuinely alike", not merely "correlated".
 fn compute_feature_similarity(feat1: &[f64], feat2: &[f64]) -> f64 {
     if feat1.len() != feat2.len() {
         return 0.0;
     }
 
-    // Normalized correlation
-    let mut sum1 = 0.0;
-    let mut sum2 = 0.0;
-    let mut sum_sq1 = 0.0;
-    let mut sum_sq2 = 0.0;
-    let mut sum_prod = 0.0;
-
-    for i in 0..feat1.len() {
-        sum1 += feat1[i];
-        sum2 += feat2[i];
-        sum_sq1 += feat1[i] * feat1[i];
-        sum_sq2 += feat2[i] * feat2[i];
-        sum_prod += feat1[i] * feat2[i];
+    let mut diff_sq = 0.0;
+    let mut norm1_sq = 0.0;
+    let mut norm2_sq = 0.0;
+    for (&a, &b) in feat1.iter().zip(feat2.iter()) {
+        let d = a - b;
+        diff_sq += d * d;
+        norm1_sq += a * a;
+        norm2_sq += b * b;
     }
 
-    let n = feat1.len() as f64;
-    let mean1 = sum1 / n;
-    let mean2 = sum2 / n;
-
-    let var1 = sum_sq1 / n - mean1 * mean1;
-    let var2 = sum_sq2 / n - mean2 * mean2;
-    let covar = sum_prod / n - mean1 * mean2;
-
-    if var1 > 0.0 && var2 > 0.0 {
-        (covar / (var1.sqrt() * var2.sqrt())).abs()
-    } else {
-        0.0
+    let denom = norm1_sq.sqrt() + norm2_sq.sqrt();
+    if denom <= f64::EPSILON {
+        // Both feature vectors are all-zero (e.g. two flat black blocks):
+        // treat them as identical.
+        return 1.0;
     }
+
+    (1.0 - diff_sq.sqrt() / denom).max(0.0)
 }
 
 /// Cluster nearby matches into regions
@@ -338,19 +441,55 @@ fn merge_regions(r1: &Region, r2: &Region) -> Region {
     }
 }
 
-/// Detect copy-move using keypoint matching
+/// Maximum number of keypoints retained by [`extract_keypoints`].
+///
+/// Keypoint matching is O(N²) in the number of keypoints, so this hard cap
+/// bounds the matching loop at ~`MAX_KEYPOINTS² / 2` (≈ 524k) comparisons no
+/// matter how corner-rich the image is.
+const MAX_KEYPOINTS: usize = 1024;
+
+/// Maximum number of keypoint matches accumulated by [`match_keypoints`].
+///
+/// A pathological (highly self-similar) image could otherwise produce
+/// millions of matches. Capping the accumulation keeps the match buffer
+/// bounded (≈ 24 bytes per [`MatchIdx`], so ≤ ~2.4 MB here); when the cap is
+/// reached the result is flagged via [`CopyMoveResult::matches_capped`]
+/// instead of being silently treated as complete.
+const MAX_KEYPOINT_MATCHES: usize = 100_000;
+
+/// Index-based keypoint match used for the internal O(N²) accumulation.
+///
+/// Holds indices into the keypoint slice instead of cloned [`Keypoint`]s
+/// (each of which owns a 256-element `Vec<f64>` descriptor), so one match is
+/// ≈ 24 bytes rather than ≈ 4.2 KB — the difference between a bounded buffer
+/// and a multi-gigabyte one on a corner-rich image. Owned [`KeypointMatch`]
+/// values (public API) are only worth materializing for a small,
+/// already-filtered result set.
+#[derive(Debug, Clone, Copy)]
+struct MatchIdx {
+    /// Index of the first keypoint in the keypoint slice.
+    i: usize,
+    /// Index of the second keypoint in the keypoint slice.
+    j: usize,
+    /// Descriptor (L2) distance between the two keypoints.
+    distance: f64,
+}
+
+/// Detect copy-move using keypoint matching.
 fn detect_copy_move_keypoints(gray: &FlatArray2<f64>) -> ForensicsResult<CopyMoveResult> {
-    // Extract keypoints using simplified SIFT-like approach
+    // Extract keypoints using a simplified SIFT-like approach. The count is
+    // bounded to MAX_KEYPOINTS so the O(N²) matcher below cannot blow up.
     let keypoints = extract_keypoints(gray);
 
-    // Match keypoints
-    let matches = match_keypoints(&keypoints);
+    // Match keypoints. Matching works on indices into `keypoints`, never on
+    // cloned descriptors, and stops accumulating at MAX_KEYPOINT_MATCHES.
+    let (matches, matches_capped) = match_keypoints(&keypoints);
 
-    // Filter matches based on geometric consistency
-    let filtered_matches = filter_geometric_matches(&matches);
+    // Filter matches for geometric consistency (index-based, no cloning).
+    let filtered_matches = filter_geometric_matches(&keypoints, &matches);
 
-    // Convert matches to regions
-    let regions = matches_to_regions(&filtered_matches);
+    // Materialize regions only for the small filtered set.
+    let regions = matches_to_regions(&keypoints, &filtered_matches);
 
     let confidence = if !filtered_matches.is_empty() {
         (filtered_matches.len() as f64 / 20.0).min(1.0)
@@ -362,34 +501,54 @@ fn detect_copy_move_keypoints(gray: &FlatArray2<f64>) -> ForensicsResult<CopyMov
         regions,
         confidence,
         num_matches: filtered_matches.len(),
+        matches_capped,
     })
 }
 
-/// Extract keypoints (simplified SIFT-like)
-#[allow(unused_variables)]
+/// Extract keypoints (simplified SIFT-like).
+///
+/// Harris responses are computed on raw 0..255 gradients, so their absolute
+/// magnitude is scene-dependent and can be astronomically large; a *fixed*
+/// response cut is therefore meaningless (it rejects almost nothing, leaving
+/// thousands of keypoints on any textured image). Instead we keep only
+/// corners whose response is a meaningful fraction of the strongest response
+/// in this image, then hard-cap the count at [`MAX_KEYPOINTS`] (strongest
+/// first) so the downstream O(N²) matcher stays bounded. Non-maximum
+/// suppression is still performed upstream in [`detect_harris_corners`].
 fn extract_keypoints(gray: &FlatArray2<f64>) -> Vec<Keypoint> {
-    let (height, width) = gray.dim();
-    let mut keypoints = Vec::new();
+    // Harris corners, already non-maximum suppressed.
+    let mut corners = detect_harris_corners(gray);
+    if corners.is_empty() {
+        return Vec::new();
+    }
 
-    // Use Harris corner detector
-    let corners = detect_harris_corners(gray);
+    // Relative threshold: keep only corners whose response is at least
+    // `relative_factor` of the strongest response in this image.
+    let max_response = corners
+        .iter()
+        .map(|&(_, _, response)| response)
+        .fold(f64::MIN, f64::max);
+    let relative_factor = 0.01;
+    let threshold = relative_factor * max_response;
+    corners.retain(|&(_, _, response)| response > threshold);
 
-    for (x, y, response) in corners {
-        if response > 0.01 {
-            // Compute descriptor
+    // Hard cap: sort by response descending and keep at most MAX_KEYPOINTS.
+    corners.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    corners.truncate(MAX_KEYPOINTS);
+
+    corners
+        .into_iter()
+        .map(|(x, y, _response)| {
             let descriptor = compute_sift_like_descriptor(gray, x, y);
-
-            keypoints.push(Keypoint {
+            Keypoint {
                 x: x as f64,
                 y: y as f64,
                 scale: 1.0,
                 orientation: 0.0,
                 descriptor,
-            });
-        }
-    }
-
-    keypoints
+            }
+        })
+        .collect()
 }
 
 /// Detect Harris corners
@@ -471,10 +630,23 @@ fn compute_harris_response(gray: &FlatArray2<f64>, x: usize, y: usize) -> f64 {
     det - k * trace * trace
 }
 
-/// Compute SIFT-like descriptor
+/// Compute a SIFT-like descriptor: a 16×16 intensity patch made
+/// contrast/brightness invariant by subtracting the patch mean and scaling to
+/// unit L2 norm.
+///
+/// The previous *sum*-normalization divided every element by the patch total,
+/// collapsing them all toward `1/N` and making every descriptor nearly
+/// identical — which rendered the descriptor-distance gate in
+/// [`match_keypoints`] useless (it rejected 0% of pairs). Subtracting the mean
+/// removes brightness (the DC component) and unit-L2 scaling removes contrast,
+/// so the L2 distance between two descriptors becomes a meaningful similarity
+/// in `[0, 2]`. A flat, textureless patch has zero variance: after mean
+/// subtraction it is all-zero, and we emit that all-zero descriptor rather
+/// than dividing by a (near-)zero norm; [`compute_descriptor_distance`] treats
+/// such a degenerate descriptor as maximally dissimilar.
 fn compute_sift_like_descriptor(gray: &FlatArray2<f64>, x: usize, y: usize) -> Vec<f64> {
     let patch_size = 16;
-    let mut descriptor = Vec::new();
+    let mut descriptor = Vec::with_capacity(patch_size * patch_size);
 
     for dy in 0..patch_size {
         for dx in 0..patch_size {
@@ -489,11 +661,25 @@ fn compute_sift_like_descriptor(gray: &FlatArray2<f64>, x: usize, y: usize) -> V
         }
     }
 
-    // Normalize
-    let sum: f64 = descriptor.iter().sum();
-    if sum > 0.0 {
+    // Subtract the patch mean (brightness / DC invariance).
+    let n = descriptor.len() as f64;
+    if n > 0.0 {
+        let mean = descriptor.iter().sum::<f64>() / n;
         for val in &mut descriptor {
-            *val /= sum;
+            *val -= mean;
+        }
+    }
+
+    // Scale to unit L2 norm (contrast invariance). Guard the zero-norm case
+    // (a flat patch) instead of dividing by zero: emit an all-zero descriptor.
+    let norm = descriptor.iter().map(|v| v * v).sum::<f64>().sqrt();
+    if norm > f64::EPSILON {
+        for val in &mut descriptor {
+            *val /= norm;
+        }
+    } else {
+        for val in &mut descriptor {
+            *val = 0.0;
         }
     }
 
@@ -820,48 +1006,81 @@ fn filter_orb_matches(matches: &[OrbKeypointMatch]) -> Vec<OrbKeypointMatch> {
         .collect()
 }
 
-/// Match keypoints
-fn match_keypoints(keypoints: &[Keypoint]) -> Vec<KeypointMatch> {
+/// Match keypoints by descriptor similarity and spatial separation.
+///
+/// Accumulates [`MatchIdx`] (indices into `keypoints`) rather than cloned
+/// [`Keypoint`]s, and stops once [`MAX_KEYPOINT_MATCHES`] is reached. Returns
+/// the matches together with a flag indicating whether that cap was hit, so
+/// the caller can mark the result as truncated.
+fn match_keypoints(keypoints: &[Keypoint]) -> (Vec<MatchIdx>, bool) {
     let mut matches = Vec::new();
-    let distance_threshold = 0.8;
+
+    // Descriptors are unit-L2-normalized (see `compute_sift_like_descriptor`),
+    // so the L2 distance between any two lies in [0, 2]: 0 for identical
+    // patches, ≈ sqrt(2) ≈ 1.41 for uncorrelated ("orthogonal") ones, and up
+    // to 2 for anti-correlated. A copy-moved region is a *near-identical*
+    // duplicate (distance ≈ 0), whereas even on a richly self-similar texture
+    // coincidental matches empirically bottom out around 0.05; a threshold of
+    // 0.03 therefore keeps genuine duplicates while rejecting essentially all
+    // unrelated pairs. (This is intentionally far below the ~0.3 that would be
+    // "loosely similar" — copy-move demands true duplication, not resemblance.)
+    let distance_threshold = 0.03;
     let min_spatial_distance = 30.0;
 
-    for i in 0..keypoints.len() {
+    let mut capped = false;
+    'outer: for i in 0..keypoints.len() {
         for j in i + 1..keypoints.len() {
             let kp1 = &keypoints[i];
             let kp2 = &keypoints[j];
 
-            // Check spatial distance
+            // Reject self-neighbourhood matches (too close to be a copy-move).
             let spatial_dist = ((kp1.x - kp2.x).powi(2) + (kp1.y - kp2.y).powi(2)).sqrt();
+            if spatial_dist <= min_spatial_distance {
+                continue;
+            }
 
-            if spatial_dist > min_spatial_distance {
-                // Compute descriptor distance
-                let desc_dist = compute_descriptor_distance(&kp1.descriptor, &kp2.descriptor);
-
-                if desc_dist < distance_threshold {
-                    matches.push(KeypointMatch {
-                        kp1: kp1.clone(),
-                        kp2: kp2.clone(),
-                        distance: desc_dist,
-                    });
+            let desc_dist = compute_descriptor_distance(&kp1.descriptor, &kp2.descriptor);
+            if desc_dist < distance_threshold {
+                matches.push(MatchIdx {
+                    i,
+                    j,
+                    distance: desc_dist,
+                });
+                if matches.len() >= MAX_KEYPOINT_MATCHES {
+                    capped = true;
+                    break 'outer;
                 }
             }
         }
     }
 
-    matches
+    (matches, capped)
 }
 
-/// Compute distance between descriptors
+/// Compute the L2 distance between two (unit-norm) descriptors.
+///
+/// A zero-norm descriptor is produced by a flat, textureless patch (see
+/// [`compute_sift_like_descriptor`]) and carries no distinctive information;
+/// any pair involving one is reported as maximally dissimilar so featureless
+/// regions never match — in particular two flat patches must not match each
+/// other merely because both descriptors are all-zero.
 fn compute_descriptor_distance(desc1: &[f64], desc2: &[f64]) -> f64 {
     if desc1.len() != desc2.len() {
         return f64::MAX;
     }
 
     let mut sum_sq = 0.0;
-    for i in 0..desc1.len() {
-        let diff = desc1[i] - desc2[i];
+    let mut norm1_sq = 0.0;
+    let mut norm2_sq = 0.0;
+    for (&a, &b) in desc1.iter().zip(desc2.iter()) {
+        let diff = a - b;
         sum_sq += diff * diff;
+        norm1_sq += a * a;
+        norm2_sq += b * b;
+    }
+
+    if norm1_sq <= f64::EPSILON || norm2_sq <= f64::EPSILON {
+        return f64::MAX;
     }
 
     sum_sq.sqrt()
@@ -872,29 +1091,36 @@ fn compute_descriptor_distance(desc1: &[f64], desc2: &[f64]) -> f64 {
 /// Groups matches by their displacement vector. Only matches whose
 /// displacement is consistent with a cluster of similar displacements
 /// (within `distance_tolerance`) are kept.
-fn filter_geometric_matches(matches: &[KeypointMatch]) -> Vec<KeypointMatch> {
+fn filter_geometric_matches(keypoints: &[Keypoint], matches: &[MatchIdx]) -> Vec<MatchIdx> {
     if matches.len() < 2 {
         return matches.to_vec();
     }
 
     let distance_tolerance = 15.0;
 
-    // Compute displacement vectors.
+    // Displacement vector of each match, derived from its referenced keypoints.
+    // `MatchIdx` is `Copy`, so this clones no descriptors and allocates no
+    // second large buffer (the previous version cloned every surviving
+    // `KeypointMatch` — with its 256-element descriptor — into a fresh Vec).
     let displacements: Vec<(f64, f64)> = matches
         .iter()
-        .map(|m| (m.kp2.x - m.kp1.x, m.kp2.y - m.kp1.y))
+        .map(|m| {
+            let kp1 = &keypoints[m.i];
+            let kp2 = &keypoints[m.j];
+            (kp2.x - kp1.x, kp2.y - kp1.y)
+        })
         .collect();
 
-    // For each match, count how many other matches have a similar displacement.
+    // For each match, count how many others share a similar displacement.
     let mut votes: Vec<usize> = vec![0; matches.len()];
-    for i in 0..displacements.len() {
-        for j in i + 1..displacements.len() {
-            let dx = displacements[i].0 - displacements[j].0;
-            let dy = displacements[i].1 - displacements[j].1;
+    for a in 0..displacements.len() {
+        for b in a + 1..displacements.len() {
+            let dx = displacements[a].0 - displacements[b].0;
+            let dy = displacements[a].1 - displacements[b].1;
             let dist = (dx * dx + dy * dy).sqrt();
             if dist < distance_tolerance {
-                votes[i] += 1;
-                votes[j] += 1;
+                votes[a] += 1;
+                votes[b] += 1;
             }
         }
     }
@@ -905,26 +1131,29 @@ fn filter_geometric_matches(matches: &[KeypointMatch]) -> Vec<KeypointMatch> {
         .iter()
         .enumerate()
         .filter(|(idx, _)| votes[*idx] >= min_votes)
-        .map(|(_, m)| m.clone())
+        .map(|(_, m)| *m)
         .collect()
 }
 
-/// Convert matches to regions
-fn matches_to_regions(matches: &[KeypointMatch]) -> Vec<(Region, Region)> {
+/// Convert index-based matches to source/destination region pairs.
+fn matches_to_regions(keypoints: &[Keypoint], matches: &[MatchIdx]) -> Vec<(Region, Region)> {
     let mut regions = Vec::new();
     let region_size = 32;
 
     for m in matches {
+        let kp1 = &keypoints[m.i];
+        let kp2 = &keypoints[m.j];
+
         let r1 = Region {
-            x: (m.kp1.x as usize).saturating_sub(region_size / 2),
-            y: (m.kp1.y as usize).saturating_sub(region_size / 2),
+            x: (kp1.x as usize).saturating_sub(region_size / 2),
+            y: (kp1.y as usize).saturating_sub(region_size / 2),
             width: region_size,
             height: region_size,
         };
 
         let r2 = Region {
-            x: (m.kp2.x as usize).saturating_sub(region_size / 2),
-            y: (m.kp2.y as usize).saturating_sub(region_size / 2),
+            x: (kp2.x as usize).saturating_sub(region_size / 2),
+            y: (kp2.y as usize).saturating_sub(region_size / 2),
             width: region_size,
             height: region_size,
         };
@@ -1137,25 +1366,33 @@ mod tests {
             orientation: 0.0,
             descriptor: vec![0.0],
         };
+        // Keypoints referenced by index; each match pairs (2k) -> (2k + 1).
+        let keypoints = vec![
+            make_kp(10.0, 10.0),
+            make_kp(50.0, 50.0), // match 0: displacement (40, 40)
+            make_kp(20.0, 20.0),
+            make_kp(60.0, 60.0), // match 1: displacement (40, 40)
+            make_kp(30.0, 30.0),
+            make_kp(31.0, 100.0), // match 2: displacement (1, 70) — inconsistent
+        ];
         let matches = vec![
-            KeypointMatch {
-                kp1: make_kp(10.0, 10.0),
-                kp2: make_kp(50.0, 50.0),
+            MatchIdx {
+                i: 0,
+                j: 1,
                 distance: 0.1,
             },
-            KeypointMatch {
-                kp1: make_kp(20.0, 20.0),
-                kp2: make_kp(60.0, 60.0),
+            MatchIdx {
+                i: 2,
+                j: 3,
                 distance: 0.1,
             },
-            // Inconsistent displacement:
-            KeypointMatch {
-                kp1: make_kp(30.0, 30.0),
-                kp2: make_kp(31.0, 100.0),
+            MatchIdx {
+                i: 4,
+                j: 5,
                 distance: 0.2,
             },
         ];
-        let filtered = filter_geometric_matches(&matches);
+        let filtered = filter_geometric_matches(&keypoints, &matches);
         // The two consistent matches should survive; the inconsistent one may be removed.
         assert!(filtered.len() >= 2);
     }

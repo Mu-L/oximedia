@@ -105,7 +105,7 @@ impl VersionChain {
     /// Returns the next version derived from the current latest and the given kind.
     ///
     /// The new version is *not* automatically added to the chain; call
-    /// [`add_version`] with the returned value if desired.
+    /// [`Self::add_version`] with the returned value if desired.
     ///
     /// The `id` of the new version is derived by appending `"-next"` to the
     /// latest `id` (or `"v1"` if the chain is empty).  The `base_version_id`

@@ -5,18 +5,33 @@
 //!
 //! VP8 is a royalty-free video codec developed by Google as part of
 //! the `WebM` project. This decoder is based on RFC 6386.
+//!
+//! # Honest status: bitstream parsing only
+//!
+//! Per `docs/codec_status.md`, VP8 is **parse-only** in this release:
+//! frame headers are parsed (dimensions, frame type, reference-refresh
+//! flags), but pixel reconstruction (entropy decode of coefficients,
+//! intra/inter prediction, inverse DCT/WHT, loop filter) is **not
+//! implemented** and is deferred to 0.2.0. Instead of fabricating output
+//! (an earlier revision emitted constant-gray frames), the
+//! decode-to-pixels path returns an honest
+//! [`CodecError::UnsupportedFeature`] error. Header information parsed
+//! before the error (e.g. [`Vp8Decoder::dimensions`]) remains available.
 
 use crate::error::{CodecError, CodecResult};
-use crate::frame::{FrameType, Plane, VideoFrame};
+use crate::frame::VideoFrame;
 use crate::traits::{DecoderConfig, VideoDecoder};
 use crate::vp8::frame_header::FrameHeader;
-use oximedia_core::{CodecId, PixelFormat, Rational, Timestamp};
+use oximedia_core::{CodecId, PixelFormat};
 
-/// VP8 decoder.
+/// VP8 decoder (bitstream parsing only — see module docs).
 ///
-/// A pure Rust implementation of the VP8 video decoder.
-/// VP8 is simpler than VP9 and uses a different bitstream format
-/// based on boolean arithmetic coding.
+/// A pure Rust VP8 bitstream parser based on RFC 6386. Frame headers are
+/// parsed and stream properties (dimensions, output format) are exposed,
+/// but pixel reconstruction is not implemented in this release:
+/// [`Vp8Decoder::send_packet`] parses the frame header and then returns an
+/// honest [`CodecError::UnsupportedFeature`] error rather than producing
+/// fabricated pixel data.
 ///
 /// # Examples
 ///
@@ -42,17 +57,10 @@ pub struct Vp8Decoder {
     width: Option<u32>,
     /// Current frame height.
     height: Option<u32>,
-    /// Pending frame output queue.
+    /// Pending frame output queue (never populated until pixel
+    /// reconstruction is implemented; kept for the `VideoDecoder`
+    /// push/pull contract).
     output_queue: Vec<VideoFrame>,
-    /// Last reference frame (for inter prediction).
-    #[allow(dead_code)]
-    last_frame: Option<VideoFrame>,
-    /// Golden reference frame.
-    #[allow(dead_code)]
-    golden_frame: Option<VideoFrame>,
-    /// Alternate reference frame.
-    #[allow(dead_code)]
-    altref_frame: Option<VideoFrame>,
     /// Whether the decoder is in flush mode.
     flushing: bool,
 }
@@ -86,15 +94,19 @@ impl Vp8Decoder {
             width: None,
             height: None,
             output_queue: Vec::new(),
-            last_frame: None,
-            golden_frame: None,
-            altref_frame: None,
             flushing: false,
         })
     }
 
-    /// Decodes a VP8 frame from the input data.
-    fn decode_frame(&mut self, data: &[u8], pts: i64) -> CodecResult<()> {
+    /// Parses a VP8 frame and reports the pixel-reconstruction gap honestly.
+    ///
+    /// The frame header is parsed and stream dimensions are updated for
+    /// keyframes, so callers can still probe stream properties via
+    /// [`Vp8Decoder::dimensions`] / [`Vp8Decoder::output_format`]. Actual
+    /// pixel reconstruction is not implemented (deferred to 0.2.0), so this
+    /// always ends in [`CodecError::UnsupportedFeature`] rather than
+    /// emitting fabricated (constant-gray) frames.
+    fn decode_frame(&mut self, data: &[u8], _pts: i64) -> CodecResult<()> {
         // Parse frame header
         let header = FrameHeader::parse(data)?;
 
@@ -104,78 +116,21 @@ impl Vp8Decoder {
             self.height = Some(u32::from(header.height));
         }
 
-        let (Some(width), Some(height)) = (self.width, self.height) else {
+        if self.width.is_none() || self.height.is_none() {
             return Err(CodecError::InvalidBitstream(
                 "VP8: No keyframe received yet, cannot decode inter frame".to_string(),
             ));
-        };
-
-        // Create output frame
-        // In a full implementation, we would decode the actual pixel data here.
-        // For now, we create a frame with allocated but initialized planes.
-        let frame = self.create_output_frame(&header, width, height, pts);
-
-        // Update reference frames based on header flags
-        if header.refresh_last {
-            self.last_frame = Some(frame.clone());
-        }
-        if header.refresh_golden_frame {
-            self.golden_frame = Some(frame.clone());
-        }
-        if header.refresh_alternate_frame {
-            self.altref_frame = Some(frame.clone());
         }
 
-        // Output frame if show_frame is set
-        if header.show_frame {
-            self.output_queue.push(frame);
-        }
-
-        Ok(())
-    }
-
-    /// Creates an output video frame with proper plane allocation.
-    #[allow(clippy::unused_self)]
-    fn create_output_frame(
-        &self,
-        header: &FrameHeader,
-        width: u32,
-        height: u32,
-        pts: i64,
-    ) -> VideoFrame {
-        // VP8 always outputs YUV420p
-        let format = PixelFormat::Yuv420p;
-
-        // Calculate plane sizes for YUV420p
-        let y_size = (width * height) as usize;
-        let uv_width = width.div_ceil(2) as usize;
-        let uv_height = height.div_ceil(2) as usize;
-        let uv_size = uv_width * uv_height;
-
-        // Allocate planes (in a real decoder, these would be filled with decoded data)
-        let y_plane = Plane::new(vec![128u8; y_size], width as usize);
-        let u_plane = Plane::new(vec![128u8; uv_size], uv_width);
-        let v_plane = Plane::new(vec![128u8; uv_size], uv_width);
-
-        // Create timestamp with 1ms timebase
-        let timestamp = Timestamp::new(pts, Rational::new(1, 1000));
-
-        let frame_type = if header.is_keyframe() {
-            FrameType::Key
-        } else {
-            FrameType::Inter
-        };
-
-        VideoFrame {
-            format,
-            width,
-            height,
-            planes: vec![y_plane, u_plane, v_plane],
-            timestamp,
-            frame_type,
-            color_info: crate::frame::ColorInfo::default(),
-            corrupt: false,
-        }
+        // Header parsing succeeded, but decoding this frame to pixels would
+        // require macroblock entropy decode, intra/inter prediction, the
+        // inverse DCT/WHT, and the loop filter — none of which are
+        // implemented yet. Fail honestly instead of returning gray frames.
+        Err(CodecError::UnsupportedFeature(
+            "VP8 pixel reconstruction not implemented: bitstream parsing only \
+             (full decode deferred to 0.2.0; see docs/codec_status.md)"
+                .to_string(),
+        ))
     }
 }
 
@@ -184,6 +139,12 @@ impl VideoDecoder for Vp8Decoder {
         CodecId::Vp8
     }
 
+    /// Sends a packet to the decoder.
+    ///
+    /// The frame header is parsed (updating [`Vp8Decoder::dimensions`] on
+    /// keyframes), then an honest [`CodecError::UnsupportedFeature`] error
+    /// is returned because pixel reconstruction is not implemented — see
+    /// the module documentation.
     fn send_packet(&mut self, data: &[u8], pts: i64) -> CodecResult<()> {
         if self.flushing {
             return Err(CodecError::InvalidParameter(
@@ -212,9 +173,6 @@ impl VideoDecoder for Vp8Decoder {
 
     fn reset(&mut self) {
         self.output_queue.clear();
-        self.last_frame = None;
-        self.golden_frame = None;
-        self.altref_frame = None;
         self.flushing = false;
         // Note: we keep width/height to allow continued decoding after seek
     }
@@ -249,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_keyframe() {
+    fn test_decode_keyframe_parses_header_then_errors_honestly() {
         let config = DecoderConfig::default();
         let mut decoder = Vp8Decoder::new(config).expect("should succeed");
 
@@ -262,18 +220,38 @@ mod tests {
             0xF0, 0x00, // height=240
         ];
 
-        decoder.send_packet(&keyframe, 0).expect("should succeed");
+        // Pixel reconstruction is not implemented — send_packet must return
+        // an honest UnsupportedFeature error, NOT queue a fake gray frame.
+        let result = decoder.send_packet(&keyframe, 0);
+        assert!(
+            matches!(result, Err(CodecError::UnsupportedFeature(_))),
+            "expected honest UnsupportedFeature error, got {result:?}"
+        );
+
+        // But header parsing still succeeded before the error.
         assert_eq!(decoder.dimensions(), Some((320, 240)));
         assert_eq!(decoder.output_format(), Some(PixelFormat::Yuv420p));
 
+        // No fabricated frame may be emitted.
         let frame = decoder.receive_frame().expect("should succeed");
-        assert!(frame.is_some());
+        assert!(frame.is_none(), "no fake gray frame may be output");
+    }
 
-        let frame = frame.expect("should succeed");
-        assert!(frame.is_keyframe());
-        assert_eq!(frame.width, 320);
-        assert_eq!(frame.height, 240);
-        assert_eq!(frame.format, PixelFormat::Yuv420p);
+    #[test]
+    fn test_honest_error_message_names_the_gap() {
+        let config = DecoderConfig::default();
+        let mut decoder = Vp8Decoder::new(config).expect("should succeed");
+        let keyframe = [0x10, 0x00, 0x00, 0x9D, 0x01, 0x2A, 0x40, 0x01, 0xF0, 0x00];
+
+        let err = match decoder.send_packet(&keyframe, 0) {
+            Err(e) => e,
+            Ok(()) => panic!("send_packet must not pretend to decode pixels"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("pixel reconstruction not implemented"),
+            "error must state the limitation clearly, got: {msg}"
+        );
     }
 
     #[test]
@@ -296,10 +274,12 @@ mod tests {
         let config = DecoderConfig::default();
         let mut decoder = Vp8Decoder::new(config).expect("should succeed");
 
-        // Send a keyframe
+        // Send a keyframe: header parses, then the honest error is returned.
         let keyframe = [0x10, 0x00, 0x00, 0x9D, 0x01, 0x2A, 0x40, 0x01, 0xF0, 0x00];
-        decoder.send_packet(&keyframe, 0).expect("should succeed");
-        let _ = decoder.receive_frame();
+        assert!(matches!(
+            decoder.send_packet(&keyframe, 0),
+            Err(CodecError::UnsupportedFeature(_))
+        ));
 
         // Flush
         decoder.flush().expect("should succeed");
@@ -316,18 +296,26 @@ mod tests {
         let config = DecoderConfig::default();
         let mut decoder = Vp8Decoder::new(config).expect("should succeed");
 
-        // Send a keyframe
+        // Send a keyframe (parses, then honest error)
         let keyframe = [0x10, 0x00, 0x00, 0x9D, 0x01, 0x2A, 0x40, 0x01, 0xF0, 0x00];
-        decoder.send_packet(&keyframe, 0).expect("should succeed");
+        assert!(matches!(
+            decoder.send_packet(&keyframe, 0),
+            Err(CodecError::UnsupportedFeature(_))
+        ));
 
         // Flush and reset
         decoder.flush().expect("should succeed");
         decoder.reset();
 
-        // Should be able to send packets again
-        decoder.send_packet(&keyframe, 0).expect("should succeed");
-        let frame = decoder.receive_frame().expect("should succeed");
-        assert!(frame.is_some());
+        // After reset, packets are accepted for parsing again (and still
+        // end in the honest reconstruction error, not an InvalidParameter
+        // "flushing" error).
+        assert!(matches!(
+            decoder.send_packet(&keyframe, 0),
+            Err(CodecError::UnsupportedFeature(_))
+        ));
+        // Dimensions survive reset (allows continued probing after seek).
+        assert_eq!(decoder.dimensions(), Some((320, 240)));
     }
 
     #[test]
@@ -341,24 +329,27 @@ mod tests {
     }
 
     #[test]
-    fn test_hidden_frame() {
+    fn test_hidden_frame_header_parsed_before_honest_error() {
         let config = DecoderConfig::default();
         let mut decoder = Vp8Decoder::new(config).expect("should succeed");
 
-        // Keyframe with show_frame=0 (hidden)
+        // Keyframe with show_frame=0 (hidden). Even hidden frames need
+        // pixel reconstruction (they become references), so the honest
+        // error applies here too.
         let hidden_keyframe = [
             0x00, // frame_type=0, version=0, show=0
             0x00, 0x00, 0x9D, 0x01, 0x2A, 0x40, 0x01, 0xF0, 0x00,
         ];
 
-        decoder
-            .send_packet(&hidden_keyframe, 0)
-            .expect("should succeed");
+        assert!(matches!(
+            decoder.send_packet(&hidden_keyframe, 0),
+            Err(CodecError::UnsupportedFeature(_))
+        ));
 
-        // Dimensions should be updated
+        // Dimensions should be updated by header parsing
         assert_eq!(decoder.dimensions(), Some((320, 240)));
 
-        // But no frame should be output (hidden)
+        // And no frame should be output
         let frame = decoder.receive_frame().expect("should succeed");
         assert!(frame.is_none());
     }

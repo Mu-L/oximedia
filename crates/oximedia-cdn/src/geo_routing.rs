@@ -291,7 +291,7 @@ impl RtreeEdgeIndex {
     /// Returns `None` if no active nodes were indexed.
     pub fn nearest(&self, lat: f64, lon: f64) -> Option<usize> {
         self.tree
-            .nearest_neighbor(&[lat, lon])
+            .nearest_neighbor([lat, lon])
             .map(|ep| ep.node_index)
     }
 }
@@ -452,7 +452,15 @@ impl GeoRouter {
             .min_by(|a, b| {
                 let da = hav.get_or_compute(lat, lon, a.location.latitude, a.location.longitude);
                 let db = hav.get_or_compute(lat, lon, b.location.latitude, b.location.longitude);
-                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                // Primary key: true Haversine distance. Secondary key: edge node
+                // ID, so that equidistant PoPs resolve to a STABLE, deterministic
+                // winner independent of insertion order (or any future R-tree
+                // iteration order). Without this tiebreak the chosen node would
+                // depend on `Vec` insertion order, which silently changes under
+                // add/remove churn — a subtle correctness hazard for routing.
+                da.partial_cmp(&db)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.id.0.cmp(&b.id.0))
             })
             .map(|n| &n.id)
     }
@@ -972,6 +980,169 @@ mod tests {
             cache.len() <= 2,
             "nearby points should share cache entry, len={}",
             cache.len()
+        );
+    }
+
+    // ── Geo-routing edge cases (equidistant / antipodal / zero-distance) ────────
+
+    // 28. Equidistant PoPs → assign_edge is DETERMINISTIC across repeated calls
+    //     AND independent of insertion order.
+    //
+    //     A client at (0°, 0°) is exactly equidistant from PoPs at (0°, +10°)
+    //     and (0°, −10°): both lie on the equator the same number of degrees of
+    //     longitude away, so their Haversine distances are bit-identical.
+    //     `assign_edge` breaks the tie by edge-node ID, so the answer is the
+    //     same every call regardless of the order the nodes were registered.
+    #[test]
+    fn test_assign_edge_equidistant_deterministic() {
+        let client = GeoLocation::new(0.0, 0.0, "XX");
+
+        // Verify the two PoPs really are equidistant (bit-for-bit).
+        let d_east = haversine_km(0.0, 0.0, 0.0, 10.0);
+        let d_west = haversine_km(0.0, 0.0, 0.0, -10.0);
+        assert_eq!(
+            d_east.to_bits(),
+            d_west.to_bits(),
+            "PoPs must be exactly equidistant: east={d_east} west={d_west}"
+        );
+
+        // Router A: register "east" first, then "west".
+        let mut router_a = GeoRouter::new();
+        router_a.add_node(EdgeNodeGeo::new(
+            "pop-east",
+            GeoLocation::new(0.0, 10.0, "XX"),
+        ));
+        router_a.add_node(EdgeNodeGeo::new(
+            "pop-west",
+            GeoLocation::new(0.0, -10.0, "XX"),
+        ));
+
+        // Router B: register "west" first, then "east" (reversed order).
+        let mut router_b = GeoRouter::new();
+        router_b.add_node(EdgeNodeGeo::new(
+            "pop-west",
+            GeoLocation::new(0.0, -10.0, "XX"),
+        ));
+        router_b.add_node(EdgeNodeGeo::new(
+            "pop-east",
+            GeoLocation::new(0.0, 10.0, "XX"),
+        ));
+
+        // Stable across repeated calls on the same router.
+        let first = router_a.assign_edge(&client).expect("a1").clone();
+        for _ in 0..50 {
+            let again = router_a.assign_edge(&client).expect("a-rep").clone();
+            assert_eq!(again, first, "assign_edge must be deterministic per call");
+        }
+
+        // Stable across insertion order: A and B agree despite reversed inserts.
+        let a = router_a.assign_edge(&client).expect("a").clone();
+        let b = router_b.assign_edge(&client).expect("b").clone();
+        assert_eq!(
+            a, b,
+            "equidistant tiebreak must be insertion-order-independent: a={a} b={b}"
+        );
+
+        // The deterministic winner is the lexicographically smaller ID.
+        assert_eq!(
+            a.0, "pop-east",
+            "tiebreak should pick the smaller PoP id (pop-east < pop-west)"
+        );
+    }
+
+    // 29. Equidistant tiebreak follows PoP-ID ordering exactly: relabel the
+    //     SAME two physical locations so the previously-losing side now has the
+    //     smaller ID, and confirm the winner flips accordingly. This proves the
+    //     tiebreak keys on the ID, not on a fixed geographic side.
+    #[test]
+    fn test_assign_edge_equidistant_id_tiebreak_flips() {
+        let client = GeoLocation::new(0.0, 0.0, "XX");
+
+        let mut router = GeoRouter::new();
+        // East location gets the LARGER id "pop-zulu"; west gets "pop-alpha".
+        router.add_node(EdgeNodeGeo::new(
+            "pop-zulu",
+            GeoLocation::new(0.0, 10.0, "XX"),
+        ));
+        router.add_node(EdgeNodeGeo::new(
+            "pop-alpha",
+            GeoLocation::new(0.0, -10.0, "XX"),
+        ));
+
+        let chosen = router.assign_edge(&client).expect("chosen");
+        assert_eq!(
+            chosen.0, "pop-alpha",
+            "with these labels the smaller id pop-alpha (west) must win"
+        );
+    }
+
+    // 30. Antipodal points: client and PoP 180° apart in longitude on the
+    //     equator → Haversine returns a finite, sane distance close to half the
+    //     Earth's circumference (≈ 20 015 km), with NO NaN / infinity.
+    #[test]
+    fn test_haversine_antipodal_finite() {
+        // (0°, 0°) and (0°, 180°) are exact antipodes.
+        let d = haversine_km(0.0, 0.0, 0.0, 180.0);
+        assert!(d.is_finite(), "antipodal distance must be finite, got {d}");
+        assert!(!d.is_nan(), "antipodal distance must not be NaN");
+
+        // Half the great-circle: π · R = π · 6371 ≈ 20 015.09 km.
+        let half_circumference = std::f64::consts::PI * 6_371.0;
+        assert!(
+            (d - half_circumference).abs() < 1.0,
+            "antipodal distance {d:.4} km should be ≈ {half_circumference:.4} km"
+        );
+
+        // A pole-to-pole antipode (±90° latitude) is also exactly half-circumference.
+        let d_poles = haversine_km(90.0, 0.0, -90.0, 0.0);
+        assert!(d_poles.is_finite() && !d_poles.is_nan());
+        assert!(
+            (d_poles - half_circumference).abs() < 1.0,
+            "pole-to-pole {d_poles:.4} km should be ≈ {half_circumference:.4} km"
+        );
+
+        // Routing through an antipodal node must not panic or yield NaN latency.
+        let mut router = GeoRouter::new();
+        router.add_node(EdgeNodeGeo::new(
+            "antipode",
+            GeoLocation::new(0.0, 180.0, "XX"),
+        ));
+        let lat = router.latency_estimate_ms(
+            &GeoLocation::new(0.0, 0.0, "XX"),
+            &GeoLocation::new(0.0, 180.0, "XX"),
+        );
+        assert!(
+            lat.is_finite() && !lat.is_nan(),
+            "antipodal latency invalid: {lat}"
+        );
+    }
+
+    // 31. Zero-distance degenerate: a client positioned at the EXACT location of
+    //     a PoP → that PoP is selected and the distance is 0.
+    #[test]
+    fn test_assign_edge_zero_distance_exact_colocation() {
+        let mut router = GeoRouter::new();
+        // Co-located PoP at Paris; plus a far-away decoy.
+        router.add_node(EdgeNodeGeo::new(
+            "paris",
+            GeoLocation::new(48.8566, 2.3522, "FR"),
+        ));
+        router.add_node(EdgeNodeGeo::new("sydney", sydney()));
+
+        let client = GeoLocation::new(48.8566, 2.3522, "FR"); // identical to paris PoP
+
+        let chosen = router.assign_edge(&client).expect("colocated node");
+        assert_eq!(
+            chosen.0, "paris",
+            "client co-located with paris must select it"
+        );
+
+        let dist = router
+            .distance_to_node(&client, &EdgeNodeId::new("paris"))
+            .expect("distance to paris");
+        assert!(
+            dist < 1e-6,
+            "distance to a co-located PoP must be ~0, got {dist}"
         );
     }
 }

@@ -31,12 +31,12 @@
 - [x] Parallelize ICC profile application across image tiles using rayon (done — par_chunks_exact_mut at src/icc/apply.rs:63)
 - [x] Cache frequently-used illuminant-to-illuminant adaptation matrices in `chromatic` (done — ADAPT_MATRIX_CACHE + cached_transform_matrix at src/chromatic/adapt.rs:160-233)
 - [ ] Optimize `patch_extract` with early-exit when sufficient patches detected
-- [ ] Pre-compute and cache LUT interpolation coefficients in `lut` module
+- [x] Pre-compute and cache LUT interpolation coefficients in `lut` module (implemented 2026-06-05: `Lut3dCached` + `TetraCoeff` in `lut/cached.rs`; precomputes per-cell base index and axis strides; 4 tests: matches-direct, identity-lut, out-of-range-clamps, perf-10k)
 
 ## Testing
-- [ ] Add test for `camera` profile generation against known ColorChecker reference values
+- [x] Add test for `camera` profile generation against known ColorChecker reference values (Wave 30, 2026-06-08: real least-squares 3×3 color matrix via normal equations M=B·A⁻¹ + λ=1e-6 Tikhonov + closed-form 3×3 adjugate inverse replacing the identity stub in `CameraCalibrator::compute_color_matrix`; new public `fit_color_matrix`/`apply_color_matrix`; classic24 identity-recovery + planted-transform recovery <1e-6 + rank-deficient graceful error; 5 tests in tests/camera_color_matrix.rs + 6 in-file helper tests)
 - [ ] Test ICC profile round-trip: generate from measurements, write, read back, verify TRCs match
-- [ ] Add delta-E verification test: calibrated output vs reference should be under 2.0 dE
+- [x] Add delta-E verification test: calibrated output vs reference should be under 2.0 dE (Wave 30, 2026-06-08: new `src/camera/color_space.rs` sRGB→linear→XYZ(D65)→Lab pipeline; `calibration_delta_e_under_2` asserts mean ΔE2000<2.0 after fit on synthetic distorted ColorChecker, `calibration_beats_identity_baseline` asserts ΔE(fit)<ΔE(identity))
 - [ ] Test `chromatic` Bradford adaptation against published ASTM E308 reference data
 - [ ] Add `gamut_checker` test with known out-of-gamut colors verifying correct mapping
 - [ ] Test `white_balance` presets produce expected RGB multiplier ratios

@@ -42,7 +42,8 @@ pub struct EngagementFeatures {
     pub completion_rate: f64,
     /// Fraction of viewers who rewatched any segment (0.0–1.0).
     pub rewatch_rate: f64,
-    /// Social engagement placeholder (0.0–1.0).
+    /// Normalised social engagement (0.0–1.0); `0.0` when no social data was
+    /// supplied to the originating engagement computation.
     pub social_score: f64,
     /// Normalised forward-seek penalty (0.0 = no penalty, 1.0 = very high).
     pub seek_penalty: f64,

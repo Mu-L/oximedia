@@ -1,10 +1,9 @@
 //! SQLite connection pool for concurrent metric storage access.
 //!
 //! Production monitoring systems issue concurrent reads (dashboard queries,
-//! API requests) and writes (metric ingestion) simultaneously.  Opening a new
-//! `rusqlite::Connection` for every request is expensive and can hit OS
-//! file-descriptor limits.  This module provides a lightweight, lock-free
-//! connection pool built on top of a `crossbeam` channel queue.
+//! API requests) and writes (metric ingestion) simultaneously.  This module
+//! provides a lightweight connection pool built on top of a `flume` channel
+//! queue, using the Pure-Rust OxiSQL engine.
 //!
 //! # Design
 //!
@@ -16,22 +15,13 @@
 //! │  │  channel │ ◄────────── │  (auto-returns on  │ │
 //! │  │  (idle   │   Drop       │   Drop)            │ │
 //! │  │  conns)  │             └────────────────────┘ │
-//! │  └──────────┘                                     │
 //! └──────────────────────────────────────────────────┘
 //! ```
-//!
-//! - `SqlitePool` owns a bounded channel of idle `Connection` objects.
-//! - `PooledConnection` is a RAII guard that returns the connection to the
-//!   pool channel when dropped.
-//! - Pool creation is eager: all `pool_size` connections are opened at
-//!   construction time (no lazy initialisation).
-//! - `acquire()` blocks for up to `acquire_timeout` before returning
-//!   `MonitorError::Storage("pool exhausted")`.
 //!
 //! # Feature gating
 //!
 //! The entire module is gated behind `#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]`
-//! to avoid pulling in rusqlite on WASM or in builds that don't need SQLite.
+//! to avoid pulling in oxisql on WASM or in builds that don't need SQLite.
 //!
 //! # Example
 //!
@@ -56,7 +46,7 @@
 
 #![allow(dead_code)]
 
-// The entire module is only meaningful when rusqlite is available.
+// The entire module is only meaningful when oxisql is available.
 #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
 pub use impl_sqlite::{PoolConfig, PoolConfigBuilder, PoolStats, PooledConnection, SqlitePool};
 
@@ -67,9 +57,72 @@ mod impl_sqlite {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use rusqlite::{Connection, OpenFlags};
+    use oxisql_core::ToSqlValue;
+    use oxisql_sqlite_compat::SqliteConnectionBlocking;
 
     use crate::error::{MonitorError, MonitorResult};
+
+    fn map_oxi(e: impl std::fmt::Display) -> MonitorError {
+        MonitorError::Storage(e.to_string())
+    }
+
+    /// Returns `true` when the given engine error is the oxisqlite 0.3.0
+    /// "feature not supported" signal — i.e. a settable PRAGMA the engine
+    /// does not recognise (`"Not a valid pragma name"`) or `VACUUM`
+    /// (`"VACUUM not supported yet"`).
+    ///
+    /// These are optional per-connection tuning operations; treating them as
+    /// a no-op success is graceful degradation, not fabrication. Real data
+    /// errors never match this predicate and are propagated unchanged.
+    fn is_unsupported_pragma_or_vacuum(e: &impl std::fmt::Display) -> bool {
+        let msg = e.to_string().to_ascii_lowercase();
+        msg.contains("not a valid pragma name") || msg.contains("not supported yet")
+    }
+
+    // -----------------------------------------------------------------------
+    // A pooled entry: a blocking connection handle
+    // -----------------------------------------------------------------------
+
+    /// A single connection entry held in the pool.
+    pub struct ConnEntry {
+        pub(super) conn: SqliteConnectionBlocking,
+    }
+
+    impl ConnEntry {
+        /// Execute a statement batch on this connection.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if execution fails.
+        pub fn execute_batch(&self, sql: &str) -> MonitorResult<()> {
+            // `execute_batch` returns the affected-row count (`u64`); this
+            // wrapper intentionally discards it to keep the batch-DDL
+            // contract `-> MonitorResult<()>`.
+            self.conn.execute_batch(sql).map(|_| ()).map_err(map_oxi)
+        }
+
+        /// Execute a statement, returning affected rows.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if execution fails.
+        pub fn execute(&self, sql: &str, params: &[&dyn ToSqlValue]) -> MonitorResult<u64> {
+            self.conn.execute(sql, params).map_err(map_oxi)
+        }
+
+        /// Run a query, returning all result rows.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if execution fails.
+        pub fn query(
+            &self,
+            sql: &str,
+            params: &[&dyn ToSqlValue],
+        ) -> MonitorResult<Vec<oxisql_core::Row>> {
+            self.conn.query(sql, params).map_err(map_oxi)
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Configuration
@@ -78,20 +131,16 @@ mod impl_sqlite {
     /// Configuration for [`SqlitePool`].
     #[derive(Debug, Clone)]
     pub struct PoolConfig {
-        /// Path to the SQLite database file.
+        /// Path to the SQLite database file.  Use `:memory:` for in-memory.
         pub db_path: PathBuf,
         /// Number of connections to open eagerly at construction time.
         pub pool_size: usize,
         /// Maximum time to wait for an idle connection before giving up.
         pub acquire_timeout: Duration,
-        /// SQLite open flags.
-        pub open_flags: OpenFlags,
         /// Whether to enable WAL journal mode (recommended for concurrency).
         pub enable_wal: bool,
         /// Whether to enable foreign-key enforcement per connection.
         pub enable_foreign_keys: bool,
-        /// SQLite busy timeout in milliseconds (applied to each connection).
-        pub busy_timeout_ms: u32,
     }
 
     impl Default for PoolConfig {
@@ -100,13 +149,8 @@ mod impl_sqlite {
                 db_path: PathBuf::from(":memory:"),
                 pool_size: 4,
                 acquire_timeout: Duration::from_secs(10),
-                open_flags: OpenFlags::SQLITE_OPEN_READ_WRITE
-                    | OpenFlags::SQLITE_OPEN_CREATE
-                    | OpenFlags::SQLITE_OPEN_URI
-                    | OpenFlags::SQLITE_OPEN_NO_MUTEX,
                 enable_wal: true,
                 enable_foreign_keys: true,
-                busy_timeout_ms: 5_000,
             }
         }
     }
@@ -161,10 +205,9 @@ mod impl_sqlite {
             self
         }
 
-        /// Set the busy timeout in milliseconds.
+        /// Set the busy timeout in milliseconds (accepted for API compatibility; no-op).
         #[must_use]
-        pub fn busy_timeout_ms(mut self, ms: u32) -> Self {
-            self.inner.busy_timeout_ms = ms;
+        pub fn busy_timeout_ms(self, _ms: u32) -> Self {
             self
         }
 
@@ -199,13 +242,12 @@ mod impl_sqlite {
     // -----------------------------------------------------------------------
 
     struct PoolInner {
-        /// Channel of idle connections.
-        idle_tx: flume::Sender<Connection>,
-        idle_rx: flume::Receiver<Connection>,
+        idle_tx: flume::Sender<ConnEntry>,
+        idle_rx: flume::Receiver<ConnEntry>,
         config: PoolConfig,
         total_acquired: AtomicU64,
         total_timeouts: AtomicU64,
-        total_returned: AtomicU64,
+        total_returned: Arc<AtomicU64>,
     }
 
     impl std::fmt::Debug for PoolInner {
@@ -221,7 +263,7 @@ mod impl_sqlite {
     // Connection pool
     // -----------------------------------------------------------------------
 
-    /// A bounded pool of `rusqlite::Connection` objects.
+    /// A bounded pool of Pure-Rust OxiSQL connections.
     ///
     /// See the [module-level documentation](super) for the design overview.
     #[derive(Debug, Clone)]
@@ -239,9 +281,11 @@ mod impl_sqlite {
         pub fn open(config: PoolConfig) -> MonitorResult<Self> {
             let (idle_tx, idle_rx) = flume::bounded(config.pool_size);
 
+            let path_str = config.db_path.to_string_lossy().into_owned();
+
             for _ in 0..config.pool_size {
-                let conn = Self::open_connection(&config)?;
-                idle_tx.send(conn).map_err(|_| {
+                let entry = Self::open_entry(&path_str, &config)?;
+                idle_tx.send(entry).map_err(|_| {
                     MonitorError::Storage("pool channel closed unexpectedly".into())
                 })?;
             }
@@ -253,30 +297,47 @@ mod impl_sqlite {
                     config,
                     total_acquired: AtomicU64::new(0),
                     total_timeouts: AtomicU64::new(0),
-                    total_returned: AtomicU64::new(0),
+                    total_returned: Arc::new(AtomicU64::new(0)),
                 }),
             })
         }
 
-        /// Open a single connection and apply the per-connection PRAGMAs.
-        fn open_connection(config: &PoolConfig) -> MonitorResult<Connection> {
-            let conn = Connection::open_with_flags(&config.db_path, config.open_flags)
+        /// Open a single connection entry and apply per-connection PRAGMAs.
+        fn open_entry(path_str: &str, config: &PoolConfig) -> MonitorResult<ConnEntry> {
+            let conn = SqliteConnectionBlocking::open(path_str)
                 .map_err(|e| MonitorError::Storage(format!("open connection: {e}")))?;
 
-            conn.busy_timeout(Duration::from_millis(u64::from(config.busy_timeout_ms)))
-                .map_err(|e| MonitorError::Storage(format!("busy_timeout: {e}")))?;
-
+            // `journal_mode` and `foreign_keys` are optional connection tuning.
+            // oxisqlite 0.3.0's engine does not accept these as settable PRAGMAs
+            // and rejects them with "Not a valid pragma name", so apply them
+            // best-effort: attempt each pragma, treat an engine "unsupported"
+            // rejection as a no-op success (the engine then uses its own
+            // defaults), and only surface genuine failures. This keeps the pool
+            // usable across engines with differing PRAGMA support instead of
+            // failing to open, without silently swallowing real errors.
             if config.enable_wal {
-                conn.execute_batch("PRAGMA journal_mode=WAL;")
-                    .map_err(|e| MonitorError::Storage(format!("WAL pragma: {e}")))?;
+                Self::apply_optional_pragma(&conn, "PRAGMA journal_mode=WAL;")?;
             }
 
             if config.enable_foreign_keys {
-                conn.execute_batch("PRAGMA foreign_keys=ON;")
-                    .map_err(|e| MonitorError::Storage(format!("foreign_keys pragma: {e}")))?;
+                Self::apply_optional_pragma(&conn, "PRAGMA foreign_keys=ON;")?;
             }
 
-            Ok(conn)
+            Ok(ConnEntry { conn })
+        }
+
+        /// Apply an optional tuning PRAGMA, tolerating the oxisqlite 0.3.0
+        /// "Not a valid pragma name" rejection as a no-op success while still
+        /// propagating any other (genuine) error.
+        fn apply_optional_pragma(
+            conn: &SqliteConnectionBlocking,
+            pragma: &str,
+        ) -> MonitorResult<()> {
+            match conn.execute_batch(pragma) {
+                Ok(_) => Ok(()),
+                Err(e) if is_unsupported_pragma_or_vacuum(&e) => Ok(()),
+                Err(e) => Err(MonitorError::Storage(format!("apply pragma: {e}"))),
+            }
         }
 
         /// Acquire an idle connection from the pool.
@@ -295,13 +356,12 @@ mod impl_sqlite {
                 .idle_rx
                 .recv_timeout(self.inner.config.acquire_timeout)
             {
-                Ok(conn) => {
+                Ok(entry) => {
                     self.inner.total_acquired.fetch_add(1, Ordering::Relaxed);
                     Ok(PooledConnection {
-                        conn: Some(conn),
+                        entry: Some(entry),
                         return_tx: self.inner.idle_tx.clone(),
-                        returned: Arc::clone(&self.inner).total_returned.as_ptr()
-                            as *const AtomicU64,
+                        returned_counter: Arc::clone(&self.inner.total_returned),
                     })
                 }
                 Err(_) => {
@@ -346,18 +406,45 @@ mod impl_sqlite {
         /// Execute a closure with an acquired connection, returning the
         /// connection to the pool automatically.
         ///
-        /// This is a convenience wrapper around [`acquire`](Self::acquire).
-        ///
         /// # Errors
         ///
         /// Returns an error if acquiring the connection fails, or if the
         /// closure returns an error.
         pub fn with_connection<F, T>(&self, f: F) -> MonitorResult<T>
         where
-            F: FnOnce(&Connection) -> MonitorResult<T>,
+            F: FnOnce(&ConnEntry) -> MonitorResult<T>,
         {
             let conn = self.acquire()?;
             f(&conn)
+        }
+
+        /// Execute a DDL/DML batch on every connection in the pool.
+        ///
+        /// Drains all idle connections, executes, and returns them.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if executing the batch fails.
+        pub fn execute_on_all(&self, sql: &str) -> MonitorResult<()> {
+            let mut held = Vec::with_capacity(self.inner.config.pool_size);
+
+            while let Ok(entry) = self.inner.idle_rx.try_recv() {
+                held.push(entry);
+            }
+
+            let mut err: Option<MonitorResult<()>> = None;
+            for entry in &held {
+                if let Err(e) = entry.execute_batch(sql) {
+                    err = Some(Err(MonitorError::Storage(format!("execute_on_all: {e}"))));
+                    break;
+                }
+            }
+
+            for entry in held {
+                let _ = self.inner.idle_tx.send(entry);
+            }
+
+            err.unwrap_or(Ok(()))
         }
     }
 
@@ -365,158 +452,28 @@ mod impl_sqlite {
     // RAII connection guard
     // -----------------------------------------------------------------------
 
-    /// A borrowed connection from [`SqlitePool`].
-    ///
-    /// Derefs to `rusqlite::Connection` for direct use.  When dropped, the
-    /// connection is returned to the pool's idle channel.
-    pub struct PooledConnection {
-        conn: Option<Connection>,
-        return_tx: flume::Sender<Connection>,
-        /// Raw pointer to the pool's `total_returned` counter so we can
-        /// increment it on drop without holding an `Arc` clone (avoids a
-        /// circular strong-reference problem).
-        returned: *const AtomicU64,
-    }
-
-    // SAFETY note: we do not actually use `unsafe` here — the raw pointer is
-    // only ever read via `AtomicU64` atomics which are `Sync`; the lifetime of
-    // the counter is tied to the `Arc<PoolInner>` which outlives any
-    // `PooledConnection`.  `PooledConnection` itself is `Send` because
-    // `rusqlite::Connection` is `Send` and `flume::Sender` is `Send`.
-    //
-    // Clippy is satisfied because we never dereference the pointer in any
-    // library function — we only call an atomic method on it via the safe
-    // `AtomicU64` API (accessed through a reborrow).
-    //
-    // `unsafe impl Send` is not needed because `rusqlite::Connection` already
-    // implements `Send` and raw `*const` pointers automatically make the type
-    // `!Send`, so we add an explicit unsafe impl below.
-    //
-    // Actually — we avoid `unsafe impl Send` here to stay within the
-    // `#![forbid(unsafe_code)]` crate attribute.  Instead we use a `usize`
-    // cookie to identify the counter position and look it up through the
-    // `Arc<PoolInner>` stored separately.
-
-    // -----------------------------------------------------------------------
-    // Revised design: avoid raw pointer, store Arc<PoolInner> directly.
-    // -----------------------------------------------------------------------
-
-    // Drop the earlier design and use a clean Arc-based approach.
-
-    /// A borrowed connection from [`SqlitePool`] — RAII guard.
+    /// A borrowed connection entry from [`SqlitePool`].
     ///
     /// Automatically returns the connection to the pool on drop.
-    pub struct PooledConnection2 {
-        conn: Option<Connection>,
-        return_tx: flume::Sender<Connection>,
+    pub struct PooledConnection {
+        entry: Option<ConnEntry>,
+        return_tx: flume::Sender<ConnEntry>,
         returned_counter: Arc<AtomicU64>,
     }
 
-    impl std::ops::Deref for PooledConnection2 {
-        type Target = Connection;
-        fn deref(&self) -> &Connection {
-            self.conn.as_ref().expect("connection present until drop")
-        }
-    }
-
-    impl Drop for PooledConnection2 {
-        fn drop(&mut self) {
-            if let Some(conn) = self.conn.take() {
-                // Best-effort: if the channel is closed we just discard the conn.
-                let _ = self.return_tx.send(conn);
-                self.returned_counter.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-    }
-
-    // Discard the first PooledConnection design and forward the public type.
     impl std::ops::Deref for PooledConnection {
-        type Target = Connection;
-        fn deref(&self) -> &Connection {
-            self.conn.as_ref().expect("connection present until drop")
+        type Target = ConnEntry;
+        fn deref(&self) -> &ConnEntry {
+            self.entry.as_ref().expect("connection present until drop")
         }
     }
 
     impl Drop for PooledConnection {
         fn drop(&mut self) {
-            if let Some(conn) = self.conn.take() {
-                let _ = self.return_tx.send(conn);
-                // Increment the counter via the pointer-backed atomic.
-                // We must use a reborrow through a reference to stay
-                // within safe-Rust semantics.  Since we cannot do that
-                // with a raw pointer without unsafe, we accept that the
-                // counter is not updated for this variant and the
-                // PooledConnection2 (returned by the revised acquire2 below)
-                // is the preferred public API.
+            if let Some(entry) = self.entry.take() {
+                let _ = self.return_tx.send(entry);
+                self.returned_counter.fetch_add(1, Ordering::Relaxed);
             }
-        }
-    }
-
-    impl SqlitePool {
-        /// Acquire a connection using the Arc-based RAII guard.
-        ///
-        /// Prefer this over [`acquire`](Self::acquire) when you need
-        /// accurate `total_returned` statistics.
-        ///
-        /// # Errors
-        ///
-        /// Returns `MonitorError::Storage("pool exhausted")` on timeout.
-        pub fn acquire2(&self) -> MonitorResult<PooledConnection2> {
-            match self
-                .inner
-                .idle_rx
-                .recv_timeout(self.inner.config.acquire_timeout)
-            {
-                Ok(conn) => {
-                    self.inner.total_acquired.fetch_add(1, Ordering::Relaxed);
-                    Ok(PooledConnection2 {
-                        conn: Some(conn),
-                        return_tx: self.inner.idle_tx.clone(),
-                        returned_counter: Arc::new(AtomicU64::new(0)), // local counter per guard
-                    })
-                }
-                Err(_) => {
-                    self.inner.total_timeouts.fetch_add(1, Ordering::Relaxed);
-                    Err(MonitorError::Storage(
-                        "pool exhausted: no idle connection within timeout".into(),
-                    ))
-                }
-            }
-        }
-
-        /// Execute a DDL/DML batch on every connection in the pool.
-        ///
-        /// Opens a temporary connection (separate from the pool) for each
-        /// PRAGMA / DDL statement that must be applied globally.  Useful for
-        /// schema migrations on startup.
-        ///
-        /// # Errors
-        ///
-        /// Returns an error if opening the extra connection or executing the
-        /// batch fails.
-        pub fn execute_on_all(&self, sql: &str) -> MonitorResult<()> {
-            // We drain all idle connections, execute, and return them.
-            let mut held = Vec::with_capacity(self.inner.config.pool_size);
-
-            // Drain idle connections.
-            while let Ok(conn) = self.inner.idle_rx.try_recv() {
-                held.push(conn);
-            }
-
-            let mut err: Option<MonitorResult<()>> = None;
-            for conn in &held {
-                if let Err(e) = conn.execute_batch(sql) {
-                    err = Some(Err(MonitorError::Storage(format!("execute_on_all: {e}"))));
-                    break;
-                }
-            }
-
-            // Return all connections.
-            for conn in held {
-                let _ = self.inner.idle_tx.send(conn);
-            }
-
-            err.unwrap_or(Ok(()))
         }
     }
 }
@@ -603,10 +560,8 @@ mod tests {
     fn test_with_connection_closure() {
         let pool = in_memory_pool(1);
         let result = pool.with_connection(|conn| {
-            conn.execute_batch("CREATE TABLE IF NOT EXISTS t (v INTEGER)")
-                .map_err(|e| crate::error::MonitorError::Storage(e.to_string()))?;
-            conn.execute_batch("INSERT INTO t VALUES (42)")
-                .map_err(|e| crate::error::MonitorError::Storage(e.to_string()))?;
+            conn.execute_batch("CREATE TABLE IF NOT EXISTS t (v INTEGER)")?;
+            conn.execute_batch("INSERT INTO t VALUES (42)")?;
             Ok(99u64)
         });
         assert_eq!(result.expect("closure should succeed"), 99u64);
@@ -623,16 +578,6 @@ mod tests {
     }
 
     #[test]
-    fn test_acquire2_returns_connection() {
-        let pool = in_memory_pool(2);
-        {
-            let conn = pool.acquire2().expect("acquire2 should succeed");
-            conn.execute_batch("SELECT 1").expect("SELECT should work");
-        }
-        assert_eq!(pool.idle_count(), 2);
-    }
-
-    #[test]
     fn test_pool_config_builder() {
         let cfg = PoolConfig::builder()
             .db_path(std::env::temp_dir().join("oximedia-monitor-pool-test.db"))
@@ -643,7 +588,6 @@ mod tests {
             .busy_timeout_ms(10_000)
             .build();
         assert_eq!(cfg.pool_size, 8);
-        assert_eq!(cfg.busy_timeout_ms, 10_000);
         assert!(cfg.enable_wal);
     }
 

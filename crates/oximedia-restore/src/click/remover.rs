@@ -91,7 +91,7 @@ impl ClickRemover {
     ///
     /// # Errors
     ///
-    /// Returns [`RestoreError`] on internal failures (e.g. from the underlying
+    /// Returns [`crate::error::RestoreError`] on internal failures (e.g. from the underlying
     /// interpolation call).
     pub fn remove_in_place(&self, samples: &mut [f32], clicks: &[Click]) -> RestoreResult<()> {
         if clicks.is_empty() || samples.is_empty() {

@@ -475,7 +475,7 @@ mod tests {
 
     #[test]
     fn test_stinger_player_synthetic() {
-        let path = PathBuf::from("/tmp/test_stinger.webm");
+        let path = std::env::temp_dir().join("test_stinger.webm");
         let player = StingerPlayer::new(&path, 500).expect("stinger player");
         assert!(player.total_duration_ms() > 0);
         assert_eq!(player.transition_point_ms(), 500);
@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn test_stinger_player_composite() {
-        let path = PathBuf::from("/tmp/stinger_test_composite.webm");
+        let path = std::env::temp_dir().join("stinger_test_composite.webm");
         let player = StingerPlayer::new(&path, 200).expect("stinger player");
         let w = player.width();
         let h = player.height();
@@ -495,14 +495,14 @@ mod tests {
     #[test]
     fn test_stinger_transition_point_exceeded() {
         // transition_point beyond clip duration should fail
-        let path = PathBuf::from("/tmp/stinger_exceed.webm");
+        let path = std::env::temp_dir().join("stinger_exceed.webm");
         let result = StingerPlayer::new(&path, 999_999_999);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_stinger_get_frame_switch_signal() {
-        let path = PathBuf::from("/tmp/stinger_switch.webm");
+        let path = std::env::temp_dir().join("stinger_switch.webm");
         let player = StingerPlayer::new(&path, 0).expect("stinger player");
         let w = player.width();
         let h = player.height();
@@ -534,7 +534,7 @@ mod tests {
 
     #[test]
     fn test_transition_engine_stinger() {
-        let path = PathBuf::from("/tmp/test_engine_stinger.webm");
+        let path = std::env::temp_dir().join("test_engine_stinger.webm");
         let t = SceneTransition::new(
             TransitionType::Stinger {
                 clip_path: path,
@@ -552,7 +552,7 @@ mod tests {
 
     #[test]
     fn test_transition_engine_stinger_signals_switch() {
-        let path = PathBuf::from("/tmp/test_engine_switch.webm");
+        let path = std::env::temp_dir().join("test_engine_switch.webm");
         let t = SceneTransition::new(
             TransitionType::Stinger {
                 clip_path: path,

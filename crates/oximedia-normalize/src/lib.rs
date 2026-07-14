@@ -117,6 +117,135 @@
 //! - Attack/release times matched to loudness gates
 //! - Preserves transients while controlling peaks
 //! - Optional makeup gain
+//!
+//! # Workflow Guide: Choosing a Processing Mode
+//!
+//! Three top-level entry points cover the vast majority of normalization workflows.
+//! They all share the same underlying analysis ([`analyzer::LoudnessAnalyzer`], which
+//! wraps [`oximedia_metering::LoudnessMeter`]) and gain-application primitives
+//! ([`processor::NormalizationProcessor`]), but trade off latency, accuracy, and
+//! throughput differently.
+//!
+//! | | [`Normalizer`] (two-pass) | [`RealtimeNormalizer`] (one-pass) | [`BatchProcessor`] / [`batch_normalizer::BatchNormalizer`] |
+//! |---|---|---|---|
+//! | Latency | Whole-file (offline) | `lookahead_ms` only (tens of ms) | Whole-file, per item |
+//! | Gain accuracy | Exact — final gain is computed from the *complete* gated integrated loudness before a single output sample is written | Approximate — gain is smoothed continuously ([`RealtimeConfig::smoothing_time_s`]) from a running estimate, so it will always lag true program loudness by design | Exact per item (two-pass), plus optional cross-item scheduling |
+//! | Random access to input required | Yes (must read all samples before pass 2) | No (streams sample-by-sample) | Yes, but decoupled per file |
+//! | Typical use | File-based mastering/delivery: archive normalization, VOD transcode, podcast episode export | Live streaming, broadcast contribution/distribution, real-time monitoring, capture pipelines where the whole signal is never available at once | Music libraries, podcast back-catalogs, album releases where many files must be normalized consistently or all at once |
+//!
+//! ## Two-pass — [`Normalizer`]
+//!
+//! Use when the complete audio buffer is available up front (files, in-memory clips).
+//! Call [`Normalizer::analyze_f32`]/[`Normalizer::analyze_f64`] once over the entire
+//! signal, read [`Normalizer::get_analysis`] for the measured [`AnalysisResult`]
+//! (including `recommended_gain_db`, `is_compliant`, and full [`oximedia_metering::LoudnessMetrics`]),
+//! then call [`Normalizer::process_f32`]/[`Normalizer::process_f64`] to apply the
+//! precise, constant gain (optionally followed by DRC/true-peak limiting per
+//! [`ProcessingMode`]). This is the only mode that guarantees the output integrated
+//! loudness matches the target to within the compliance tolerance of the chosen
+//! [`oximedia_metering::Standard`], because the gain is derived from a fully gated
+//! measurement rather than a running estimate.
+//!
+//! ## One-pass — [`RealtimeNormalizer`]
+//!
+//! Use for live/streaming sources where samples must be emitted as they arrive and
+//! buffering the whole program is not an option. [`RealtimeNormalizer::process_chunk`]
+//! measures a lookahead window (`lookahead_ms`, exposed via
+//! `RealtimeNormalizer::latency_samples`), applies a smoothed gain derived from the
+//! running loudness estimate, and optionally runs the gain through
+//! [`limiter::TruePeakLimiter`] to guarantee no inter-sample clipping regardless of
+//! measurement error. Because the loudness estimate is never "final" (the program
+//! could still get louder or quieter later), the output loudness will track — not
+//! exactly hit — the target; use [`RealtimeConfig::low_latency`] to trade measurement
+//! stability for lower delay, or the default [`RealtimeConfig::new`] for smoother gain
+//! rides.
+//!
+//! ## Batch — [`BatchProcessor`] / [`batch_normalizer::BatchNormalizer`]
+//!
+//! Use when normalizing a collection of files (a podcast feed, an album, a library
+//! import). [`batch_normalizer::BatchNormalizer`] is the fully working engine: call
+//! `measure` for every item, then `schedule_gains` to compute either
+//! [`batch_normalizer::GainMode::Independent`] gains (each file hits the target loudness
+//! on its own — the right choice for standalone tracks/episodes) or
+//! [`batch_normalizer::GainMode::Album`] gains (every file in the set is shifted by the
+//! *same* gain, derived from the loudest item, so relative loudness differences between
+//! tracks on an album are preserved — the right choice whenever tracks are meant to be
+//! played back-to-back), and finally `apply_to_item` per file. [`BatchProcessor`]
+//! (this module's [`batch`] submodule) exposes the same [`BatchConfig`]/[`BatchResult`]
+//! shape for file-oriented workflows (parallel processing, `ReplayGain` tagging,
+//! metadata writing) but its `process_file`/`process_directory` do not yet perform file
+//! I/O — they wire up the analyzer/processor/`ReplayGain` pipeline and return results
+//! from empty input, so real file-based batch runs should drive
+//! [`batch_normalizer::BatchNormalizer`] with decoded sample buffers today.
+//!
+//! # Relationship with `oximedia-metering`
+//!
+//! `oximedia-normalize` does not re-implement loudness measurement — every gain
+//! decision in this crate is derived from analysis performed by the
+//! [`oximedia_metering`] crate:
+//!
+//! - [`analyzer::LoudnessAnalyzer`] (used by [`Normalizer`] and by
+//!   [`batch::BatchProcessor`]) wraps [`oximedia_metering::LoudnessMeter`], the
+//!   standard-aware ITU-R BS.1770-4 meter that measures integrated loudness, loudness
+//!   range (LRA), true peak, and momentary/short-term loudness for any
+//!   [`oximedia_metering::Standard`] (EBU R128, ATSC A/85, or a streaming platform).
+//!   [`analyzer::AnalysisResult`] adds normalization-specific derived fields on top of
+//!   the raw [`oximedia_metering::LoudnessMetrics`]: `recommended_gain_db` (target minus
+//!   measured loudness), `safe_gain_db`/`max_safe_gain_db` (the largest gain that will
+//!   not push the true peak past the standard's ceiling), and `is_compliant`/
+//!   `compliance` (via [`oximedia_metering::ComplianceResult`]).
+//! - [`realtime::RealtimeNormalizer`] also drives an
+//!   [`oximedia_metering::LoudnessMeter`] internally (through the same `MeterConfig`
+//!   construction as the two-pass analyzer) to produce the running loudness estimate
+//!   that its gain smoothing responds to.
+//! - [`replaygain::ReplayGainCalculator`] uses the same meter to measure loudness
+//!   against the fixed -18 LUFS `ReplayGain` reference
+//!   ([`replaygain::REPLAYGAIN_REFERENCE_LUFS`]) rather than a broadcast/streaming
+//!   [`oximedia_metering::Standard`] target.
+//! - [`metering_bridge`] provides a lighter-weight, standard-agnostic vocabulary
+//!   (`LufsTarget`, `MeteringWindow`, `LoudnessMeasurement`) for call sites that bridge
+//!   externally-supplied measurements into normalization gain plans without depending
+//!   directly on `oximedia_metering`'s richer `Standard`/`LoudnessMeter` types.
+//!
+//! In short: `oximedia-metering` answers "how loud is this, and is it compliant?";
+//! `oximedia-normalize` answers "what gain (and what limiting/DRC) gets it there
+//! safely?" and applies it.
+//!
+//! # Standard Selection Guide
+//!
+//! [`oximedia_metering::Standard`] is the single source of truth for target loudness
+//! and max true peak (via `Standard::target_lufs()`/`Standard::max_true_peak_dbtp()`);
+//! this crate layers recommended *processing* settings on top. As a starting point:
+//!
+//! | Target | Standard | Target LUFS | Max True Peak | Recommended config |
+//! |---|---|---|---|---|
+//! | EBU R128 (EU broadcast/OTT) | [`Standard::EbuR128`] | -23.0 | -1.0 dBTP | [`NormalizerConfig::broadcast`] — limiter + DRC on, `lookahead_ms: 10.0`, `max_gain_db: 15.0`, metadata on (R128 tags via [`metadata`]) |
+//! | ATSC A/85 (US broadcast) | [`Standard::AtscA85`] | -24.0 | -2.0 dBTP | [`NormalizerConfig::broadcast`] — same rationale as EBU R128; wider ±2 dB tolerance permits slightly more aggressive DRC |
+//! | Spotify | [`Standard::Spotify`] | -14.0 | -1.0 dBTP | [`NormalizerConfig::new`] (two-pass, limiter on, DRC off) to preserve the track's original dynamics — Spotify does not reward over-compression, and the platform applies its own gain if the track is louder than -14 LUFS |
+//! | `YouTube` | [`Standard::YouTube`] | -14.0 | -1.0 dBTP | Same as Spotify: limiter-only two-pass; `YouTube` similarly turns *down* content louder than target rather than boosting it |
+//! | Apple Music | [`Standard::AppleMusic`] | -16.0 | -1.0 dBTP | [`NormalizerConfig::new`] with limiter on; enable `write_metadata` to emit the iTunes Sound Check tag ([`metadata`]) so Apple's playback gain matches your measurement |
+//! | Netflix | [`Standard::Netflix`] | -27.0 (dialogue-gated drama) | -2.0 dBTP | Use [`cinema_loudness`]/[`dialogue_gate`] dialogue-gated measurement rather than a plain program-loudness two-pass — Netflix's delivery spec measures dialogue loudness, not full-program loudness, and a plain [`Normalizer`] will over- or under-estimate gain for dialogue-sparse content |
+//! | Amazon Prime Video | [`Standard::AmazonPrime`] | -24.0 | -2.0 dBTP | [`NormalizerConfig::broadcast`]-style settings (closer to ATSC A/85 than to the -14 LUFS music platforms) |
+//! | `ReplayGain` (personal libraries, offline players) | N/A — not an [`oximedia_metering::Standard`] variant | -18.0 (fixed reference, see [`replaygain::REPLAYGAIN_REFERENCE_LUFS`]) | player-dependent | [`replaygain::ReplayGainCalculator`] via [`BatchProcessor`]/[`batch_normalizer::BatchNormalizer`] in [`batch_normalizer::GainMode::Album`] mode for whole albums (preserves track-to-track dynamics) or `Independent` mode for shuffled/single-track playback |
+//!
+//! General rules of thumb:
+//!
+//! - **Broadcast standards (EBU R128, ATSC A/85, Amazon Prime)** expect tightly
+//!   controlled loudness *and* peaks: always enable the true-peak limiter, prefer
+//!   [`NormalizerConfig::broadcast`], and write metadata so downstream QC tools see the
+//!   same numbers you measured.
+//! - **Streaming music platforms (Spotify, `YouTube`, Apple Music, Tidal, Amazon Music
+//!   HD)** normalize on playback and penalize (or ignore) over-compressed masters — keep
+//!   DRC off and let the platform's own loudness normalization do the leveling; only the
+//!   limiter should run, purely as a safety net against inter-sample peaks.
+//! - **Dialogue-centric long-form content (film/TV/Netflix)** should be measured with
+//!   [`dialogue_gate`]/[`cinema_loudness`] rather than plain full-program integration,
+//!   since a few minutes of ambient-only content can otherwise skew the gated
+//!   measurement away from perceived dialogue loudness.
+//! - **`ReplayGain`** is the right choice when there is no single delivery platform to
+//!   target (a personal library played across many apps/devices) — it stores a gain
+//!   *offset* rather than baking in a specific target, so playback software can apply it
+//!   consistently across an eclectic collection.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

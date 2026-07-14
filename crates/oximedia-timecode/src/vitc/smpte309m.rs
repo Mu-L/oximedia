@@ -5,17 +5,17 @@
 //!
 //! # Packet Structure
 //! Each word is 10 bits:
-//! - Bits[7:0]: data payload (BCD timecode or binary group byte)
-//! - Bits[9:8]: odd parity — exactly one of these two bits is set so that the
+//! - `Bits[7:0]`: data payload (BCD timecode or binary group byte)
+//! - `Bits[9:8]`: odd parity — exactly one of these two bits is set so that the
 //!   total number of 1-bits across all 10 positions is odd.
 //!
 //! ## Word layout (words 0–3: timecode; words 4–15: binary groups)
 //! | Word | Content                                        |
 //! |------|------------------------------------------------|
-//! | 0    | frames_units[3:0] | frames_tens[7:4]; bit 8 = drop-frame flag |
-//! | 1    | seconds_units[3:0] | seconds_tens[7:4]                        |
-//! | 2    | minutes_units[3:0] | minutes_tens[7:4]; bit 8 = color-frame (0)|
-//! | 3    | hours_units[3:0] | hours_tens[7:4]                            |
+//! | 0    | `frames_units[3:0]` | `frames_tens[7:4]`; bit 8 = drop-frame flag |
+//! | 1    | `seconds_units[3:0]` | `seconds_tens[7:4]`                        |
+//! | 2    | `minutes_units[3:0]` | `minutes_tens[7:4]`; bit 8 = color-frame (0)|
+//! | 3    | `hours_units[3:0]` | `hours_tens[7:4]`                            |
 //! | 4–7  | binary group bytes 0–3 (from `binary_groups`)                  |
 //! | 8–15 | binary group bytes 4–11 (zero-padded)                           |
 
@@ -24,14 +24,14 @@ use crate::{FrameRate, Timecode};
 /// SMPTE 309M ancillary timecode packet for HD-SDI.
 ///
 /// `DID=0x60`, `SDID=0x60`, 16 10-bit user data words.
-/// Bits[7:0] of each word carry data; bits[9:8] carry odd parity.
+/// `Bits[7:0]` of each word carry data; `bits[9:8]` carry odd parity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Smpte309mPacket {
     /// DID byte — always 0x60 for SMPTE 309M timecode.
     pub did: u8,
     /// SDID byte — always 0x60 for SMPTE 309M timecode.
     pub sdid: u8,
-    /// 16 10-bit words (bits[7:0] = data; bits[9:8] = parity).
+    /// 16 10-bit words (`bits[7:0]` = data; `bits[9:8]` = parity).
     pub payload: [u16; 16],
 }
 

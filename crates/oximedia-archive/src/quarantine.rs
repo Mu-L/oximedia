@@ -9,8 +9,8 @@
 
 use crate::{ArchiveError, ArchiveResult, VerificationConfig};
 use chrono::{DateTime, Utc};
+use oxisql_core::Connection;
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tracing::{error, info, warn};
@@ -52,62 +52,76 @@ impl QuarantineRecord {
     }
 
     /// Save to database
-    pub async fn save(&self, pool: &sqlx::SqlitePool) -> ArchiveResult<i64> {
+    pub async fn save(&self, pool: &oxisql_sqlite_compat::SqliteConnection) -> ArchiveResult<i64> {
         let quarantine_date_str = self.quarantine_date.to_rfc3339();
         let restore_date_str = self.restore_date.map(|dt| dt.to_rfc3339());
+        let original_path_str = self.original_path.to_string_lossy().to_string();
+        let quarantine_path_str = self.quarantine_path.to_string_lossy().to_string();
 
-        let result = sqlx::query(
+        pool.execute(
             r"
             INSERT INTO quarantine_records (original_path, quarantine_path, quarantine_date, reason, checksum_before, auto_quarantine, restored, restore_date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ",
+            &[
+                &original_path_str,
+                &quarantine_path_str,
+                &quarantine_date_str,
+                &self.reason,
+                &self.checksum_before,
+                &self.auto_quarantine,
+                &self.restored,
+                &restore_date_str,
+            ],
         )
-        .bind(self.original_path.to_string_lossy().as_ref())
-        .bind(self.quarantine_path.to_string_lossy().as_ref())
-        .bind(&quarantine_date_str)
-        .bind(&self.reason)
-        .bind(&self.checksum_before)
-        .bind(self.auto_quarantine)
-        .bind(self.restored)
-        .bind(&restore_date_str)
-        .execute(pool)
         .await?;
 
-        Ok(result.last_insert_rowid())
+        let rows = pool.query("SELECT last_insert_rowid()", &[]).await?;
+        let id: i64 = rows
+            .first()
+            .and_then(|r| r.try_get_by_index::<i64>(0).ok())
+            .unwrap_or(0);
+        Ok(id)
     }
 
     /// Load from database by ID
-    pub async fn load(pool: &sqlx::SqlitePool, id: i64) -> ArchiveResult<Option<Self>> {
-        let row = sqlx::query(
-            r"
+    pub async fn load(
+        pool: &oxisql_sqlite_compat::SqliteConnection,
+        id: i64,
+    ) -> ArchiveResult<Option<Self>> {
+        let rows = pool
+            .query(
+                r"
             SELECT id, original_path, quarantine_path, quarantine_date, reason, checksum_before, auto_quarantine, restored, restore_date
             FROM quarantine_records
-            WHERE id = ?
+            WHERE id = $1
             ",
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await?;
+                &[&id],
+            )
+            .await?;
 
-        if let Some(row) = row {
-            let quarantine_date_str: String = row.get("quarantine_date");
-            let restore_date_str: Option<String> = row.get("restore_date");
+        if let Some(row) = rows.into_iter().next() {
+            let quarantine_date_str: String = row.try_get("quarantine_date")?;
+            let restore_date_str: Option<String> = row.try_get("restore_date")?;
+            // BOOLEAN columns round-trip through SQLite storage as INTEGER 0/1.
+            let auto_quarantine: i64 = row.try_get("auto_quarantine")?;
+            let restored: i64 = row.try_get("restored")?;
 
             Ok(Some(Self {
-                id: Some(row.get("id")),
-                original_path: PathBuf::from(row.get::<String, _>("original_path")),
-                quarantine_path: PathBuf::from(row.get::<String, _>("quarantine_path")),
+                id: row.try_get("id")?,
+                original_path: PathBuf::from(row.try_get::<String>("original_path")?),
+                quarantine_path: PathBuf::from(row.try_get::<String>("quarantine_path")?),
                 quarantine_date: DateTime::parse_from_rfc3339(&quarantine_date_str)
-                    .map_err(|e| ArchiveError::Database(sqlx::Error::Decode(Box::new(e))))?
+                    .map_err(|e| ArchiveError::Validation(format!("quarantine_date decode: {e}")))?
                     .with_timezone(&Utc),
-                reason: row.get("reason"),
-                checksum_before: row.get("checksum_before"),
-                auto_quarantine: row.get("auto_quarantine"),
-                restored: row.get("restored"),
+                reason: row.try_get("reason")?,
+                checksum_before: row.try_get("checksum_before")?,
+                auto_quarantine: auto_quarantine != 0,
+                restored: restored != 0,
                 restore_date: restore_date_str
                     .map(|s| DateTime::parse_from_rfc3339(&s).map(|dt| dt.with_timezone(&Utc)))
                     .transpose()
-                    .map_err(|e| ArchiveError::Database(sqlx::Error::Decode(Box::new(e))))?,
+                    .map_err(|e| ArchiveError::Validation(format!("restore_date decode: {e}")))?,
             }))
         } else {
             Ok(None)
@@ -115,37 +129,42 @@ impl QuarantineRecord {
     }
 
     /// Load all quarantine records
-    pub async fn load_all(pool: &sqlx::SqlitePool) -> ArchiveResult<Vec<Self>> {
-        let rows = sqlx::query(
-            r"
+    pub async fn load_all(
+        pool: &oxisql_sqlite_compat::SqliteConnection,
+    ) -> ArchiveResult<Vec<Self>> {
+        let rows = pool
+            .query(
+                r"
             SELECT id, original_path, quarantine_path, quarantine_date, reason, checksum_before, auto_quarantine, restored, restore_date
             FROM quarantine_records
             ORDER BY quarantine_date DESC
             ",
-        )
-        .fetch_all(pool)
-        .await?;
+                &[],
+            )
+            .await?;
 
         let mut records = Vec::new();
         for row in rows {
-            let quarantine_date_str: String = row.get("quarantine_date");
-            let restore_date_str: Option<String> = row.get("restore_date");
+            let quarantine_date_str: String = row.try_get("quarantine_date")?;
+            let restore_date_str: Option<String> = row.try_get("restore_date")?;
+            let auto_quarantine: i64 = row.try_get("auto_quarantine")?;
+            let restored: i64 = row.try_get("restored")?;
 
             records.push(Self {
-                id: Some(row.get("id")),
-                original_path: PathBuf::from(row.get::<String, _>("original_path")),
-                quarantine_path: PathBuf::from(row.get::<String, _>("quarantine_path")),
+                id: row.try_get("id")?,
+                original_path: PathBuf::from(row.try_get::<String>("original_path")?),
+                quarantine_path: PathBuf::from(row.try_get::<String>("quarantine_path")?),
                 quarantine_date: DateTime::parse_from_rfc3339(&quarantine_date_str)
-                    .map_err(|e| ArchiveError::Database(sqlx::Error::Decode(Box::new(e))))?
+                    .map_err(|e| ArchiveError::Validation(format!("quarantine_date decode: {e}")))?
                     .with_timezone(&Utc),
-                reason: row.get("reason"),
-                checksum_before: row.get("checksum_before"),
-                auto_quarantine: row.get("auto_quarantine"),
-                restored: row.get("restored"),
+                reason: row.try_get("reason")?,
+                checksum_before: row.try_get("checksum_before")?,
+                auto_quarantine: auto_quarantine != 0,
+                restored: restored != 0,
                 restore_date: restore_date_str
                     .map(|s| DateTime::parse_from_rfc3339(&s).map(|dt| dt.with_timezone(&Utc)))
                     .transpose()
-                    .map_err(|e| ArchiveError::Database(sqlx::Error::Decode(Box::new(e))))?,
+                    .map_err(|e| ArchiveError::Validation(format!("restore_date decode: {e}")))?,
             });
         }
 
@@ -153,23 +172,23 @@ impl QuarantineRecord {
     }
 
     /// Mark as restored
-    pub async fn mark_restored(&mut self, pool: &sqlx::SqlitePool) -> ArchiveResult<()> {
+    pub async fn mark_restored(
+        &mut self,
+        pool: &oxisql_sqlite_compat::SqliteConnection,
+    ) -> ArchiveResult<()> {
         self.restored = true;
         let now = Utc::now();
         self.restore_date = Some(now);
         let restore_date_str = now.to_rfc3339();
 
-        sqlx::query(
+        pool.execute(
             r"
             UPDATE quarantine_records
-            SET restored = ?, restore_date = ?
-            WHERE id = ?
+            SET restored = $1, restore_date = $2
+            WHERE id = $3
             ",
+            &[&self.restored, &restore_date_str, &self.id],
         )
-        .bind(self.restored)
-        .bind(&restore_date_str)
-        .bind(self.id)
-        .execute(pool)
         .await?;
 
         Ok(())
@@ -179,7 +198,7 @@ impl QuarantineRecord {
 /// Quarantine a file
 pub async fn quarantine_file(
     path: &Path,
-    pool: &sqlx::SqlitePool,
+    pool: &oxisql_sqlite_compat::SqliteConnection,
     config: &VerificationConfig,
     reason: &str,
 ) -> ArchiveResult<QuarantineRecord> {
@@ -243,7 +262,7 @@ pub async fn quarantine_file(
 /// Restore a quarantined file
 pub async fn restore_file(
     record_id: i64,
-    pool: &sqlx::SqlitePool,
+    pool: &oxisql_sqlite_compat::SqliteConnection,
     config: &VerificationConfig,
 ) -> ArchiveResult<()> {
     let mut record = QuarantineRecord::load(pool, record_id)
@@ -302,7 +321,10 @@ pub async fn restore_file(
 }
 
 /// Delete a quarantined file permanently
-pub async fn delete_quarantined_file(record_id: i64, pool: &sqlx::SqlitePool) -> ArchiveResult<()> {
+pub async fn delete_quarantined_file(
+    record_id: i64,
+    pool: &oxisql_sqlite_compat::SqliteConnection,
+) -> ArchiveResult<()> {
     let record = QuarantineRecord::load(pool, record_id)
         .await?
         .ok_or_else(|| ArchiveError::Quarantine("Quarantine record not found".to_string()))?;
@@ -316,10 +338,11 @@ pub async fn delete_quarantined_file(record_id: i64, pool: &sqlx::SqlitePool) ->
     }
 
     // Remove record from database
-    sqlx::query("DELETE FROM quarantine_records WHERE id = ?")
-        .bind(record_id)
-        .execute(pool)
-        .await?;
+    pool.execute(
+        "DELETE FROM quarantine_records WHERE id = $1",
+        &[&record_id],
+    )
+    .await?;
 
     Ok(())
 }
@@ -335,7 +358,9 @@ pub struct QuarantineStatus {
 }
 
 /// Get quarantine status
-pub async fn get_quarantine_status(pool: &sqlx::SqlitePool) -> ArchiveResult<QuarantineStatus> {
+pub async fn get_quarantine_status(
+    pool: &oxisql_sqlite_compat::SqliteConnection,
+) -> ArchiveResult<QuarantineStatus> {
     let records = QuarantineRecord::load_all(pool).await?;
 
     let total_quarantined = records.len();
@@ -395,7 +420,7 @@ impl RepairWorkflow {
 /// Attempt to repair a corrupted file
 pub async fn attempt_repair(
     path: &Path,
-    pool: &sqlx::SqlitePool,
+    pool: &oxisql_sqlite_compat::SqliteConnection,
     config: &VerificationConfig,
 ) -> ArchiveResult<RepairWorkflow> {
     let mut workflow = RepairWorkflow::new(path.to_path_buf());
@@ -531,7 +556,7 @@ async fn attempt_mp4_repair(path: &Path) -> ArchiveResult<bool> {
 pub async fn restore_from_backup(
     corrupted_path: &Path,
     backup_path: &Path,
-    pool: &sqlx::SqlitePool,
+    pool: &oxisql_sqlite_compat::SqliteConnection,
     config: &VerificationConfig,
 ) -> ArchiveResult<()> {
     info!(

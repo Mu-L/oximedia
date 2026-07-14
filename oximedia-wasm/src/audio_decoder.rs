@@ -1,8 +1,13 @@
 //! WASM audio decoders.
 //!
-//! This module provides WebAssembly-compatible audio decoders for FLAC, Vorbis,
-//! and Opus codecs. Each decoder wraps the internal codec implementations from
+//! This module provides WebAssembly-compatible audio decoders for FLAC and
+//! Opus codecs. Each decoder wraps the internal codec implementations from
 //! `oximedia-audio` and exposes a JavaScript-friendly API.
+//!
+//! A Vorbis decoder is intentionally **not** exposed here: the underlying
+//! `oximedia_audio::vorbis` codec only round-trips its own synthetic test
+//! format and cannot decode real Ogg Vorbis bitstreams, so shipping a
+//! `WasmVorbisDecoder` class would silently mislead browser callers.
 //!
 //! All decoders follow the same pattern:
 //! 1. Create a decoder with `new()`
@@ -24,7 +29,6 @@ use wasm_bindgen::prelude::*;
 use oximedia_audio::flac::{FlacDecoder, StreamInfo};
 use oximedia_audio::opus::OpusDecoder;
 use oximedia_audio::traits::{AudioDecoder, AudioDecoderConfig};
-use oximedia_audio::vorbis::{IdentificationHeader, VorbisDecoder};
 use oximedia_audio::{AudioBuffer, AudioFrame};
 use oximedia_core::{CodecId, SampleFormat};
 
@@ -219,131 +223,6 @@ impl WasmFlacDecoder {
     /// Reset decoder state.
     ///
     /// After reset, the decoder can be re-initialized with new stream info.
-    pub fn reset(&mut self) {
-        if let Some(ref mut decoder) = self.decoder {
-            decoder.reset();
-        }
-        self.initialized = false;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Vorbis Decoder
-// ---------------------------------------------------------------------------
-
-/// Vorbis audio decoder for WebAssembly.
-///
-/// Decodes Ogg Vorbis compressed audio data into PCM float samples.
-/// Vorbis is a lossy, royalty-free audio codec commonly used in Ogg containers.
-///
-/// # Usage
-///
-/// ```javascript
-/// const decoder = new oximedia.WasmVorbisDecoder();
-/// decoder.init(identificationHeaderBytes);
-/// const samples = decoder.decode_frame(vorbisPacket);
-/// ```
-#[wasm_bindgen]
-pub struct WasmVorbisDecoder {
-    /// Internal Vorbis decoder.
-    decoder: Option<VorbisDecoder>,
-    /// Sample rate from identification header.
-    sample_rate: u32,
-    /// Channel count from identification header.
-    channels: u16,
-    /// Whether the decoder has been initialized.
-    initialized: bool,
-}
-
-#[wasm_bindgen]
-impl WasmVorbisDecoder {
-    /// Create a new Vorbis decoder.
-    ///
-    /// The decoder must be initialized with `init()` before decoding frames.
-    #[wasm_bindgen(constructor)]
-    pub fn new() -> Self {
-        Self {
-            decoder: None,
-            sample_rate: 0,
-            channels: 0,
-            initialized: false,
-        }
-    }
-
-    /// Initialize decoder with Vorbis identification header bytes.
-    ///
-    /// The header is the first Vorbis header packet from an Ogg stream.
-    /// It contains sample rate, channel count, and codec configuration.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the header is invalid.
-    pub fn init(&mut self, header: &[u8]) -> Result<(), JsValue> {
-        let id_header = IdentificationHeader::parse(header)
-            .map_err(|e| crate::utils::js_err(&format!("Vorbis header parse error: {e}")))?;
-
-        self.sample_rate = id_header.audio_sample_rate;
-        self.channels = u16::from(id_header.audio_channels);
-
-        let config = AudioDecoderConfig {
-            codec: CodecId::Vorbis,
-            sample_rate: self.sample_rate,
-            channels: self.channels as u8,
-            extradata: Some(header.to_vec()),
-        };
-
-        let decoder = VorbisDecoder::new(&config)
-            .map_err(|e| crate::utils::js_err(&format!("Vorbis decoder creation error: {e}")))?;
-
-        self.decoder = Some(decoder);
-        self.initialized = true;
-        Ok(())
-    }
-
-    /// Decode a Vorbis audio packet and return PCM samples as Float32Array.
-    ///
-    /// Returns interleaved float samples normalized to -1.0 to 1.0.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the decoder is not initialized or decoding fails.
-    pub fn decode_frame(&mut self, data: &[u8]) -> Result<js_sys::Float32Array, JsValue> {
-        let decoder = self
-            .decoder
-            .as_mut()
-            .ok_or_else(|| crate::utils::js_err("Vorbis decoder not initialized"))?;
-
-        decoder
-            .send_packet(data, 0)
-            .map_err(|e| crate::utils::js_err(&format!("Vorbis send_packet error: {e}")))?;
-
-        match decoder.receive_frame() {
-            Ok(Some(frame)) => {
-                let raw_bytes = extract_frame_bytes(&frame);
-                let float_samples = samples_to_f32(raw_bytes, frame.format);
-                Ok(js_sys::Float32Array::from(float_samples.as_slice()))
-            }
-            Ok(None) => Ok(js_sys::Float32Array::new_with_length(0)),
-            Err(e) => Err(crate::utils::js_err(&format!("Vorbis decode error: {e}"))),
-        }
-    }
-
-    /// Get sample rate in Hz.
-    pub fn sample_rate(&self) -> u32 {
-        self.sample_rate
-    }
-
-    /// Get number of audio channels.
-    pub fn channels(&self) -> u16 {
-        self.channels
-    }
-
-    /// Check if the decoder has been initialized.
-    pub fn is_initialized(&self) -> bool {
-        self.initialized
-    }
-
-    /// Reset decoder state.
     pub fn reset(&mut self) {
         if let Some(ref mut decoder) = self.decoder {
             decoder.reset();

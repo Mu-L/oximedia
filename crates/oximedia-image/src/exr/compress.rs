@@ -64,7 +64,7 @@ pub(crate) fn decompress_rle(compressed: &[u8]) -> ImageResult<Vec<u8>> {
             }
             let byte = compressed[i];
             i += 1;
-            output.extend(std::iter::repeat(byte).take(run_length));
+            output.extend(std::iter::repeat_n(byte, run_length));
         }
     }
 
@@ -631,7 +631,7 @@ pub(crate) fn decompress_b44a(compressed: &[u8]) -> ImageResult<Vec<u8>> {
             }
             let val = u16::from_le_bytes([block_data[offset], block_data[offset + 1]]);
             offset += 2;
-            u16_vals.extend(std::iter::repeat(val).take(B44_BLOCK_SIZE));
+            u16_vals.extend(std::iter::repeat_n(val, B44_BLOCK_SIZE));
         } else {
             // Normal block: 14 bytes
             if offset + 14 > block_data.len() {

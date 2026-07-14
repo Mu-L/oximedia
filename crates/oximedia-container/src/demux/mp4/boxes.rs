@@ -457,6 +457,41 @@ pub struct TrakBox {
     pub padding_samples: u32,
 }
 
+/// Validates that a box-declared entry count can actually fit within the
+/// number of bytes still available in the box content.
+///
+/// MP4 sample-table boxes (`stts`, `stsc`, `stsz`, `stco`, `co64`, `stss`,
+/// `ctts`) each carry a 32-bit `entry_count`/`sample_count` field that is
+/// fully attacker-controlled: a truncated or crafted box can declare up to
+/// `u32::MAX` entries while providing only a handful of payload bytes. Using
+/// that count directly in `Vec::with_capacity` would let a ~20-byte file
+/// trigger a multi-gigabyte allocation (memory-exhaustion DoS) before any
+/// per-entry read has a chance to fail. This check rejects such files with a
+/// proper [`OxiError`] *before* any allocation is attempted.
+///
+/// # Errors
+///
+/// Returns [`OxiError::Parse`] if `entry_count * entry_size` exceeds
+/// `available` (the number of bytes actually remaining in the box).
+fn check_entry_count(
+    box_name: &str,
+    entry_count: usize,
+    entry_size: usize,
+    available: usize,
+    offset: u64,
+) -> OxiResult<()> {
+    let needed = entry_count.saturating_mul(entry_size);
+    if needed > available {
+        return Err(OxiError::Parse {
+            offset,
+            message: format!(
+                "{box_name}: declared entry_count {entry_count} needs {needed} bytes but only {available} bytes remain in box"
+            ),
+        });
+    }
+    Ok(())
+}
+
 impl TrakBox {
     /// Parses the content of a `trak` box by iterating its child boxes.
     ///
@@ -858,6 +893,13 @@ impl TrakBox {
         let mut atom = Mp4Atom::new(data);
         atom.skip(4)?; // version + flags
         let entry_count = atom.read_u32()? as usize;
+        check_entry_count(
+            "stts",
+            entry_count,
+            8, // sample_count (4) + sample_delta (4)
+            atom.remaining().len(),
+            atom.position() as u64,
+        )?;
         let mut entries = Vec::with_capacity(entry_count);
         for _ in 0..entry_count {
             let sample_count = atom.read_u32()?;
@@ -876,6 +918,13 @@ impl TrakBox {
         let mut atom = Mp4Atom::new(data);
         atom.skip(4)?; // version + flags
         let entry_count = atom.read_u32()? as usize;
+        check_entry_count(
+            "stsc",
+            entry_count,
+            12, // first_chunk (4) + samples_per_chunk (4) + sample_description_index (4)
+            atom.remaining().len(),
+            atom.position() as u64,
+        )?;
         let mut entries = Vec::with_capacity(entry_count);
         for _ in 0..entry_count {
             let first_chunk = atom.read_u32()?;
@@ -903,6 +952,13 @@ impl TrakBox {
             trak.default_sample_size = sample_size;
         } else {
             // Per-sample sizes
+            check_entry_count(
+                "stsz",
+                sample_count,
+                4, // per-entry sample_size (4)
+                atom.remaining().len(),
+                atom.position() as u64,
+            )?;
             let mut sizes = Vec::with_capacity(sample_count);
             for _ in 0..sample_count {
                 sizes.push(atom.read_u32()?);
@@ -918,6 +974,13 @@ impl TrakBox {
         let mut atom = Mp4Atom::new(data);
         atom.skip(4)?; // version + flags
         let entry_count = atom.read_u32()? as usize;
+        check_entry_count(
+            "stco",
+            entry_count,
+            4, // chunk_offset (4)
+            atom.remaining().len(),
+            atom.position() as u64,
+        )?;
         let mut offsets = Vec::with_capacity(entry_count);
         for _ in 0..entry_count {
             offsets.push(u64::from(atom.read_u32()?));
@@ -931,6 +994,13 @@ impl TrakBox {
         let mut atom = Mp4Atom::new(data);
         atom.skip(4)?; // version + flags
         let entry_count = atom.read_u32()? as usize;
+        check_entry_count(
+            "co64",
+            entry_count,
+            8, // chunk_offset (8)
+            atom.remaining().len(),
+            atom.position() as u64,
+        )?;
         let mut offsets = Vec::with_capacity(entry_count);
         for _ in 0..entry_count {
             offsets.push(atom.read_u64()?);
@@ -944,6 +1014,13 @@ impl TrakBox {
         let mut atom = Mp4Atom::new(data);
         atom.skip(4)?; // version + flags
         let entry_count = atom.read_u32()? as usize;
+        check_entry_count(
+            "stss",
+            entry_count,
+            4, // sample_number (4)
+            atom.remaining().len(),
+            atom.position() as u64,
+        )?;
         let mut samples = Vec::with_capacity(entry_count);
         for _ in 0..entry_count {
             samples.push(atom.read_u32()?);
@@ -958,6 +1035,13 @@ impl TrakBox {
         let version = atom.read_u8()?;
         atom.skip(3)?; // flags
         let entry_count = atom.read_u32()? as usize;
+        check_entry_count(
+            "ctts",
+            entry_count,
+            8, // sample_count (4) + sample_offset (4)
+            atom.remaining().len(),
+            atom.position() as u64,
+        )?;
         let mut entries = Vec::with_capacity(entry_count);
         for _ in 0..entry_count {
             let sample_count = atom.read_u32()?;
@@ -1226,5 +1310,152 @@ mod tests {
     #[test]
     fn test_box_type_as_u32() {
         assert_eq!(BoxType::FTYP.as_u32(), 0x66747970); // "ftyp"
+    }
+
+    // ------------------------------------------------------------------
+    // Regression tests: BLOCKER FIX — an unvalidated 32-bit entry_count /
+    // sample_count field must never drive an unbounded `Vec::with_capacity`
+    // allocation. Each crafted box below declares `entry_count = u32::MAX`
+    // while providing only a handful of trailing payload bytes; before the
+    // fix this would attempt a multi-gigabyte allocation (memory-exhaustion
+    // DoS) from a ~20-byte file. The parser must now return `Err` instead of
+    // panicking or attempting the allocation.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_stts_valid_small_box() {
+        // version(1)+flags(3) + entry_count(4)=1 + one entry (count=10, delta=1000)
+        let data = [
+            0x00, 0x00, 0x00, 0x00, // version + flags
+            0x00, 0x00, 0x00, 0x01, // entry_count = 1
+            0x00, 0x00, 0x00, 0x0A, // sample_count = 10
+            0x00, 0x00, 0x03, 0xE8, // sample_delta = 1000
+        ];
+        let mut trak = TrakBox::default();
+        TrakBox::parse_stts(&data, &mut trak).expect("valid stts box should parse");
+        assert_eq!(trak.stts_entries.len(), 1);
+        assert_eq!(trak.stts_entries[0].sample_count, 10);
+        assert_eq!(trak.stts_entries[0].sample_delta, 1000);
+    }
+
+    #[test]
+    fn test_parse_stts_huge_entry_count_rejected() {
+        // A naive `Vec::with_capacity(entry_count)` here would try to
+        // allocate ~34 GiB (0xFFFF_FFFF * 8 bytes) for a 12-byte input.
+        let data = [
+            0x00, 0x00, 0x00, 0x00, // version + flags
+            0xFF, 0xFF, 0xFF, 0xFF, // entry_count = u32::MAX
+            0x00, 0x00, 0x00, 0x00, // trailing bytes (nowhere near enough)
+        ];
+        let mut trak = TrakBox::default();
+        let result = TrakBox::parse_stts(&data, &mut trak);
+        assert!(
+            result.is_err(),
+            "malformed stts box must be rejected with Err, not panic/OOM"
+        );
+    }
+
+    #[test]
+    fn test_parse_stsz_huge_sample_count_rejected() {
+        // sample_size = 0 selects the per-sample-size branch, whose
+        // sample_count is then used for Vec::with_capacity.
+        let data = [
+            0x00, 0x00, 0x00, 0x00, // version + flags
+            0x00, 0x00, 0x00, 0x00, // sample_size = 0 (per-sample sizes follow)
+            0xFF, 0xFF, 0xFF, 0xFF, // sample_count = u32::MAX
+            0x00, 0x00, 0x00, 0x00, // trailing bytes (nowhere near enough)
+        ];
+        let mut trak = TrakBox::default();
+        let result = TrakBox::parse_stsz(&data, &mut trak);
+        assert!(
+            result.is_err(),
+            "malformed stsz box must be rejected with Err, not panic/OOM"
+        );
+    }
+
+    #[test]
+    fn test_parse_stco_huge_entry_count_rejected() {
+        let data = [
+            0x00, 0x00, 0x00, 0x00, // version + flags
+            0xFF, 0xFF, 0xFF, 0xFF, // entry_count = u32::MAX
+            0x00, 0x00, 0x00, 0x00, // trailing bytes (nowhere near enough)
+        ];
+        let mut trak = TrakBox::default();
+        let result = TrakBox::parse_stco(&data, &mut trak);
+        assert!(
+            result.is_err(),
+            "malformed stco box must be rejected with Err, not panic/OOM"
+        );
+    }
+
+    #[test]
+    fn test_parse_co64_huge_entry_count_rejected() {
+        let data = [
+            0x00, 0x00, 0x00, 0x00, // version + flags
+            0xFF, 0xFF, 0xFF, 0xFF, // entry_count = u32::MAX
+            0x00, 0x00, 0x00, 0x00, // trailing bytes (nowhere near enough)
+        ];
+        let mut trak = TrakBox::default();
+        let result = TrakBox::parse_co64(&data, &mut trak);
+        assert!(
+            result.is_err(),
+            "malformed co64 box must be rejected with Err, not panic/OOM"
+        );
+    }
+
+    #[test]
+    fn test_parse_stsc_huge_entry_count_rejected() {
+        let data = [
+            0x00, 0x00, 0x00, 0x00, // version + flags
+            0xFF, 0xFF, 0xFF, 0xFF, // entry_count = u32::MAX
+            0x00, 0x00, 0x00, 0x00, // trailing bytes (nowhere near enough)
+        ];
+        let mut trak = TrakBox::default();
+        let result = TrakBox::parse_stsc(&data, &mut trak);
+        assert!(
+            result.is_err(),
+            "malformed stsc box must be rejected with Err, not panic/OOM"
+        );
+    }
+
+    #[test]
+    fn test_parse_stss_huge_entry_count_rejected() {
+        let data = [
+            0x00, 0x00, 0x00, 0x00, // version + flags
+            0xFF, 0xFF, 0xFF, 0xFF, // entry_count = u32::MAX
+            0x00, 0x00, 0x00, 0x00, // trailing bytes (nowhere near enough)
+        ];
+        let mut trak = TrakBox::default();
+        let result = TrakBox::parse_stss(&data, &mut trak);
+        assert!(
+            result.is_err(),
+            "malformed stss box must be rejected with Err, not panic/OOM"
+        );
+    }
+
+    #[test]
+    fn test_parse_ctts_huge_entry_count_rejected() {
+        let data = [
+            0x00, // version
+            0x00, 0x00, 0x00, // flags
+            0xFF, 0xFF, 0xFF, 0xFF, // entry_count = u32::MAX
+            0x00, 0x00, 0x00, 0x00, // trailing bytes (nowhere near enough)
+        ];
+        let mut trak = TrakBox::default();
+        let result = TrakBox::parse_ctts(&data, &mut trak);
+        assert!(
+            result.is_err(),
+            "malformed ctts box must be rejected with Err, not panic/OOM"
+        );
+    }
+
+    #[test]
+    fn test_check_entry_count_boundary() {
+        // Exactly fits: entry_count * entry_size == available -> Ok
+        assert!(check_entry_count("test", 4, 8, 32, 0).is_ok());
+        // One byte short -> Err
+        assert!(check_entry_count("test", 4, 8, 31, 0).is_err());
+        // Must not overflow/panic when entry_count is huge relative to entry_size.
+        assert!(check_entry_count("test", usize::MAX, 8, 4, 0).is_err());
     }
 }

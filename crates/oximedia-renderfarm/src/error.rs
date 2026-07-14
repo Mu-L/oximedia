@@ -39,7 +39,7 @@ pub enum Error {
 
     /// Database error
     #[error("Database error: {0}")]
-    Database(#[from] rusqlite::Error),
+    Database(String),
 
     /// Serialization error
     #[error("Serialization error: {0}")]

@@ -16,7 +16,6 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 use std::sync::Arc;
 
 // ── Response types ────────────────────────────────────────────────────────────
@@ -189,14 +188,17 @@ pub async fn list_users(
         None => ("", None),
     };
 
+    // `where_clause` is always one of two hardcoded literal fragments (never built
+    // from `params.role`'s CONTENT), and the actual role value is always bound below
+    // -- audited safe for sqlx 0.9's `SqlSafeStr` gate.
     let count_sql = format!("SELECT COUNT(*) FROM users{}", where_clause);
     let total: i64 = if let Some(ref role) = role_bind {
-        sqlx::query_scalar(&count_sql)
+        crate::db::query_scalar(crate::db::AssertSqlSafe(count_sql))
             .bind(role)
             .fetch_one(state.db.pool())
             .await?
     } else {
-        sqlx::query_scalar(&count_sql)
+        crate::db::query_scalar(crate::db::AssertSqlSafe(count_sql))
             .fetch_one(state.db.pool())
             .await?
     };
@@ -207,14 +209,14 @@ pub async fn list_users(
     );
 
     let rows = if let Some(ref role) = role_bind {
-        sqlx::query(&list_sql)
+        crate::db::query(crate::db::AssertSqlSafe(list_sql))
             .bind(role)
             .bind(per_page)
             .bind(offset)
             .fetch_all(state.db.pool())
             .await?
     } else {
-        sqlx::query(&list_sql)
+        crate::db::query(crate::db::AssertSqlSafe(list_sql))
             .bind(per_page)
             .bind(offset)
             .fetch_all(state.db.pool())
@@ -265,7 +267,7 @@ pub async fn change_user_role(
     }
 
     let now = chrono::Utc::now().timestamp();
-    let result = sqlx::query("UPDATE users SET role = ?, updated_at = ? WHERE id = ?")
+    let result = crate::db::query("UPDATE users SET role = ?, updated_at = ? WHERE id = ?")
         .bind(&role_str)
         .bind(now)
         .bind(&user_id)
@@ -299,7 +301,7 @@ pub async fn delete_user(
         ));
     }
 
-    let result = sqlx::query("DELETE FROM users WHERE id = ?")
+    let result = crate::db::query("DELETE FROM users WHERE id = ?")
         .bind(&user_id)
         .execute(state.db.pool())
         .await?;
@@ -321,19 +323,20 @@ pub async fn get_admin_stats(
 ) -> ServerResult<impl IntoResponse> {
     require_admin(&auth_user)?;
 
-    let total_users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+    let total_users: i64 = crate::db::query_scalar("SELECT COUNT(*) FROM users")
         .fetch_one(state.db.pool())
         .await?;
 
-    let total_media: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM media")
+    let total_media: i64 = crate::db::query_scalar("SELECT COUNT(*) FROM media")
         .fetch_one(state.db.pool())
         .await?;
 
-    let storage_bytes_used: Option<i64> = sqlx::query_scalar("SELECT SUM(file_size) FROM media")
-        .fetch_one(state.db.pool())
-        .await?;
+    let storage_bytes_used: Option<i64> =
+        crate::db::query_scalar("SELECT SUM(file_size) FROM media")
+            .fetch_one(state.db.pool())
+            .await?;
 
-    let jobs_pending: i64 = sqlx::query_scalar(
+    let jobs_pending: i64 = crate::db::query_scalar(
         "SELECT COUNT(*) FROM transcode_jobs WHERE status IN ('queued', 'processing')",
     )
     .fetch_one(state.db.pool())
@@ -407,8 +410,12 @@ pub async fn get_audit_log(
         }};
     }
 
+    // `where_sql` is built entirely from hardcoded literal condition fragments
+    // (`"timestamp >= ?"` etc, chosen only by whether each filter is `Some`), and
+    // every actual filter value is bound via `bind_filters!` above -- audited safe
+    // for sqlx 0.9's `SqlSafeStr` gate.
     let count_sql = format!("SELECT COUNT(*) FROM audit_log{}", where_sql);
-    let total: i64 = bind_filters!(sqlx::query_scalar(&count_sql))
+    let total: i64 = bind_filters!(crate::db::query_scalar(crate::db::AssertSqlSafe(count_sql)))
         .fetch_one(state.db.pool())
         .await?;
 
@@ -417,7 +424,7 @@ pub async fn get_audit_log(
          FROM audit_log{} ORDER BY timestamp DESC LIMIT ? OFFSET ?",
         where_sql
     );
-    let rows = bind_filters!(sqlx::query(&list_sql))
+    let rows = bind_filters!(crate::db::query(crate::db::AssertSqlSafe(list_sql)))
         .bind(per_page)
         .bind(offset)
         .fetch_all(state.db.pool())
@@ -472,7 +479,7 @@ pub async fn vacuum_db(
 ) -> ServerResult<impl IntoResponse> {
     require_admin(&auth_user)?;
 
-    sqlx::query("VACUUM")
+    crate::db::query("VACUUM")
         .execute(state.db.pool())
         .await
         .map_err(|e| ServerError::Internal(format!("VACUUM failed: {e}")))?;
@@ -499,8 +506,8 @@ fn redact_url(url: &str) -> String {
 }
 
 /// Creates the `audit_log` table if it does not already exist.
-pub async fn ensure_audit_table(pool: &sqlx::SqlitePool) -> ServerResult<()> {
-    sqlx::query(
+pub async fn ensure_audit_table(pool: &crate::db::SqlitePool) -> ServerResult<()> {
+    crate::db::query(
         r"
         CREATE TABLE IF NOT EXISTS audit_log (
             id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -515,11 +522,11 @@ pub async fn ensure_audit_table(pool: &sqlx::SqlitePool) -> ServerResult<()> {
     .execute(pool)
     .await?;
 
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp)")
+    crate::db::query("CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp)")
         .execute(pool)
         .await?;
 
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_audit_log_user_id ON audit_log(user_id)")
+    crate::db::query("CREATE INDEX IF NOT EXISTS idx_audit_log_user_id ON audit_log(user_id)")
         .execute(pool)
         .await?;
 
@@ -531,7 +538,7 @@ pub async fn ensure_audit_table(pool: &sqlx::SqlitePool) -> ServerResult<()> {
 /// Creates the table on first use.  Failures are logged but not propagated —
 /// audit writes should never abort a user-facing request.
 pub async fn log_audit_event(
-    pool: &sqlx::SqlitePool,
+    pool: &crate::db::SqlitePool,
     user_id: Option<&str>,
     action: &str,
     resource: &str,
@@ -543,7 +550,7 @@ pub async fn log_audit_event(
     }
 
     let now = chrono::Utc::now().timestamp();
-    if let Err(e) = sqlx::query(
+    if let Err(e) = crate::db::query(
         "INSERT INTO audit_log (user_id, action, resource, timestamp, ip) VALUES (?, ?, ?, ?, ?)",
     )
     .bind(user_id)
@@ -692,21 +699,13 @@ mod tests {
         let db_path = dir.join(format!("oximedia_admin_test_{}.db", uuid::Uuid::new_v4()));
         let url = format!("sqlite:{}", db_path.display());
 
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(2)
-            .connect_with(
-                url.parse::<sqlx::sqlite::SqliteConnectOptions>()
-                    .expect("parse url")
-                    .create_if_missing(true),
-            )
-            .await
-            .expect("connect");
+        let pool = crate::db::SqlitePool::connect(&url).await.expect("connect");
 
         // Call twice — must not fail on second call.
         ensure_audit_table(&pool).await.expect("first call");
         ensure_audit_table(&pool).await.expect("second call");
 
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log")
+        let count: i64 = crate::db::query_scalar("SELECT COUNT(*) FROM audit_log")
             .fetch_one(&pool)
             .await
             .expect("count");
@@ -724,15 +723,7 @@ mod tests {
         ));
         let url = format!("sqlite:{}", db_path.display());
 
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(2)
-            .connect_with(
-                url.parse::<sqlx::sqlite::SqliteConnectOptions>()
-                    .expect("parse url")
-                    .create_if_missing(true),
-            )
-            .await
-            .expect("connect");
+        let pool = crate::db::SqlitePool::connect(&url).await.expect("connect");
 
         log_audit_event(
             &pool,
@@ -743,7 +734,7 @@ mod tests {
         )
         .await;
 
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log")
+        let count: i64 = crate::db::query_scalar("SELECT COUNT(*) FROM audit_log")
             .fetch_one(&pool)
             .await
             .expect("count");

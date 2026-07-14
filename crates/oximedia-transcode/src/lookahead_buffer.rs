@@ -27,8 +27,8 @@
 //!  └───────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! [`LookaheadBuffer`] is intentionally codec-agnostic.  The caller (e.g.
-//! the CRF optimiser or a per-scene encoder) feeds [`FrameFeatures`] into
+//! [`crate::lookahead_buffer::LookaheadBuffer`] is intentionally codec-agnostic.  The caller (e.g.
+//! the CRF optimiser or a per-scene encoder) feeds [`crate::lookahead_buffer::FrameFeatures`] into
 //! the buffer and queries it for an adjusted CRF before handing each frame
 //! to the codec.
 

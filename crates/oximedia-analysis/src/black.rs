@@ -53,7 +53,11 @@ pub struct BlackFrameDetector {
     threshold: u8,
     min_duration: usize,
     segments: Vec<BlackSegment>,
-    current_segment: Option<(usize, Vec<f64>, Vec<f64>)>,
+    /// In-progress black run: `(start_frame, last_seen_frame, luminances, ratios)`.
+    /// `last_seen_frame` tracks the most recent black `frame_number` so the close
+    /// path uses an inclusive run extent that is identical in `process_frame` and
+    /// `finalize`, even when frame numbers are non-contiguous (every-Nth sampling).
+    current_segment: Option<(usize, usize, Vec<f64>, Vec<f64>)>,
 }
 
 impl BlackFrameDetector {
@@ -91,7 +95,11 @@ impl BlackFrameDetector {
         let total: usize = y_plane.iter().map(|&p| p as usize).sum();
         let avg_luminance = total as f64 / y_plane.len() as f64;
 
-        // Count black pixels
+        // Count black pixels.
+        // NOTE: This per-pixel test is STRICT `<` (a pixel equal to `threshold` is
+        // NOT counted as black), whereas `BlackBarDetector` (see `:377`) uses `<=`.
+        // The asymmetry is a deliberate seam between the two detectors and is left
+        // intact here on purpose; it is out of scope to unify.
         let black_pixels = y_plane.iter().filter(|&&p| p < self.threshold).count();
         let black_ratio = black_pixels as f64 / y_plane.len() as f64;
 
@@ -99,48 +107,58 @@ impl BlackFrameDetector {
         let is_black = avg_luminance < f64::from(self.threshold) || black_ratio > 0.98;
 
         if is_black {
-            // Start or continue a black segment
-            if let Some((_start, ref mut lums, ref mut ratios)) = self.current_segment {
+            // Start or continue a black segment.
+            if let Some((_start, ref mut last_seen, ref mut lums, ref mut ratios)) =
+                self.current_segment
+            {
+                *last_seen = frame_number;
                 lums.push(avg_luminance);
                 ratios.push(black_ratio);
             } else {
-                self.current_segment = Some((frame_number, vec![avg_luminance], vec![black_ratio]));
+                self.current_segment = Some((
+                    frame_number,
+                    frame_number,
+                    vec![avg_luminance],
+                    vec![black_ratio],
+                ));
             }
-        } else {
-            // End current black segment if it exists
-            if let Some((start, lums, ratios)) = self.current_segment.take() {
-                let duration = frame_number - start;
-                if duration >= self.min_duration {
-                    let avg_lum = lums.iter().sum::<f64>() / lums.len() as f64;
-                    let avg_ratio = ratios.iter().sum::<f64>() / ratios.len() as f64;
-                    self.segments.push(BlackSegment {
-                        start_frame: start,
-                        end_frame: frame_number,
-                        avg_luminance: avg_lum,
-                        black_pixel_ratio: avg_ratio,
-                    });
-                }
-            }
+        } else if let Some(segment) = self.current_segment.take() {
+            // End current black segment via the unified close path so the result
+            // is identical to `finalize` for the same run of black frames.
+            self.close_segment(segment);
         }
 
         Ok(())
     }
 
+    /// Finalize an in-progress black run into a `BlackSegment` if it meets the
+    /// minimum-duration requirement.
+    ///
+    /// Shared by both the mid-stream close in [`Self::process_frame`] and the
+    /// end-of-stream close in [`Self::finalize`] so the two paths agree on every
+    /// input, including non-contiguous frame numbers (e.g. analysing every Nth
+    /// frame). `duration` is the count of accumulated black samples and
+    /// `end_frame` is the exclusive bound `last_seen_frame + 1`.
+    fn close_segment(&mut self, segment: (usize, usize, Vec<f64>, Vec<f64>)) {
+        let (start, last_seen, lums, ratios) = segment;
+        let duration = lums.len();
+        if duration >= self.min_duration {
+            let avg_lum = lums.iter().sum::<f64>() / lums.len() as f64;
+            let avg_ratio = ratios.iter().sum::<f64>() / ratios.len() as f64;
+            self.segments.push(BlackSegment {
+                start_frame: start,
+                end_frame: last_seen + 1,
+                avg_luminance: avg_lum,
+                black_pixel_ratio: avg_ratio,
+            });
+        }
+    }
+
     /// Finalize and return detected black segments.
     pub fn finalize(mut self) -> Vec<BlackSegment> {
-        // Close any open segment
-        if let Some((start, lums, ratios)) = self.current_segment.take() {
-            let duration = lums.len();
-            if duration >= self.min_duration {
-                let avg_lum = lums.iter().sum::<f64>() / lums.len() as f64;
-                let avg_ratio = ratios.iter().sum::<f64>() / ratios.len() as f64;
-                self.segments.push(BlackSegment {
-                    start_frame: start,
-                    end_frame: start + duration,
-                    avg_luminance: avg_lum,
-                    black_pixel_ratio: avg_ratio,
-                });
-            }
+        // Close any open segment via the same unified path used mid-stream.
+        if let Some(segment) = self.current_segment.take() {
+            self.close_segment(segment);
         }
         self.segments
     }

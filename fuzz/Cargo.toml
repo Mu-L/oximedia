@@ -2,7 +2,12 @@
 name = "oximedia-fuzz"
 version = "0.0.0"
 publish = false
-edition.workspace = true
+# The root workspace `exclude`s this crate, so workspace inheritance is
+# unavailable here; keep the edition in sync with [workspace.package].
+edition = "2021"
+
+# Standalone: the root workspace excludes `fuzz`.
+[workspace]
 
 [package.metadata]
 cargo-fuzz = true
@@ -16,9 +21,12 @@ tokio = { version = "1", features = ["rt"] }
 oximedia-core = { path = "../crates/oximedia-core" }
 oximedia-io = { path = "../crates/oximedia-io" }
 oximedia-container = { path = "../crates/oximedia-container" }
-oximedia-codec = { path = "../crates/oximedia-codec", features = ["av1", "vp9", "vp8", "theora"] }
+oximedia-codec = { path = "../crates/oximedia-codec", features = ["av1", "vp9", "vp8", "theora", "ffv1", "jpegxl"] }
 oximedia-audio = { path = "../crates/oximedia-audio", features = ["opus", "vorbis", "flac"] }
 oximedia-net = { path = "../crates/oximedia-net" }
+oximedia-image = { path = "../crates/oximedia-image" }
+oximedia-subtitle = { path = "../crates/oximedia-subtitle" }
+oximedia-aaf = { path = "../crates/oximedia-aaf" }
 
 # Prevent this from activating dev-dependencies of the crates above
 [profile.release]
@@ -63,6 +71,77 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "y4m_parser"
+path = "fuzz_targets/y4m_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "aaf_parser"
+path = "fuzz_targets/aaf_parser.rs"
+test = false
+doc = false
+bench = false
+
+# ============================================================================
+# Image Format Targets
+# ============================================================================
+
+[[bin]]
+name = "tiff_parser"
+path = "fuzz_targets/tiff_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "exr_parser"
+path = "fuzz_targets/exr_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jpegxl_decoder"
+path = "fuzz_targets/jpegxl_decoder.rs"
+test = false
+doc = false
+bench = false
+
+# ============================================================================
+# Subtitle / Caption Parser Targets
+# ============================================================================
+
+[[bin]]
+name = "srt_parser"
+path = "fuzz_targets/srt_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ass_parser"
+path = "fuzz_targets/ass_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "webvtt_parser"
+path = "fuzz_targets/webvtt_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ttml_parser"
+path = "fuzz_targets/ttml_parser.rs"
+test = false
+doc = false
+bench = false
+
 # ============================================================================
 # Video Codec Targets
 # ============================================================================
@@ -70,6 +149,13 @@ bench = false
 [[bin]]
 name = "av1_decoder"
 path = "fuzz_targets/av1_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ffv1_decoder"
+path = "fuzz_targets/ffv1_decoder.rs"
 test = false
 doc = false
 bench = false

@@ -120,17 +120,17 @@ impl VideoExtractor {
                 .execute()
                 .await
                 .map_err(|e| ConversionError::Transcode(e.to_string()))?;
+
+            Ok(())
         }
 
         #[cfg(target_arch = "wasm32")]
         {
             let _ = output;
-            return Err(ConversionError::UnsupportedFormat(
+            Err(ConversionError::UnsupportedFormat(
                 "Video extraction is not supported on wasm32".to_string(),
-            ));
+            ))
         }
-
-        Ok(())
     }
 
     /// Extract video segment by time range.

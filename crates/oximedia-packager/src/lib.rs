@@ -94,9 +94,14 @@
 //! use oximedia_packager::encryption::KeyGenerator;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! // Generate encryption key
-//! let key = KeyGenerator::generate_aes128_key();
-//! let iv = KeyGenerator::generate_iv();
+//! // Generate a cryptographically secure encryption key and IV (OS CSPRNG).
+//! let key = KeyGenerator::generate_aes128_key()?;
+//! let iv = KeyGenerator::generate_iv()?;
+//!
+//! // Alternatively, derive a key from a passphrase with PBKDF2-HMAC-SHA256.
+//! // `salt` must be a unique, random value generated and stored per key.
+//! let salt = KeyGenerator::generate_iv()?;
+//! let _passphrase_key = KeyGenerator::from_passphrase("correct horse battery staple", &salt)?;
 //!
 //! let mut encryption = EncryptionConfig::default();
 //! encryption.method = EncryptionMethod::Aes128;

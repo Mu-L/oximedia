@@ -277,4 +277,39 @@ mod tests {
             }
         }
     }
+
+    /// Trim suggestions must land exactly on the boundaries of silence regions
+    /// (which mark dialogue start/end) and NOT inside the dialogue region.
+    ///
+    /// Layout: silence [0,30], dialogue [30,80], silence [80,100].
+    /// `SilenceEnd` at frame 30 marks dialogue beginning; `SilenceStart` at
+    /// frame 80 marks dialogue end.  No trim point should fall in (30,80).
+    #[test]
+    fn test_trim_preserves_dialogue_boundaries() {
+        let trimmer = SmartTrimmer::default();
+        // silence 0–30, dialogue 30–80, silence 80–100
+        let silence_regions = [(0u64, 30u64), (80u64, 100u64)];
+        let result = trimmer.find_trim_points(200, &[], &silence_regions);
+
+        let frames: Vec<u64> = result.iter().map(|s| s.frame).collect();
+
+        // Both dialogue boundaries must be present
+        assert!(
+            frames.contains(&30),
+            "dialogue-start boundary (frame 30) must be a trim point"
+        );
+        assert!(
+            frames.contains(&80),
+            "dialogue-end boundary (frame 80) must be a trim point"
+        );
+
+        // No trim point may fall strictly inside the dialogue region (31..=79)
+        for s in &result {
+            assert!(
+                s.frame <= 30 || s.frame >= 80,
+                "trim point at frame {} falls inside dialogue region [31, 79]",
+                s.frame
+            );
+        }
+    }
 }

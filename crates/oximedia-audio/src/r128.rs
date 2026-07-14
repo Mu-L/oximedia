@@ -100,8 +100,8 @@ impl Biquad {
 
 /// EBU R128 integrated loudness meter (mono).
 ///
-/// Feed audio in arbitrary-length blocks via [`add_block`]; retrieve the
-/// current integrated loudness with [`integrated_lufs`].
+/// Feed audio in arbitrary-length blocks via [`Self::add_block`]; retrieve the
+/// current integrated loudness with [`Self::integrated_lufs`].
 pub struct R128Meter {
     sample_rate: u32,
     /// K-weighting pre-filter.

@@ -36,7 +36,7 @@ fn write_temp_file(name: &str, content: &[u8]) -> std::path::PathBuf {
 // Test 1: submit → assign → complete → verify output
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_submit_assign_complete_verify_output() {
     let queue = make_queue().await;
 
@@ -118,7 +118,7 @@ async fn test_submit_assign_complete_verify_output() {
 // Test 2: fault path — task fails and is retried
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_task_failure_and_retry() {
     let queue = make_queue().await;
 
@@ -154,7 +154,7 @@ async fn test_task_failure_and_retry() {
 // Test 3: worker goes offline → tasks are reassigned
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_worker_offline_triggers_task_reassignment() {
     let queue = make_queue().await;
 
@@ -242,7 +242,7 @@ fn test_worker_health_integration_quarantines_bad_worker() {
 // Test 5: multi-task job — all tasks must complete for job to be Completed
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_multi_task_job_requires_all_tasks_completed() {
     let queue = make_queue().await;
 

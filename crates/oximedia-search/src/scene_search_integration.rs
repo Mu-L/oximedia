@@ -7,7 +7,7 @@
 //!
 //! - [`SceneSearchBridge`] wraps a [`SceneSearchIndex`] and translates
 //!   [`SceneSearchResult`][crate::scene_search::SceneSearchResult]s into
-//!   [`SearchResultItem`][crate::SearchResultItem]s that can be merged with
+//!   [`SearchResultItem`]s that can be merged with
 //!   results from other search indices.
 //!
 //! - [`SceneSearchPipeline`] combines a [`SceneSearchBridge`] with a metadata

@@ -12,6 +12,10 @@ readme = "README.md"
 categories = ["multimedia", "multimedia::video", "multimedia::audio", "multimedia::encoding", "multimedia::images"]
 keywords = ["multimedia", "video", "audio", "codec", "media"]
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lints]
 workspace = true
 
@@ -582,9 +586,10 @@ full = [
 ]
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["full"] }
 serde_json = { workspace = true }
 uuid.workspace = true
+toml = { workspace = true }
 
 [[example]]
 name = "probe_file"
@@ -679,3 +684,12 @@ required-features = ["ml"]
 name = "ml_model_zoo"
 path = "../examples/ml_model_zoo.rs"
 required-features = ["ml"]
+
+# NOTE: unlike the examples above (which live in the workspace-root
+# `examples/` directory shared with other tooling), this example lives in
+# `oximedia/examples/` — inside this crate's own directory — since it was
+# added standalone without touching shared, cross-crate files.
+[[example]]
+name = "ffmpeg_translate_demo"
+path = "examples/ffmpeg_translate_demo.rs"
+required-features = ["compat-ffmpeg"]

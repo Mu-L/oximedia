@@ -1,9 +1,9 @@
 //! Parallel compliance checking across multiple media files.
 //!
-//! Provides a [`ParallelComplianceChecker`] that can evaluate many media assets
+//! Provides a [`crate::parallel_compliance::ParallelComplianceChecker`] that can evaluate many media assets
 //! against WCAG, Section 508, and EBU standards concurrently.  Each asset is
-//! represented by a [`MediaAssetInfo`] descriptor; results are collected into a
-//! [`BatchComplianceReport`].
+//! represented by a [`crate::parallel_compliance::MediaAssetInfo`] descriptor; results are collected into a
+//! [`crate::parallel_compliance::BatchComplianceReport`].
 //!
 //! The checker uses a configurable thread-pool size to limit CPU usage, and
 //! aggregates per-file reports into a batch summary with overall pass/fail
@@ -32,6 +32,7 @@
 
 use std::collections::HashMap;
 
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 // ── Media asset descriptor ───────────────────────────────────────────────────
@@ -321,6 +322,9 @@ pub struct BatchConfig {
     pub require_sign_language: bool,
     /// Whether to require transcript (WCAG 1.2.8 AAA).
     pub require_transcript: bool,
+    /// Number of rayon worker threads for parallel checking.
+    /// `0` means use the rayon global thread pool's default.
+    pub thread_pool_size: usize,
 }
 
 impl Default for BatchConfig {
@@ -333,17 +337,30 @@ impl Default for BatchConfig {
             require_audio_description: true,
             require_sign_language: false,
             require_transcript: false,
+            thread_pool_size: 0,
         }
     }
+}
+
+// ── Pure helper ──────────────────────────────────────────────────────────────
+
+/// Free-function wrapper so rayon closures can borrow `checker` immutably
+/// without capturing `self` by reference inside a `par_iter` closure.
+fn check_asset_pure(
+    checker: &ParallelComplianceChecker,
+    asset: &MediaAssetInfo,
+) -> AssetComplianceResult {
+    checker.check_single(asset)
 }
 
 // ── Checker ──────────────────────────────────────────────────────────────────
 
 /// Parallel compliance checker for batches of media assets.
 ///
-/// Despite the name "parallel", the implementation is synchronous and
-/// iterates over assets sequentially.  The struct is named for its API purpose
-/// (checking many files) and can be wrapped with threading at a higher layer.
+/// Uses a rayon thread pool (sized by [`BatchConfig::thread_pool_size`]) to
+/// check all assets concurrently.  When `thread_pool_size` is `0`, the rayon
+/// global thread pool is used directly.  If the dedicated pool cannot be built,
+/// the checker falls back to the global pool transparently.
 pub struct ParallelComplianceChecker {
     config: BatchConfig,
 }
@@ -355,11 +372,37 @@ impl ParallelComplianceChecker {
         Self { config }
     }
 
-    /// Check a batch of media assets for compliance.
+    /// Check a batch of media assets for compliance in parallel.
+    ///
+    /// If [`BatchConfig::thread_pool_size`] is non-zero a dedicated rayon
+    /// thread pool is built with that many threads.  On build failure (or when
+    /// `thread_pool_size == 0`) the rayon global pool is used instead.
     #[must_use]
     pub fn check_batch(&self, assets: &[MediaAssetInfo]) -> BatchComplianceReport {
-        let results: Vec<AssetComplianceResult> =
-            assets.iter().map(|a| self.check_single(a)).collect();
+        let results: Vec<AssetComplianceResult> = if self.config.thread_pool_size > 0 {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(self.config.thread_pool_size)
+                .build()
+                .map(|pool| {
+                    pool.install(|| {
+                        assets
+                            .par_iter()
+                            .map(|a| check_asset_pure(self, a))
+                            .collect()
+                    })
+                })
+                .unwrap_or_else(|_| {
+                    assets
+                        .par_iter()
+                        .map(|a| check_asset_pure(self, a))
+                        .collect()
+                })
+        } else {
+            assets
+                .par_iter()
+                .map(|a| check_asset_pure(self, a))
+                .collect()
+        };
 
         self.aggregate(results)
     }
@@ -738,5 +781,84 @@ mod tests {
         let sports = report.results_with_tag("sports", &assets);
         assert_eq!(sports.len(), 1);
         assert_eq!(sports[0].status, AssetComplianceStatus::Pass);
+    }
+
+    // ── Parallel compliance tests ─────────────────────────────────────────────
+
+    /// 4 passing + 4 failing assets; batch report must tally correctly.
+    #[test]
+    fn test_check_batch_parallel_correct_counts() {
+        let checker = ParallelComplianceChecker::new(BatchConfig {
+            thread_pool_size: 4,
+            ..BatchConfig::default()
+        });
+        // 4 fully compliant (Pass) + 4 non-compliant (Fail)
+        let assets: Vec<MediaAssetInfo> = (0..4)
+            .map(|i| fully_compliant().with_tag(format!("pass-{i}")))
+            .chain((0..4).map(|i| non_compliant().with_tag(format!("fail-{i}"))))
+            .collect();
+
+        let report = checker.check_batch(&assets);
+
+        assert_eq!(report.total_assets(), 8, "total must be 8");
+        assert_eq!(report.passed, 4, "4 assets should pass");
+        assert_eq!(report.failed, 4, "4 assets should fail");
+        assert_eq!(report.passed_with_warnings, 0);
+    }
+
+    /// Empty slice produces a zeroed report with no results.
+    #[test]
+    fn test_check_batch_empty_returns_empty_report() {
+        let checker = ParallelComplianceChecker::new(BatchConfig {
+            thread_pool_size: 2,
+            ..BatchConfig::default()
+        });
+        let report = checker.check_batch(&[]);
+        assert_eq!(report.total_assets(), 0);
+        assert_eq!(report.passed, 0);
+        assert_eq!(report.failed, 0);
+        assert!(report.results.is_empty());
+    }
+
+    /// thread_pool_size=1 gives the same results as the multi-threaded case.
+    #[test]
+    fn test_check_batch_thread_pool_size_1() {
+        let checker = ParallelComplianceChecker::new(BatchConfig {
+            thread_pool_size: 1,
+            ..BatchConfig::default()
+        });
+        let assets: Vec<MediaAssetInfo> = (0..4)
+            .map(|i| fully_compliant().with_tag(format!("pass-{i}")))
+            .chain((0..4).map(|i| non_compliant().with_tag(format!("fail-{i}"))))
+            .collect();
+
+        let report = checker.check_batch(&assets);
+
+        assert_eq!(report.total_assets(), 8);
+        assert_eq!(report.passed, 4);
+        assert_eq!(report.failed, 4);
+    }
+
+    /// Running the same batch twice must produce identical aggregate counts.
+    #[test]
+    fn test_check_batch_deterministic() {
+        let checker = ParallelComplianceChecker::new(BatchConfig {
+            thread_pool_size: 4,
+            ..BatchConfig::default()
+        });
+        let assets: Vec<MediaAssetInfo> = (0..4)
+            .map(|i| fully_compliant().with_tag(format!("p-{i}")))
+            .chain((0..4).map(|i| non_compliant().with_tag(format!("f-{i}"))))
+            .collect();
+
+        let r1 = checker.check_batch(&assets);
+        let r2 = checker.check_batch(&assets);
+
+        assert_eq!(r1.total, r2.total);
+        assert_eq!(r1.passed, r2.passed);
+        assert_eq!(r1.failed, r2.failed);
+        assert_eq!(r1.passed_with_warnings, r2.passed_with_warnings);
+        // Severity histograms must also match
+        assert_eq!(r1.severity_histogram, r2.severity_histogram);
     }
 }

@@ -240,8 +240,11 @@ mod tests {
         }
 
         // The measured rate should be in the ballpark of 1 Mbps.
-        // Because the window elapsed may be very short (sub-ms) we just
-        // assert it's non-zero and less than an unreasonably large value.
+        // `current_rate_bps()` is `bytes*8 / window_start.elapsed()` and returns 0
+        // when the window elapsed rounds to zero (the record loop runs in well
+        // under a clock tick under load). Guarantee a measurable window before
+        // reading so the non-zero assertion is deterministic.
+        std::thread::sleep(Duration::from_millis(10));
         let rate = pacer.current_rate_bps();
         assert!(rate > 0, "rate should be non-zero after sending");
         // Upper bound: in a tight loop with no sleep, all packets are recorded

@@ -66,16 +66,15 @@ prost = { workspace = true }
 prost-types = { workspace = true }
 
 # Database
-rusqlite = { workspace = true }
-r2d2 = { workspace = true }
-r2d2_sqlite = { workspace = true }
+oxisql-core = { workspace = true }
+oxisql-sqlite-compat = { workspace = true }
 
 # Random number generation (getrandom 0.4 on wasm32 needs wasm_js feature; move here)
 rand.workspace = true
 
 # System information
-num_cpus = "1.17"
-hostname = "0.4"
+num_cpus = { workspace = true }
+hostname.workspace = true
 sysinfo = { workspace = true }
 
 # Metrics and monitoring
@@ -93,12 +92,15 @@ rustls-pemfile = "2.2.0"
 tracing-subscriber = { workspace = true }
 
 [build-dependencies]
-tonic-build = "0.14"
-tonic-prost-build = "0.14"
+tonic-build = { workspace = true }
+tonic-prost-build = { workspace = true }
+# Pure-Rust protobuf compiler (parses .proto files directly; no external
+# `protoc` binary required at build time — replaces protoc-based codegen).
+protox = { workspace = true }
 
 [features]
 sqlite = []
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["full", "test-util"] }

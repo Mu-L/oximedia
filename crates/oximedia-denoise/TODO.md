@@ -46,10 +46,13 @@
   - File: src/regression_tests.rs (test_nlmeans_psnr_improvement_over_noisy)
 - [x] Add temporal consistency tests verifying no flickering across frame sequences
   - File: src/regression_tests.rs (test_mctf_temporal_consistency: MAD inter-frame must decrease)
-- [ ] Test edge preservation metrics for bilateral and NLM filters
+- [x] Test edge preservation metrics for bilateral and NLM filters
+  - File: src/spatial/bilateral.rs (test_bilateral_preserves_hard_edge, test_bilateral_reduces_flat_region_variance)
+  - File: src/spatial/nlmeans.rs (test_nlmeans_preserves_edge, test_nlmeans_reduces_flat_noise)
 - [x] Add stress tests with various pixel formats beyond Yuv420p (Yuv422p, Yuv444p, RGB)
   - File: src/regression_tests.rs (test_nlmeans_yuv422p_no_panic, test_nlmeans_rgb24_no_panic)
-- [ ] Test `spectral_gate.rs` with known audio noise patterns
+- [x] Test `spectral_gate.rs` with known audio noise patterns
+  - File: src/spectral_gate.rs (test_spectral_gate_learns_noise_floor, test_spectral_gate_signal_bins_survive, test_spectral_gate_reduction_db_positive)
 
 ## Documentation
 - [ ] Document the noise model mathematical formulations in `noise_model.rs`

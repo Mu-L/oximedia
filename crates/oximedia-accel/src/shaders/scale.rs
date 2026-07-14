@@ -243,6 +243,10 @@ pub const BILINEAR_GLSL: &str = r"
 /// eliminating repeated global-buffer fetches.  For downscale ratios the
 /// shader falls back to direct global-buffer reads because a fixed 18×18
 /// tile cannot cover the larger source neighbourhood.
+///
+/// Only compiled with the `vulkan-backend` feature: the `vulkano_shaders::shader!`
+/// proc-macro compiles this GLSL to SPIR-V at build time via `shaderc-sys`.
+#[cfg(feature = "vulkan-backend")]
 #[allow(missing_docs)]
 pub mod bilinear {
     vulkano_shaders::shader! {
@@ -414,6 +418,10 @@ pub mod bilinear {
 }
 
 /// Nearest neighbor scaling compute shader.
+///
+/// Only compiled with the `vulkan-backend` feature: the `vulkano_shaders::shader!`
+/// proc-macro compiles this GLSL to SPIR-V at build time via `shaderc-sys`.
+#[cfg(feature = "vulkan-backend")]
 #[allow(missing_docs)]
 pub mod nearest {
     vulkano_shaders::shader! {

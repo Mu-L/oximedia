@@ -28,7 +28,7 @@
 ## Performance
 - [x] Implement parallel multipart upload with configurable part size in `upload_manager.rs`
 - [ ] Add streaming download with zero-copy I/O in `transfer.rs` using `bytes::Bytes`
-- [ ] Cache cloud provider credentials with automatic refresh in `cloud_credentials.rs`
+- [x] Cache cloud provider credentials with automatic refresh in `cloud_credentials.rs`
 - [ ] Add connection multiplexing for concurrent operations in `generic.rs`
 
 ## Testing

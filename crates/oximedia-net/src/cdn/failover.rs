@@ -752,4 +752,92 @@ mod tests {
         manager.reset_all();
         assert!(manager.is_available("provider-1"));
     }
+
+    #[test]
+    fn test_cdn_failover_primary_timeout_switches_to_secondary() {
+        let manager = FailoverManager::new(3, Duration::from_secs(60));
+
+        manager.add_fallback_chain("cdn-primary".to_string(), vec!["cdn-secondary".to_string()]);
+
+        // Both providers initially available (no circuit breaker state yet)
+        assert!(
+            manager.is_available("cdn-primary"),
+            "primary should be initially available"
+        );
+        assert!(
+            manager.is_available("cdn-secondary"),
+            "secondary should be initially available"
+        );
+
+        // Simulate 3 failures on primary — reaches failure_threshold
+        manager.record_failure("cdn-primary");
+        manager.record_failure("cdn-primary");
+        manager.record_failure("cdn-primary");
+
+        // Primary circuit should now be open
+        assert!(
+            !manager.is_available("cdn-primary"),
+            "primary should be unavailable after threshold failures"
+        );
+        assert!(
+            manager.is_open("cdn-primary"),
+            "primary circuit should be open"
+        );
+
+        // Next fallback from primary chain should be the secondary
+        let next = manager.get_next_fallback("cdn-primary");
+        assert!(next.is_some(), "should have a fallback available");
+        assert_eq!(
+            next.as_deref(),
+            Some("cdn-secondary"),
+            "fallback should be cdn-secondary"
+        );
+
+        // Secondary was never touched — still available
+        assert!(
+            manager.is_available("cdn-secondary"),
+            "secondary should still be available"
+        );
+    }
+
+    #[test]
+    fn test_cdn_failover_secondary_chain_exhaustion() {
+        let manager = FailoverManager::new(2, Duration::from_secs(60));
+
+        manager.add_fallback_chain("p".to_string(), vec!["s1".to_string(), "s2".to_string()]);
+
+        // Record 2 failures on primary — opens circuit on "p"
+        manager.record_failure("p");
+        manager.record_failure("p");
+        assert!(
+            !manager.is_available("p"),
+            "primary should be unavailable after 2 failures"
+        );
+
+        // First fallback from "p" chain → s1
+        let next1 = manager.get_next_fallback("p");
+        assert_eq!(next1.as_deref(), Some("s1"), "first fallback should be s1");
+
+        // Record 2 failures on s1 — opens circuit on "s1"
+        manager.record_failure("s1");
+        manager.record_failure("s1");
+        assert!(
+            !manager.is_available("s1"),
+            "s1 should be unavailable after 2 failures"
+        );
+
+        // Second fallback from "p" chain → s2
+        let next2 = manager.get_next_fallback("p");
+        assert_eq!(next2.as_deref(), Some("s2"), "second fallback should be s2");
+
+        // Chain exhausted — no more fallbacks
+        let next3 = manager.get_next_fallback("p");
+        assert!(next3.is_none(), "chain should be exhausted after s2");
+
+        // s2 was never failed — still available
+        assert!(
+            manager.is_available("s2"),
+            "s2 should still be available (never failed)"
+        );
+    }
 }

@@ -14,8 +14,9 @@
 //!    percentages and common punctuation into the words a reader would
 //!    naturally say aloud.
 //!
-//! The main entry point is [`TtsHintEngine`].  Build one with a
-//! [`TtsHintConfig`] and call [`TtsHintEngine::process`] to transform a
+//! The main entry point is [`crate::text_to_speech_hints::TtsHintEngine`].  Build one with a
+//! [`crate::text_to_speech_hints::TtsHintConfig`] and call
+//! [`crate::text_to_speech_hints::TtsHintEngine::process`] to transform a
 //! string.
 
 use std::collections::HashMap;

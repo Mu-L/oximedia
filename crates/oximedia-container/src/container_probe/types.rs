@@ -193,7 +193,7 @@ impl ContainerProber {
         r
     }
 }
-/// Rich container information returned by [`MultiFormatProber`].
+/// Rich container information returned by [`super::multi_format::MultiFormatProber`].
 #[derive(Debug, Clone, Default)]
 pub struct DetailedContainerInfo {
     /// Short format name (`"mp4"`, `"mkv"`, `"mpeg-ts"`, `"webm"`, `"ogg"`,
@@ -242,7 +242,7 @@ pub struct DetailedStreamInfo {
 }
 /// Per-second bitrate window statistics for one stream.
 ///
-/// Produced by [`probe_detailed`].  The histogram divides the stream into
+/// Produced by [`super::stats::probe_detailed`].  The histogram divides the stream into
 /// 1-second windows and records the number of bits observed in each window.
 #[derive(Debug, Clone)]
 pub struct DetailedStreamStats {

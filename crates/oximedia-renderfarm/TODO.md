@@ -26,7 +26,7 @@
 
 ## Performance
 - [ ] Add connection pooling for the `api` axum handlers to reduce per-request overhead
-- [ ] Implement batch insert for `render_log` entries instead of per-frame writes
+- [x] Implement batch insert for `render_log` entries instead of per-frame writes (2026-06-22: added `BatchedRenderLogWriter` in src/render_log.rs — in-memory buffer, configurable `batch_size` threshold auto-flush, explicit `flush`/`flush_and_sync`, flush-on-drop, single JSONL append write per batch instead of per-frame; durability trade-off documented; 13 new tests)
 - [x] Add LRU eviction policy to `cache` module with configurable max memory usage (verified 2026-05-31: EvictionPolicy::LRU+max_size in src/cache.rs:32,123)
 - [x] Profile and optimize `tile_rendering` merge step for large frame resolutions (8K+) (verified 2026-05-31: TileCompositor::merge with rayon par_chunks_mut parallelism; benches/tile_merge.rs)
 - [x] Use `crossbeam-channel` bounded channels in `frame_distribution` to apply backpressure when workers are saturated (verified 2026-05-31: BackpressureDistributor in src/frame_distribution.rs; dispatch+try_dispatch; 5 tests)

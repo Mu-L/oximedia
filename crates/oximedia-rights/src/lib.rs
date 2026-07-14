@@ -168,7 +168,7 @@ pub enum RightsError {
     /// Database error
     #[cfg(not(target_arch = "wasm32"))]
     #[error("Database error: {0}")]
-    Database(#[from] sqlx::Error),
+    Database(String),
 
     /// Rights not found
     #[error("Rights not found: {0}")]
@@ -221,6 +221,13 @@ pub enum RightsError {
     /// IO error
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<oxisql_core::OxiSqlError> for RightsError {
+    fn from(e: oxisql_core::OxiSqlError) -> Self {
+        Self::Database(e.to_string())
+    }
 }
 
 // ── RightsManagerConfig ───────────────────────────────────────────────────────
@@ -382,23 +389,26 @@ impl RightsManager {
         territory_json: Option<&str>,
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            r"INSERT INTO rights_grants
+        self.db
+            .pool()
+            .execute(
+                r"INSERT INTO rights_grants
               (id, asset_id, owner_id, license_type, start_date, end_date,
                is_exclusive, territory_json, created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
-        )
-        .bind(license_id)
-        .bind(asset_id)
-        .bind(owner_id)
-        .bind(license_type)
-        .bind(start_date)
-        .bind(end_date)
-        .bind(territory_json)
-        .bind(&now)
-        .bind(&now)
-        .execute(self.db.pool())
-        .await?;
+              VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, $9)",
+                &[
+                    &license_id,
+                    &asset_id,
+                    &owner_id,
+                    &license_type,
+                    &start_date,
+                    &end_date,
+                    &territory_json,
+                    &now,
+                    &now,
+                ],
+            )
+            .await?;
         Ok(())
     }
 
@@ -411,24 +421,29 @@ impl RightsManager {
     /// revocation immediately.
     pub async fn revoke_license(&self, license_id: &str) -> Result<()> {
         // Fetch the asset_id first so we can invalidate the cache after deletion.
-        let asset_id_row: Option<(String,)> =
-            sqlx::query_as("SELECT asset_id FROM rights_grants WHERE id = ?")
-                .bind(license_id)
-                .fetch_optional(self.db.pool())
-                .await?;
-
-        let rows = sqlx::query("DELETE FROM rights_grants WHERE id = ?")
-            .bind(license_id)
-            .execute(self.db.pool())
+        let asset_id_row = self
+            .db
+            .pool()
+            .query_optional(
+                "SELECT asset_id FROM rights_grants WHERE id = $1",
+                &[&license_id],
+            )
             .await?;
-        if rows.rows_affected() == 0 {
+
+        let rows_affected = self
+            .db
+            .pool()
+            .execute("DELETE FROM rights_grants WHERE id = $1", &[&license_id])
+            .await?;
+        if rows_affected == 0 {
             return Err(RightsError::NotFound(format!(
                 "License not found: {license_id}"
             )));
         }
 
         // Invalidate cached results for this asset.
-        if let Some((asset_id,)) = asset_id_row {
+        if let Some(row) = asset_id_row {
+            let asset_id: String = row.try_get("asset_id")?;
             let mut guard = self.cache.lock().await;
             guard.invalidate(&asset_id);
         }
@@ -458,24 +473,23 @@ impl RightsManager {
         }
 
         // Cache miss — query the database.
-        let row: (i64,) = sqlx::query_as(
-            r"SELECT COUNT(*) FROM rights_grants
-              WHERE asset_id = ?
-                AND start_date <= ?
-                AND (end_date IS NULL OR end_date >= ?)
-                AND (territory_json IS NULL OR territory_json LIKE ?)",
-        )
-        .bind(asset_id)
-        .bind(at_date)
-        .bind(at_date)
-        .bind(
-            territory
-                .map(|t| format!("%{t}%"))
-                .unwrap_or_else(|| "%".to_string()),
-        )
-        .fetch_one(self.db.pool())
-        .await?;
-        let result = row.0 > 0;
+        let territory_pattern = territory
+            .map(|t| format!("%{t}%"))
+            .unwrap_or_else(|| "%".to_string());
+        let row = self
+            .db
+            .pool()
+            .query_one(
+                r"SELECT COUNT(*) AS cnt FROM rights_grants
+              WHERE asset_id = $1
+                AND start_date <= $2
+                AND (end_date IS NULL OR end_date >= $3)
+                AND (territory_json IS NULL OR territory_json LIKE $4)",
+                &[&asset_id, &at_date, &at_date, &territory_pattern],
+            )
+            .await?;
+        let count: i64 = row.try_get("cnt")?;
+        let result = count > 0;
 
         // Store in cache.
         {
@@ -493,19 +507,28 @@ impl RightsManager {
         asset_id: &str,
         at_date: &str,
     ) -> Result<Vec<(String, String, String, Option<String>)>> {
-        let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
-            r"SELECT id, license_type, start_date, end_date
+        let rows = self
+            .db
+            .pool()
+            .query(
+                r"SELECT id, license_type, start_date, end_date
               FROM rights_grants
-              WHERE asset_id = ?
-                AND start_date <= ?
-                AND (end_date IS NULL OR end_date >= ?)",
-        )
-        .bind(asset_id)
-        .bind(at_date)
-        .bind(at_date)
-        .fetch_all(self.db.pool())
-        .await?;
-        Ok(rows)
+              WHERE asset_id = $1
+                AND start_date <= $2
+                AND (end_date IS NULL OR end_date >= $3)",
+                &[&asset_id, &at_date, &at_date],
+            )
+            .await?;
+        rows.into_iter()
+            .map(|r| {
+                Ok((
+                    r.try_get("id")?,
+                    r.try_get("license_type")?,
+                    r.try_get("start_date")?,
+                    r.try_get("end_date")?,
+                ))
+            })
+            .collect()
     }
 
     /// Batch rights check: for each `asset_id` in the slice, check whether
@@ -522,37 +545,52 @@ impl RightsManager {
             return Ok(std::collections::HashMap::new());
         }
 
-        // Build the IN clause placeholders.
-        let placeholders: String = asset_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        // Build the IN clause placeholders ($1..$n) plus the trailing
+        // date/territory parameters ($n+1..$n+3).
+        let n = asset_ids.len();
+        let placeholders: String = (1..=n)
+            .map(|i| format!("${i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let sql = format!(
             r"SELECT asset_id, COUNT(*) as cnt
               FROM rights_grants
               WHERE asset_id IN ({placeholders})
-                AND start_date <= ?
-                AND (end_date IS NULL OR end_date >= ?)
-                AND (territory_json IS NULL OR territory_json LIKE ?)
-              GROUP BY asset_id"
+                AND start_date <= ${}
+                AND (end_date IS NULL OR end_date >= ${})
+                AND (territory_json IS NULL OR territory_json LIKE ${})
+              GROUP BY asset_id",
+            n + 1,
+            n + 2,
+            n + 3
         );
 
         let territory_pattern = territory
             .map(|t| format!("%{t}%"))
             .unwrap_or_else(|| "%".to_string());
 
-        // Build query with bound parameters.
-        let mut query = sqlx::query_as::<_, (String, i64)>(&sql);
+        // Every value (ids, dates, territory pattern) is bound as a positional
+        // parameter — the only dynamic SQL is the run of `$N` placeholders
+        // whose count is driven by `asset_ids.len()`, never by string content
+        // (a textbook-safe variable-arity `IN (...)` clause).
+        let mut params: Vec<&dyn oxisql_core::ToSqlValue> = Vec::with_capacity(n + 3);
         for id in asset_ids {
-            query = query.bind(*id);
+            params.push(id);
         }
-        query = query.bind(at_date).bind(at_date).bind(territory_pattern);
+        params.push(&at_date);
+        params.push(&at_date);
+        params.push(&territory_pattern);
 
-        let rows: Vec<(String, i64)> = query.fetch_all(self.db.pool()).await?;
+        let rows = self.db.pool().query(&sql, &params).await?;
 
         // Seed with false for all requested IDs, then flip to true if found.
         let mut result: std::collections::HashMap<String, bool> = asset_ids
             .iter()
             .map(|&id| (id.to_string(), false))
             .collect();
-        for (asset_id, count) in rows {
+        for row in rows {
+            let asset_id: String = row.try_get("asset_id")?;
+            let count: i64 = row.try_get("cnt")?;
             if count > 0 {
                 result.insert(asset_id, true);
             }
@@ -607,32 +645,27 @@ mod tests {
     /// Helper: insert a minimal asset row so foreign keys are satisfied.
     async fn insert_asset(mgr: &RightsManager, asset_id: &str) {
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "INSERT INTO assets (id, name, asset_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(asset_id)
-        .bind(asset_id)
-        .bind("video")
-        .bind(&now)
-        .bind(&now)
-        .execute(mgr.database().pool())
-        .await
-        .expect("insert asset should succeed");
+        mgr.database()
+            .pool()
+            .execute(
+                "INSERT INTO assets (id, name, asset_type, created_at, updated_at) VALUES ($1, $2, $3, $4, $5)",
+                &[&asset_id, &asset_id, &"video", &now, &now],
+            )
+            .await
+            .expect("insert asset should succeed");
     }
 
     /// Helper: insert a minimal owner row.
     async fn insert_owner(mgr: &RightsManager, owner_id: &str) {
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "INSERT INTO rights_owners (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
-        )
-        .bind(owner_id)
-        .bind("ACME Corp")
-        .bind(&now)
-        .bind(&now)
-        .execute(mgr.database().pool())
-        .await
-        .expect("insert owner should succeed");
+        mgr.database()
+            .pool()
+            .execute(
+                "INSERT INTO rights_owners (id, name, created_at, updated_at) VALUES ($1, $2, $3, $4)",
+                &[&owner_id, &"ACME Corp", &now, &now],
+            )
+            .await
+            .expect("insert owner should succeed");
     }
 
     #[tokio::test]
@@ -743,13 +776,15 @@ mod tests {
             .map(|_| {
                 let p = pool.clone();
                 tokio::spawn(async move {
-                    let row: (i64,) =
-                        sqlx::query_as("SELECT COUNT(*) FROM rights_grants WHERE asset_id = ?")
-                            .bind("asset-3")
-                            .fetch_one(&p)
-                            .await
-                            .expect("concurrent query should succeed");
-                    row.0
+                    let row = p
+                        .query_one(
+                            "SELECT COUNT(*) AS cnt FROM rights_grants WHERE asset_id = $1",
+                            &[&"asset-3"],
+                        )
+                        .await
+                        .expect("concurrent query should succeed");
+                    row.try_get::<i64>("cnt")
+                        .expect("count column should decode")
                 })
             })
             .collect();
@@ -854,14 +889,20 @@ mod tests {
         let (mgr, _dir) = make_manager().await;
 
         // Query for the two new performance indices on territory and end_date.
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT name FROM sqlite_master WHERE type='index' AND (name LIKE 'idx_rights_grants_t%' OR name LIKE 'idx_rights_grants_e%')",
-        )
-        .fetch_all(mgr.database().pool())
-        .await
-        .expect("sqlite_master query should succeed");
+        let rows = mgr
+            .database()
+            .pool()
+            .query(
+                "SELECT name FROM sqlite_master WHERE type='index' AND (name LIKE 'idx_rights_grants_t%' OR name LIKE 'idx_rights_grants_e%')",
+                &[],
+            )
+            .await
+            .expect("sqlite_master query should succeed");
 
-        let names: Vec<String> = rows.into_iter().map(|(n,)| n).collect();
+        let names: Vec<String> = rows
+            .into_iter()
+            .map(|r| r.try_get("name").expect("name column should decode"))
+            .collect();
         assert!(
             names.iter().any(|n| n == "idx_rights_grants_territory"),
             "territory index should exist, got: {names:?}"
@@ -966,9 +1007,9 @@ mod tests {
 
         // Revoke license directly via pool (bypasses cache invalidation) —
         // with TTL=0 the next check_rights will always re-query the DB anyway.
-        sqlx::query("DELETE FROM rights_grants WHERE id = ?")
-            .bind("ttl-lic")
-            .execute(mgr.database().pool())
+        mgr.database()
+            .pool()
+            .execute("DELETE FROM rights_grants WHERE id = $1", &[&"ttl-lic"])
             .await
             .expect("direct delete");
 

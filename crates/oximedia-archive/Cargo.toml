@@ -16,26 +16,29 @@ workspace = true
 
 [features]
 default = []
-sqlite = ["sqlx"]
+sqlite = ["oxisql-core", "oxisql-sqlite-compat"]
 
 [dependencies]
-blake3 = "1.8"
+# "pure" forces the portable pure-Rust blake3 backend; without it a standalone
+# build of this crate would compile C/assembly SIMD kernels via `cc`.
+blake3.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
-sqlx = { workspace = true, features = ["chrono"], optional = true }
+oxisql-core = { workspace = true, optional = true }
+oxisql-sqlite-compat = { workspace = true, optional = true }
 chrono = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 thiserror = { workspace = true }
-anyhow = "1.0"
+anyhow.workspace = true
 tracing = { workspace = true }
-hex = "0.4"
+hex.workspace = true
 sha2 = { workspace = true }
 sha1 = { workspace = true }
 xxhash-rust = { workspace = true }
-md-5 = "0.11"
+md-5.workspace = true
 crc32fast = "1.5"
 rayon = { workspace = true }
 async-trait = { workspace = true }
 memmap2 = { workspace = true }
-regex = "1.12"
-csv = "1.4"
+regex.workspace = true
+csv = { workspace = true }

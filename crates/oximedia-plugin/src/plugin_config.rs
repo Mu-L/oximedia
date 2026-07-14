@@ -243,7 +243,7 @@ impl PluginConfigStore {
     ///
     /// # Errors
     ///
-    /// Returns [`PluginError::Io`] on read failure, or [`PluginError::Json`] on
+    /// Returns [`crate::error::PluginError::Io`] on read failure, or [`crate::error::PluginError::Json`] on
     /// parse failure.
     pub fn load_from_file(path: &Path) -> PluginResult<Self> {
         if !path.exists() {
@@ -261,7 +261,7 @@ impl PluginConfigStore {
     ///
     /// # Errors
     ///
-    /// Returns [`PluginError::Io`] or [`PluginError::Json`] on failure.
+    /// Returns [`crate::error::PluginError::Io`] or [`crate::error::PluginError::Json`] on failure.
     pub fn save_to_file(&self, path: &Path) -> PluginResult<()> {
         let json = serde_json::to_string_pretty(self)?;
 

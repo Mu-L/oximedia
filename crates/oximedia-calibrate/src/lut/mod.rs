@@ -3,11 +3,13 @@
 //! This module provides tools for generating calibration LUTs from measurements
 //! and verifying their accuracy.
 
+pub mod cached;
 pub mod generate;
 pub mod measure;
 pub mod tetrahedral;
 pub mod verify;
 
+pub use cached::{Lut3dCached, TetraCoeff};
 pub use generate::LutGenerator;
 pub use measure::LutMeasurement;
 pub use tetrahedral::TetrahedralInterpolator;

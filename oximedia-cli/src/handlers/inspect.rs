@@ -11,6 +11,8 @@ use tracing::info;
 /// * `path` - Path to the media file to probe
 /// * `verbose` - Whether to show detailed technical information
 /// * `show_streams` - Whether to list individual stream details
+/// * `compute_hash` - Whether to compute a real SHA-256 content hash of the
+///   full file (`--hash`), via `oximedia_archive_pro::checksum::ChecksumGenerator`
 /// * `output_format` - Output format: "text", "json", or "csv"
 /// * `show_chapters` - Whether to show chapter information
 /// * `show_metadata` - Whether to dump all metadata key/value pairs
@@ -19,6 +21,7 @@ pub(crate) async fn probe_file(
     path: &PathBuf,
     verbose: bool,
     show_streams: bool,
+    compute_hash: bool,
     output_format: &str,
     show_chapters: bool,
     show_metadata: bool,
@@ -48,16 +51,48 @@ pub(crate) async fn probe_file(
 
     match oximedia_container::probe_format(&buffer) {
         Ok(result) => {
+            // Optionally compute a real SHA-256 content hash/fingerprint of the
+            // whole file via `oximedia-archive-pro`'s streaming checksum
+            // generator (Blake3/MD5/SHA256/SHA512/XXH3 capable; SHA-256 is
+            // both its own `ChecksumGenerator::new()` default and the
+            // `ChecksumAlgorithm::recommended()` choice for preservation).
+            // Runs on a blocking thread since `generate_file` performs
+            // synchronous buffered I/O over the full file, independent of the
+            // 8 KiB header sniff above.
+            let hash_hex: Option<String> = if compute_hash {
+                use oximedia_archive_pro::checksum::{ChecksumAlgorithm, ChecksumGenerator};
+
+                let hash_path = path.clone();
+                let checksum = tokio::task::spawn_blocking(move || {
+                    ChecksumGenerator::new()
+                        .with_algorithms(vec![ChecksumAlgorithm::Sha256])
+                        .generate_file(&hash_path)
+                })
+                .await
+                .context("hash computation task panicked")?
+                .map_err(|e| anyhow::anyhow!("Failed to compute file hash: {e}"))?;
+
+                checksum.checksums.get(&ChecksumAlgorithm::Sha256).cloned()
+            } else {
+                None
+            };
+
             // NDJSON: emit a single record and return before the regular branches.
             if ndjson {
                 colored::control::set_override(false);
-                let record = serde_json::json!({
+                let mut record = serde_json::json!({
                     "path": path.display().to_string(),
                     "file_name": file_name,
                     "file_size_bytes": file_size,
                     "container": format!("{:?}", result.format),
                     "confidence": result.confidence,
                 });
+                if let Some(ref hash) = hash_hex {
+                    record["hash"] = serde_json::json!({
+                        "algorithm": "sha256",
+                        "value": hash,
+                    });
+                }
                 let mut writer = crate::output::NdjsonWriter::new(std::io::stdout());
                 writer
                     .emit(&record)
@@ -98,19 +133,38 @@ pub(crate) async fn probe_file(
                         });
                     }
 
+                    if let Some(ref hash) = hash_hex {
+                        probe_json["hash"] = serde_json::json!({
+                            "algorithm": "sha256",
+                            "value": hash,
+                        });
+                    }
+
                     let json_str = serde_json::to_string_pretty(&probe_json)
                         .context("Failed to serialize probe result")?;
                     println!("{}", json_str);
                 }
                 "csv" => {
-                    println!("file,container,confidence,file_size");
-                    println!(
-                        "{},{:?},{:.4},{}",
-                        path.display(),
-                        result.format,
-                        result.confidence,
-                        file_size
-                    );
+                    if let Some(ref hash) = hash_hex {
+                        println!("file,container,confidence,file_size,hash_sha256");
+                        println!(
+                            "{},{:?},{:.4},{},{}",
+                            path.display(),
+                            result.format,
+                            result.confidence,
+                            file_size,
+                            hash
+                        );
+                    } else {
+                        println!("file,container,confidence,file_size");
+                        println!(
+                            "{},{:?},{:.4},{}",
+                            path.display(),
+                            result.format,
+                            result.confidence,
+                            file_size
+                        );
+                    }
 
                     if show_streams {
                         println!();
@@ -126,6 +180,9 @@ pub(crate) async fn probe_file(
                     println!("{:20} {:?}", "Container:", result.format);
                     println!("{:20} {:.1}%", "Confidence:", result.confidence * 100.0);
                     println!("{:20} {} bytes", "File size:", file_size);
+                    if let Some(ref hash) = hash_hex {
+                        println!("{:20} {}", "Hash (SHA-256):", hash);
+                    }
 
                     if verbose {
                         println!("\n{}", "Technical Details".cyan().bold());

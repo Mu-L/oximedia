@@ -46,12 +46,12 @@
 
 ## Testing
 - [x] Add reference signal tests: 997 Hz sine at -23 LUFS should measure exactly -23.0 LUFS (EBU R128 test signal) -- `test_ebu_r128_reference_signal` in lib.rs, ±0.5 LUFS tolerance
-- [ ] Add gating algorithm conformance tests per ITU-R BS.1770-4 Section 3
-- [ ] Test LRA calculation against EBU PLOUD reference values
-- [ ] Add round-trip test: normalize to target then re-meter should report target LUFS
-- [ ] Test all streaming platform targets (Spotify/YouTube/Apple/Netflix/Amazon) with known-loudness signals
+- [x] Add gating algorithm conformance tests per ITU-R BS.1770-4 Section 3
+- [x] Test LRA calculation against EBU PLOUD reference values (`test_lra_ebu_tech3342_case1`..`case4` in `src/ebu_r128_impl.rs`, reproducing the four synthetic conformance signals from EBU Tech 3342 (Nov 2023) Table 1; this also fixed `loudness_range_lu()` to apply the Tech 3342 §3.1 −20 LU relative gate it was previously missing, without which case 4 measured ~30 LU instead of the published 15±1 LU)
+- [x] Add round-trip test: normalize to target then re-meter should report target LUFS
+- [x] Test all streaming platform targets (Spotify/YouTube/Apple/Netflix/Amazon) with known-loudness signals
 
 ## Documentation
-- [ ] Add architecture diagram showing LoudnessMeter internal pipeline (filter -> LKFS -> gating -> LRA)
-- [ ] Document the relationship between clip_counter.rs, rms_envelope.rs, silence_detect.rs and the main metering pipeline
-- [ ] Add compliance testing guide with step-by-step EBU R128 verification procedure
+- [x] Add architecture diagram showing LoudnessMeter internal pipeline (filter -> LKFS -> gating -> LRA) (ASCII diagram in crate-level `src/lib.rs` doc, "# Pipeline Architecture" section)
+- [x] Document the relationship between clip_counter.rs, rms_envelope.rs, silence_detect.rs and the main metering pipeline ("# Complementary Metering Modules" section in `src/lib.rs`, plus a "Relationship to the main metering pipeline" note added to each of the three modules)
+- [x] Add compliance testing guide with step-by-step EBU R128 verification procedure ("# Compliance Testing Guide (EBU R128 Verification)" section in `src/lib.rs`, referencing the actual conformance tests in `src/lib.rs`/`src/gating.rs`/`src/ebu_r128_impl.rs`)

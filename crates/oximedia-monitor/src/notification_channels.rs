@@ -22,6 +22,10 @@
 
 use std::collections::BTreeMap;
 
+// `MonitorError`/`MonitorResult` are only used by the `send()` methods below,
+// which perform real HTTP requests via `reqwest` and are therefore gated out
+// on `wasm32` (no blocking-friendly HTTP client there).
+#[cfg(not(target_arch = "wasm32"))]
 use crate::error::{MonitorError, MonitorResult};
 
 // ---------------------------------------------------------------------------

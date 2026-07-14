@@ -559,8 +559,14 @@ mod tests {
 
 // ── Sample-rate conversion ────────────────────────────────────────────────────
 
-/// Convert `samples` from `from_rate` Hz to `to_rate` Hz using a high-quality
-/// polyphase sinc resampler (rubato SincAsync under the hood).
+/// Convert `samples` from `from_rate` Hz to `to_rate` Hz using the Pure-Rust
+/// band-limited windowed-sinc polyphase resampler from `oximedia-audio`
+/// ([`oximedia_audio::Resampler`], `High` quality: 192-tap kernel with fine
+/// phase resolution).
+///
+/// The resampler compensates its own group delay and the stream tail is
+/// drained via `flush()`, so the output is time-aligned with the input and
+/// has length ≈ `samples.len() * to_rate / from_rate`.
 ///
 /// When the rates are equal the input slice is returned unchanged (zero-copy
 /// clone).  Mono-only: the function treats `samples` as a single channel.
@@ -569,7 +575,7 @@ mod tests {
 ///
 /// Returns [`AudioPostError::InvalidSampleRate`] for a zero `from_rate` or
 /// `to_rate`, and [`AudioPostError::InvalidBufferSize`] for an empty input.
-/// Internal rubato errors are wrapped in [`AudioPostError::Generic`].
+/// Internal resampler errors are wrapped in [`AudioPostError::Generic`].
 #[allow(clippy::cast_precision_loss)]
 pub fn convert_sample_rate(
     samples: &[f32],
@@ -591,51 +597,41 @@ pub fn convert_sample_rate(
         return Ok(samples.to_vec());
     }
 
-    use rubato::audioadapter::Adapter as AudioAdapter;
-    use rubato::audioadapter_buffers::owned::InterleavedOwned;
-    use rubato::{
-        Async, FixedAsync, Resampler as RubatoResampler, SincInterpolationParameters,
-        SincInterpolationType, WindowFunction,
-    };
+    use oximedia_audio::{AudioBuffer, AudioFrame, ChannelLayout, Resampler, ResamplerQuality};
+    use oximedia_core::SampleFormat;
 
-    let ratio = f64::from(to_rate) / f64::from(from_rate);
-    let input_len = samples.len();
+    let mut resampler = Resampler::new(from_rate, to_rate, 1, ResamplerQuality::High)
+        .map_err(|e| AudioPostError::Generic(format!("Resampler creation failed: {e}")))?;
 
-    // Chunk size: use 1024 input frames per call — large enough for good
-    // anti-aliasing convergence, small enough to avoid excessive latency.
-    let chunk_size = 1024_usize;
-
-    let sinc_params = SincInterpolationParameters {
-        sinc_len: 128,
-        f_cutoff: 0.95,
-        interpolation: SincInterpolationType::Cubic,
-        oversampling_factor: 256,
-        window: WindowFunction::BlackmanHarris2,
-    };
-
-    let mut resampler =
-        Async::<f32>::new_sinc(ratio, 2.0, &sinc_params, chunk_size, 1, FixedAsync::Input)
-            .map_err(|e| AudioPostError::Generic(format!("Resampler creation failed: {e}")))?;
-
-    // Wrap the input slice in a mono InterleavedOwned (1 channel).
-    let input_buf = InterleavedOwned::new_from(samples.to_vec(), 1, input_len)
-        .map_err(|e| AudioPostError::Generic(format!("Input buffer construction failed: {e}")))?;
-
-    // Allocate output buffer of the required size.
-    let output_needed = resampler.process_all_needed_output_len(input_len);
-    let mut output_buf = InterleavedOwned::new(0.0_f32, 1, output_needed);
-
-    let (_in_consumed, out_written) = resampler
-        .process_all_into_buffer(&input_buf, &mut output_buf, input_len, None)
-        .map_err(|e| AudioPostError::Generic(format!("Resampling failed: {e}")))?;
-
-    // Collect the written output frames into a flat Vec<f32>.
-    let mut output = Vec::with_capacity(out_written);
-    for frame in 0..out_written {
-        if let Some(s) = output_buf.read_sample(0, frame) {
-            output.push(s);
-        }
+    // Wrap the mono input in an F32 interleaved frame (little-endian bytes).
+    let mut input_bytes = Vec::with_capacity(samples.len() * 4);
+    for &s in samples {
+        input_bytes.extend_from_slice(&s.to_le_bytes());
     }
+    let mut frame = AudioFrame::new(SampleFormat::F32, from_rate, ChannelLayout::Mono);
+    frame.samples = AudioBuffer::Interleaved(bytes::Bytes::from(input_bytes));
+
+    // Extract mono f32 samples from an F32 interleaved/planar frame.
+    fn frame_to_f32(frame: &AudioFrame) -> Vec<f32> {
+        let data = match &frame.samples {
+            AudioBuffer::Interleaved(data) => data.as_ref(),
+            AudioBuffer::Planar(planes) => planes.first().map_or(&[][..], |p| p.as_ref()),
+        };
+        data.chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
+    // One-shot: process the whole signal, then drain the filter tail.
+    let main = resampler
+        .resample(&frame)
+        .map_err(|e| AudioPostError::Generic(format!("Resampling failed: {e}")))?;
+    let tail = resampler
+        .flush()
+        .map_err(|e| AudioPostError::Generic(format!("Resampler flush failed: {e}")))?;
+
+    let mut output = frame_to_f32(&main);
+    output.extend(frame_to_f32(&tail));
 
     Ok(output)
 }
@@ -724,4 +720,141 @@ pub fn normalize_loudness(
         .collect();
 
     Ok(output)
+}
+
+#[cfg(test)]
+mod resample_tests {
+    use super::*;
+
+    /// Generate `n` samples of a unit-amplitude sine at `freq` Hz / `rate` Hz.
+    fn sine(freq: f64, rate: u32, n: usize) -> Vec<f32> {
+        (0..n)
+            .map(|i| {
+                #[allow(clippy::cast_precision_loss)]
+                let t = i as f64 / f64::from(rate);
+                (2.0 * std::f64::consts::PI * freq * t).sin() as f32
+            })
+            .collect()
+    }
+
+    /// Least-squares fit of `a·sin(ωt) + b·cos(ωt)` at a known frequency over
+    /// `y[skip..len-skip]`; returns `(amplitude, snr_db)` of the fit.
+    #[allow(clippy::cast_precision_loss)]
+    fn sine_fit(y: &[f32], freq: f64, rate: u32, skip: usize) -> (f64, f64) {
+        assert!(y.len() > 2 * skip + 16, "signal too short for sine fit");
+        let seg = &y[skip..y.len() - skip];
+        let w = 2.0 * std::f64::consts::PI * freq / f64::from(rate);
+
+        let (mut s_ss, mut s_cc, mut s_sc) = (0.0f64, 0.0f64, 0.0f64);
+        let (mut r_s, mut r_c) = (0.0f64, 0.0f64);
+        for (i, &yv) in seg.iter().enumerate() {
+            let t = (skip + i) as f64;
+            let (s, c) = ((w * t).sin(), (w * t).cos());
+            let yf = f64::from(yv);
+            s_ss += s * s;
+            s_cc += c * c;
+            s_sc += s * c;
+            r_s += yf * s;
+            r_c += yf * c;
+        }
+        let det = s_ss * s_cc - s_sc * s_sc;
+        assert!(det.abs() > 1e-9, "degenerate sine fit");
+        let a = (r_s * s_cc - r_c * s_sc) / det;
+        let b = (r_c * s_ss - r_s * s_sc) / det;
+
+        let (mut sig, mut noise) = (0.0f64, 0.0f64);
+        for (i, &yv) in seg.iter().enumerate() {
+            let t = (skip + i) as f64;
+            let fit = a * (w * t).sin() + b * (w * t).cos();
+            sig += fit * fit;
+            noise += (f64::from(yv) - fit) * (f64::from(yv) - fit);
+        }
+        let amplitude = (a * a + b * b).sqrt();
+        let snr_db = 10.0 * (sig / noise.max(1e-30)).log10();
+        (amplitude, snr_db)
+    }
+
+    #[test]
+    fn test_convert_sample_rate_identity() {
+        let input = sine(1000.0, 48_000, 4800);
+        let out = match convert_sample_rate(&input, 48_000, 48_000) {
+            Ok(v) => v,
+            Err(e) => panic!("identity conversion failed: {e}"),
+        };
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn test_convert_sample_rate_rejects_invalid_input() {
+        assert!(convert_sample_rate(&[0.0; 8], 0, 44_100).is_err());
+        assert!(convert_sample_rate(&[0.0; 8], 48_000, 0).is_err());
+        assert!(convert_sample_rate(&[], 48_000, 44_100).is_err());
+    }
+
+    #[test]
+    fn test_convert_sample_rate_1khz_48k_to_44k1_preserves_tone() {
+        let input = sine(1000.0, 48_000, 48_000); // 1 second
+        let out = match convert_sample_rate(&input, 48_000, 44_100) {
+            Ok(v) => v,
+            Err(e) => panic!("48k->44.1k conversion failed: {e}"),
+        };
+
+        // Length must approximate len * 44100/48000 = 44100 (filter edges may
+        // add/remove a handful of samples).
+        let expected = 44_100_i64;
+        #[allow(clippy::cast_possible_wrap)]
+        let got = out.len() as i64;
+        assert!(
+            (got - expected).abs() <= 256,
+            "unexpected output length: got {got}, expected ~{expected}"
+        );
+
+        // The 1 kHz tone must survive with unit amplitude and high purity.
+        let (amplitude, snr_db) = sine_fit(&out, 1000.0, 44_100, 1000);
+        assert!(
+            (amplitude - 1.0).abs() < 0.02,
+            "amplitude not preserved: {amplitude}"
+        );
+        assert!(snr_db > 60.0, "tone degraded: SNR {snr_db:.1} dB");
+    }
+
+    #[test]
+    fn test_convert_sample_rate_round_trip_48k_44k1_48k() {
+        let input = sine(1000.0, 48_000, 48_000); // 1 second
+        let down = match convert_sample_rate(&input, 48_000, 44_100) {
+            Ok(v) => v,
+            Err(e) => panic!("48k->44.1k conversion failed: {e}"),
+        };
+        let up = match convert_sample_rate(&down, 44_100, 48_000) {
+            Ok(v) => v,
+            Err(e) => panic!("44.1k->48k conversion failed: {e}"),
+        };
+
+        // Round-trip length within tolerance of the original.
+        #[allow(clippy::cast_possible_wrap)]
+        let (got, expected) = (up.len() as i64, input.len() as i64);
+        assert!(
+            (got - expected).abs() <= 512,
+            "round-trip length drifted: got {got}, expected ~{expected}"
+        );
+
+        // The resampler is group-delay compensated, so mid-signal samples must
+        // match the original sine directly (both passes are time-aligned).
+        let (amplitude, snr_db) = sine_fit(&up, 1000.0, 48_000, 1500);
+        assert!(
+            (amplitude - 1.0).abs() < 0.02,
+            "round-trip amplitude drifted: {amplitude}"
+        );
+        assert!(snr_db > 55.0, "round-trip degraded: SNR {snr_db:.1} dB");
+
+        let n = up.len().min(input.len());
+        let mut max_err = 0.0f32;
+        for i in 2000..n.saturating_sub(2000) {
+            max_err = max_err.max((up[i] - input[i]).abs());
+        }
+        assert!(
+            max_err < 0.02,
+            "round-trip not time-aligned within tolerance: max_err {max_err}"
+        );
+    }
 }

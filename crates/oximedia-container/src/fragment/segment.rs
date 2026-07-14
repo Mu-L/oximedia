@@ -239,7 +239,11 @@ impl SegmentWriter {
                     let path = segment.path.clone();
                     if let Err(e) = fs::remove_file(&path).await {
                         // Log error but don't fail
-                        eprintln!("Failed to delete segment {}: {e}", path.display());
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "failed to delete old segment"
+                        );
                     }
                 }
                 self.segments.remove(0);

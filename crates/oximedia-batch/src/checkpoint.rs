@@ -125,7 +125,7 @@ impl CheckpointEnvelope {
 /// Manages periodic checkpoint files in a directory.
 ///
 /// Checkpoints are named `checkpoint_<sequence>.json` and wrapped in a
-/// [`CheckpointEnvelope`] for integrity verification.
+/// `CheckpointEnvelope` for integrity verification.
 ///
 /// Rotation: after writing a new checkpoint the manager deletes the oldest
 /// files to keep at most `max_retained` checkpoints on disk.

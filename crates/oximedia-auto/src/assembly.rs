@@ -403,6 +403,7 @@ impl AssemblyConfig {
 }
 
 /// Automatic video assembler.
+#[derive(Clone)]
 pub struct AutoAssembler {
     /// Configuration.
     config: AssemblyConfig,

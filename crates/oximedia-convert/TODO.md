@@ -19,7 +19,7 @@
 
 ## New Features
 - [x] Implement watch folder conversion mode (monitor directory, auto-convert new files) (verified 2026-05-16; src/watch.rs:19 WatchConfig, WatchEntry:165, WatchStats:186, 950 lines)
-- [~] Add HDR-to-SDR tone mapping conversion in `color_convert.rs` (in-progress 2026-05-29: SourceTransferFunction, HdrToSdrConfig, convert_hdr_to_sdr_pixel/frame, PQ EOTF, HLG OETF-inverse, Rec.2020→Rec.709 matrix; oximedia-colormgmt dep added; 9 new tests pass)
+- [x] Add HDR-to-SDR tone mapping conversion in `color_convert.rs` (Wave 30, 2026-06-08: verified complete — convert_hdr_to_sdr_pixel/frame + PQ EOTF + HLG OETF⁻¹ + Rec.2020→Rec.709; oximedia-colormgmt dep wired; fixed 2 test bugs [stale PQ code-value 690→924 for the 4000-nit super-white headroom test; tautological `u8 <= 255` gamut assertion → red-dominance check]; 972 crate tests green, clippy clean)
 - [x] Implement audio-only extraction with format conversion (e.g., video -> opus audio) (completed 2026-05-05)
   - WAV→WAV copy path implemented; transcode pipeline delegation for other formats; full validation (negative timestamp, zero duration, missing file) — all tests pass
 - [x] Add image sequence to video conversion in `sequence/mod.rs` (PNG/JPEG frames -> WebM) (verified 2026-05-16; src/sequence/mod.rs:13 ImageSequence, SequenceImporter:151, SequenceExporter:100, 251 lines)

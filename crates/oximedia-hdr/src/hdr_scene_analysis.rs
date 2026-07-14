@@ -33,7 +33,7 @@ pub struct SceneAnalyzerConfig {
     /// Rolling window size (number of frames) used to compute a smoothed
     /// baseline luminance. A scene cut is detected when the current frame's
     /// peak luminance deviates from the window mean by more than
-    /// [`cut_threshold_ratio`].
+    /// [`SceneAnalyzerConfig::cut_threshold_ratio`].
     ///
     /// Default: 30 frames.
     pub window_size: usize,

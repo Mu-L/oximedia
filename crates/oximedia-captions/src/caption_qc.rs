@@ -664,3 +664,205 @@ mod tests {
         assert_eq!(format!("{}", QcStatus::Fail), "FAIL");
     }
 }
+
+/// Negative tests: verify that intentionally flawed captions trigger the
+/// expected QC findings.  Each test exercises a different failure path so
+/// that the full check matrix is covered.
+#[cfg(test)]
+mod qc_negative_tests {
+    use super::*;
+
+    // ── Individual check triggers ─────────────────────────────────────────────
+
+    /// T001: caption shorter than Netflix minimum duration (0.833 s).
+    #[test]
+    fn test_qc_too_short_duration_fails() {
+        let engine = CaptionQcEngine::new(QcConfig::netflix());
+        // 0.1 s is well below the 0.833 s Netflix minimum.
+        let captions = vec![QcCaption::new(0, "Hello world", 0.0, 0.1)];
+        let report = engine.run_checks(&captions);
+        let has_fail = report.findings.iter().any(|f| f.status == QcStatus::Fail);
+        assert!(
+            has_fail,
+            "too-short duration should produce a Fail finding (T001)"
+        );
+        assert!(
+            report.findings.iter().any(|f| f.rule_id == "T001"),
+            "expected T001 rule in findings"
+        );
+    }
+
+    /// T003: end time before start time must produce a Fail finding.
+    #[test]
+    fn test_qc_reversed_timestamps_fails() {
+        let engine = CaptionQcEngine::new(QcConfig::netflix());
+        let captions = vec![QcCaption::new(0, "Reversed", 5.0, 2.0)];
+        let report = engine.run_checks(&captions);
+        assert!(
+            report.findings.iter().any(|f| f.rule_id == "T003"),
+            "reversed timestamps should trigger T003"
+        );
+    }
+
+    /// T004: overlapping captions produce a Fail finding.
+    #[test]
+    fn test_qc_overlapping_captions_fail() {
+        let engine = CaptionQcEngine::new(QcConfig::netflix());
+        let captions = vec![
+            QcCaption::new(0, "First caption", 0.0, 5.0),
+            QcCaption::new(1, "Overlapping", 3.0, 7.0),
+        ];
+        let report = engine.run_checks(&captions);
+        assert!(
+            report.findings.iter().any(|f| f.rule_id == "T004"),
+            "overlapping captions should trigger T004"
+        );
+        assert_eq!(report.overall_status, QcStatus::Fail);
+    }
+
+    /// R001: 50 words in 1 second = 3000 WPM is far beyond the 200 WPM Netflix limit.
+    #[test]
+    fn test_qc_too_fast_speech_fails() {
+        let engine = CaptionQcEngine::new(QcConfig::netflix());
+        let long_text = "word ".repeat(50).trim().to_string();
+        let captions = vec![QcCaption::new(0, &long_text, 0.0, 1.0)];
+        let report = engine.run_checks(&captions);
+        let has_issue = report
+            .findings
+            .iter()
+            .any(|f| f.status == QcStatus::Fail || f.status == QcStatus::Warn);
+        assert!(
+            has_issue,
+            "excessive speech rate should produce Warn or Fail finding (R001)"
+        );
+    }
+
+    /// F001: empty caption text must be flagged.
+    #[test]
+    fn test_qc_empty_caption_fails() {
+        let engine = CaptionQcEngine::new(QcConfig::netflix());
+        let captions = vec![QcCaption::new(0, "   ", 0.0, 2.0)];
+        let report = engine.run_checks(&captions);
+        assert!(
+            report.findings.iter().any(|f| f.rule_id == "F001"),
+            "empty caption should trigger F001"
+        );
+    }
+
+    /// F002: line exceeding max_chars_per_line must be flagged.
+    #[test]
+    fn test_qc_long_line_fails() {
+        let engine = CaptionQcEngine::new(QcConfig::netflix()); // max 42
+        let long_line = "A".repeat(50);
+        let captions = vec![QcCaption::new(0, &long_line, 0.0, 3.0)];
+        let report = engine.run_checks(&captions);
+        assert!(
+            report.findings.iter().any(|f| f.rule_id == "F002"),
+            "over-long line should trigger F002"
+        );
+    }
+
+    /// F003: more than 2 lines must be flagged (Netflix limit).
+    #[test]
+    fn test_qc_too_many_lines_fails() {
+        let engine = CaptionQcEngine::new(QcConfig::netflix());
+        let captions = vec![QcCaption::new(0, "Line 1\nLine 2\nLine 3", 0.0, 4.0)];
+        let report = engine.run_checks(&captions);
+        assert!(
+            report.findings.iter().any(|f| f.rule_id == "F003"),
+            "three-line caption should trigger F003"
+        );
+    }
+
+    /// F004: trailing whitespace produces a Warn finding.
+    #[test]
+    fn test_qc_trailing_whitespace_warns() {
+        let engine = CaptionQcEngine::new(QcConfig::netflix());
+        let captions = vec![QcCaption::new(0, "trailing space  ", 0.0, 2.0)];
+        let report = engine.run_checks(&captions);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.rule_id == "F004" && f.status == QcStatus::Warn),
+            "trailing whitespace should trigger F004 Warn"
+        );
+    }
+
+    /// F005: consecutive duplicate captions produce a Warn finding.
+    #[test]
+    fn test_qc_duplicate_captions_warn() {
+        let engine = CaptionQcEngine::new(QcConfig::netflix());
+        let captions = vec![
+            QcCaption::new(0, "Duplicate text", 0.0, 2.0),
+            QcCaption::new(1, "Duplicate text", 2.5, 4.5),
+        ];
+        let report = engine.run_checks(&captions);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.rule_id == "F005" && f.status == QcStatus::Warn),
+            "duplicate consecutive captions should trigger F005 Warn"
+        );
+    }
+
+    // ── Happy-path regression ─────────────────────────────────────────────────
+
+    /// Well-formed captions must not produce any Fail findings.
+    #[test]
+    fn test_qc_known_good_captions_pass() {
+        let engine = CaptionQcEngine::new(QcConfig::netflix());
+        // ~5 words / 3 seconds ≈ 100 WPM — well within 200 WPM Netflix limit.
+        let captions = vec![
+            QcCaption::new(0, "Hello, how are you today?", 0.0, 3.0),
+            QcCaption::new(1, "I am doing very well, thank you.", 4.0, 7.0),
+        ];
+        let report = engine.run_checks(&captions);
+        let has_fail = report.findings.iter().any(|f| f.status == QcStatus::Fail);
+        assert!(
+            !has_fail,
+            "well-formed captions should not produce any Fail findings"
+        );
+    }
+
+    // ── BBC preset checks ─────────────────────────────────────────────────────
+
+    /// BBC has a lower WPM limit (180) and different min_duration (0.3 s).
+    #[test]
+    fn test_qc_bbc_preset_rate_limit() {
+        let engine = CaptionQcEngine::new(QcConfig::bbc());
+        // 40 words in 1 second = 2400 WPM — far above BBC 180 WPM limit.
+        let fast_text = "word ".repeat(40).trim().to_string();
+        let captions = vec![QcCaption::new(0, &fast_text, 0.0, 1.0)];
+        let report = engine.run_checks(&captions);
+        assert!(
+            report.findings.iter().any(|f| f.rule_id == "R001"),
+            "BBC preset should also flag excessive speech rate via R001"
+        );
+    }
+
+    /// All six check-type categories must be exercisable without panic.
+    #[test]
+    fn test_qc_report_structure_integrity() {
+        let engine = CaptionQcEngine::new(QcConfig::default());
+        // Produce at least one finding so category_counts is non-empty.
+        let captions = vec![QcCaption::new(0, "Blink", 0.0, 0.1)];
+        let report = engine.run_checks(&captions);
+        // count_by_status must be consistent with findings vec length.
+        let total: usize = [
+            QcStatus::Pass,
+            QcStatus::Warn,
+            QcStatus::Fail,
+            QcStatus::Skip,
+        ]
+        .iter()
+        .map(|&s| report.count_by_status(s))
+        .sum();
+        assert_eq!(
+            total,
+            report.findings.len(),
+            "count_by_status totals must equal findings length"
+        );
+    }
+}

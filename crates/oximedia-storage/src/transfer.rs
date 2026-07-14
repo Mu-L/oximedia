@@ -614,19 +614,28 @@ impl RateLimiter {
 /// Transfer state for resume support
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TransferState {
+    /// Object key being transferred.
     pub key: String,
+    /// Local file path involved in the transfer.
     pub file_path: std::path::PathBuf,
+    /// Total size of the transfer in bytes.
     pub total_bytes: u64,
+    /// Number of bytes transferred so far.
     pub transferred_bytes: u64,
+    /// Per-chunk progress/completion state.
     pub chunk_states: Vec<ChunkState>,
 }
 
 /// State of a transfer chunk
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChunkState {
+    /// Zero-based chunk index within the transfer.
     pub index: usize,
+    /// Start byte offset of this chunk (inclusive).
     pub start: u64,
+    /// End byte offset of this chunk (exclusive).
     pub end: u64,
+    /// Whether this chunk has finished transferring.
     pub completed: bool,
 }
 

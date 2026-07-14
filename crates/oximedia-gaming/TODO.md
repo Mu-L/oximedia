@@ -20,7 +20,7 @@
 - [x] Make `GameStreamer::get_stats()` return real metrics instead of hardcoded values (verified 2026-05-16; src/lib.rs:612 get_stats() real metrics comment, test_stream_stats_with_real_metrics:864)
 - [x] Implement actual replay buffer ring-buffer storage in `replay/buffer.rs` (verified 2026-05-16; src/replay/buffer.rs:24 ReplayBuffer ring-buffer:3)
 - [x] Add `save_replay()` actual file writing with encoding in `replay/save.rs` (Wave 13: ORC container; Wave 14: VP9 re-encode pass via SimpleVp9Encoder for raw-YUV frames, replay/save.rs:276)
-- [ ] Enhance `highlight/detector.rs` with configurable detection thresholds per game genre (verified-open 2026-05-16: not yet implemented)
+- [x] Enhance `highlight/detector.rs` with configurable detection thresholds per game genre (verified implemented 2026-06-06: src/genre_highlight.rs — `GameGenre` enum (10 genres) + `GenreThresholds` + per-genre `default_thresholds()` + `GenreHighlightDetector`)
 - [x] Add `frame_pacing.rs` adaptive frame pacing that adjusts to encoder backpressure (verified 2026-05-16; src/frame_pacing.rs:349 lines, backpressure in async_encoder.rs:101)
 - [x] Implement `network_quality.rs` real-time bitrate adaptation based on network conditions (verified 2026-05-16; src/network_quality.rs:398 lines NetworkQualityMonitor)
 - [x] Add `stream_analytics.rs` viewer count, chat activity, and engagement metrics (verified 2026-05-16; src/stream_analytics.rs:372 lines StreamAnalytics)

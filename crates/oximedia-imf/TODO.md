@@ -62,7 +62,10 @@
 
 ## Testing
 - [ ] Add conformance tests with reference IMF packages from the SMPTE IMF plugfest test suite
-- [ ] Test `cpl_merge.rs` with conflicting edit rates and overlapping timeline segments
+- [x] Test `cpl_merge.rs` with conflicting edit rates and overlapping timeline segments (Wave 29 / Slice 2, completed 2026-06-06)
+  - [x] **Bug fix (A):** `merge_cpls` now selects the merged edit rate by `ConflictStrategy` — `KeepSupplemental` adopts the supplemental rate, while `KeepBase`/`Fail`/`Concatenate` retain the base rate (previously the merged CPL always used the base rate, ignoring the strategy). The Error-severity `edit_rate` mismatch conflict is still surfaced regardless of strategy. (`src/cpl_merge.rs`)
+  - [x] **Bug fix (B):** `MergeResult.supplemental_segments` now reports the TOTAL supplemental segment count (matching the sibling `base_segments` total), instead of the non-overlapping-only count; removed the now-dead `supp_only_count` binding and updated the field doc-comment. (`src/cpl_merge.rs`)
+  - [x] Added `tests/edit_rate_strategy.rs` (5 tests): per-strategy edit-rate selection (KeepBase/KeepSupplemental/Fail/Concatenate), matching-rate no-conflict case, and total supplemental count including an overlapping segment id.
 - [x] Add round-trip tests: create CPL -> serialize to XML -> parse XML -> compare structure
 - [ ] Test `package_validator.rs` with intentionally corrupted hash values
 - [ ] Add `supplemental_package.rs` tests with multi-level supplemental chain

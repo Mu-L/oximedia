@@ -6,7 +6,6 @@ use crate::{
     error::{ServerError, ServerResult},
     models::media::{Media, MediaMetadata, MediaStatus},
 };
-use sqlx::Row;
 use std::path::Path;
 use walkdir::WalkDir;
 
@@ -30,7 +29,7 @@ impl MediaLibrary {
     ///
     /// Returns an error if the database operation fails.
     pub async fn add_media(&self, media: &Media) -> ServerResult<()> {
-        sqlx::query(
+        crate::db::query(
             r"
             INSERT INTO media (
                 id, user_id, filename, original_filename, mime_type, file_size,
@@ -74,7 +73,7 @@ impl MediaLibrary {
     ///
     /// Returns an error if the media is not found or database query fails.
     pub async fn get_media(&self, media_id: &str) -> ServerResult<Media> {
-        let row = sqlx::query(
+        let row = crate::db::query(
             r"
             SELECT * FROM media WHERE id = ?
             ",
@@ -93,7 +92,7 @@ impl MediaLibrary {
     ///
     /// Returns an error if the database operation fails.
     pub async fn update_media(&self, media: &Media) -> ServerResult<()> {
-        sqlx::query(
+        crate::db::query(
             r"
             UPDATE media SET
                 duration = ?, width = ?, height = ?,
@@ -162,7 +161,7 @@ impl MediaLibrary {
         }
 
         // Delete from database (cascades to metadata, collection items, etc.)
-        sqlx::query("DELETE FROM media WHERE id = ?")
+        crate::db::query("DELETE FROM media WHERE id = ?")
             .bind(media_id)
             .execute(self.db.pool())
             .await?;
@@ -181,7 +180,7 @@ impl MediaLibrary {
         limit: i64,
         offset: i64,
     ) -> ServerResult<Vec<Media>> {
-        let rows = sqlx::query(
+        let rows = crate::db::query(
             r"
             SELECT * FROM media
             WHERE user_id = ?
@@ -212,7 +211,7 @@ impl MediaLibrary {
         limit: i64,
     ) -> ServerResult<Vec<Media>> {
         let search_pattern = format!("%{query}%");
-        let rows = sqlx::query(
+        let rows = crate::db::query(
             r"
             SELECT * FROM media
             WHERE user_id = ?
@@ -264,18 +263,20 @@ impl MediaLibrary {
                 continue;
             }
 
-            let filename = path
-                .file_name()
-                .expect("path has a valid file name component")
-                .to_string_lossy()
-                .to_string();
+            // `path.is_file()` was already checked above, so a missing
+            // file-name component is not expected — but we skip the entry
+            // instead of panicking rather than trust that invariant blindly.
+            let Some(filename_os) = path.file_name() else {
+                continue;
+            };
+            let filename = filename_os.to_string_lossy().to_string();
             let file_size = entry
                 .metadata()
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
                 .len() as i64;
 
             // Check if already in library
-            let exists = sqlx::query_scalar::<_, i64>(
+            let exists = crate::db::query_scalar::<i64, _>(
                 "SELECT COUNT(*) FROM media WHERE user_id = ? AND filename = ?",
             )
             .bind(user_id)
@@ -309,7 +310,7 @@ impl MediaLibrary {
     ///
     /// Returns an error if the database operation fails.
     pub async fn add_metadata(&self, media_id: &str, key: &str, value: &str) -> ServerResult<()> {
-        sqlx::query(
+        crate::db::query(
             r"
             INSERT OR REPLACE INTO media_metadata (media_id, key, value)
             VALUES (?, ?, ?)
@@ -330,7 +331,7 @@ impl MediaLibrary {
     ///
     /// Returns an error if the database query fails.
     pub async fn get_metadata(&self, media_id: &str) -> ServerResult<MediaMetadata> {
-        let rows = sqlx::query(
+        let rows = crate::db::query(
             r"
             SELECT key, value FROM media_metadata
             WHERE media_id = ?
@@ -351,7 +352,7 @@ impl MediaLibrary {
     }
 
     /// Helper to convert a database row to a Media struct.
-    fn row_to_media(&self, row: &sqlx::sqlite::SqliteRow) -> ServerResult<Media> {
+    fn row_to_media(&self, row: &crate::db::Row) -> ServerResult<Media> {
         let status_str: String = row.get("status");
         let status = status_str
             .parse::<MediaStatus>()

@@ -238,4 +238,4 @@ scale = "1920:-1"
 
 Apache-2.0
 
-Version: 0.1.5 — 2026-04-20 — 19 tests
+Version: 0.1.9 — 2026-07-08 — extensively tested

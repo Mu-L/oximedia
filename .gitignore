@@ -5,10 +5,20 @@
 **/target/
 **/.cargo_targets/
 /.cargo_targets/
+Cargo.lock
 
+# Patch/backup droppings
+*.orig
+*.rej
+*.bak
 
-# Cargo
-**/Cargo.lock
+# Generated files
+rust_out
+*.db
+
+# Generated docs (cargo doc build output for scratch crates; hand-written
+# guides live in /docs/, not this directory)
+/doc/
 
 # IDEs
 .vscode/

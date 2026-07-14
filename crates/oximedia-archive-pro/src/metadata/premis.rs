@@ -4,8 +4,11 @@
 //! See: <https://www.loc.gov/standards/premis/>
 
 use crate::Result;
+use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
+use quick_xml::Writer;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write as IoWrite;
 use std::path::Path;
 
 /// PREMIS object types
@@ -143,6 +146,61 @@ impl PremisObject {
         xml.push_str("  </object>\n");
         Ok(xml)
     }
+
+    /// Write this object as a `<premis:object>` element using the zero-copy
+    /// `quick-xml` streaming API (see the non-streaming counterpart [`Self::to_xml`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if writing to the underlying writer fails.
+    pub fn write_streaming<W: IoWrite>(&self, writer: &mut Writer<W>) -> Result<()> {
+        writer.write_event(Event::Start(BytesStart::new("object")))?;
+
+        writer.write_event(Event::Start(BytesStart::new("objectIdentifier")))?;
+        writer.write_event(Event::Text(BytesText::new(&self.identifier)))?;
+        writer.write_event(Event::End(BytesEnd::new("objectIdentifier")))?;
+
+        let category = format!("{:?}", self.object_type);
+        writer.write_event(Event::Start(BytesStart::new("objectCategory")))?;
+        writer.write_event(Event::Text(BytesText::new(&category)))?;
+        writer.write_event(Event::End(BytesEnd::new("objectCategory")))?;
+
+        if let Some(ref name) = self.original_name {
+            writer.write_event(Event::Start(BytesStart::new("originalName")))?;
+            writer.write_event(Event::Text(BytesText::new(name)))?;
+            writer.write_event(Event::End(BytesEnd::new("originalName")))?;
+        }
+
+        if let Some(size) = self.size {
+            let size_str = size.to_string();
+            writer.write_event(Event::Start(BytesStart::new("size")))?;
+            writer.write_event(Event::Text(BytesText::new(&size_str)))?;
+            writer.write_event(Event::End(BytesEnd::new("size")))?;
+        }
+
+        if let Some(ref format) = self.format {
+            writer.write_event(Event::Start(BytesStart::new("format")))?;
+            writer.write_event(Event::Text(BytesText::new(format)))?;
+            writer.write_event(Event::End(BytesEnd::new("format")))?;
+        }
+
+        for (algo, value) in &self.checksums {
+            writer.write_event(Event::Start(BytesStart::new("fixity")))?;
+
+            writer.write_event(Event::Start(BytesStart::new("messageDigestAlgorithm")))?;
+            writer.write_event(Event::Text(BytesText::new(algo)))?;
+            writer.write_event(Event::End(BytesEnd::new("messageDigestAlgorithm")))?;
+
+            writer.write_event(Event::Start(BytesStart::new("messageDigest")))?;
+            writer.write_event(Event::Text(BytesText::new(value)))?;
+            writer.write_event(Event::End(BytesEnd::new("messageDigest")))?;
+
+            writer.write_event(Event::End(BytesEnd::new("fixity")))?;
+        }
+
+        writer.write_event(Event::End(BytesEnd::new("object")))?;
+        Ok(())
+    }
 }
 
 /// PREMIS event
@@ -243,6 +301,53 @@ impl PremisEvent {
 
         xml.push_str("  </event>\n");
         Ok(xml)
+    }
+
+    /// Write this event as a `<premis:event>` element using the zero-copy
+    /// `quick-xml` streaming API (see the non-streaming counterpart [`Self::to_xml`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if writing to the underlying writer fails.
+    pub fn write_streaming<W: IoWrite>(&self, writer: &mut Writer<W>) -> Result<()> {
+        writer.write_event(Event::Start(BytesStart::new("event")))?;
+
+        writer.write_event(Event::Start(BytesStart::new("eventIdentifier")))?;
+        writer.write_event(Event::Text(BytesText::new(&self.identifier)))?;
+        writer.write_event(Event::End(BytesEnd::new("eventIdentifier")))?;
+
+        let event_type_str = event_type_to_string(&self.event_type);
+        writer.write_event(Event::Start(BytesStart::new("eventType")))?;
+        writer.write_event(Event::Text(BytesText::new(&event_type_str)))?;
+        writer.write_event(Event::End(BytesEnd::new("eventType")))?;
+
+        let date_str = self.date_time.to_rfc3339();
+        writer.write_event(Event::Start(BytesStart::new("eventDateTime")))?;
+        writer.write_event(Event::Text(BytesText::new(&date_str)))?;
+        writer.write_event(Event::End(BytesEnd::new("eventDateTime")))?;
+
+        if let Some(ref detail) = self.detail {
+            writer.write_event(Event::Start(BytesStart::new("eventDetail")))?;
+            writer.write_event(Event::Text(BytesText::new(detail)))?;
+            writer.write_event(Event::End(BytesEnd::new("eventDetail")))?;
+        }
+
+        if let Some(ref outcome) = self.outcome {
+            writer.write_event(Event::Start(BytesStart::new("eventOutcomeInformation")))?;
+            writer.write_event(Event::Start(BytesStart::new("eventOutcome")))?;
+            writer.write_event(Event::Text(BytesText::new(outcome)))?;
+            writer.write_event(Event::End(BytesEnd::new("eventOutcome")))?;
+            writer.write_event(Event::End(BytesEnd::new("eventOutcomeInformation")))?;
+        }
+
+        for obj_id in &self.linking_objects {
+            writer.write_event(Event::Start(BytesStart::new("linkingObjectIdentifier")))?;
+            writer.write_event(Event::Text(BytesText::new(obj_id)))?;
+            writer.write_event(Event::End(BytesEnd::new("linkingObjectIdentifier")))?;
+        }
+
+        writer.write_event(Event::End(BytesEnd::new("event")))?;
+        Ok(())
     }
 }
 

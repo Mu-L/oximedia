@@ -1,8 +1,8 @@
 # oximedia-image-transform
 
-![Version: 0.1.8](https://img.shields.io/badge/version-0.1.8-blue)
+![Version: 0.1.9](https://img.shields.io/badge/version-0.1.9-blue)
 ![Tests: 501](https://img.shields.io/badge/tests-501-brightgreen)
-![Updated: 2026-05-21](https://img.shields.io/badge/updated-2026--05--21-blue)
+![Updated: 2026-07-08](https://img.shields.io/badge/updated-2026--07--08-blue)
 
 Cloudflare Images-compatible URL image transformation for the [OxiMedia](https://github.com/cool-japan/oximedia) Sovereign Media Framework.
 
@@ -20,29 +20,32 @@ Cloudflare Images-compatible URL image transformation for the [OxiMedia](https:/
 
 ## Supported Parameters
 
-| Parameter | Short | Description |
-|-----------|-------|-------------|
-| `width` | `w` | Target width in pixels |
-| `height` | `h` | Target height in pixels |
-| `quality` | `q` | Output quality (1-100) |
-| `format` | `f` | Output format: `auto`, `avif`, `webp`, `jpeg`, `png`, `gif`, `baseline`, `json` |
-| `fit` | -- | Resize mode: `scale-down`, `contain`, `cover`, `crop`, `pad`, `fill` |
-| `gravity` | `g` | Crop anchor: `auto`, `center`, `top`, `bottom`, `left`, `right`, `face`, `0.5x0.5` |
-| `sharpen` | -- | Sharpen amount (0.0-10.0) |
-| `blur` | -- | Gaussian blur radius (0.0-250.0) |
-| `brightness` | -- | Brightness adjustment (-1.0 to 1.0) |
-| `contrast` | -- | Contrast adjustment (-1.0 to 1.0) |
-| `gamma` | -- | Gamma correction (0.1-10.0) |
-| `rotate` | -- | Rotation: `0`, `90`, `180`, `270`, `auto` |
-| `dpr` | -- | Device pixel ratio (1.0-4.0) |
-| `trim` | -- | Edge trimming in pixels |
-| `background` | `bg` | Background color (CSS hex) |
-| `border` | -- | Border: `width:color` or `t,r,b,l:color` |
-| `padding` | `pad` | Fractional padding (0.0-1.0) |
-| `metadata` | -- | Metadata handling: `keep`, `copyright`, `none` |
-| `anim` | -- | Animate GIFs: `true` / `false` |
-| `compression` | -- | Compression strategy: `fast`, `default`, `slow` |
-| `onerror` | -- | Fallback URL on error |
+See [`TransformParams`](src/transform.rs) module docs for the full field-by-field reference (types and valid ranges). Defaults shown below are what applies when a parameter is omitted from the URL/query string entirely.
+
+| Parameter | Short | Default | Description |
+|-----------|-------|---------|-------------|
+| `width` | `w` | (none) | Target width in pixels, `1..=12000` |
+| `height` | `h` | (none) | Target height in pixels, `1..=12000` |
+| `quality` | `q` | `85` | Output quality (1-100) |
+| `format` | `f` | `auto` | Output format: `auto`, `avif`, `webp`, `jpeg`, `png`, `gif`, `baseline`, `json` |
+| `fit` | -- | `scale-down` | Resize mode: `scale-down`, `contain`, `cover`, `crop`, `pad`, `fill` |
+| `gravity` | `g` | `center` | Crop anchor: `auto`, `center`, `top`, `bottom`, `left`, `right`, `face`, `0.5x0.5` |
+| `sharpen` | -- | `0.0` (off) | Sharpen amount (0.0-10.0) |
+| `blur` | -- | `0.0` (off) | Gaussian blur radius (0.0-250.0) |
+| `brightness` | -- | `0.0` (no change) | Brightness adjustment (-1.0 to 1.0) |
+| `contrast` | -- | `0.0` (no change) | Contrast adjustment (-1.0 to 1.0) |
+| `gamma` | -- | `1.0` (no change) | Gamma correction (0.0-10.0, exclusive of 0) |
+| `rotate` | -- | `0` | Rotation: `0`, `90`, `180`, `270`, `auto` |
+| `dpr` | -- | `1.0` | Device pixel ratio (1.0-4.0) |
+| `trim` | -- | (none) | Edge trimming in pixels |
+| `background` | `bg` | transparent | Background color (CSS hex) |
+| `border` | -- | (none) | Border: `width:color` or `t,r,b,l:color` |
+| `padding` | `pad` | (none) | Fractional padding (0.0-1.0) |
+| `metadata` | -- | `none` | Metadata handling: `keep`, `copyright`, `none` |
+| `anim` | -- | `true` | Animate GIFs: `true` / `false` |
+| `compression` | -- | (none) | Compression strategy: `fast`, `default`, `slow` |
+| `onerror` | -- | (none) | Fallback URL on error |
+| `preset` | -- | (none) | Named preset: `thumbnail`, `preview`, `hd_ready` (sets width/height/quality) |
 
 ## URL Formats
 
@@ -108,11 +111,66 @@ The processor module builds an ordered pipeline from transform parameters:
 
 | Module | Description |
 |--------|-------------|
-| `transform` | Strongly-typed parameter structs and enums |
-| `parser` | URL parsing and cache key generation |
-| `negotiation` | Accept header parsing and format selection |
-| `processor` | Image processing pipeline and pixel operations |
-| `security` | SSRF prevention and input validation |
+| `transform` / `transform_types` | Strongly-typed parameter structs and enums (`TransformParams`, `Border`, `Padding`, `Trim`, `Rotation`, `Compression`, `OutputOptions`) |
+| `parser` | URL / query-string parsing, presets, and cache key generation |
+| `negotiation` | Accept header parsing, format selection, client hints, cache-control generation |
+| `processor` | Image processing pipeline and pixel operations (resize, geometry, color, filters, streaming) |
+| `security` | SSRF prevention, path-traversal detection, signed-URL (HMAC-SHA256) verification |
+| `quality` | SSIM-guided quality auto-tuning from image complexity analysis |
+| `watermark` | Text/image watermark overlay (9 positions, opacity, scaling) |
+| `face_detect` | Skin-tone + saliency-based face detection for smart gravity cropping |
+| `blur_region` | Selective rectangular region blurring for privacy/NSFW redaction |
+| `responsive` | `srcset` / `<picture>` HTML generation across breakpoints and formats |
+| `animation` | GIF/WebP animation frame resize, frame-rate reduction, optimisation |
+| `origin_fetch` | Remote source-image fetching with SSRF-checked allowlisting and in-memory caching |
+| `metrics` | Thread-safe transform request statistics (hit rate, latency histogram, format distribution) |
+| `batch_transform` | Multiple transform variants processed in parallel (`rayon`) from a single request |
+| `image_analysis` | Dominant-colour extraction (median-cut) and BlurHash encoding |
+| `response_cache` | Content-addressable in-memory cache for fully-encoded transform output |
+| `compose` / `inverse` | 2-D affine transform matrix composition and analytical inversion |
+
+## Cloudflare Images Compatibility Matrix
+
+Cross-reference against the [Cloudflare Images transformation reference](https://developers.cloudflare.com/images/transform-images/transform-via-url/). "Extension" marks functionality with no direct Cloudflare Images equivalent.
+
+| Feature | Cloudflare Images | oximedia-image-transform | Module |
+|---------|:---:|:---:|--------|
+| `/cdn-cgi/image/...` URL transform syntax | Yes | Yes | `parser` |
+| Query-string transform syntax | No (path-only) | Yes (extension) | `parser` |
+| `width` / `height` resize | Yes | Yes | `transform`, `processor` |
+| `fit` modes (scale-down/contain/cover/crop/pad/fill) | Yes | Yes | `transform`, `processor` |
+| `gravity` (center/side/`x,y` focal point) | Yes | Yes | `transform`, `processor` |
+| `gravity=auto` (saliency-based smart crop) | Yes | Yes | `face_detect` |
+| `gravity=face` | Yes | Yes (skin-tone + saliency heuristic, not ML face detection) | `face_detect` |
+| `quality` | Yes | Yes | `transform` |
+| SSIM-guided automatic quality tuning | No | Yes (extension) | `quality` |
+| `format=auto` content negotiation (AVIF/WebP/JPEG) | Yes | Yes | `negotiation` |
+| HTTP Client Hints (`DPR`, `Width`, `Viewport-Width`) | Yes | Yes | `negotiation` |
+| `background` colour | Yes | Yes | `transform`, `processor` |
+| `blur` | Yes | Yes | `transform`, `processor` |
+| `sharpen` | Yes | Yes | `transform`, `processor` |
+| `brightness` / `contrast` / `gamma` | Partial (Cloudflare exposes `brightness`/`contrast`/`gamma` on Enterprise plans) | Yes | `transform`, `processor` |
+| `rotate` (incl. `auto` via EXIF) | Yes | Yes | `transform`, `processor` |
+| `trim` | Yes | Yes | `transform`, `processor` |
+| `border` | Yes | Yes | `transform`, `processor` |
+| `dpr` | Yes | Yes | `transform` |
+| `metadata` (keep/copyright/none) | Yes | Yes | `transform` |
+| `anim` (animated GIF passthrough toggle) | Yes | Yes | `transform` |
+| Animation frame resize / frame-rate reduction | No (Cloudflare resizes the whole animated asset opaquely) | Yes (extension) | `animation` |
+| `compression` hint (`fast`/`best`) | No | Yes (extension) | `transform` |
+| `onerror` fallback | Yes | Yes | `transform` |
+| Named variants (dashboard-configured presets) | Yes | Yes, via `preset=` URL parameter (`thumbnail`, `preview`, `hd_ready`) | `parser` |
+| Signed URLs (token-based access control) | Yes | Yes (HMAC-SHA256) | `security` |
+| SSRF / private-IP source validation | Yes (managed internally) | Yes | `security` |
+| Draw / watermark overlay (text or image) | Yes (Enterprise "draw" array) | Yes | `watermark` |
+| Selective region blur (privacy/NSFW redaction) | No | Yes (extension) | `blur_region` |
+| `srcset` / `<picture>` responsive HTML generation | No (left to the caller) | Yes (extension) | `responsive` |
+| Dominant colour extraction / BlurHash placeholders | No | Yes (extension) | `image_analysis` |
+| Batch/multi-variant transform in one request | No (one URL = one variant) | Yes (extension, parallelised) | `batch_transform` |
+| Request metrics (latency, hit rate, format mix) | Yes (dashboard analytics, hosted) | Yes (local, embeddable) | `metrics` |
+| Origin image fetch with caching | Yes (managed internally) | Yes | `origin_fetch` |
+| Response cache keyed by transform params | Yes (managed internally, CDN-level) | Yes (in-process, content-addressable) | `response_cache` |
+| `format=json` (metadata-only response) | Yes | Recognised as an [`OutputFormat`](src/transform.rs) variant; JSON body construction is left to the calling service | `transform` |
 
 ## License
 

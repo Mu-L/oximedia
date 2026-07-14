@@ -57,7 +57,8 @@ fn crc_stream_reset_clears_state() {
 #[test]
 fn watcher_nonexistent_file_does_not_exist() {
     use oximedia_io::watcher::FileWatcher;
-    let w = FileWatcher::new("/tmp/oximedia_orphan_smoke_nonexistent_99999.mp4");
+    let tmp_path = std::env::temp_dir().join("oximedia_orphan_smoke_nonexistent_99999.mp4");
+    let w = FileWatcher::new(&tmp_path.to_string_lossy());
     assert!(!w.exists());
     let _result = w.poll(0);
 }

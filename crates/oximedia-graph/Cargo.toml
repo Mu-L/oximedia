@@ -21,5 +21,13 @@ oximedia-codec = { workspace = true, default-features = true }
 oximedia-audio = { workspace = true }
 thiserror = { workspace = true }
 bytes = { workspace = true }
-fontdue = "0.9"
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time"] }
+fontdue.workspace = true
+tokio = { workspace = true, features = ["rt", "time"] }
+
+[dev-dependencies]
+criterion = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time", "macros"] }
+
+[[bench]]
+name = "graph_exec_bench"
+harness = false

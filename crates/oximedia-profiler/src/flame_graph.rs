@@ -80,32 +80,6 @@ impl FlameNode {
             .sum::<usize>()
     }
 
-    /// Walk the path `frames[1..]` into this node's children, creating nodes
-    /// as needed, and accumulate `duration_us` into every node on the path.
-    fn insert_path(&mut self, frames: &[&str], duration_us: u64) {
-        if frames.is_empty() {
-            // This node is the leaf — attribute self time here.
-            self.self_us = self.self_us.saturating_add(duration_us);
-            self.call_count += 1;
-            return;
-        }
-
-        let child_name = frames[0];
-        // Find or create the child with this name.
-        let pos = self
-            .children
-            .iter()
-            .position(|c| c.name == child_name)
-            .unwrap_or_else(|| {
-                self.children.push(FlameNode::new(child_name));
-                self.children.len() - 1
-            });
-
-        let child = &mut self.children[pos];
-        child.total_us = child.total_us.saturating_add(duration_us);
-        child.insert_path(&frames[1..], duration_us);
-    }
-
     /// Emit this node (and its subtree) in folded format into `out`.
     fn collect_folded<'a>(&'a self, path: &mut Vec<&'a str>, out: &mut Vec<String>) {
         path.push(&self.name);
@@ -205,12 +179,53 @@ fn collect_self_times<'a>(node: &'a FlameNode, out: &mut Vec<(&'a str, u64)>) {
     }
 }
 
+/// Iterative replacement for the recursive `FlameNode::insert_path`.
+///
+/// Walks `frames` from left to right, finding or creating child nodes and
+/// accumulating `duration_us`.  Uses a mutable cursor advanced frame-by-frame
+/// so the call depth is O(1) regardless of stack size.
+fn insert_path_iterative(start: &mut FlameNode, frames: &[&str], duration_us: u64) {
+    // If frames is empty, `start` itself is the leaf — handle it before
+    // borrowing `start` into the walking cursor below.
+    if frames.is_empty() {
+        start.self_us = start.self_us.saturating_add(duration_us);
+        start.call_count += 1;
+        return;
+    }
+
+    let mut current = start;
+    for (i, &frame_name) in frames.iter().enumerate() {
+        let is_last = i == frames.len() - 1;
+        // Find or create the child with this name.
+        let pos = current
+            .children
+            .iter()
+            .position(|c| c.name == frame_name)
+            .unwrap_or_else(|| {
+                current.children.push(FlameNode::new(frame_name));
+                current.children.len() - 1
+            });
+        let child = &mut current.children[pos];
+        child.total_us = child.total_us.saturating_add(duration_us);
+        if is_last {
+            child.self_us = child.self_us.saturating_add(duration_us);
+            child.call_count += 1;
+        }
+        current = child;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // FlameGraphBuilder
 // ---------------------------------------------------------------------------
 
+/// Default maximum frame depth for [`FlameGraphBuilder`].
+///
+/// Frames beyond this depth are silently dropped during insertion.
+const DEFAULT_DEPTH_CAP: usize = 512;
+
 /// Incrementally accumulates call-stack samples and builds a `FlameGraph`.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct FlameGraphBuilder {
     /// Per-root-frame subtrees indexed by root-frame name.
     ///
@@ -220,12 +235,45 @@ pub struct FlameGraphBuilder {
     roots_vec: Vec<FlameNode>,
     total_duration_us: u64,
     sample_count: u64,
+    /// Maximum number of frames walked per sample.
+    depth_cap: usize,
+}
+
+impl Default for FlameGraphBuilder {
+    fn default() -> Self {
+        Self {
+            roots_index: HashMap::new(),
+            roots_vec: Vec::new(),
+            total_duration_us: 0,
+            sample_count: 0,
+            depth_cap: DEFAULT_DEPTH_CAP,
+        }
+    }
 }
 
 impl FlameGraphBuilder {
-    /// Create a new, empty builder.
+    /// Create a new, empty builder with default settings.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a new builder with pre-allocated capacity and a frame depth cap.
+    ///
+    /// - `n`: pre-allocates `roots_vec` to avoid early reallocations.
+    /// - `depth`: frames beyond this depth are silently dropped.
+    pub fn with_capacity(n: usize, depth: usize) -> Self {
+        Self {
+            roots_index: HashMap::with_capacity(n),
+            roots_vec: Vec::with_capacity(n),
+            total_duration_us: 0,
+            sample_count: 0,
+            depth_cap: depth,
+        }
+    }
+
+    /// Return the configured depth cap.
+    pub fn depth_cap(&self) -> usize {
+        self.depth_cap
     }
 
     /// Record a single sample.
@@ -233,6 +281,8 @@ impl FlameGraphBuilder {
     /// `stack` must contain at least one frame name.  The first element is
     /// the outermost (root) frame; the last element is the leaf that
     /// receives the self-time attribution.
+    ///
+    /// Frames beyond `depth_cap` are silently dropped.
     ///
     /// Returns `Err(FlameError::EmptyStack)` if `stack` is empty.
     pub fn record(&mut self, stack: &[&str], duration_us: u64) -> Result<(), FlameError> {
@@ -243,7 +293,14 @@ impl FlameGraphBuilder {
         self.total_duration_us = self.total_duration_us.saturating_add(duration_us);
         self.sample_count += 1;
 
-        let root_name = stack[0];
+        // Apply depth cap: truncate the stack to at most `depth_cap` frames.
+        let effective_stack = if stack.len() > self.depth_cap {
+            &stack[..self.depth_cap]
+        } else {
+            stack
+        };
+
+        let root_name = effective_stack[0];
         let idx = if let Some(&i) = self.roots_index.get(root_name) {
             i
         } else {
@@ -255,7 +312,8 @@ impl FlameGraphBuilder {
 
         let root_node = &mut self.roots_vec[idx];
         root_node.total_us = root_node.total_us.saturating_add(duration_us);
-        root_node.insert_path(&stack[1..], duration_us);
+        // Use iterative insertion to avoid deep recursion on large stacks.
+        insert_path_iterative(root_node, &effective_stack[1..], duration_us);
 
         Ok(())
     }
@@ -433,5 +491,44 @@ mod tests {
         let top2 = fg.self_time_top_n(2);
         assert_eq!(top2[0].0, "slow_leaf");
         assert_eq!(top2[1].0, "fast_leaf");
+    }
+
+    // ------------------------------------------------------------------
+    // Sub-item 32 new tests
+    // ------------------------------------------------------------------
+
+    /// `FlameGraphBuilder::with_capacity(1000, 50)` + add samples, build, no panic.
+    #[test]
+    fn test_flame_graph_builder_with_capacity_constructor() {
+        let mut b = FlameGraphBuilder::with_capacity(1000, 50);
+        assert_eq!(b.depth_cap(), 50);
+
+        // Build a stack of depth 30 (well within the cap).
+        let frames: Vec<&str> = (0..30).map(|i| ["a", "b", "c", "d", "e"][i % 5]).collect();
+        b.record(&frames, 100).expect("record should succeed");
+        let fg = b.build().expect("build should succeed");
+        assert_eq!(fg.total_duration_us, 100);
+    }
+
+    /// Stacks deeper than `depth_cap` are truncated — no stack overflow,
+    /// result has ≤ depth_cap nodes in the longest path.
+    #[test]
+    fn test_flame_graph_builder_depth_cap_truncation() {
+        const DEPTH_CAP: usize = 8;
+        let mut b = FlameGraphBuilder::with_capacity(4, DEPTH_CAP);
+
+        // Build a stack much deeper than the cap.
+        let names: Vec<String> = (0..10_000).map(|i| format!("f{i}")).collect();
+        let frames: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        b.record(&frames, 500).expect("record should succeed");
+
+        let fg = b.build().expect("build should succeed");
+
+        // Walk the hottest path and measure its length.
+        let path_len = fg.hottest_path().len();
+        assert!(
+            path_len <= DEPTH_CAP,
+            "path_len {path_len} exceeds depth_cap {DEPTH_CAP}"
+        );
     }
 }

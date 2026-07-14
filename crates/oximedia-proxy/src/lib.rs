@@ -99,7 +99,11 @@
 //! # }
 //! ```
 
-#![forbid(unsafe_code)]
+// `deny` (not `forbid`) so the single audited `memmap2::Mmap::map` call in
+// `proxy_fingerprint::FingerprintEngine::hash_via_mmap` can opt in via a
+// scoped `#[allow(unsafe_code)]` with a `// SAFETY:` justification. All other
+// unsafe usage remains denied crate-wide.
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::missing_errors_doc)]
@@ -229,8 +233,10 @@ pub type Result<T> = std::result::Result<T, ProxyError>;
 pub use cache::{CacheCleanup, CacheManager, CacheStrategy, CleanupPolicy};
 pub use conform::{ConformEngine, ConformResult, EdlConformer, XmlConformer};
 pub use generate::{
-    BatchProxyGenerator, BatchResult, PresetInfo, ProxyEncodeResult, ProxyEncoder,
-    ProxyGenerationSettings, ProxyGenerator, ProxyOptimizer, ProxyPreset, ProxyPresets,
+    BatchProxyGenerator, BatchResult, CompleteOutcome, ConstantBitrateModel, GenerationProgress,
+    PresetInfo, ProgressiveProxy, ProxyEncodeResult, ProxyEncoder, ProxyGenerationSettings,
+    ProxyGenerator, ProxyOptimizer, ProxyPreset, ProxyPresets, ProxySegment, SegmentPlan,
+    SegmentSpec, StreamingProxyConfig, StreamingProxyGenerator,
 };
 pub use link::{LinkDatabase, LinkStatistics, ProxyLink, ProxyLinkManager, ProxyVerifier};
 pub use metadata::{MetadataSync, MetadataTransfer};

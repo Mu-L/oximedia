@@ -369,6 +369,8 @@ pub struct AppState {
     pub config: Config,
     /// In-memory transcoding job queue (RwLock for concurrent read access to job status)
     pub job_queue: tokio::sync::RwLock<JobQueue>,
+    /// Memory-mapped segment cache for zero-copy HLS/DASH segment serving.
+    pub segment_store: Arc<mmap_segments::SegmentStore>,
 }
 
 impl Server {
@@ -381,6 +383,14 @@ impl Server {
     /// - Required directories cannot be created
     /// - Configuration is invalid
     pub async fn new(config: Config) -> ServerResult<Self> {
+        // Install the Pure-Rust `rustls-rustcrypto` crypto provider as the
+        // process-wide default before any TLS-capable HTTP client (webhooks,
+        // outbound API calls, ...) can be constructed. The workspace builds
+        // `reqwest`/`rustls` without a compiled-in default provider, so this
+        // is required or the first TLS use would panic. Idempotent — safe
+        // even if the embedding binary already installed one.
+        oximedia_net::install_default_crypto_provider();
+
         // Initialize database
         let db = db::Database::new(&config.database_url).await?;
         db.migrate().await?;
@@ -394,12 +404,17 @@ impl Server {
         let auth = auth::AuthManager::new(&config.jwt_secret);
         let library = library::MediaLibrary::new(db.clone(), config.clone());
 
+        let segment_store = Arc::new(mmap_segments::SegmentStore::new(
+            mmap_segments::SegmentStoreConfig::default(),
+        ));
+
         let state = Arc::new(AppState {
             db,
             auth,
             library,
             config,
             job_queue: tokio::sync::RwLock::new(JobQueue::new()),
+            segment_store,
         });
 
         Ok(Self { state })

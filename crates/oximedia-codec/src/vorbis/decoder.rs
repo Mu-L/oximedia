@@ -1,7 +1,25 @@
 //! Vorbis audio decoder.
 //!
-//! Decodes Vorbis audio packets produced by `VorbisEncoder` (or any
-//! compliant encoder) back to floating-point PCM samples.
+//! Decodes audio packets produced by this crate's [`VorbisEncoder`]
+//! (`crate::vorbis::encoder`) back to floating-point PCM samples.
+//!
+//! # Honest status: full Vorbis I decode is NOT implemented
+//!
+//! Per `docs/codec_status.md`, full Vorbis I decoding (setup-header
+//! codebook/floor/residue/mapping/mode parsing, reverse codebook decode,
+//! floor-curve reconstruction, channel coupling, window switching) is
+//! **not implemented** and is deferred to 0.2.0. This decoder handles only
+//! the *OxiMedia simplified packet format* emitted by `VorbisEncoder`
+//! (fixed 2048-sample long blocks, raw little-endian i16 floor amplitudes
+//! and residue codes per channel).
+//!
+//! Streams produced by standards-compliant encoders (libvorbis etc.) are
+//! rejected with an honest [`CodecError::UnsupportedFeature`] error at the
+//! setup header — instead of silently discarding the setup data and then
+//! misinterpreting real Vorbis audio packets as the simplified format
+//! (which would produce garbage output).
+//!
+//! [`VorbisEncoder`]: crate::vorbis::encoder::VorbisEncoder
 
 #![forbid(unsafe_code)]
 #![allow(clippy::cast_possible_truncation)]
@@ -129,13 +147,20 @@ impl VorbisDecoder {
     /// Decode one Vorbis packet.
     ///
     /// - Header packets are parsed for configuration.
-    /// - Audio packets are decoded to interleaved f32 PCM.
+    /// - Audio packets in the *OxiMedia simplified format* (as produced by
+    ///   [`VorbisEncoder`](crate::vorbis::encoder::VorbisEncoder)) are
+    ///   decoded to interleaved f32 PCM.
     ///
     /// Returns `None` for header packets, `Some(Vec<f32>)` for audio.
     ///
+    /// Standards-compliant Vorbis streams are rejected with an honest
+    /// [`CodecError::UnsupportedFeature`] at the setup header — see the
+    /// module documentation (full Vorbis I decode is deferred to 0.2.0).
+    ///
     /// # Errors
     ///
-    /// Returns `CodecError` if the packet is malformed.
+    /// Returns `CodecError` if the packet is malformed or requires the
+    /// unimplemented full Vorbis I decode path.
     pub fn decode_packet(&mut self, data: &[u8]) -> CodecResult<Option<Vec<f32>>> {
         if data.is_empty() {
             return Err(CodecError::InvalidBitstream(
@@ -209,17 +234,27 @@ impl VorbisDecoder {
         self.state == DecoderState::ReadyForAudio
     }
 
-    /// Validate and structurally decode a Vorbis audio packet.
+    /// Validate a Vorbis audio packet structurally, then report the decode
+    /// gap honestly.
     ///
     /// This checks that the decoder is ready and that the packet starts with
-    /// the audio-packet type byte (`0x00`).  A full Vorbis II floor/residue
-    /// decode is performed by `decode_packet`; this entry-point is provided
-    /// for callers that only need structural validation.
+    /// the audio-packet type byte (`0x00`), then **always returns an honest
+    /// [`CodecError::UnsupportedFeature`] error**: a stateless (`&self`)
+    /// audio decode is not implemented — full Vorbis I decode is deferred to
+    /// 0.2.0, and even the OxiMedia simplified format requires the stateful
+    /// MDCT/overlap-add context that only [`Self::decode_packet`] holds.
+    ///
+    /// An earlier revision returned `Ok(Vec::new())` here, silently
+    /// pretending a packet decoded to zero samples; that misleading no-op
+    /// has been replaced by this explicit error. Use
+    /// [`Self::decode_packet`] for actual (simplified-format) decoding.
     ///
     /// # Errors
     ///
-    /// Returns `CodecError` if the decoder is not yet ready, the packet is
-    /// empty, or the packet-type byte is not `0x00`.
+    /// Returns `CodecError::InvalidBitstream` if the decoder is not yet
+    /// ready, the packet is empty, or the packet-type byte is not `0x00`;
+    /// otherwise returns `CodecError::UnsupportedFeature` as described
+    /// above.
     pub fn decode_audio_packet(&self, data: &[u8]) -> CodecResult<Vec<f32>> {
         if self.state != DecoderState::ReadyForAudio {
             return Err(CodecError::InvalidBitstream(
@@ -237,9 +272,12 @@ impl VorbisDecoder {
                 data[0]
             )));
         }
-        // Structural implementation: packet header is valid; full decode
-        // requires the stateful MDCT/OLA context held by decode_packet().
-        Ok(Vec::new())
+        Err(CodecError::UnsupportedFeature(
+            "Vorbis full decode not implemented: stateless audio-packet decode is \
+             unsupported (deferred to 0.2.0); use decode_packet(), which decodes the \
+             OxiMedia simplified packet format with its stateful MDCT/overlap-add context"
+                .to_string(),
+        ))
     }
 
     // ------------------------------------------------------------------
@@ -417,10 +455,42 @@ impl VorbisDecoder {
         Ok(())
     }
 
-    fn parse_setup_header(&mut self, _data: &[u8]) -> CodecResult<Option<Vec<f32>>> {
+    /// Parse the Vorbis setup header (packet type 5).
+    ///
+    /// # Honest limitation
+    ///
+    /// Real Vorbis I setup-header parsing (codebooks, floors, residues,
+    /// mappings, modes — Vorbis I spec §4.2.4) is **not implemented**
+    /// (deferred to 0.2.0). The only setup packet accepted is the minimal
+    /// placeholder emitted by
+    /// [`VorbisEncoder`](crate::vorbis::encoder::VorbisEncoder), which
+    /// marks the stream as using the OxiMedia simplified packet format.
+    ///
+    /// Any other setup header — i.e. any standards-compliant Vorbis stream
+    /// carrying real codebook data — is rejected with
+    /// [`CodecError::UnsupportedFeature`]. An earlier revision silently
+    /// discarded the setup payload and flipped to `ReadyForAudio`, which
+    /// made subsequent real Vorbis audio packets decode to garbage; this
+    /// explicit error replaces that silent no-op.
+    fn parse_setup_header(&mut self, data: &[u8]) -> CodecResult<Option<Vec<f32>>> {
         if self.state != DecoderState::AwaitingSetupHeader {
             return Err(CodecError::InvalidBitstream(
                 "Unexpected setup header".to_string(),
+            ));
+        }
+        if data.len() < 7 || &data[0..7] != b"\x05vorbis" {
+            return Err(CodecError::InvalidBitstream(
+                "Invalid Vorbis setup header magic".to_string(),
+            ));
+        }
+        // The OxiMedia encoder emits exactly:
+        //   type (0x05) + "vorbis" + codebook_count_minus_1 (0x00) + framing (0x01)
+        if data[7..] != [0x00, 0x01] {
+            return Err(CodecError::UnsupportedFeature(
+                "Vorbis full decode not implemented: setup-header codebook/floor/residue \
+                 parsing is unsupported (deferred to 0.2.0); only the simplified setup \
+                 packet produced by OxiMedia's VorbisEncoder is accepted"
+                    .to_string(),
             ));
         }
         self.state = DecoderState::ReadyForAudio;
@@ -431,6 +501,13 @@ impl VorbisDecoder {
     // Audio decode
     // ------------------------------------------------------------------
 
+    /// Decode an audio packet in the *OxiMedia simplified format*.
+    ///
+    /// This is only reachable after `parse_setup_header` accepted the
+    /// OxiMedia placeholder setup packet, which guarantees the stream was
+    /// produced by this crate's `VorbisEncoder` (raw little-endian i16
+    /// floor amplitudes + residue codes per channel). It is NOT a
+    /// standards-compliant Vorbis I audio decode — see the module docs.
     fn decode_audio(&mut self, data: &[u8]) -> CodecResult<Option<Vec<f32>>> {
         if self.state != DecoderState::ReadyForAudio {
             return Err(CodecError::InvalidBitstream(
@@ -738,18 +815,78 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_audio_packet_valid_type_returns_empty_vec() {
+    fn test_decode_audio_packet_returns_honest_unsupported_error() {
         let (mut enc, mut dec) = make_enc_dec();
         let headers = enc.headers();
         for h in &headers {
             dec.process_header_packet(&h.data).expect("header");
         }
-        // Valid audio packet type byte
-        let samples = dec
-            .decode_audio_packet(&[0x00u8, 0x00, 0x00])
-            .expect("structural audio decode");
-        // Structural implementation returns an empty frame
-        assert!(samples.is_empty());
+        // Structurally valid audio packet: the stateless entry point must
+        // report the decode gap honestly instead of pretending the packet
+        // decoded to zero samples (the old silent `Ok(Vec::new())` no-op).
+        let result = dec.decode_audio_packet(&[0x00u8, 0x00, 0x00]);
+        match result {
+            Err(CodecError::UnsupportedFeature(msg)) => {
+                assert!(
+                    msg.contains("not implemented"),
+                    "error must state the limitation clearly, got: {msg}"
+                );
+            }
+            other => panic!("expected honest UnsupportedFeature error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_real_vorbis_setup_header_rejected_honestly() {
+        let (mut enc, mut dec) = make_enc_dec();
+        let headers = enc.headers();
+        dec.process_header_packet(&headers[0].data).expect("id");
+        dec.process_header_packet(&headers[1].data)
+            .expect("comment");
+
+        // A standards-compliant setup header carries real codebook data
+        // after the magic (each codebook starts with the 24-bit sync
+        // pattern 0x564342 = "BCV"). The decoder cannot parse it, so it
+        // must say so honestly rather than silently discarding it.
+        let mut pkt = Vec::new();
+        pkt.push(0x05);
+        pkt.extend_from_slice(b"vorbis");
+        pkt.push(3); // vorbis_codebook_count - 1
+        pkt.extend_from_slice(&[0x42, 0x43, 0x56]); // "BCV" codebook sync
+        pkt.extend_from_slice(&[0u8; 32]); // (truncated) codebook payload
+
+        let result = dec.process_header_packet(&pkt);
+        match result {
+            Err(CodecError::UnsupportedFeature(msg)) => {
+                assert!(
+                    msg.contains("not implemented"),
+                    "error must state the limitation clearly, got: {msg}"
+                );
+            }
+            other => panic!("expected honest UnsupportedFeature error, got {other:?}"),
+        }
+        assert!(
+            !dec.is_ready(),
+            "decoder must not claim readiness after rejecting the setup header"
+        );
+    }
+
+    #[test]
+    fn test_setup_header_bad_magic_rejected() {
+        let (mut enc, mut dec) = make_enc_dec();
+        let headers = enc.headers();
+        dec.process_header_packet(&headers[0].data).expect("id");
+        dec.process_header_packet(&headers[1].data)
+            .expect("comment");
+
+        // Correct type byte but wrong magic string.
+        let pkt = [0x05u8, b'x', b'o', b'r', b'b', b'i', b's', 0x00, 0x01];
+        let result = dec.process_header_packet(&pkt);
+        assert!(
+            matches!(result, Err(CodecError::InvalidBitstream(_))),
+            "bad setup magic must be InvalidBitstream, got {result:?}"
+        );
+        assert!(!dec.is_ready());
     }
 
     #[test]

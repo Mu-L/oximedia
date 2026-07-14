@@ -99,10 +99,15 @@ fn default_size_buckets() -> Vec<SizeBucket> {
 /// Aggregated statistics for a single storage class.
 #[derive(Debug, Clone)]
 pub struct ClassStats {
+    /// The storage class these statistics are aggregated for.
     pub class: StorageClass,
+    /// Number of objects seen in this class.
     pub object_count: u64,
+    /// Total size in bytes of all objects in this class.
     pub total_bytes: u64,
+    /// Size in bytes of the smallest object seen (`u64::MAX` if none).
     pub smallest_object: u64,
+    /// Size in bytes of the largest object seen.
     pub largest_object: u64,
 }
 
@@ -135,8 +140,11 @@ impl ClassStats {
 /// Aggregated statistics for a key prefix (virtual directory).
 #[derive(Debug, Clone)]
 pub struct PrefixStats {
+    /// The key prefix (virtual directory) these statistics cover.
     pub prefix: String,
+    /// Number of objects seen under this prefix.
     pub object_count: u64,
+    /// Total size in bytes of all objects under this prefix.
     pub total_bytes: u64,
 }
 
@@ -222,9 +230,13 @@ impl InventoryReport {
 /// A single object descriptor fed into the inventory builder.
 #[derive(Debug, Clone)]
 pub struct ObjectEntry {
+    /// Object key/name.
     pub key: String,
+    /// Object size in bytes.
     pub size: u64,
+    /// Storage class/tier the object is stored in.
     pub storage_class: StorageClass,
+    /// Last modification timestamp.
     pub last_modified: DateTime<Utc>,
 }
 

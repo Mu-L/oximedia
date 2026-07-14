@@ -808,7 +808,7 @@ impl HlsClient {
                                 result.data
                             }
                             Err(e) => {
-                                eprintln!("Failed to fetch segment {seq}: {e}");
+                                tracing::warn!(error = %e, segment = seq, "failed to fetch segment; retrying");
                                 tokio::time::sleep(Duration::from_secs(1)).await;
                                 continue;
                             }

@@ -641,35 +641,35 @@ mod tests {
         )
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_basic_copy_example() {
         let (engine, _dir) = create_test_engine().await;
         let result = example_basic_copy(&engine).await;
         assert!(result.is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_quality_control_example() {
         let (engine, _dir) = create_test_engine().await;
         let result = example_quality_control(&engine).await;
         assert!(result.is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_scheduled_job_example() {
         let (engine, _dir) = create_test_engine().await;
         let result = example_scheduled_job(&engine).await;
         assert!(result.is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_pipeline_example() {
         let (engine, _dir) = create_test_engine().await;
         let result = example_pipeline(&engine).await;
         assert!(result.is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_batch_analysis_example() {
         let (engine, _dir) = create_test_engine().await;
         let result = example_batch_analysis(&engine).await;

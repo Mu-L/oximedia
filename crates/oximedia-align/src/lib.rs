@@ -124,6 +124,7 @@ pub mod drift_correct;
 pub mod drift_correction;
 pub mod elastic_align;
 pub mod farneback_flow;
+pub mod feature_cache;
 pub mod features;
 pub mod frame_matcher;
 pub mod frequency_align;
@@ -161,6 +162,8 @@ pub mod temporal;
 pub mod temporal_align;
 pub mod transform;
 pub mod warp;
+
+pub use feature_cache::DescriptorCache;
 
 use thiserror::Error;
 

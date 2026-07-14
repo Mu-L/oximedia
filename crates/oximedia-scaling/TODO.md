@@ -35,10 +35,10 @@
 
 ## Testing
 - [ ] Add PSNR/SSIM quality regression tests comparing scaling output against reference implementations
-- [ ] Test `aspect_preserve` with edge cases: 1:1, ultrawide (32:9), portrait (9:16), anamorphic (2.39:1)
+- [x] Test `aspect_preserve` with edge cases: 1:1, ultrawide (32:9), portrait (9:16), anamorphic (2.39:1)
 - [ ] Add roundtrip tests: scale down then up, verify quality metric degradation is within bounds
 - [ ] Test `batch_scale` with mixed input resolutions and aspect ratios in a single batch
-- [ ] Add fuzz tests for `ScalingParams` with zero/negative/maximum dimensions
+- [x] Add fuzz tests for `ScalingParams` with zero/negative/maximum dimensions
 
 ## Documentation
 - [ ] Add quality comparison guide for Bilinear vs Bicubic vs Lanczos with visual examples

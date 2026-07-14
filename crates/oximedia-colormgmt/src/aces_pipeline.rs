@@ -709,4 +709,67 @@ mod tests {
             prev = y;
         }
     }
+
+    // ── New numeric accuracy tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_aces_middle_grey_is_neutral() {
+        // Middle grey 0.18 ACEScg → output channels should be in [0,1] and neutral (R≈G≈B).
+        let ot = AcesOutputTransform2::new(OutputColorSpace::Srgb);
+        let out = ot.apply([0.18, 0.18, 0.18]);
+        for ch in out {
+            assert!(
+                (0.0..=1.0).contains(&ch),
+                "Middle grey output channel must be in [0,1]: {ch}"
+            );
+        }
+        let max_diff = (out[0] - out[1]).abs().max((out[1] - out[2]).abs());
+        assert!(
+            max_diff < 0.05,
+            "Middle grey must map to a near-neutral output (max channel diff = {max_diff:.4}); got {out:?}"
+        );
+    }
+
+    #[test]
+    fn test_rrt_tone_curve_monotonic() {
+        // Verify strict monotonicity over the canonical ACES sweep.
+        let sweep = [0.0f32, 0.01, 0.05, 0.1, 0.18, 0.5, 1.0, 2.0, 4.0];
+        let values: Vec<f32> = sweep.iter().map(|&x| aces_rrt_tone_curve(x)).collect();
+        for i in 1..values.len() {
+            assert!(
+                values[i] > values[i - 1],
+                "RRT tone curve must be strictly increasing at index {i}: \
+                 f({x_prev}) = {y_prev} >= f({x_cur}) = {y_cur}",
+                x_prev = sweep[i - 1],
+                y_prev = values[i - 1],
+                x_cur = sweep[i],
+                y_cur = values[i],
+            );
+        }
+    }
+
+    #[test]
+    fn test_aces_output_channels_clamped_to_01() {
+        // For a range of very bright HDR inputs all output channels must stay in [0.0, 1.0].
+        let ot = AcesOutputTransform2::new(OutputColorSpace::Srgb).with_peak_luminance(1000.0);
+        let bright_inputs: &[[f32; 3]] = &[
+            [1.0, 1.0, 1.0],
+            [2.0, 2.0, 2.0],
+            [5.0, 5.0, 5.0],
+            [10.0, 10.0, 10.0],
+            [10.0, 0.0, 0.0],
+            [0.0, 10.0, 0.0],
+            [0.0, 0.0, 10.0],
+            [8.0, 4.0, 2.0],
+        ];
+        for &input in bright_inputs {
+            let out = ot.apply(input);
+            for (ch_idx, ch) in out.iter().enumerate() {
+                assert!(
+                    (0.0f32..=1.0).contains(ch),
+                    "Channel {ch_idx} out of [0,1] for input {input:?}: got {ch}"
+                );
+            }
+        }
+    }
 }

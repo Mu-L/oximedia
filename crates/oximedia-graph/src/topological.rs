@@ -581,7 +581,7 @@ pub mod fast_topo {
 
         /// Run Kahn's algorithm and return nodes in topological order.
         ///
-        /// Returns [`Err(CycleError)`] if the graph contains a cycle; the
+        /// Returns `Err(CycleError)` if the graph contains a cycle; the
         /// `remaining` field lists node IDs whose in-degree never reached zero.
         ///
         /// # Complexity

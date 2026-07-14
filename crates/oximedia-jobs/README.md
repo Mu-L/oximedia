@@ -1,9 +1,9 @@
 # oximedia-jobs
 
 ![Status: Stable](https://img.shields.io/badge/status-stable-green)
-![Version: 0.1.8](https://img.shields.io/badge/version-0.1.8-blue)
+![Version: 0.1.9](https://img.shields.io/badge/version-0.1.9-blue)
 ![Tests: 499](https://img.shields.io/badge/tests-499-brightgreen)
-![Updated: 2026-05-21](https://img.shields.io/badge/updated-2026--05--21-blue)
+![Updated: 2026-07-08](https://img.shields.io/badge/updated-2026--07--08-blue)
 
 Production-quality job queue and worker management system for OxiMedia video transcoding operations.
 
@@ -41,7 +41,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-jobs = "0.1.8"
+oximedia-jobs = "0.1.9"
 ```
 
 ```rust

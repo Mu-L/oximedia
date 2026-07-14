@@ -13,7 +13,6 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 use std::sync::Arc;
 
 /// Create collection request.
@@ -58,7 +57,7 @@ pub async fn list_collections(
     State(state): State<Arc<AppState>>,
     auth_user: AuthUser,
 ) -> ServerResult<impl IntoResponse> {
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         r"
         SELECT * FROM collections
         WHERE user_id = ?
@@ -99,7 +98,7 @@ pub async fn create_collection(
 
     let collection = Collection::new(auth_user.user_id, req.name, req.description);
 
-    sqlx::query(
+    crate::db::query(
         r"
         INSERT INTO collections (id, user_id, name, description, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -124,7 +123,7 @@ pub async fn get_collection(
     Path(collection_id): Path<String>,
 ) -> ServerResult<impl IntoResponse> {
     // Get collection
-    let row = sqlx::query(
+    let row = crate::db::query(
         r"
         SELECT * FROM collections WHERE id = ?
         ",
@@ -154,7 +153,7 @@ pub async fn get_collection(
     };
 
     // Get items
-    let item_rows = sqlx::query(
+    let item_rows = crate::db::query(
         r"
         SELECT * FROM collection_items
         WHERE collection_id = ?
@@ -186,7 +185,7 @@ pub async fn update_collection(
     Json(req): Json<UpdateCollectionRequest>,
 ) -> ServerResult<impl IntoResponse> {
     // Verify ownership
-    let user_id: String = sqlx::query_scalar("SELECT user_id FROM collections WHERE id = ?")
+    let user_id: String = crate::db::query_scalar("SELECT user_id FROM collections WHERE id = ?")
         .bind(&collection_id)
         .fetch_one(state.db.pool())
         .await
@@ -200,7 +199,7 @@ pub async fn update_collection(
 
     // Update fields
     if let Some(name) = &req.name {
-        sqlx::query("UPDATE collections SET name = ?, updated_at = ? WHERE id = ?")
+        crate::db::query("UPDATE collections SET name = ?, updated_at = ? WHERE id = ?")
             .bind(name)
             .bind(chrono::Utc::now().timestamp())
             .bind(&collection_id)
@@ -209,7 +208,7 @@ pub async fn update_collection(
     }
 
     if let Some(description) = &req.description {
-        sqlx::query("UPDATE collections SET description = ?, updated_at = ? WHERE id = ?")
+        crate::db::query("UPDATE collections SET description = ?, updated_at = ? WHERE id = ?")
             .bind(description)
             .bind(chrono::Utc::now().timestamp())
             .bind(&collection_id)
@@ -227,7 +226,7 @@ pub async fn delete_collection(
     Path(collection_id): Path<String>,
 ) -> ServerResult<impl IntoResponse> {
     // Verify ownership
-    let user_id: String = sqlx::query_scalar("SELECT user_id FROM collections WHERE id = ?")
+    let user_id: String = crate::db::query_scalar("SELECT user_id FROM collections WHERE id = ?")
         .bind(&collection_id)
         .fetch_one(state.db.pool())
         .await
@@ -240,7 +239,7 @@ pub async fn delete_collection(
     }
 
     // Delete collection (cascades to items)
-    sqlx::query("DELETE FROM collections WHERE id = ?")
+    crate::db::query("DELETE FROM collections WHERE id = ?")
         .bind(&collection_id)
         .execute(state.db.pool())
         .await?;
@@ -256,7 +255,7 @@ pub async fn add_item(
     Json(req): Json<AddItemRequest>,
 ) -> ServerResult<impl IntoResponse> {
     // Verify collection ownership
-    let user_id: String = sqlx::query_scalar("SELECT user_id FROM collections WHERE id = ?")
+    let user_id: String = crate::db::query_scalar("SELECT user_id FROM collections WHERE id = ?")
         .bind(&collection_id)
         .fetch_one(state.db.pool())
         .await
@@ -272,7 +271,7 @@ pub async fn add_item(
     let _media = state.library.get_media(&req.media_id).await?;
 
     // Check if item already in collection
-    let exists = sqlx::query_scalar::<_, i64>(
+    let exists = crate::db::query_scalar::<i64, _>(
         "SELECT COUNT(*) FROM collection_items WHERE collection_id = ? AND media_id = ?",
     )
     .bind(&collection_id)
@@ -291,7 +290,7 @@ pub async fn add_item(
         pos
     } else {
         // Add to end
-        let max_pos: Option<i32> = sqlx::query_scalar(
+        let max_pos: Option<i32> = crate::db::query_scalar(
             "SELECT MAX(position) FROM collection_items WHERE collection_id = ?",
         )
         .bind(&collection_id)
@@ -303,7 +302,7 @@ pub async fn add_item(
 
     let item = CollectionItem::new(collection_id, req.media_id, position);
 
-    sqlx::query(
+    crate::db::query(
         r"
         INSERT INTO collection_items (collection_id, media_id, position, added_at)
         VALUES (?, ?, ?, ?)
@@ -326,7 +325,7 @@ pub async fn remove_item(
     Path((collection_id, media_id)): Path<(String, String)>,
 ) -> ServerResult<impl IntoResponse> {
     // Verify collection ownership
-    let user_id: String = sqlx::query_scalar("SELECT user_id FROM collections WHERE id = ?")
+    let user_id: String = crate::db::query_scalar("SELECT user_id FROM collections WHERE id = ?")
         .bind(&collection_id)
         .fetch_one(state.db.pool())
         .await
@@ -339,7 +338,7 @@ pub async fn remove_item(
     }
 
     // Remove item
-    sqlx::query("DELETE FROM collection_items WHERE collection_id = ? AND media_id = ?")
+    crate::db::query("DELETE FROM collection_items WHERE collection_id = ? AND media_id = ?")
         .bind(&collection_id)
         .bind(&media_id)
         .execute(state.db.pool())

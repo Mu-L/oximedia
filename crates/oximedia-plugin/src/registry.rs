@@ -320,7 +320,11 @@ impl PluginRegistry {
 
     /// Load a plugin from a shared library file.
     ///
-    /// Requires the `dynamic-loading` feature.
+    /// Requires the `dynamic-loading` feature. This performs **no
+    /// integrity verification** of the file before executing it — see
+    /// the security notes on [`crate::loader`] and prefer
+    /// [`PluginRegistry::load_plugin_with_digest`] wherever the expected
+    /// plugin contents are known ahead of time.
     ///
     /// # Errors
     ///
@@ -333,7 +337,7 @@ impl PluginRegistry {
     /// plugins from trusted sources.
     #[cfg(feature = "dynamic-loading")]
     pub fn load_plugin(&self, path: &Path) -> PluginResult<()> {
-        let loaded = crate::loader::LoadedPlugin::load(path)?;
+        let loaded = crate::loader::LoadedPlugin::load_unchecked(path)?;
         self.register(loaded.into_plugin())
     }
 
@@ -343,6 +347,46 @@ impl PluginRegistry {
     /// feature is not enabled.
     #[cfg(not(feature = "dynamic-loading"))]
     pub fn load_plugin(&self, _path: &Path) -> PluginResult<()> {
+        Err(PluginError::DynamicLoadingDisabled)
+    }
+
+    /// Load a plugin from a shared library file, verifying its SHA-256
+    /// digest against `expected_sha256_hex` before opening it.
+    ///
+    /// This is the **recommended** way to load a dynamic plugin: it
+    /// fails closed with [`PluginError::IntegrityMismatch`] before any
+    /// plugin code is executed if the file's contents do not match the
+    /// expected digest. See
+    /// [`crate::loader::LoadedPlugin::load_with_digest`] for the accepted
+    /// digest formats and the full trust model.
+    ///
+    /// Requires the `dynamic-loading` feature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError::DynamicLoadingDisabled`] if the feature is
+    /// not enabled, [`PluginError::IntegrityMismatch`] if the digest does
+    /// not match, or propagates other loading errors.
+    #[cfg(feature = "dynamic-loading")]
+    pub fn load_plugin_with_digest(
+        &self,
+        path: &Path,
+        expected_sha256_hex: &str,
+    ) -> PluginResult<()> {
+        let loaded = crate::loader::LoadedPlugin::load_with_digest(path, expected_sha256_hex)?;
+        self.register(loaded.into_plugin())
+    }
+
+    /// Load a plugin from a shared library file, verifying its digest first.
+    ///
+    /// This is a stub that returns an error when the `dynamic-loading`
+    /// feature is not enabled.
+    #[cfg(not(feature = "dynamic-loading"))]
+    pub fn load_plugin_with_digest(
+        &self,
+        _path: &Path,
+        _expected_sha256_hex: &str,
+    ) -> PluginResult<()> {
         Err(PluginError::DynamicLoadingDisabled)
     }
 
@@ -995,6 +1039,40 @@ mod tests {
         {
             // With dynamic loading, it will fail trying to load the file
             assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn test_load_plugin_with_digest_rejects_mismatch() {
+        let registry = PluginRegistry::empty();
+
+        #[cfg(not(feature = "dynamic-loading"))]
+        {
+            let result = registry
+                .load_plugin_with_digest(Path::new("/nonexistent.so"), "0".repeat(64).as_str());
+            assert!(result.is_err());
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("Dynamic loading not enabled"));
+        }
+
+        #[cfg(feature = "dynamic-loading")]
+        {
+            let dir = std::env::temp_dir().join("oximedia-plugin-registry-test-digest");
+            std::fs::create_dir_all(&dir).expect("dir creation should succeed");
+            let fake_lib = dir.join("fake_plugin.so");
+            std::fs::write(&fake_lib, b"not a real library").expect("write should succeed");
+
+            let wrong_digest = "0".repeat(64);
+            let result = registry.load_plugin_with_digest(&fake_lib, &wrong_digest);
+            assert!(result.is_err());
+            assert!(matches!(
+                result.unwrap_err(),
+                PluginError::IntegrityMismatch { .. }
+            ));
+
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 }

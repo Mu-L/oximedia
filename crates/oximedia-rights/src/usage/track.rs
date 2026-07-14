@@ -2,8 +2,6 @@
 
 use crate::{database::RightsDatabase, rights::UsageType, usage::UsageLog, Result};
 use chrono::{DateTime, Utc};
-#[cfg(not(target_arch = "wasm32"))]
-use sqlx::Row;
 
 /// Usage tracker
 pub struct UsageTracker<'a> {
@@ -40,12 +38,16 @@ impl<'a> UsageTracker<'a> {
 
     /// Get usage count for an asset
     pub async fn get_usage_count(&self, asset_id: &str) -> Result<u32> {
-        let row = sqlx::query("SELECT COUNT(*) as count FROM usage_logs WHERE asset_id = ?")
-            .bind(asset_id)
-            .fetch_one(self.db.pool())
+        let row = self
+            .db
+            .pool()
+            .query_one(
+                "SELECT COUNT(*) as count FROM usage_logs WHERE asset_id = $1",
+                &[&asset_id],
+            )
             .await?;
 
-        Ok(row.get::<i64, _>("count") as u32)
+        Ok(row.try_get::<i64>("count")? as u32)
     }
 
     /// Get usage count for an asset within a date range
@@ -55,16 +57,16 @@ impl<'a> UsageTracker<'a> {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> Result<u32> {
-        let row = sqlx::query(
-            "SELECT COUNT(*) as count FROM usage_logs WHERE asset_id = ? AND usage_date >= ? AND usage_date <= ?"
-        )
-        .bind(asset_id)
-        .bind(start.to_rfc3339())
-        .bind(end.to_rfc3339())
-        .fetch_one(self.db.pool())
-        .await?;
+        let row = self
+            .db
+            .pool()
+            .query_one(
+                "SELECT COUNT(*) as count FROM usage_logs WHERE asset_id = $1 AND usage_date >= $2 AND usage_date <= $3",
+                &[&asset_id, &start.to_rfc3339(), &end.to_rfc3339()],
+            )
+            .await?;
 
-        Ok(row.get::<i64, _>("count") as u32)
+        Ok(row.try_get::<i64>("count")? as u32)
     }
 }
 

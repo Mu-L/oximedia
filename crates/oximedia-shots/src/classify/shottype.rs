@@ -75,7 +75,7 @@ impl ShotTypeClassifier {
     /// Classify shot type based on frame content.
     ///
     /// Feature branches are evaluated in decreasing confidence order.  As soon
-    /// as the running confidence reaches [`HIGH_CONFIDENCE_THRESHOLD`] the
+    /// as the running confidence reaches `HIGH_CONFIDENCE_THRESHOLD` the
     /// function returns immediately without evaluating any remaining branches,
     /// saving significant computation when the result is obvious.
     ///

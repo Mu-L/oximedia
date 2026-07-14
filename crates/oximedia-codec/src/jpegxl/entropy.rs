@@ -334,7 +334,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore]
     fn test_uniform_distribution() {
         let dist = uniform_distribution(4).expect("ok");
         assert_eq!(dist.num_symbols(), 4);
@@ -346,7 +345,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_distribution_from_counts() {
         let counts = [10u32, 20, 30, 0, 40];
         let dist = distribution_from_counts(&counts, 10).expect("ok");
@@ -355,7 +353,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_distribution_cumulative() {
         let symbols = vec![0, 1, 2];
         let freqs = vec![256, 512, 256];
@@ -368,7 +365,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_distribution_lookup() {
         let symbols = vec![0, 1];
         let freqs = vec![512, 512];
@@ -384,7 +380,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_ans_roundtrip_single_symbol() {
         let dist = uniform_distribution(4).expect("ok");
 
@@ -398,7 +393,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_ans_roundtrip_sequence() {
         let dist = uniform_distribution(8).expect("ok");
         let symbols_to_encode: Vec<u16> = vec![0, 3, 7, 1, 5, 2, 6, 4];
@@ -419,7 +413,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_ans_roundtrip_skewed_distribution() {
         let symbols = vec![0, 1, 2, 3];
         let freqs = vec![700, 200, 80, 20];
@@ -441,7 +434,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_ans_roundtrip_repeated_symbol() {
         let dist = uniform_distribution(4).expect("ok");
         let symbols: Vec<u16> = vec![1, 1, 1, 1, 1];
@@ -460,7 +452,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_ans_roundtrip_long_sequence() {
         let dist = uniform_distribution(16).expect("ok");
         let symbols: Vec<u16> = (0..100).map(|i| (i % 16) as u16).collect();
@@ -479,13 +470,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_empty_distribution_error() {
         assert!(AnsDistribution::new(vec![], vec![], 10).is_err());
     }
 
     #[test]
-    #[ignore]
     fn test_zero_symbol_uniform_error() {
         assert!(uniform_distribution(0).is_err());
     }

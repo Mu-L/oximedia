@@ -3,8 +3,6 @@
 use crate::{database::RightsDatabase, license::LicenseTerms, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-#[cfg(not(target_arch = "wasm32"))]
-use sqlx::Row;
 use uuid::Uuid;
 
 /// License agreement status
@@ -121,16 +119,56 @@ impl LicenseAgreement {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Decode a `license_agreements` row into a [`LicenseAgreement`].
+    fn from_row(r: &oxisql_core::Row) -> Result<Self> {
+        let terms_json: String = r.try_get("terms_json")?;
+        let terms = serde_json::from_str(&terms_json).unwrap_or_default();
+
+        let signed_date = r
+            .try_get::<Option<String>>("signed_date")?
+            .map(|s| {
+                DateTime::parse_from_rfc3339(&s)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .map_err(|e| crate::RightsError::Serialization(e.to_string()))
+            })
+            .transpose()?;
+
+        let created_at_s: String = r.try_get("created_at")?;
+        let created_at = DateTime::parse_from_rfc3339(&created_at_s)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| crate::RightsError::Serialization(e.to_string()))?;
+
+        let updated_at_s: String = r.try_get("updated_at")?;
+        let updated_at = DateTime::parse_from_rfc3339(&updated_at_s)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| crate::RightsError::Serialization(e.to_string()))?;
+
+        let status_s: String = r.try_get("status")?;
+
+        Ok(LicenseAgreement {
+            id: r.try_get("id")?,
+            grant_id: r.try_get("grant_id")?,
+            agreement_number: r.try_get("agreement_number")?,
+            terms,
+            status: AgreementStatus::from_str(&status_s),
+            signed_date,
+            created_at,
+            updated_at,
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     /// Save agreement to database
     pub async fn save(&self, db: &RightsDatabase) -> Result<()> {
         let terms_json = serde_json::to_string(&self.terms)
             .map_err(|e| crate::RightsError::Serialization(e.to_string()))?;
 
-        sqlx::query(
-            r"
+        db.pool()
+            .execute(
+                r"
             INSERT INTO license_agreements
             (id, grant_id, agreement_number, terms_json, status, signed_date, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT(id) DO UPDATE SET
                 grant_id = excluded.grant_id,
                 agreement_number = excluded.agreement_number,
@@ -139,17 +177,18 @@ impl LicenseAgreement {
                 signed_date = excluded.signed_date,
                 updated_at = excluded.updated_at
             ",
-        )
-        .bind(&self.id)
-        .bind(&self.grant_id)
-        .bind(&self.agreement_number)
-        .bind(&terms_json)
-        .bind(self.status.as_str())
-        .bind(self.signed_date.map(|d| d.to_rfc3339()))
-        .bind(self.created_at.to_rfc3339())
-        .bind(self.updated_at.to_rfc3339())
-        .execute(db.pool())
-        .await?;
+                &[
+                    &self.id,
+                    &self.grant_id,
+                    &self.agreement_number,
+                    &terms_json,
+                    &self.status.as_str(),
+                    &self.signed_date.map(|d| d.to_rfc3339()),
+                    &self.created_at.to_rfc3339(),
+                    &self.updated_at.to_rfc3339(),
+                ],
+            )
+            .await?;
 
         Ok(())
     }
@@ -157,111 +196,43 @@ impl LicenseAgreement {
     #[cfg(not(target_arch = "wasm32"))]
     /// Load agreement from database by ID
     pub async fn load(db: &RightsDatabase, id: &str) -> Result<Option<Self>> {
-        let row = sqlx::query(
-            r"
+        let row = db
+            .pool()
+            .query_optional(
+                r"
             SELECT id, grant_id, agreement_number, terms_json, status, signed_date, created_at, updated_at
-            FROM license_agreements WHERE id = ?
+            FROM license_agreements WHERE id = $1
             ",
-        )
-        .bind(id)
-        .fetch_optional(db.pool())
-        .await?;
+                &[&id],
+            )
+            .await?;
 
-        let agreement = match row {
-            None => return Ok(None),
-            Some(r) => {
-                let terms_json: String = r.get("terms_json");
-                let terms = serde_json::from_str(&terms_json).unwrap_or_default();
-
-                let signed_date = r
-                    .get::<Option<String>, _>("signed_date")
-                    .map(|s| {
-                        DateTime::parse_from_rfc3339(&s)
-                            .map(|dt| dt.with_timezone(&Utc))
-                            .map_err(|e| crate::RightsError::Serialization(e.to_string()))
-                    })
-                    .transpose()?;
-
-                let created_at = DateTime::parse_from_rfc3339(r.get("created_at"))
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .map_err(|e| crate::RightsError::Serialization(e.to_string()))?;
-
-                let updated_at = DateTime::parse_from_rfc3339(r.get("updated_at"))
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .map_err(|e| crate::RightsError::Serialization(e.to_string()))?;
-
-                LicenseAgreement {
-                    id: r.get("id"),
-                    grant_id: r.get("grant_id"),
-                    agreement_number: r.get("agreement_number"),
-                    terms,
-                    status: AgreementStatus::from_str(r.get("status")),
-                    signed_date,
-                    created_at,
-                    updated_at,
-                }
-            }
-        };
-
-        Ok(Some(agreement))
+        row.map(|r| Self::from_row(&r)).transpose()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     /// List agreements for a grant
     pub async fn list_for_grant(db: &RightsDatabase, grant_id: &str) -> Result<Vec<Self>> {
-        let rows = sqlx::query(
-            r"
+        let rows = db
+            .pool()
+            .query(
+                r"
             SELECT id, grant_id, agreement_number, terms_json, status, signed_date, created_at, updated_at
-            FROM license_agreements WHERE grant_id = ?
+            FROM license_agreements WHERE grant_id = $1
             ORDER BY created_at DESC
             ",
-        )
-        .bind(grant_id)
-        .fetch_all(db.pool())
-        .await?;
+                &[&grant_id],
+            )
+            .await?;
 
-        rows.into_iter()
-            .map(|r| {
-                let terms_json: String = r.get("terms_json");
-                let terms = serde_json::from_str(&terms_json).unwrap_or_default();
-
-                let signed_date = r
-                    .get::<Option<String>, _>("signed_date")
-                    .map(|s| {
-                        DateTime::parse_from_rfc3339(&s)
-                            .map(|dt| dt.with_timezone(&Utc))
-                            .map_err(|e| crate::RightsError::Serialization(e.to_string()))
-                    })
-                    .transpose()?;
-
-                let created_at = DateTime::parse_from_rfc3339(r.get("created_at"))
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .map_err(|e| crate::RightsError::Serialization(e.to_string()))?;
-
-                let updated_at = DateTime::parse_from_rfc3339(r.get("updated_at"))
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .map_err(|e| crate::RightsError::Serialization(e.to_string()))?;
-
-                Ok(LicenseAgreement {
-                    id: r.get("id"),
-                    grant_id: r.get("grant_id"),
-                    agreement_number: r.get("agreement_number"),
-                    terms,
-                    status: AgreementStatus::from_str(r.get("status")),
-                    signed_date,
-                    created_at,
-                    updated_at,
-                })
-            })
-            .collect()
+        rows.iter().map(Self::from_row).collect()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     /// Delete agreement from database
     pub async fn delete(db: &RightsDatabase, id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM license_agreements WHERE id = ?")
-            .bind(id)
-            .execute(db.pool())
+        db.pool()
+            .execute("DELETE FROM license_agreements WHERE id = $1", &[&id])
             .await?;
         Ok(())
     }

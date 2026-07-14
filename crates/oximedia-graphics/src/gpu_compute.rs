@@ -143,6 +143,8 @@ fn try_gpu_gaussian_blur(pixels: &mut [u8], width: u32, height: u32, sigma: f32)
         power_preference: wgpu::PowerPreference::HighPerformance,
         compatible_surface: None,
         force_fallback_adapter: false,
+        // native/trusted context; limit-bucketing is only a browser-fingerprinting mitigation
+        apply_limit_buckets: false,
     })) {
         Ok(a) => a,
         Err(_) => return false,
@@ -448,7 +450,10 @@ fn try_gpu_gaussian_blur(pixels: &mut [u8], width: u32, height: u32, sigma: f32)
 
     // ── 10. Copy result back to pixels (strip row padding) ────────────────────
     {
-        let mapped = buf_slice.get_mapped_range();
+        let mapped = match buf_slice.get_mapped_range() {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
         let src_bytes = &*mapped;
         let raw_row = raw_bytes_per_row as usize;
         let aligned_row = aligned_bytes_per_row as usize;

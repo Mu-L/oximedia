@@ -47,3 +47,7 @@ path = "tests/roundtrip.rs"
 [[test]]
 name = "read_seek"
 path = "tests/read_seek.rs"
+
+[[test]]
+name = "integer_shifts"
+path = "tests/integer_shifts.rs"

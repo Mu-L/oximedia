@@ -1,6 +1,6 @@
 //! Playout health monitoring.
 //!
-//! [`PlayoutHealth`] tracks cumulative dropped-frame and late-segment counts
+//! [`PlayoutHealth`](crate::health::PlayoutHealth) tracks cumulative dropped-frame and late-segment counts
 //! and exposes an `is_healthy` predicate that returns `false` once either
 //! counter exceeds a configurable threshold.
 //!

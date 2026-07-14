@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 //! Byte-level corruption heat map visualization and export.
 //!
-//! Given a set of [`CorruptedRegion`](crate::corruption_map::CorruptedRegion)s
+//! Given a set of [`CorruptedRegion`]s
 //! this module quantises a file into fixed-size buckets and computes a per-bucket
 //! severity score, producing a heat map that can be exported as CSV, plain-text
 //! ASCII art, or a raw severity vector for further processing.

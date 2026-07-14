@@ -34,7 +34,7 @@ fuzz_target!(|data: &[u8]| {
             },
         };
 
-        let mut decoder = match VorbisDecoder::new(config) {
+        let mut decoder = match VorbisDecoder::new(&config) {
             Ok(d) => d,
             Err(_) => continue,
         };

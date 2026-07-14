@@ -206,6 +206,86 @@ fn parse_rgb_line(line: &str) -> LutResult<[f64; 3]> {
     Ok([r, g, b])
 }
 
+/// A polymorphically-loaded `.cube` LUT: either a 1D per-channel curve or a 3D cube.
+#[derive(Clone, Debug)]
+pub enum CubeLut {
+    /// A 1D LUT parsed from a `LUT_1D_SIZE` `.cube` file.
+    Lut1d(crate::Lut1d),
+    /// A 3D LUT parsed from a `LUT_3D_SIZE` `.cube` file.
+    Lut3d(crate::Lut3d),
+}
+
+impl CubeLut {
+    /// Returns `true` if this is a 1D LUT.
+    #[must_use]
+    pub fn is_1d(&self) -> bool {
+        matches!(self, CubeLut::Lut1d(_))
+    }
+    /// Returns `true` if this is a 3D LUT.
+    #[must_use]
+    pub fn is_3d(&self) -> bool {
+        matches!(self, CubeLut::Lut3d(_))
+    }
+    /// Returns the inner 3D LUT, or `None` if this is a 1D LUT.
+    #[must_use]
+    pub fn as_3d(&self) -> Option<&crate::Lut3d> {
+        match self {
+            CubeLut::Lut3d(l) => Some(l),
+            CubeLut::Lut1d(_) => None,
+        }
+    }
+    /// Returns the inner 1D LUT, or `None` if this is a 3D LUT.
+    #[must_use]
+    pub fn as_1d(&self) -> Option<&crate::Lut1d> {
+        match self {
+            CubeLut::Lut1d(l) => Some(l),
+            CubeLut::Lut3d(_) => None,
+        }
+    }
+    /// Loads a `.cube` file, returning either variant based on its header. Mirrors [`parse_cube_any`].
+    ///
+    /// # Errors
+    /// Propagates any error from [`parse_cube_any`].
+    pub fn from_file<P: AsRef<Path>>(path: P) -> LutResult<Self> {
+        parse_cube_any(path)
+    }
+}
+
+/// Parses a `.cube` LUT file polymorphically, dispatching on `LUT_1D_SIZE` vs `LUT_3D_SIZE`.
+///
+/// Unlike [`parse_cube_file`], a 1D `.cube` is accepted and returned as [`CubeLut::Lut1d`].
+///
+/// # Errors
+/// Returns [`LutError::Io`] if the file cannot be read, or [`LutError::UnsupportedFormat`] if the
+/// header declares neither a `LUT_1D_SIZE` nor a `LUT_3D_SIZE`. Parser errors are propagated.
+pub fn parse_cube_any<P: AsRef<Path>>(path: P) -> LutResult<CubeLut> {
+    let path = path.as_ref();
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut kind: Option<bool> = None; // Some(true)=1D, Some(false)=3D
+    for line in reader.lines() {
+        let line = line?;
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with("LUT_1D_SIZE") {
+            kind = Some(true);
+            break;
+        } else if line.starts_with("LUT_3D_SIZE") {
+            kind = Some(false);
+            break;
+        }
+    }
+    match kind {
+        Some(true) => Ok(CubeLut::Lut1d(crate::Lut1d::from_file(path)?)),
+        Some(false) => Ok(CubeLut::Lut3d(crate::Lut3d::from_file(path)?)),
+        None => Err(LutError::UnsupportedFormat(
+            "no LUT_1D_SIZE or LUT_3D_SIZE header found in .cube file".to_string(),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

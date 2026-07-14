@@ -63,7 +63,7 @@
 
 ## Testing
 - [x] Add visual regression tests for `lower_third.rs`, `ticker.rs`, and `scoreboard.rs` output (already implemented at tests/visual_regression.rs:97 test_lower_third_classic_dimensions, :248 test_ticker_render_dimensions_1080p, :370 test_scoreboard_render_dimensions_1080p, Wave 14 verified 2026-06-01)
-- [ ] Test `animation.rs` keyframe interpolation at boundary conditions (t=0.0, t=1.0, overshoot)
+- [x] Test `animation.rs` keyframe interpolation at boundary conditions (t=0.0, t=1.0, overshoot) (implemented at tests/easing_boundary.rs — covers `keyframe::Easing` all 24 variants: anchors @0/1, input-clamp aliasing, monotone family in-range, Back undershoot/overshoot, Elastic oscillation, Spring+CubicBezier internal clamp, Bounce in-range; Wave 28 2026-06-06)
 - [ ] Add tests for `hdr_composite.rs` tone mapping correctness against reference values
 - [ ] Test `svg_renderer.rs` with complex paths including curves, arcs, and clip regions
 - [ ] Add GPU rendering integration tests that verify `gpu.rs` output matches software path

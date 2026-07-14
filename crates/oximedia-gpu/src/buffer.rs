@@ -1,7 +1,6 @@
 //! GPU buffer management for staging and device memory
 
-use crate::{GpuDevice, GpuError, Result};
-use std::sync::Arc;
+use crate::{GpuDevice, GpuError, Result, Shared};
 use wgpu::{Buffer, BufferUsages};
 
 /// Type of GPU buffer
@@ -22,7 +21,7 @@ pub struct GpuBuffer {
     buffer: Buffer,
     size: u64,
     buffer_type: BufferType,
-    device: Arc<wgpu::Device>,
+    device: Shared<wgpu::Device>,
 }
 
 impl GpuBuffer {
@@ -51,7 +50,7 @@ impl GpuBuffer {
             buffer,
             size,
             buffer_type,
-            device: Arc::clone(device.device()),
+            device: device.device().clone(),
         })
     }
 
@@ -82,7 +81,7 @@ impl GpuBuffer {
             buffer,
             size,
             buffer_type,
-            device: Arc::clone(device.device()),
+            device: device.device().clone(),
         })
     }
 
@@ -150,7 +149,9 @@ impl GpuBuffer {
             .map_err(|e| GpuError::BufferMapping(e.to_string()))?
             .map_err(|e| GpuError::BufferMapping(e.to_string()))?;
 
-        let data = slice.get_mapped_range();
+        let data = slice
+            .get_mapped_range()
+            .map_err(|e| GpuError::BufferMapping(e.to_string()))?;
         let result = data.to_vec();
 
         drop(data);

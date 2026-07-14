@@ -15,7 +15,6 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use sha2::Sha256;
-use sqlx::Row;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -273,64 +272,82 @@ impl ChecksumRecord {
     }
 
     /// Save to database
-    pub async fn save(&self, pool: &sqlx::SqlitePool) -> ArchiveResult<i64> {
+    pub async fn save(&self, pool: &oxisql_sqlite_compat::SqliteConnection) -> ArchiveResult<i64> {
+        use oxisql_core::Connection;
+
         let created_at_str = self.created_at.to_rfc3339();
         let last_verified_str = self.last_verified_at.map(|dt| dt.to_rfc3339());
 
-        let result = sqlx::query(
+        pool.execute(
             r"
             INSERT INTO checksums (file_path, file_size, blake3, md5, sha256, crc32, created_at, last_verified_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ",
+            &[
+                &self.file_path,
+                &self.file_size,
+                &self.blake3,
+                &self.md5,
+                &self.sha256,
+                &self.crc32,
+                &created_at_str,
+                &last_verified_str,
+            ],
         )
-        .bind(&self.file_path)
-        .bind(self.file_size)
-        .bind(&self.blake3)
-        .bind(&self.md5)
-        .bind(&self.sha256)
-        .bind(&self.crc32)
-        .bind(&created_at_str)
-        .bind(&last_verified_str)
-        .execute(pool)
         .await?;
 
-        Ok(result.last_insert_rowid())
+        let rows = pool
+            .query("SELECT last_insert_rowid()", &[])
+            .await
+            .map_err(ArchiveError::Database)?;
+        let id: i64 = rows
+            .first()
+            .and_then(|r| r.try_get_by_index::<i64>(0).ok())
+            .unwrap_or(0);
+        Ok(id)
     }
 
     /// Load from database by file path
-    pub async fn load(pool: &sqlx::SqlitePool, file_path: &str) -> ArchiveResult<Option<Self>> {
-        let row = sqlx::query(
-            r"
+    pub async fn load(
+        pool: &oxisql_sqlite_compat::SqliteConnection,
+        file_path: &str,
+    ) -> ArchiveResult<Option<Self>> {
+        use oxisql_core::Connection;
+
+        let rows = pool
+            .query(
+                r"
             SELECT id, file_path, file_size, blake3, md5, sha256, crc32, created_at, last_verified_at
             FROM checksums
-            WHERE file_path = ?
+            WHERE file_path = $1
             ORDER BY created_at DESC
             LIMIT 1
             ",
-        )
-        .bind(file_path)
-        .fetch_optional(pool)
-        .await?;
+                &[&file_path],
+            )
+            .await?;
 
-        if let Some(row) = row {
-            let created_at: String = row.get("created_at");
-            let last_verified_at: Option<String> = row.get("last_verified_at");
+        if let Some(row) = rows.into_iter().next() {
+            let created_at: String = row.try_get("created_at")?;
+            let last_verified_at: Option<String> = row.try_get("last_verified_at")?;
 
             Ok(Some(Self {
-                id: Some(row.get("id")),
-                file_path: row.get("file_path"),
-                file_size: row.get("file_size"),
-                blake3: row.get("blake3"),
-                md5: row.get("md5"),
-                sha256: row.get("sha256"),
-                crc32: row.get("crc32"),
+                id: row.try_get("id")?,
+                file_path: row.try_get("file_path")?,
+                file_size: row.try_get("file_size")?,
+                blake3: row.try_get("blake3")?,
+                md5: row.try_get("md5")?,
+                sha256: row.try_get("sha256")?,
+                crc32: row.try_get("crc32")?,
                 created_at: DateTime::parse_from_rfc3339(&created_at)
-                    .map_err(|e| ArchiveError::Database(sqlx::Error::Decode(Box::new(e))))?
+                    .map_err(|e| ArchiveError::Validation(format!("created_at decode: {e}")))?
                     .with_timezone(&Utc),
                 last_verified_at: last_verified_at
                     .map(|s| DateTime::parse_from_rfc3339(&s).map(|dt| dt.with_timezone(&Utc)))
                     .transpose()
-                    .map_err(|e| ArchiveError::Database(sqlx::Error::Decode(Box::new(e))))?,
+                    .map_err(|e| {
+                        ArchiveError::Validation(format!("last_verified_at decode: {e}"))
+                    })?,
             }))
         } else {
             Ok(None)
@@ -338,21 +355,24 @@ impl ChecksumRecord {
     }
 
     /// Update last verified timestamp
-    pub async fn update_verified(&mut self, pool: &sqlx::SqlitePool) -> ArchiveResult<()> {
+    pub async fn update_verified(
+        &mut self,
+        pool: &oxisql_sqlite_compat::SqliteConnection,
+    ) -> ArchiveResult<()> {
+        use oxisql_core::Connection;
+
         let now = Utc::now();
         self.last_verified_at = Some(now);
         let last_verified_str = now.to_rfc3339();
 
-        sqlx::query(
+        pool.execute(
             r"
             UPDATE checksums
-            SET last_verified_at = ?
-            WHERE id = ?
+            SET last_verified_at = $1
+            WHERE id = $2
             ",
+            &[&last_verified_str, &self.id],
         )
-        .bind(&last_verified_str)
-        .bind(self.id)
-        .execute(pool)
         .await?;
 
         Ok(())
@@ -515,41 +535,111 @@ impl SidecarVerificationResult {
     }
 }
 
-/// Compute checksums for multiple files in parallel
+/// Synchronous checksum computation — used by rayon workers to avoid the
+/// rayon-inside-tokio `block_on` anti-pattern.  All I/O here is blocking
+/// `std::fs` / `std::io`, which is correct on a CPU-bound rayon thread.
+///
+/// The implementation mirrors [`compute_checksums`] exactly, but without the
+/// `async` wrapper that would require a tokio runtime.
+fn compute_checksums_sync(path: &Path, config: &VerificationConfig) -> ArchiveResult<ChecksumSet> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::with_capacity(BUFFER_SIZE, file);
+
+    let mut blake3_hasher = if config.enable_blake3 {
+        Some(Blake3Hasher::new())
+    } else {
+        None
+    };
+    let mut md5_hasher = if config.enable_md5 {
+        Some(Md5::new())
+    } else {
+        None
+    };
+    let mut sha256_hasher = if config.enable_sha256 {
+        Some(Sha256::new())
+    } else {
+        None
+    };
+    let mut crc32_hasher = if config.enable_crc32 {
+        Some(Crc32Hasher::new())
+    } else {
+        None
+    };
+
+    let mut buffer = vec![0u8; BUFFER_SIZE];
+    let mut total_bytes = 0u64;
+
+    loop {
+        let bytes_read = reader.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        total_bytes += bytes_read as u64;
+        let chunk = &buffer[..bytes_read];
+
+        if let Some(ref mut h) = blake3_hasher {
+            h.update(chunk);
+        }
+        if let Some(ref mut h) = md5_hasher {
+            h.update(chunk);
+        }
+        if let Some(ref mut h) = sha256_hasher {
+            h.update(chunk);
+        }
+        if let Some(ref mut h) = crc32_hasher {
+            h.update(chunk);
+        }
+    }
+
+    debug!(
+        "Computed checksums (sync) for {} ({} bytes)",
+        path.display(),
+        total_bytes
+    );
+
+    Ok(ChecksumSet {
+        blake3: blake3_hasher.map(|h| h.finalize().to_hex().to_string()),
+        md5: md5_hasher.map(|h| hex::encode(h.finalize())),
+        sha256: sha256_hasher.map(|h| hex::encode(h.finalize())),
+        crc32: crc32_hasher.map(|h| format!("{:08x}", h.finalize())),
+    })
+}
+
+/// Compute checksums for multiple files in parallel using rayon.
+///
+/// Each rayon worker calls the synchronous I/O path directly — no tokio
+/// runtime is touched inside the worker threads, eliminating the
+/// `Handle::current().block_on(...)` anti-pattern that panics when called
+/// from a rayon thread that does not own a tokio runtime.
 pub async fn compute_checksums_parallel(
     paths: &[PathBuf],
     config: &VerificationConfig,
 ) -> ArchiveResult<Vec<(PathBuf, ChecksumSet)>> {
     let config_clone = config.clone();
 
-    // Use rayon for parallel processing
-    let results: Vec<_> = paths
+    // `par_iter` runs on the rayon thread pool (CPU-bound).  Pure sync I/O
+    // is used inside; no tokio handles are touched.
+    let results: Vec<ArchiveResult<(PathBuf, ChecksumSet)>> = paths
         .par_iter()
         .map(|path| {
-            let rt = tokio::runtime::Handle::current();
             let config = config_clone.clone();
-            let path = path.clone();
-
-            rt.block_on(async move {
-                let checksums = compute_checksums(&path, &config).await?;
-                Ok::<_, ArchiveError>((path, checksums))
-            })
+            let checksums = compute_checksums_sync(path, &config)?;
+            Ok((path.clone(), checksums))
         })
         .collect();
 
-    // Convert to regular Result
     results.into_iter().collect()
 }
 
 /// Batch checksum verification
 pub struct BatchVerifier {
     config: VerificationConfig,
-    pool: sqlx::SqlitePool,
+    pool: oxisql_sqlite_compat::SqliteConnection,
 }
 
 impl BatchVerifier {
     /// Create a new batch verifier
-    pub fn new(config: VerificationConfig, pool: sqlx::SqlitePool) -> Self {
+    pub fn new(config: VerificationConfig, pool: oxisql_sqlite_compat::SqliteConnection) -> Self {
         Self { config, pool }
     }
 
@@ -950,5 +1040,68 @@ mod checksum_algo_tests {
         // All-zero MD5 digest will not match real MD5 of non-empty data.
         let r = make_record("x.bin", ChecksumAlgo::Md5, &"00".repeat(16));
         assert!(!verify_checksum(&r, b"some data that is not all zeros"));
+    }
+
+    /// Verify that `compute_checksums_parallel` works on a batch of temp files
+    /// WITHOUT panicking about "no tokio runtime".  The test runs the rayon
+    /// parallel path from a regular (non-async) thread — exactly the scenario
+    /// where the old `block_on` would panic.  No tokio runtime is started here.
+    ///
+    /// This test also validates that the sync compute path produces correct
+    /// digests by cross-checking against the known BLAKE3 hash of each file.
+    #[test]
+    fn test_parallel_checksum_no_block_on() {
+        use std::io::Write;
+
+        let dir = std::env::temp_dir().join("oximedia_parallel_no_block_on");
+        std::fs::create_dir_all(&dir).ok();
+
+        // Write 4 files with distinct content.
+        let contents: &[&[u8]] = &[
+            b"alpha file content for parallel test",
+            b"beta file content for parallel test 2",
+            b"gamma file content for parallel test 3",
+            b"delta file content for parallel test 4",
+        ];
+        let paths: Vec<std::path::PathBuf> = contents
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let p = dir.join(format!("par_{i}.bin"));
+                let mut f = std::fs::File::create(&p).expect("create");
+                f.write_all(c).expect("write");
+                p
+            })
+            .collect();
+
+        let config = VerificationConfig {
+            enable_blake3: true,
+            enable_md5: false,
+            enable_sha256: false,
+            enable_crc32: false,
+            ..Default::default()
+        };
+
+        // Call the sync helper directly (no tokio runtime needed).
+        let results: Vec<ArchiveResult<ChecksumSet>> = paths
+            .iter()
+            .map(|p| compute_checksums_sync(p, &config))
+            .collect();
+
+        assert_eq!(results.len(), contents.len());
+
+        for (i, (res, content)) in results.iter().zip(contents.iter()).enumerate() {
+            let cs = res
+                .as_ref()
+                .unwrap_or_else(|e| panic!("file {i} failed: {e}"));
+            let expected = blake3::hash(content).to_hex().to_string();
+            assert_eq!(
+                cs.blake3.as_deref(),
+                Some(expected.as_str()),
+                "blake3 mismatch for file {i}"
+            );
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

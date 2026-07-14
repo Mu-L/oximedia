@@ -8,7 +8,7 @@
 //! # Design
 //!
 //! [`TierCompressor`] wraps a configurable compression level and exposes a
-//! symmetric [`compress`] / [`decompress`] pair.  The codec is a simplified
+//! symmetric [`TierCompressor::compress`] / [`TierCompressor::decompress`] pair.  The codec is a simplified
 //! LZ77 variant:
 //!
 //! - The input stream is divided into 256-byte look-ahead windows.
@@ -132,7 +132,7 @@ impl TierCompressor {
     /// Compress `input` and return the compressed bytes.
     ///
     /// The compressed bytes include a header that encodes the original length;
-    /// pass them directly to [`decompress`] to recover the original.
+    /// pass them directly to [`Self::decompress`] to recover the original.
     pub fn compress(&self, input: &[u8]) -> Result<Vec<u8>, CompressorError> {
         if input.len() > u32::MAX as usize {
             return Err(CompressorError::InputTooLarge(input.len()));
@@ -186,7 +186,7 @@ impl TierCompressor {
         Ok(out)
     }
 
-    /// Decompress bytes previously produced by [`compress`].
+    /// Decompress bytes previously produced by [`Self::compress`].
     pub fn decompress(&self, input: &[u8]) -> Result<Vec<u8>, CompressorError> {
         if input.len() < HEADER_LEN {
             return Err(CompressorError::InvalidData(format!(

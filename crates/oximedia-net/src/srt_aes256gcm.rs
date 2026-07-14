@@ -22,7 +22,7 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use aes_gcm::aead::{AeadInPlace, KeyInit};
+use aes_gcm::aead::{AeadInOut, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 
 use crate::error::{NetError, NetResult};
@@ -262,7 +262,9 @@ impl Session {
         policy: KeyRotationPolicy,
         aad: Vec<u8>,
     ) -> NetResult<Self> {
-        let key = Key::<Aes256Gcm>::from_slice(key_bytes);
+        // Infallible: `key_bytes` is a statically-sized `&[u8; KEY_LEN]`, so its length
+        // is checked at compile time and `From` (not `TryFrom`) applies.
+        let key = <&Key<Aes256Gcm>>::from(key_bytes);
         let cipher = Aes256Gcm::new(key);
         Ok(Self {
             cipher,
@@ -308,7 +310,12 @@ impl Session {
     /// Returns `Err` on nonce exhaustion or AES-GCM failure.
     pub fn encrypt(&mut self, plaintext: &[u8], out: &mut Vec<u8>) -> NetResult<usize> {
         let nonce_bytes = self.nonce_gen.next()?;
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        // Infallible: `nonce_bytes` is an owned `[u8; NONCE_LEN]`, so `&nonce_bytes` is a
+        // statically-sized `&[u8; NONCE_LEN]` and `From` (not `TryFrom`) applies. Note
+        // `aes_gcm::Nonce<NonceSize>` is generic over the *size* (unlike `aead::Nonce<Cipher>`
+        // and `aes_gcm`'s own `Key<Cipher>`, which are generic over the cipher) — `_` lets
+        // inference pick `U12` from how `nonce` is used below.
+        let nonce = <&Nonce<_>>::from(&nonce_bytes);
 
         // Build buffer: salt | nonce | plaintext (to be encrypted in-place).
         // We encrypt into a temporary Vec because encrypt_in_place requires a
@@ -351,7 +358,12 @@ impl Session {
         }
         // Skip salt (bytes 0..16); extract nonce (bytes 16..28).
         let nonce_bytes = &frame[SALT_LEN..SALT_LEN + NONCE_LEN];
-        let nonce = Nonce::from_slice(nonce_bytes);
+        // Fallible: `nonce_bytes` is a runtime slice (its length is only known to be
+        // exactly NONCE_LEN by construction above, not by the type system), so `TryFrom`
+        // (not the infallible `From`) applies. See the comment in `encrypt()` above for why
+        // this is `Nonce<_>` (size-generic) rather than `Nonce<Aes256Gcm>` (cipher-generic).
+        let nonce = <&Nonce<_>>::try_from(nonce_bytes)
+            .map_err(|_| NetError::encoding("frame nonce has invalid length"))?;
 
         let mut buf = frame[SALT_LEN + NONCE_LEN..].to_vec();
         self.cipher

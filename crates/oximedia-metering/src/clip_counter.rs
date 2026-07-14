@@ -5,6 +5,17 @@
 //! counts consecutive clip samples, logs clip event timestamps, and provides
 //! statistics for broadcast quality control. Supports per-channel tracking
 //! and configurable clip thresholds.
+//!
+//! # Relationship to the main metering pipeline
+//!
+//! This module is independent of the [`crate::ebu_r128_impl::EbuR128Meter`]
+//! filter → LKFS → gating → LRA pipeline (see the crate-level docs, "Pipeline
+//! Architecture") — it shares no state with it. Run it alongside
+//! [`crate::LoudnessMeter`] on the same audio buffer to catch *sustained*
+//! digital overs, which complements (rather than duplicates) the 4×-oversampled
+//! true-peak detector's inter-sample peak measurement. See also
+//! [`crate::rms_envelope`] and [`crate::silence_detect`] for the other two
+//! complementary, independently-run QC modules.
 
 /// Threshold mode for detecting clip events.
 #[derive(Clone, Copy, Debug, PartialEq)]

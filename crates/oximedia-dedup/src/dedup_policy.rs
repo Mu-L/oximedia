@@ -362,9 +362,10 @@ pub fn apply_group_policy(files: &[String], policy: &GroupPolicy) -> Option<Grou
 pub enum GroupAction {
     /// Retain the file with the most recent modification time.
     KeepNewest,
-    /// Retain the file that is (likely) the highest quality, currently
-    /// implemented as the largest file.
-    /// A future version may use codec-aware quality scoring.
+    /// Retain the highest-quality file, ranked by a codec-aware quality score
+    /// (header-derived resolution, bit depth and effective bitrate) rather than
+    /// raw on-disk size. See [`crate::quality::quality_score`] for the formula
+    /// and its honest fallback to file size when a format cannot be probed.
     KeepHighestQuality,
     /// Retain the first file listed in the group (index 0).
     KeepFirst,
@@ -396,8 +397,10 @@ impl GroupAction {
 /// - `KeepNewest` — returns the path with the largest mtime (via
 ///   [`std::fs::metadata`]).  Paths whose metadata cannot be read are treated
 ///   as having `mtime = 0` (i.e., oldest).
-/// - `KeepHighestQuality` — returns the path with the largest on-disk size.
-///   Paths whose metadata cannot be read are treated as size 0.
+/// - `KeepHighestQuality` — returns the path with the highest codec-aware
+///   [`crate::quality::quality_score`] (resolution first, then effective bitrate,
+///   then bit depth). Formats that cannot be probed fall back to file size, so the
+///   result is never worse than a size ranking. Unreadable paths score `0.0`.
 /// - `KeepFirst` — returns `group.first().cloned()`.
 /// - `Delete` — returns `None` (all files are considered expendable).
 ///
@@ -438,17 +441,18 @@ pub fn select_keeper(
         }
 
         GroupAction::KeepHighestQuality => {
-            // TODO: replace with codec-aware quality scoring in a future release.
-            // For now, largest file is a reasonable proxy for highest quality.
-            let best = group
+            // Keep the genuinely highest-quality copy using header-derived signals
+            // (resolution, bit depth and effective bitrate) instead of raw on-disk
+            // size. `quality_score` reads each signal from the real file header and
+            // falls back to size only when a format cannot be probed, so this never
+            // regresses below the previous "largest file" behaviour. The score is
+            // computed once per file; ties resolve to the last maximum, matching
+            // the prior `max_by_key` semantics.
+            group
                 .iter()
-                .map(|p| {
-                    let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-                    (size, p)
-                })
-                .max_by_key(|(size, _)| *size)
-                .map(|(_, p)| p.clone());
-            best
+                .map(|p| (crate::quality::quality_score(p), p))
+                .max_by(|(a, _), (b, _)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(_, p)| p.clone())
         }
     }
 }
@@ -740,5 +744,47 @@ mod tests {
     fn test_select_keeper_empty_group() {
         let keeper = select_keeper(&[], &GroupAction::KeepFirst);
         assert!(keeper.is_none(), "Empty group should always return None");
+    }
+
+    /// Minimal PNG whose header reports `width`x`height`, padded to `total_size`
+    /// bytes so the on-disk size can be controlled independently of resolution.
+    fn write_png(path: &std::path::Path, width: u32, height: u32, total_size: usize) {
+        const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let mut bytes = Vec::with_capacity(total_size.max(26));
+        bytes.extend_from_slice(&PNG_SIGNATURE);
+        bytes.extend_from_slice(&13u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.push(8); // bit depth
+        bytes.push(2); // colour type
+        while bytes.len() < total_size {
+            bytes.push(0);
+        }
+        std::fs::write(path, &bytes).expect("write png");
+    }
+
+    #[test]
+    fn test_keep_highest_quality_prefers_resolution_over_size() {
+        // The headline fix: a small 4K image must beat a large SD image, which a
+        // pure file-size ranking (the old behaviour) would get wrong.
+        let dir = std::env::temp_dir().join(format!(
+            "oximedia_policy_quality_res_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let small_4k = dir.join("small_4k.png");
+        let huge_sd = dir.join("huge_sd.png");
+        write_png(&small_4k, 3840, 2160, 4_096);
+        write_png(&huge_sd, 720, 480, 4_000_000);
+
+        let group = vec![huge_sd.clone(), small_4k.clone()];
+        let keeper = select_keeper(&group, &GroupAction::KeepHighestQuality);
+        assert_eq!(
+            keeper,
+            Some(small_4k),
+            "KeepHighestQuality must keep the higher-resolution file, not the larger one"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

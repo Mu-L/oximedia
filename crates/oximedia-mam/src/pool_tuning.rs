@@ -720,4 +720,160 @@ mod tests {
         assert_eq!(sampler.total_started(), 100);
         assert_eq!(sampler.total_finished(), 100);
     }
+
+    // -----------------------------------------------------------------------
+    // Async / tokio integration tests
+    // -----------------------------------------------------------------------
+    //
+    // LoadSampler is Send + Sync, so it is safe to share across tokio tasks.
+    // These tests verify that behaviour: spawn N async tasks, each recording a
+    // started/finished pair, then assert the counters are consistent.
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_load_sampler_async_concurrent_tasks() {
+        use tokio::task;
+
+        let sampler = Arc::new(LoadSampler::new(Duration::from_secs(60)));
+        let mut handles = vec![];
+
+        // Spin up 8 tasks, each performing 20 start/finish pairs.
+        for _ in 0..8 {
+            let s = Arc::clone(&sampler);
+            handles.push(task::spawn(async move {
+                for _ in 0..20 {
+                    s.request_started();
+                    // Yield so other tasks may interleave.
+                    task::yield_now().await;
+                    s.request_finished();
+                    task::yield_now().await;
+                }
+            }));
+        }
+        for h in handles {
+            h.await.expect("task panicked");
+        }
+
+        // All 160 operations must have been recorded.
+        assert_eq!(sampler.total_started(), 160);
+        assert_eq!(sampler.total_finished(), 160);
+        // After everything is finished concurrency must be 0.
+        assert_eq!(sampler.current_concurrency(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_pool_tuner_grows_under_async_load() {
+        use tokio::task;
+
+        let sampler = Arc::new(LoadSampler::new(Duration::from_secs(60)));
+        let config = PoolConfig {
+            min_connections: 2,
+            max_connections: 20,
+            ..Default::default()
+        };
+        let tuner = Arc::new(PoolTuner::new(
+            Arc::clone(&sampler),
+            TuningStrategy::Balanced,
+            config.clone(),
+            2,
+            200,
+        ));
+
+        // Simulate high concurrency from async tasks so the tuner sees load.
+        let mut handles = vec![];
+        for _ in 0..18 {
+            let s = Arc::clone(&sampler);
+            handles.push(task::spawn(async move {
+                s.request_started();
+                task::yield_now().await;
+                // Leave in-flight so the snapshot captures them.
+            }));
+        }
+        for h in handles {
+            h.await.expect("task panicked");
+        }
+
+        // Snapshot at 18/20 → 90 % utilisation → high load → pool should grow.
+        let metrics = make_metrics(18, 2, 3, 20, 2);
+        let rec = tuner.evaluate(&metrics);
+        tuner.apply(&rec);
+
+        assert!(
+            rec.config.max_connections > config.max_connections,
+            "expected pool to grow under async high-load; got max={}",
+            rec.config.max_connections
+        );
+        // The tuner's internal config must have been updated.
+        assert_eq!(
+            tuner.current_config().max_connections,
+            rec.config.max_connections
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_pool_tuner_acquire_timeout_shortened_on_high_load() {
+        let sampler = Arc::new(LoadSampler::new(Duration::from_secs(60)));
+        let tuner = PoolTuner::new(
+            Arc::clone(&sampler),
+            TuningStrategy::Balanced,
+            PoolConfig::default(),
+            2,
+            200,
+        );
+        // High-load metrics: utilisation = 90 %.
+        let metrics = make_metrics(18, 2, 5, 20, 2);
+        let rec = tuner.evaluate(&metrics);
+        // Under high load the tuner must shorten the acquire timeout to 10 s.
+        assert_eq!(rec.config.acquire_timeout, Duration::from_secs(10));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_pool_bounds_never_violated_under_async_load() {
+        let sampler = Arc::new(LoadSampler::new(Duration::from_secs(60)));
+        let absolute_min = 2_u32;
+        let absolute_max = 50_u32;
+        let tuner = PoolTuner::new(
+            Arc::clone(&sampler),
+            TuningStrategy::Aggressive,
+            PoolConfig {
+                min_connections: 2,
+                max_connections: 20,
+                ..Default::default()
+            },
+            absolute_min,
+            absolute_max,
+        );
+
+        // Test both extremes: extreme high load and extreme low load.
+        for _ in 0..50 {
+            sampler.request_started();
+        }
+        let high_metrics = make_metrics(50, 0, 10, 50, 2);
+        let rec_high = tuner.evaluate(&high_metrics);
+        tuner.apply(&rec_high);
+        assert!(
+            rec_high.config.max_connections <= absolute_max,
+            "max must not exceed absolute_max={}; got={}",
+            absolute_max,
+            rec_high.config.max_connections
+        );
+        assert!(
+            rec_high.config.min_connections >= absolute_min,
+            "min must not go below absolute_min={}; got={}",
+            absolute_min,
+            rec_high.config.min_connections
+        );
+
+        let low_metrics = make_metrics(1, 49, 0, 50, 2);
+        let rec_low = tuner.evaluate(&low_metrics);
+        assert!(
+            rec_low.config.max_connections <= absolute_max,
+            "max must not exceed absolute_max after low-load; got={}",
+            rec_low.config.max_connections
+        );
+        assert!(
+            rec_low.config.min_connections >= absolute_min,
+            "min must not go below absolute_min after low-load; got={}",
+            rec_low.config.min_connections
+        );
+    }
 }

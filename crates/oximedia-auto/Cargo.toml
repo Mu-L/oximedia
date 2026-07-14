@@ -24,7 +24,7 @@ oximedia-edit = { workspace = true }
 thiserror = { workspace = true }
 bytes = { workspace = true }
 async-trait = { workspace = true }
-tokio = { workspace = true, features = ["sync", "time"] }
+tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 rayon = { workspace = true }
 

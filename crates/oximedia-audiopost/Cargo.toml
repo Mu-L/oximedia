@@ -24,7 +24,7 @@ oximedia-metering = { workspace = true }
 oximedia-timecode = { workspace = true }
 thiserror = { workspace = true }
 oxifft = { workspace = true }
-rubato = "2.0"
+bytes = { workspace = true }
 scirs2-core = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }

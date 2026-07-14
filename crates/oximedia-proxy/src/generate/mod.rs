@@ -5,12 +5,17 @@ pub mod encoder;
 pub mod optimizer;
 pub mod presets;
 pub mod settings;
+pub mod streaming;
 
 pub use batch::{BatchProxyGenerator, BatchResult};
 pub use encoder::{ProxyEncodeResult, ProxyEncoder};
 pub use optimizer::ProxyOptimizer;
 pub use presets::{PresetInfo, ProxyPresets};
 pub use settings::ProxyGenerationSettings;
+pub use streaming::{
+    CompleteOutcome, ConstantBitrateModel, GenerationProgress, ProgressiveProxy, ProxySegment,
+    SegmentPlan, SegmentSpec, StreamingProxyConfig, StreamingProxyGenerator,
+};
 
 use crate::Result;
 use std::path::Path;

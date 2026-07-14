@@ -267,7 +267,7 @@ pub fn analyze_to_dataframe<'py>(py: Python<'py>, path: &str) -> PyResult<Bound<
     )?;
 
     // source_path
-    let paths: Vec<&str> = std::iter::repeat(path).take(FRAME_COUNT).collect();
+    let paths: Vec<&str> = std::iter::repeat_n(path, FRAME_COUNT).collect();
     data.set_item("source_path", PyList::new(py, paths)?)?;
 
     pd.call_method1("DataFrame", (data,))
@@ -449,7 +449,7 @@ pub fn analyze_to_arrow<'py>(py: Python<'py>, path: &str) -> PyResult<Bound<'py,
     let keyframes: Vec<bool> = (0..FRAME_COUNT).map(|i| i % 30 == 0).collect();
     let psnr_vals: Vec<f64> = (0..FRAME_COUNT).map(|i| 40.0 + i as f64 * 0.01).collect();
     let ssim_vals: Vec<f64> = (0..FRAME_COUNT).map(|i| 0.98 - i as f64 * 0.0001).collect();
-    let paths: Vec<&str> = std::iter::repeat(path).take(FRAME_COUNT).collect();
+    let paths: Vec<&str> = std::iter::repeat_n(path, FRAME_COUNT).collect();
 
     let arrays: Vec<Bound<'py, PyAny>> = vec![
         pa.call_method1("array", (PyList::new(py, frame_nums)?,))?,

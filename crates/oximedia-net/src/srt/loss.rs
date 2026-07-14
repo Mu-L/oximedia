@@ -399,4 +399,97 @@ mod tests {
 
         assert_eq!(list.oldest(), Some(10));
     }
+
+    // ── New NAK range-compression tests ─────────────────────────────────────
+
+    /// `add_range(10, 20)` uses an exclusive end; adds seqs 10–19.
+    /// `compressed_ranges()` should yield exactly one range with start=10, end=19.
+    #[test]
+    fn test_loss_contiguous_run_is_one_range() {
+        let mut list = LossList::new(1000);
+        list.add_range(10, 20); // exclusive end → inserts 10..=19
+        let ranges = list.compressed_ranges();
+        assert_eq!(
+            ranges.len(),
+            1,
+            "contiguous run must compress to a single range"
+        );
+        assert_eq!(ranges[0].start, 10);
+        assert_eq!(ranges[0].end, 19);
+    }
+
+    /// Non-adjacent singletons [1, 3, 5, 7] each form their own range.
+    #[test]
+    fn test_loss_scattered_singletons_are_n_ranges() {
+        let mut list = LossList::new(1000);
+        for seq in [1u32, 3, 5, 7] {
+            list.add(seq);
+        }
+        let ranges = list.compressed_ranges();
+        assert_eq!(
+            ranges.len(),
+            4,
+            "four non-adjacent singletons must produce 4 ranges"
+        );
+    }
+
+    /// `add_range(1, 6)` inserts 1–5; `add_range(6, 11)` inserts 6–10.
+    /// In the BTreeSet, 6 == 5.wrapping_add(1) so they merge into [1, 10].
+    #[test]
+    fn test_loss_adjacent_ranges_merge() {
+        let mut list = LossList::new(1000);
+        list.add_range(1, 6); // inserts 1..=5
+        list.add_range(6, 11); // inserts 6..=10; 6 is adjacent to 5
+        let ranges = list.compressed_ranges();
+        assert_eq!(
+            ranges.len(),
+            1,
+            "adjacent ranges must merge into one; got: {:?}",
+            ranges
+        );
+        assert_eq!(ranges[0].start, 1);
+        assert_eq!(ranges[0].end, 10);
+    }
+
+    /// After `remove(12)`, `contains(12)` must be false.
+    #[test]
+    fn test_loss_remove_shrinks_range() {
+        let mut list = LossList::new(1000);
+        list.add_range(10, 16); // inserts 10..=15
+        assert!(list.contains(12), "12 should be present before remove");
+        let removed = list.remove(12);
+        assert!(removed, "remove should return true for an existing entry");
+        assert!(!list.contains(12), "12 must not be present after remove");
+        // Surrounding entries must still be present.
+        assert!(list.contains(11));
+        assert!(list.contains(13));
+    }
+
+    /// With max_entries=3, adding 5 entries only retains the first 3.
+    #[test]
+    fn test_loss_max_entries_cap() {
+        let mut list = LossList::new(3);
+        for seq in [1u32, 2, 3, 4, 5] {
+            list.add(seq);
+        }
+        assert!(
+            list.len() <= 3,
+            "len() must not exceed max_entries; got {}",
+            list.len()
+        );
+    }
+
+    /// `oldest()` must return the minimum (not insertion-order oldest) seq number.
+    #[test]
+    fn test_loss_oldest_correct() {
+        let mut list = LossList::new(1000);
+        list.add(100);
+        list.add(50);
+        list.add(200);
+        assert_eq!(
+            list.oldest(),
+            Some(50),
+            "oldest() must return the minimum seq number"
+        );
+    }
 }

@@ -1,11 +1,44 @@
 //! SRT encryption support using AES.
 //!
 //! Provides AES-128/192/256 encryption for SRT payloads.
-
-#![allow(dead_code)]
+//!
+//! # Cryptography
+//!
+//! Payload confidentiality uses real **AES-CTR** (NIST SP 800-38A) via the
+//! vetted RustCrypto `aes` + `ctr` crates: [`AesContext::encrypt`]/
+//! [`AesContext::decrypt`] select AES-128/192/256 by key length and apply
+//! the CTR keystream to the caller-supplied 16-byte IV/counter block. This
+//! replaces a previous homebrew XOR/mixing "cipher" that provided no real
+//! security.
+//!
+//! Key material is derived with real **PBKDF2-HMAC-SHA256** (RFC 8018) via
+//! [`derive_session_key`], built on the vetted `hmac` + `sha2` crates
+//! (mirroring the approach already used and tested in
+//! `crate::srt_aes256gcm::derive_key`). Salts are generated with the
+//! process-wide CSPRNG (`rand::rng()`, reseeded from OS entropy), not a
+//! plain LCG.
+//!
+//! For a fully authenticated alternative (AES-256-GCM with tamper
+//! detection), see [`crate::srt_aes256gcm`].
 
 use crate::error::{NetError, NetResult};
-use bytes::{Bytes, BytesMut};
+use aes::cipher::{KeyIvInit, StreamCipher};
+use aes::{Aes128, Aes192, Aes256};
+use bytes::Bytes;
+use ctr::Ctr128BE;
+use hmac::{Hmac, KeyInit, Mac};
+use rand::Rng;
+use sha2::Sha256;
+
+/// AES-128 in CTR mode with a 128-bit big-endian counter (full 16-byte IV
+/// used as the initial counter block).
+type Aes128Ctr = Ctr128BE<Aes128>;
+/// AES-192 in CTR mode with a 128-bit big-endian counter.
+type Aes192Ctr = Ctr128BE<Aes192>;
+/// AES-256 in CTR mode with a 128-bit big-endian counter.
+type Aes256Ctr = Ctr128BE<Aes256>;
+/// HMAC-SHA256, used as the PBKDF2 pseudo-random function.
+type HmacSha256 = Hmac<Sha256>;
 
 /// AES encryption context.
 #[derive(Debug, Clone)]
@@ -32,7 +65,7 @@ impl AesContext {
         }
 
         let salt = generate_salt();
-        let key = derive_key(passphrase.as_bytes(), &salt, key_size);
+        let key = derive_key(passphrase.as_bytes(), &salt, key_size)?;
 
         Ok(Self {
             key,
@@ -73,37 +106,29 @@ impl AesContext {
         &self.salt
     }
 
-    /// Encrypts a payload.
+    /// Encrypts a payload using real AES-CTR (NIST SP 800-38A).
+    ///
+    /// The AES variant (128/192/256) is selected by this context's key
+    /// length; `iv` is used verbatim as the initial 128-bit counter block.
     ///
     /// # Errors
     ///
-    /// Returns an error if encryption fails.
+    /// Returns an error if the stored key length is not 16, 24, or 32 bytes.
     pub fn encrypt(&self, plaintext: &[u8], iv: &[u8; 16]) -> NetResult<Bytes> {
-        // Simple CTR mode encryption (for demonstration)
-        // In production, use a proper crypto library like aes-gcm
-        let mut ciphertext = BytesMut::with_capacity(plaintext.len());
-        let mut counter_block = *iv;
-
-        for chunk in plaintext.chunks(16) {
-            let keystream = aes_encrypt_block(&self.key, &counter_block);
-
-            for (i, &byte) in chunk.iter().enumerate() {
-                ciphertext.extend_from_slice(&[byte ^ keystream[i]]);
-            }
-
-            increment_counter(&mut counter_block);
-        }
-
-        Ok(ciphertext.freeze())
+        let mut buf = plaintext.to_vec();
+        apply_aes_ctr_keystream(&self.key, iv, &mut buf)?;
+        Ok(Bytes::from(buf))
     }
 
     /// Decrypts a payload.
     ///
+    /// AES-CTR decryption is identical to encryption (XOR with the same
+    /// keystream derived from the key and counter block).
+    ///
     /// # Errors
     ///
-    /// Returns an error if decryption fails.
+    /// Returns an error if the stored key length is not 16, 24, or 32 bytes.
     pub fn decrypt(&self, ciphertext: &[u8], iv: &[u8; 16]) -> NetResult<Bytes> {
-        // CTR mode decryption is the same as encryption
         self.encrypt(ciphertext, iv)
     }
 
@@ -119,105 +144,63 @@ impl AesContext {
     }
 }
 
-/// Derives an encryption key from a passphrase using PBKDF2-like derivation.
-fn derive_key(passphrase: &[u8], salt: &[u8], key_len: usize) -> Vec<u8> {
-    // Simple key derivation (in production use PBKDF2)
-    let mut key = Vec::with_capacity(key_len);
-    let mut hash = hash_bytes(passphrase, salt);
-
-    while key.len() < key_len {
-        key.extend_from_slice(&hash);
-        hash = hash_bytes(&hash, salt);
-    }
-
-    key.truncate(key_len);
-    key
-}
-
-/// Generates a random salt.
-fn generate_salt() -> [u8; 16] {
-    // In production, use a cryptographically secure RNG
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(12345);
-
-    let mut salt = [0u8; 16];
-    let mut state = seed;
-
-    for byte in &mut salt {
-        state = lcg_next(state);
-        *byte = (state & 0xFF) as u8;
-    }
-
-    salt
-}
-
-/// Simple LCG for pseudo-random number generation.
-const fn lcg_next(state: u64) -> u64 {
-    state
-        .wrapping_mul(6_364_136_223_846_793_005)
-        .wrapping_add(1_442_695_040_888_963_407)
-}
-
-/// Simple hash function (for demonstration).
-fn hash_bytes(data: &[u8], salt: &[u8]) -> [u8; 32] {
-    let mut hash = [0u8; 32];
-    let mut state: u64 = 0x517c_c1b7_2722_0a95;
-
-    for &byte in salt {
-        state = state.wrapping_mul(31).wrapping_add(u64::from(byte));
-    }
-
-    for &byte in data {
-        state = state.wrapping_mul(31).wrapping_add(u64::from(byte));
-    }
-
-    for (i, chunk) in hash.chunks_mut(8).enumerate() {
-        state = lcg_next(state);
-        let bytes = state.to_le_bytes();
-        chunk.copy_from_slice(&bytes[..chunk.len().min(8)]);
-        state = state.wrapping_add(u64::try_from(i).unwrap_or(0));
-    }
-
-    hash
-}
-
-/// Encrypts a single AES block (simplified for demonstration).
-fn aes_encrypt_block(key: &[u8], block: &[u8; 16]) -> [u8; 16] {
-    // This is a simplified placeholder
-    // In production, use the 'aes' crate with proper AES implementation
-    let mut output = *block;
-
-    // Simple XOR with key material (not real AES!)
-    for (i, byte) in output.iter_mut().enumerate() {
-        *byte ^= key[i % key.len()];
-    }
-
-    // Add some mixing
-    for _ in 0..4 {
-        mix_block(&mut output);
-    }
-
-    output
-}
-
-/// Mixes block bytes (simplified).
-fn mix_block(block: &mut [u8; 16]) {
-    for i in 0..16 {
-        block[i] = block[i].wrapping_add(block[(i + 1) % 16]);
-        block[i] = block[i].rotate_left(3);
-    }
-}
-
-/// Increments a counter block.
-fn increment_counter(counter: &mut [u8; 16]) {
-    for byte in counter.iter_mut().rev() {
-        *byte = byte.wrapping_add(1);
-        if *byte != 0 {
-            break;
+/// Applies the AES-CTR keystream (RustCrypto `aes` + `ctr`, NIST SP 800-38A)
+/// to `buf` in place, selecting AES-128/192/256 by `key.len()`.
+///
+/// `iv` is used as the full 128-bit initial counter block (matching the
+/// `Ctr128BE` big-endian counter convention), consistent with how callers
+/// in this module derive per-packet IVs (see `SrtCryptoContext::derive_iv`
+/// and `super::connection::generate_iv`).
+///
+/// # Errors
+///
+/// Returns an error if `key.len()` is not 16, 24, or 32 bytes.
+fn apply_aes_ctr_keystream(key: &[u8], iv: &[u8; 16], buf: &mut [u8]) -> NetResult<()> {
+    match key.len() {
+        16 => {
+            let mut cipher = Aes128Ctr::new_from_slices(key, iv)
+                .map_err(|e| NetError::protocol(format!("AES-128-CTR init: {e}")))?;
+            cipher.apply_keystream(buf);
+        }
+        24 => {
+            let mut cipher = Aes192Ctr::new_from_slices(key, iv)
+                .map_err(|e| NetError::protocol(format!("AES-192-CTR init: {e}")))?;
+            cipher.apply_keystream(buf);
+        }
+        32 => {
+            let mut cipher = Aes256Ctr::new_from_slices(key, iv)
+                .map_err(|e| NetError::protocol(format!("AES-256-CTR init: {e}")))?;
+            cipher.apply_keystream(buf);
+        }
+        other => {
+            return Err(NetError::protocol(format!(
+                "Invalid AES key length: {other} bytes (must be 16, 24, or 32)"
+            )));
         }
     }
+    Ok(())
+}
+
+/// Derives an encryption key from a passphrase using real PBKDF2-HMAC-SHA256
+/// (RFC 8018).
+///
+/// # Errors
+///
+/// Propagates any (practically unreachable) HMAC initialization failure
+/// from [`derive_session_key`].
+fn derive_key(passphrase: &[u8], salt: &[u8], key_len: usize) -> NetResult<Vec<u8>> {
+    derive_session_key(passphrase, salt, key_len, KDF_ITERATIONS)
+}
+
+/// Generates a cryptographically secure random salt.
+///
+/// Uses the process CSPRNG (`rand::rng()`, backed by a CSPRNG seeded from OS
+/// entropy — see the `rand` crate's `ThreadRng` documentation), not a
+/// non-cryptographic PRNG.
+fn generate_salt() -> [u8; 16] {
+    let mut salt = [0u8; 16];
+    rand::rng().fill_bytes(&mut salt);
+    salt
 }
 
 /// Key material exchange information.
@@ -276,38 +259,54 @@ const KDF_ITERATIONS: u32 = 2048;
 /// SRT key-exchange version.
 const KM_VERSION: u8 = 1;
 
-/// Derives a session key from a passphrase and salt using an iterative
-/// PBKDF2-like approach (SHA-256 family, for demonstration).
+/// Derives a session key from a passphrase and salt using real
+/// PBKDF2-HMAC-SHA256 (RFC 8018).
 ///
-/// The function runs `iterations` rounds of the internal hash function and
-/// XORs the blocks together, producing `key_len` bytes of output.
-#[must_use]
+/// Runs `iterations` rounds of HMAC-SHA256 per 32-byte output block,
+/// XORing the intermediate `U_i` values together (the standard PBKDF2
+/// `F` function), and concatenates as many blocks as needed to produce
+/// `key_len` bytes of output. This is the same construction already used
+/// and tested in `crate::srt_aes256gcm::derive_key`, generalized here to
+/// support multi-block output and a caller-supplied iteration count.
+///
+/// # Errors
+///
+/// Returns an error if HMAC initialization fails. In practice this never
+/// happens (HMAC accepts keys — here, the passphrase — of any length), but
+/// the fallible path is propagated rather than unwrapped, per project
+/// policy.
 pub fn derive_session_key(
     passphrase: &[u8],
     salt: &[u8],
     key_len: usize,
     iterations: u32,
-) -> Vec<u8> {
-    // PRF block function: HMAC-SHA256-like using hash_bytes
+) -> NetResult<Vec<u8>> {
     let mut output = vec![0u8; key_len];
     let blocks_needed = key_len.div_ceil(32);
+    let effective_iterations = iterations.max(1);
 
     for block_idx in 0..blocks_needed {
-        // U_1 = PRF(password, salt || INT(i))
-        let mut int_bytes = [0u8; 4];
-        int_bytes[0] = ((block_idx + 1) >> 24) as u8;
-        int_bytes[1] = ((block_idx + 1) >> 16) as u8;
-        int_bytes[2] = ((block_idx + 1) >> 8) as u8;
-        int_bytes[3] = (block_idx + 1) as u8;
+        // INT(i): 4-byte big-endian block index, 1-based (PBKDF2 §5.2).
+        let block_num = u32::try_from(block_idx)
+            .map_err(|_| NetError::protocol("PBKDF2 block index overflow"))?
+            .wrapping_add(1);
 
         let mut combined_salt = salt.to_vec();
-        combined_salt.extend_from_slice(&int_bytes);
+        combined_salt.extend_from_slice(&block_num.to_be_bytes());
 
-        let mut u = hash_bytes(passphrase, &combined_salt);
+        // U_1 = HMAC-SHA256(password, salt || INT(i))
+        let mut mac = HmacSha256::new_from_slice(passphrase)
+            .map_err(|e| NetError::protocol(format!("HMAC init: {e}")))?;
+        mac.update(&combined_salt);
+        let mut u = mac.finalize().into_bytes();
         let mut t = u;
 
-        for _ in 1..iterations {
-            u = hash_bytes(passphrase, &u);
+        // U_2..U_c, T_i = U_1 XOR U_2 XOR ... XOR U_c
+        for _ in 1..effective_iterations {
+            let mut mac = HmacSha256::new_from_slice(passphrase)
+                .map_err(|e| NetError::protocol(format!("HMAC init: {e}")))?;
+            mac.update(&u);
+            u = mac.finalize().into_bytes();
             for (a, b) in t.iter_mut().zip(u.iter()) {
                 *a ^= b;
             }
@@ -318,7 +317,7 @@ pub fn derive_session_key(
         output[start..end].copy_from_slice(&t[..end - start]);
     }
 
-    output
+    Ok(output)
 }
 
 /// AES key wrapping (RFC 3394) - simplified for demonstration.
@@ -384,9 +383,9 @@ impl KeySchedule {
         odd_salt.extend_from_slice(salt);
 
         let even_key =
-            derive_session_key(passphrase.as_bytes(), &even_salt, key_size, KDF_ITERATIONS);
+            derive_session_key(passphrase.as_bytes(), &even_salt, key_size, KDF_ITERATIONS)?;
         let odd_key =
-            derive_session_key(passphrase.as_bytes(), &odd_salt, key_size, KDF_ITERATIONS);
+            derive_session_key(passphrase.as_bytes(), &odd_salt, key_size, KDF_ITERATIONS)?;
 
         Ok(Self {
             even_key,
@@ -774,7 +773,7 @@ impl PassphraseAuth {
         }
 
         let kek_salt = generate_salt();
-        let kek = derive_session_key(passphrase.as_bytes(), &kek_salt, key_size, KDF_ITERATIONS);
+        let kek = derive_session_key(passphrase.as_bytes(), &kek_salt, key_size, KDF_ITERATIONS)?;
 
         Ok(Self {
             kek,
@@ -793,7 +792,7 @@ impl PassphraseAuth {
             return Err(NetError::protocol("Invalid key size for PassphraseAuth"));
         }
 
-        let kek = derive_session_key(passphrase.as_bytes(), &salt, key_size, KDF_ITERATIONS);
+        let kek = derive_session_key(passphrase.as_bytes(), &salt, key_size, KDF_ITERATIONS)?;
 
         Ok(Self {
             kek,
@@ -912,11 +911,11 @@ mod tests {
 
     #[test]
     fn test_derive_key() {
-        let key1 = derive_key(b"password", b"salt", 16);
-        let key2 = derive_key(b"password", b"salt", 16);
+        let key1 = derive_key(b"password", b"salt", 16).expect("should succeed in test");
+        let key2 = derive_key(b"password", b"salt", 16).expect("should succeed in test");
         assert_eq!(key1, key2);
 
-        let key3 = derive_key(b"different", b"salt", 16);
+        let key3 = derive_key(b"different", b"salt", 16).expect("should succeed in test");
         assert_ne!(key1, key3);
     }
 
@@ -924,30 +923,110 @@ mod tests {
 
     #[test]
     fn test_derive_session_key_deterministic() {
-        let key1 = derive_session_key(b"mysecret", b"somesalt", 16, 10);
-        let key2 = derive_session_key(b"mysecret", b"somesalt", 16, 10);
+        let key1 =
+            derive_session_key(b"mysecret", b"somesalt", 16, 10).expect("should succeed in test");
+        let key2 =
+            derive_session_key(b"mysecret", b"somesalt", 16, 10).expect("should succeed in test");
         assert_eq!(key1, key2);
         assert_eq!(key1.len(), 16);
     }
 
     #[test]
     fn test_derive_session_key_different_passphrase() {
-        let key1 = derive_session_key(b"passA", b"salt", 16, 10);
-        let key2 = derive_session_key(b"passB", b"salt", 16, 10);
+        let key1 = derive_session_key(b"passA", b"salt", 16, 10).expect("should succeed in test");
+        let key2 = derive_session_key(b"passB", b"salt", 16, 10).expect("should succeed in test");
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_derive_session_key_different_salt() {
-        let key1 = derive_session_key(b"pass", b"saltA", 16, 10);
-        let key2 = derive_session_key(b"pass", b"saltB", 16, 10);
+        let key1 = derive_session_key(b"pass", b"saltA", 16, 10).expect("should succeed in test");
+        let key2 = derive_session_key(b"pass", b"saltB", 16, 10).expect("should succeed in test");
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_derive_session_key_32_bytes() {
-        let key = derive_session_key(b"pass", b"salt", 32, 10);
+        let key = derive_session_key(b"pass", b"salt", 32, 10).expect("should succeed in test");
         assert_eq!(key.len(), 32);
+    }
+
+    // --- Real-crypto regression tests (NIST known-answer + round-trip) ---
+
+    /// NIST SP 800-38A §F.5.1 AES-128-CTR known-answer test vector (block 1).
+    ///
+    /// This MUST fail if `AesContext::encrypt` is a homebrew XOR/mixing
+    /// "cipher" (as it previously was) instead of real AES-CTR: the fake
+    /// cipher cannot reproduce a NIST reference ciphertext.
+    #[test]
+    fn test_aes_ctr_nist_known_answer_vector() {
+        let key = hex_decode("2b7e151628aed2a6abf7158809cf4f3c");
+        let iv: [u8; 16] = hex_decode("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff")
+            .try_into()
+            .expect("16-byte IV");
+        let plaintext = hex_decode("6bc1bee22e409f96e93d7e117393172a");
+        let expected_ciphertext = hex_decode("874d6191b620e3261bef6864990db6ce");
+
+        let ctx = AesContext::from_key(&key).expect("valid 16-byte key");
+        let ciphertext = ctx
+            .encrypt(&plaintext, &iv)
+            .expect("should succeed in test");
+
+        assert_eq!(
+            ciphertext.as_ref(),
+            expected_ciphertext.as_slice(),
+            "AES-128-CTR output must match the NIST SP 800-38A known-answer vector"
+        );
+    }
+
+    /// Minimal hex decoder for the known-answer test vector above (avoids
+    /// pulling in a `hex`/`hex-literal` dependency for a single test).
+    fn hex_decode(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap_or(0))
+            .collect()
+    }
+
+    /// Round-trip encrypt -> decrypt using the same real AES-CTR path,
+    /// across all three supported key sizes.
+    #[test]
+    fn test_aes_ctr_round_trip_all_key_sizes() {
+        for key_size in [16usize, 24, 32] {
+            let key = vec![0x5Au8; key_size];
+            let ctx = AesContext::from_key(&key).expect("should succeed in test");
+            let iv = [0x11u8; 16];
+            let plaintext = b"OxiMedia SRT AES-CTR round-trip test payload, multi-block!";
+
+            let ciphertext = ctx.encrypt(plaintext, &iv).expect("should succeed in test");
+            assert_ne!(ciphertext.as_ref(), plaintext.as_slice());
+
+            let decrypted = ctx
+                .decrypt(&ciphertext, &iv)
+                .expect("should succeed in test");
+            assert_eq!(decrypted.as_ref(), plaintext.as_slice());
+        }
+    }
+
+    /// Two different keys must not produce the same ciphertext for the same
+    /// plaintext/IV (sanity check that the key material actually feeds into
+    /// the cipher, unlike a cipher that silently ignores it).
+    #[test]
+    fn test_aes_ctr_different_keys_different_ciphertext() {
+        let iv = [0x22u8; 16];
+        let plaintext = b"same plaintext, different keys";
+
+        let ctx_a = AesContext::from_key(&[0xAAu8; 16]).expect("should succeed in test");
+        let ctx_b = AesContext::from_key(&[0xBBu8; 16]).expect("should succeed in test");
+
+        let ct_a = ctx_a
+            .encrypt(plaintext, &iv)
+            .expect("should succeed in test");
+        let ct_b = ctx_b
+            .encrypt(plaintext, &iv)
+            .expect("should succeed in test");
+
+        assert_ne!(ct_a.as_ref(), ct_b.as_ref());
     }
 
     // --- KeySchedule tests ---

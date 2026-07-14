@@ -192,7 +192,7 @@ pub use metrics::{
     ApplicationMetrics, EncodingMetrics, JobMetrics, QualityMetrics, WorkerMetrics, WorkerStatus,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use metrics::{MetricsCollector, SystemMetrics};
+pub use metrics::{MetricsCollector, SystemMetrics, SystemMetricsConfig};
 pub use simple::{
     CodecMetrics, Comparison, FiredAlert, HealthCheck, HealthCheckAggregator, HealthStatus,
     NotificationAction, SimpleAlertManager, SimpleAlertRule, SimpleMetricsCollector,
@@ -484,7 +484,7 @@ mod tests {
         config
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_monitor_creation() {
         let dir = tempdir().expect("failed to create temp dir");
         let monitor = OximediaMonitor::new(fast_monitor_config(&dir))
@@ -493,7 +493,7 @@ mod tests {
         assert!(monitor.alert_manager().is_some());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_monitor_start_stop() {
         let dir = tempdir().expect("failed to create temp dir");
         let monitor = OximediaMonitor::new(fast_monitor_config(&dir))
@@ -508,7 +508,7 @@ mod tests {
         assert!(!monitor.metrics_collector().is_running().await);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_collect_metrics() {
         let dir = tempdir().expect("failed to create temp dir");
         // Enable system metrics (CPU + memory) but disable disk I/O so the

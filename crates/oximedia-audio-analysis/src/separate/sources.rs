@@ -29,7 +29,7 @@ impl SourceSeparator {
         }
 
         // Compute spectrogram
-        let spectrogram = self.compute_spectrogram(samples)?;
+        let spectrogram = self.compute_spectrogram(samples);
 
         // Apply median filtering
         let harmonic_spec = self.median_filter_horizontal(&spectrogram);
@@ -47,8 +47,7 @@ impl SourceSeparator {
     }
 
     /// Compute spectrogram.
-    #[allow(clippy::unnecessary_wraps)]
-    fn compute_spectrogram(&self, samples: &[f32]) -> Result<Vec<Vec<Complex<f64>>>> {
+    fn compute_spectrogram(&self, samples: &[f32]) -> Vec<Vec<Complex<f64>>> {
         let hop_size = self.config.hop_size;
         let window_size = self.config.fft_size;
 
@@ -72,7 +71,7 @@ impl SourceSeparator {
             spectrogram.push(fft_result);
         }
 
-        Ok(spectrogram)
+        spectrogram
     }
 
     /// Apply horizontal median filtering (enhances harmonic content).
@@ -132,8 +131,22 @@ impl SourceSeparator {
         filtered
     }
 
-    /// Synthesize audio from spectrogram using overlap-add.
-    #[allow(clippy::unnecessary_wraps)]
+    /// Synthesize audio from a (possibly median-filtered) spectrogram using
+    /// overlap-add.
+    ///
+    /// # Normalization
+    ///
+    /// `oxifft::ifft` is already normalized by `1/N`, so each `ifft_frame[i]`
+    /// is a faithful time-domain reconstruction of the original frame sample —
+    /// it must NOT be divided by `window_size` again. (An earlier version did,
+    /// attenuating the output by a factor of `window_size` ≈ 2048 and collapsing
+    /// the separated sources toward silence.)
+    ///
+    /// Because `compute_spectrogram` applies **no** analysis window, every output
+    /// sample is the plain sum of the overlapping frames that cover it. Dividing
+    /// by `window_sum` — the per-sample count of contributing frames — yields the
+    /// correct overlap-add average and reconstructs the original amplitude when
+    /// the spectrum is left unmodified.
     fn synthesize(&self, spectrogram: &[Vec<Complex<f64>>]) -> Result<Vec<f32>> {
         let hop_size = self.config.hop_size;
         let window_size = self.config.fft_size;
@@ -143,19 +156,23 @@ impl SourceSeparator {
         let mut window_sum = vec![0.0f64; output_len];
 
         for (frame_idx, frame) in spectrogram.iter().enumerate() {
+            // oxifft::ifft normalizes by 1/N internally → ifft_frame[i] is the
+            // reconstructed sample, NOT scaled by window_size.
             let ifft_frame = oxifft::ifft(frame);
 
             let start = frame_idx * hop_size;
 
             for (i, value) in ifft_frame.iter().enumerate().take(window_size) {
                 if start + i < output.len() {
-                    output[start + i] += value.re / window_size as f64;
+                    output[start + i] += value.re;
                     window_sum[start + i] += 1.0;
                 }
             }
         }
 
-        // Normalize by window sum
+        // Overlap-add average: divide by the number of frames overlapping each
+        // sample (no synthesis window was applied, so this is the correct
+        // normalization).
         for (i, &sum) in window_sum.iter().enumerate() {
             if sum > 0.0 {
                 output[i] /= sum;

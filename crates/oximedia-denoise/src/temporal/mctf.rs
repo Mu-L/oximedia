@@ -1,9 +1,9 @@
 //! Motion-Compensated Temporal Filter (MCTF).
 //!
-//! Processes a sliding window of N frames.  For each frame F[t] the filter:
-//!  1. Estimates motion vectors from F[t] to F[t-1] and F[t+1] via diamond-
+//! Processes a sliding window of N frames.  For each frame `F[t]` the filter:
+//!  1. Estimates motion vectors from `F[t]` to `F[t-1]` and `F[t+1]` via diamond-
 //!     search block matching (8×8 blocks, SAD metric).
-//!  2. Warps the reference frames toward F[t] using bilinear sub-pixel
+//!  2. Warps the reference frames toward `F[t]` using bilinear sub-pixel
 //!     interpolation.
 //!  3. Blends: `Fout[t] = w0*F[t] + w_ref*(F[t-1]_warped + F[t+1]_warped)`,
 //!     where weights are reduced for blocks with high motion magnitude to

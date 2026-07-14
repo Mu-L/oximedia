@@ -1,6 +1,6 @@
 //! Subtitle position normalisation.
 //!
-//! Converts raw [`SubtitlePosition`] values (which may use arbitrary
+//! Converts raw [`crate::style::Position`] values (which may use arbitrary
 //! coordinate systems, pixel positions, or percentage-based offsets) into a
 //! canonical [`NormalizedPosition`] with percentage-based coordinates in the
 //! range `[0.0, 100.0]` and one of three vertical placement modes:

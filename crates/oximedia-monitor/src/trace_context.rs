@@ -2,9 +2,9 @@
 //!
 //! Implements <https://www.w3.org/TR/trace-context/> with:
 //!
-//! - [`TraceParent`] — the `traceparent` header value (version, trace-id, parent-id, flags)
-//! - [`TraceState`] — the `tracestate` header value (vendor key=value pairs)
-//! - [`TraceSpan`] — a single span within a distributed trace
+//! - [`TraceParent`](crate::trace_context::TraceParent) — the `traceparent` header value (version, trace-id, parent-id, flags)
+//! - [`TraceState`](crate::trace_context::TraceState) — the `tracestate` header value (vendor key=value pairs)
+//! - [`TraceSpan`](crate::trace_context::TraceSpan) — a single span within a distributed trace
 //!
 //! IDs are generated via an LCG seeded from a caller-supplied `u64` so that
 //! tests are deterministic without requiring any PRNG dependency.

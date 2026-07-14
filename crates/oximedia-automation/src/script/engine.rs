@@ -1,6 +1,22 @@
 //! Lua scripting engine for custom automation workflows.
 //!
-//! # Sandboxing
+//! # Opt-in, C-backed feature
+//!
+//! Lua execution is gated behind the **non-default** `lua-scripting` Cargo
+//! feature (`mlua`, which embeds a vendored Lua 5.4 C interpreter via
+//! `lua-src`/`mlua-sys`). Without that feature enabled, [`ScriptEngine`]
+//! still exists and its public API is fully callable, but every method that
+//! would need an actual Lua VM returns
+//! `Err(AutomationError::Scripting("lua-scripting feature not enabled"))`
+//! instead of panicking or failing to compile. This keeps the default build
+//! of this crate 100% Pure Rust while preserving a stable public API.
+//!
+//! Enable it with:
+//! ```toml
+//! oximedia-automation = { version = "...", features = ["lua-scripting"] }
+//! ```
+//!
+//! # Sandboxing (when `lua-scripting` is enabled)
 //!
 //! The engine creates each Lua instance with a **sandboxed** environment by
 //! stripping out all standard library functions that could give a script
@@ -38,18 +54,64 @@
 //!   is fully respected.
 
 use crate::{AutomationError, Result};
+#[cfg(feature = "lua-scripting")]
 use mlua::{HookTriggers, Lua, Table, Value, VmState};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
+#[cfg(feature = "lua-scripting")]
+use std::collections::VecDeque;
+#[cfg(feature = "lua-scripting")]
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
 use std::time::Duration;
+#[cfg(not(feature = "lua-scripting"))]
+use tracing::debug;
+#[cfg(feature = "lua-scripting")]
 use tracing::{debug, error, info};
 
 /// Maximum number of compiled Lua scripts retained in the cache.
+#[cfg(feature = "lua-scripting")]
 const SCRIPT_CACHE_CAPACITY: usize = 64;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ScriptValue — Lua execution result
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Value returned from Lua script execution.
+///
+/// When the `lua-scripting` feature is enabled this is a re-export of
+/// [`mlua::Value`], the full Lua value representation (nil, boolean,
+/// integer, number, string, table, function, ...).
+///
+/// When `lua-scripting` is disabled (the default, Pure Rust build) no Lua VM
+/// is compiled into the binary, so this collapses to a minimal placeholder
+/// enum whose only variant is `Nil` — every method that would otherwise
+/// produce a real `ScriptValue` instead returns an `Err` before any value
+/// could be constructed.
+#[cfg(feature = "lua-scripting")]
+pub use mlua::Value as ScriptValue;
+
+/// Placeholder Lua value type used when the `lua-scripting` feature is
+/// disabled. See the feature-enabled [`ScriptValue`] docs for details.
+#[cfg(not(feature = "lua-scripting"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScriptValue {
+    /// No Lua runtime is available (feature disabled); always `Nil`.
+    Nil,
+}
+
+/// Build the standard "feature not enabled" error returned by every
+/// Lua-dependent method when compiled without `lua-scripting`.
+#[cfg(not(feature = "lua-scripting"))]
+fn lua_scripting_disabled_error() -> AutomationError {
+    AutomationError::Scripting(
+        "lua-scripting feature not enabled: rebuild oximedia-automation with \
+         `--features lua-scripting` to execute Lua automation scripts"
+            .to_string(),
+    )
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ScriptLimits
@@ -86,7 +148,9 @@ impl Default for ScriptLimits {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Convenience label used in error strings.
+#[cfg(feature = "lua-scripting")]
 const ERR_INSTRUCTION_LIMIT: &str = "instruction limit exceeded";
+#[cfg(feature = "lua-scripting")]
 const ERR_TIMEOUT: &str = "script execution timeout";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -126,13 +190,14 @@ impl ScriptContext {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Script cache — bounded FIFO keyed by source text hash
+// Script cache — bounded FIFO keyed by source text hash (lua-scripting only)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// A minimal bounded cache for compiled Lua bytecode.
 ///
 /// Keys are the source string; values are the raw bytecode bytes produced by
 /// dumping a compiled `mlua` function.
+#[cfg(feature = "lua-scripting")]
 struct ScriptCache {
     /// Insertion-ordered keys for FIFO eviction.
     order: VecDeque<String>,
@@ -141,6 +206,7 @@ struct ScriptCache {
     capacity: usize,
 }
 
+#[cfg(feature = "lua-scripting")]
 impl ScriptCache {
     fn new(capacity: usize) -> Self {
         Self {
@@ -175,16 +241,18 @@ impl ScriptCache {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ScriptEngine
+// ScriptEngine — `lua-scripting` enabled
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Lua scripting engine with sandboxing, script caching, and resource limits.
+#[cfg(feature = "lua-scripting")]
 pub struct ScriptEngine {
     lua: Lua,
     context: ScriptContext,
     cache: ScriptCache,
 }
 
+#[cfg(feature = "lua-scripting")]
 impl ScriptEngine {
     /// Create a new sandboxed script engine.
     pub fn new() -> Result<Self> {
@@ -285,7 +353,7 @@ impl ScriptEngine {
     // ── Execution ─────────────────────────────────────────────────────────────
 
     /// Execute Lua script, using the compiled-bytecode cache when possible.
-    pub fn execute(&self, script: &str) -> Result<Value> {
+    pub fn execute(&self, script: &str) -> Result<ScriptValue> {
         debug!("Executing Lua script (cache size: {})", self.cache.len());
 
         // Try cached bytecode first.
@@ -305,7 +373,7 @@ impl ScriptEngine {
 
     /// Execute and cache: compile the script, run it, and store the bytecode
     /// so subsequent calls hit the cache.
-    pub fn execute_cached(&mut self, script: &str) -> Result<Value> {
+    pub fn execute_cached(&mut self, script: &str) -> Result<ScriptValue> {
         // If already cached, delegate directly (avoids a borrow conflict).
         if self.cache.get(script).is_some() {
             return self.execute(script);
@@ -327,7 +395,7 @@ impl ScriptEngine {
 
     /// Execute script file (reads from filesystem — only available outside
     /// the script runtime itself).
-    pub fn execute_file(&self, path: &str) -> Result<Value> {
+    pub fn execute_file(&self, path: &str) -> Result<ScriptValue> {
         info!("Executing Lua script file: {}", path);
 
         let script = std::fs::read_to_string(path)
@@ -425,7 +493,7 @@ impl ScriptEngine {
     }
 
     /// Get Lua global variable.
-    pub fn get_global(&self, key: &str) -> Result<Value> {
+    pub fn get_global(&self, key: &str) -> Result<ScriptValue> {
         self.lua
             .globals()
             .get(key)
@@ -433,7 +501,7 @@ impl ScriptEngine {
     }
 
     /// Call Lua function.
-    pub fn call_function(&self, name: &str, args: Vec<Value>) -> Result<String> {
+    pub fn call_function(&self, name: &str, args: Vec<ScriptValue>) -> Result<String> {
         debug!("Calling Lua function: {}", name);
 
         let func: mlua::Function = self
@@ -456,6 +524,7 @@ impl ScriptEngine {
     }
 }
 
+#[cfg(feature = "lua-scripting")]
 impl Default for ScriptEngine {
     fn default() -> Self {
         // Lua::new() is infallible; apply_sandbox strips OS/IO functions which
@@ -473,7 +542,105 @@ impl Default for ScriptEngine {
     }
 }
 
-#[cfg(test)]
+// ─────────────────────────────────────────────────────────────────────────────
+// ScriptEngine — `lua-scripting` disabled (default, Pure Rust) fallback
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Lua scripting engine stub used when the `lua-scripting` feature is
+/// disabled (the default). No Lua VM is compiled in; every method that would
+/// need one returns `Err(AutomationError::Scripting(..))` describing how to
+/// enable the feature, rather than panicking.
+///
+/// [`ScriptContext`] bookkeeping (`set_variable`/`context`) still works,
+/// since it is plain Rust state independent of Lua.
+#[cfg(not(feature = "lua-scripting"))]
+pub struct ScriptEngine {
+    context: ScriptContext,
+}
+
+#[cfg(not(feature = "lua-scripting"))]
+impl ScriptEngine {
+    /// Create a new script engine stub (no Lua VM — `lua-scripting` is off).
+    pub fn new() -> Result<Self> {
+        debug!("lua-scripting feature disabled: creating no-op ScriptEngine stub");
+        Ok(Self {
+            context: ScriptContext::default(),
+        })
+    }
+
+    /// Create with context (stub — `lua-scripting` is off).
+    pub fn with_context(context: ScriptContext) -> Result<Self> {
+        Ok(Self { context })
+    }
+
+    /// Load automation API into Lua. Always errors: no Lua VM is available.
+    pub fn load_api(&self) -> Result<()> {
+        Err(lua_scripting_disabled_error())
+    }
+
+    /// Execute Lua script. Always errors: no Lua VM is available.
+    pub fn execute(&self, _script: &str) -> Result<ScriptValue> {
+        Err(lua_scripting_disabled_error())
+    }
+
+    /// Execute and cache. Always errors: no Lua VM is available.
+    pub fn execute_cached(&mut self, _script: &str) -> Result<ScriptValue> {
+        Err(lua_scripting_disabled_error())
+    }
+
+    /// Execute script file. Always errors: no Lua VM is available.
+    pub fn execute_file(&self, _path: &str) -> Result<ScriptValue> {
+        Err(lua_scripting_disabled_error())
+    }
+
+    /// Execute with resource limits. Always errors: no Lua VM is available.
+    pub fn execute_with_limits(&self, _script: &str, _limits: ScriptLimits) -> Result<()> {
+        Err(lua_scripting_disabled_error())
+    }
+
+    /// Get context (always available — pure Rust state).
+    pub fn context(&self) -> &ScriptContext {
+        &self.context
+    }
+
+    /// Set context variable. Updates the local [`ScriptContext`] only; there
+    /// is no Lua global to mirror it into since no Lua VM is available.
+    pub fn set_variable(&mut self, key: String, value: String) -> Result<()> {
+        self.context.set_variable(key, value);
+        Ok(())
+    }
+
+    /// Get Lua global variable. Always errors: no Lua VM is available.
+    pub fn get_global(&self, _key: &str) -> Result<ScriptValue> {
+        Err(lua_scripting_disabled_error())
+    }
+
+    /// Call Lua function. Always errors: no Lua VM is available.
+    pub fn call_function(&self, _name: &str, _args: Vec<ScriptValue>) -> Result<String> {
+        Err(lua_scripting_disabled_error())
+    }
+
+    /// Return the number of scripts in the bytecode cache. Always `0`: there
+    /// is no cache without a Lua VM.
+    pub fn cache_size(&self) -> usize {
+        0
+    }
+}
+
+#[cfg(not(feature = "lua-scripting"))]
+impl Default for ScriptEngine {
+    fn default() -> Self {
+        Self {
+            context: ScriptContext::default(),
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests — `lua-scripting` enabled: exercise the real Lua VM
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(all(test, feature = "lua-scripting"))]
 mod tests {
     use super::*;
 
@@ -715,6 +882,88 @@ mod tests {
 
     #[test]
     fn test_limits_default_values() {
+        let limits = ScriptLimits::default();
+        assert_eq!(limits.max_instructions, 1_000_000);
+        assert_eq!(limits.max_memory_bytes, 32 * 1024 * 1024);
+        assert_eq!(limits.max_duration, Duration::from_secs(5));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests — `lua-scripting` disabled: verify the graceful stub behaviour
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(all(test, not(feature = "lua-scripting")))]
+mod stub_tests {
+    use super::*;
+
+    #[test]
+    fn test_script_engine_creation_without_feature() {
+        let engine = ScriptEngine::new();
+        assert!(engine.is_ok());
+    }
+
+    #[test]
+    fn test_execute_without_feature_errors_gracefully() {
+        let engine = ScriptEngine::new().expect("stub new should succeed");
+        let result = engine.execute("return 1 + 1");
+        assert!(result.is_err(), "execute must error without lua-scripting");
+    }
+
+    #[test]
+    fn test_execute_cached_without_feature_errors_gracefully() {
+        let mut engine = ScriptEngine::new().expect("stub new should succeed");
+        let result = engine.execute_cached("return 1");
+        assert!(result.is_err());
+        assert_eq!(engine.cache_size(), 0);
+    }
+
+    #[test]
+    fn test_execute_with_limits_without_feature_errors_gracefully() {
+        let engine = ScriptEngine::new().expect("stub new should succeed");
+        let result = engine.execute_with_limits("local x = 1", ScriptLimits::default());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_api_without_feature_errors_gracefully() {
+        let engine = ScriptEngine::new().expect("stub new should succeed");
+        assert!(engine.load_api().is_err());
+    }
+
+    #[test]
+    fn test_get_global_without_feature_errors_gracefully() {
+        let engine = ScriptEngine::new().expect("stub new should succeed");
+        assert!(engine.get_global("anything").is_err());
+    }
+
+    #[test]
+    fn test_call_function_without_feature_errors_gracefully() {
+        let engine = ScriptEngine::new().expect("stub new should succeed");
+        assert!(engine.call_function("anything", vec![]).is_err());
+    }
+
+    #[test]
+    fn test_set_variable_still_updates_context_without_feature() {
+        let mut engine = ScriptEngine::new().expect("stub new should succeed");
+        engine
+            .set_variable("key".to_string(), "value".to_string())
+            .expect("set_variable must not fail even without lua-scripting");
+        assert_eq!(
+            engine.context().get_variable("key"),
+            Some(&"value".to_string())
+        );
+    }
+
+    #[test]
+    fn test_script_context_independent_of_feature() {
+        let mut context = ScriptContext::new();
+        context.set_variable("key".to_string(), "value".to_string());
+        assert_eq!(context.get_variable("key"), Some(&"value".to_string()));
+    }
+
+    #[test]
+    fn test_script_limits_default_independent_of_feature() {
         let limits = ScriptLimits::default();
         assert_eq!(limits.max_instructions, 1_000_000);
         assert_eq!(limits.max_memory_bytes, 32 * 1024 * 1024);

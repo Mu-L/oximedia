@@ -25,7 +25,7 @@
 //!
 //! ## Stub Injection
 //!
-//! [`inject_stub_watermark`] adds a very low-amplitude (0.001 by default)
+//! [`inject_stub_watermark`](crate::watermark_detect::inject_stub_watermark) adds a very low-amplitude (0.001 by default)
 //! sinusoidal signal at each target bin frequency to the input signal.  The
 //! payload is encoded by selectively enabling or disabling bins based on the
 //! bit pattern of the payload.

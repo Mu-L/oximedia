@@ -321,6 +321,86 @@ fn compute_rgb_to_xyz_matrix(primaries: &Primaries, white_point: &WhitePoint) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::delta_e::delta_e_2000;
+    use crate::xyz::{Lab, Xyz};
+
+    /// Compute ΔE 2000 for the full sRGB→Rec.2020→sRGB round-trip of an RGB color.
+    ///
+    /// Strategy:
+    /// 1. sRGB → XYZ₁ (via ColorSpace::rgb_to_xyz)
+    /// 2. XYZ₁ → Rec.2020 RGB (via rec2020.xyz_to_rgb)
+    /// 3. Rec.2020 RGB → XYZ₂ (via rec2020.rgb_to_xyz)
+    /// 4. XYZ₂ → sRGB RGB (via srgb.xyz_to_rgb)  →  XYZ₃
+    /// 5. Convert XYZ₁ and XYZ₃ each to Lab (D65 white point) and compute ΔE 2000.
+    fn roundtrip_srgb_rec2020_de2000(r: f64, g: f64, b: f64) -> f64 {
+        let srgb = ColorSpace::srgb().expect("sRGB color space creation should succeed");
+        let rec = ColorSpace::rec2020().expect("Rec.2020 color space creation should succeed");
+        let d65 = Xyz::d65();
+
+        // Forward: sRGB → XYZ
+        let xyz1 = srgb.rgb_to_xyz([r, g, b]);
+
+        // Through Rec.2020 and back
+        let rgb20 = rec.xyz_to_rgb(&xyz1);
+        let xyz2 = rec.rgb_to_xyz(rgb20);
+        let rgb_back = srgb.xyz_to_rgb(&xyz2);
+        let xyz3 = srgb.rgb_to_xyz(rgb_back);
+
+        // Convert both XYZ endpoints to Lab (D65) and measure ΔE 2000
+        let lab1 = Lab::from_xyz(&xyz1, &d65);
+        let lab3 = Lab::from_xyz(&xyz3, &d65);
+        delta_e_2000(&lab1, &lab3)
+    }
+
+    #[test]
+    fn test_srgb_rec2020_roundtrip_de_under_1() {
+        let colors: &[(f64, f64, f64)] = &[
+            (1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (1.0, 1.0, 1.0),
+            (0.5, 0.5, 0.5),
+            (0.2, 0.4, 0.8),
+        ];
+        for &(r, g, b) in colors {
+            let de = roundtrip_srgb_rec2020_de2000(r, g, b);
+            assert!(
+                de < 1.0,
+                "sRGB→Rec.2020→sRGB round-trip ΔE 2000 for ({r},{g},{b}) = {de:.4}, expected < 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_srgb_rec2020_roundtrip_primaries() {
+        // Primary red
+        let de_red = roundtrip_srgb_rec2020_de2000(1.0, 0.0, 0.0);
+        assert!(
+            de_red < 1.0,
+            "Red primary ΔE 2000 = {de_red:.4}, expected < 1.0"
+        );
+
+        // Primary green
+        let de_green = roundtrip_srgb_rec2020_de2000(0.0, 1.0, 0.0);
+        assert!(
+            de_green < 1.0,
+            "Green primary ΔE 2000 = {de_green:.4}, expected < 1.0"
+        );
+
+        // Primary blue
+        let de_blue = roundtrip_srgb_rec2020_de2000(0.0, 0.0, 1.0);
+        assert!(
+            de_blue < 1.0,
+            "Blue primary ΔE 2000 = {de_blue:.4}, expected < 1.0"
+        );
+
+        // White point
+        let de_white = roundtrip_srgb_rec2020_de2000(1.0, 1.0, 1.0);
+        assert!(
+            de_white < 1.0,
+            "White point ΔE 2000 = {de_white:.4}, expected < 1.0"
+        );
+    }
 
     #[test]
     fn test_srgb_white_point() {

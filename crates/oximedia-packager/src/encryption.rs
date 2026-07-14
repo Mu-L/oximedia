@@ -3,6 +3,7 @@
 use crate::config::EncryptionMethod;
 use crate::error::{PackagerError, PackagerResult};
 use bytes::{BufMut, BytesMut};
+use rand::TryRng;
 
 #[cfg(feature = "encryption")]
 use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
@@ -268,54 +269,79 @@ impl EncryptionHandler {
     }
 }
 
+/// Number of PBKDF2-HMAC-SHA256 rounds used by [`KeyGenerator::from_passphrase`].
+///
+/// `100_000` rounds meets the current OWASP minimum recommendation for
+/// PBKDF2-HMAC-SHA256 password-based key derivation.
+pub const PBKDF2_ITERATIONS: u32 = 100_000;
+
 /// Key generator for creating encryption keys.
+///
+/// All keys and IVs are generated from the operating system's cryptographically
+/// secure random number source (via [`rand::rngs::SysRng`], backed by `getrandom`).
 pub struct KeyGenerator;
 
 impl KeyGenerator {
-    /// Generate a random AES-128 key.
-    #[must_use]
-    pub fn generate_aes128_key() -> Vec<u8> {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        // Simple key generation (not cryptographically secure)
-        // In production, use a proper RNG
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-
-        let mut key = Vec::with_capacity(16);
-        for i in 0..16 {
-            #[allow(clippy::cast_possible_truncation)]
-            key.push(((now >> (i * 8)) & 0xFF) as u8);
-        }
-
-        key
+    /// Generate a cryptographically secure random AES-128 key.
+    ///
+    /// Uses the OS CSPRNG ([`rand::rngs::SysRng`]) to fill 16 bytes of key
+    /// material. Each call returns an independent, unpredictable key.
+    ///
+    /// # Errors
+    /// Returns [`PackagerError::EncryptionError`] if the operating system's
+    /// random number source is unavailable.
+    pub fn generate_aes128_key() -> PackagerResult<Vec<u8>> {
+        let mut key = vec![0u8; 16];
+        rand::rngs::SysRng.try_fill_bytes(&mut key).map_err(|e| {
+            PackagerError::EncryptionError(format!(
+                "Failed to generate secure random AES-128 key: {e}"
+            ))
+        })?;
+        Ok(key)
     }
 
-    /// Generate a random IV.
-    #[must_use]
-    pub fn generate_iv() -> Vec<u8> {
-        Self::generate_aes128_key()
+    /// Generate a cryptographically secure random initialization vector.
+    ///
+    /// # Errors
+    /// Returns [`PackagerError::EncryptionError`] if the operating system's
+    /// random number source is unavailable.
+    pub fn generate_iv() -> PackagerResult<Vec<u8>> {
+        let mut iv = vec![0u8; 16];
+        rand::rngs::SysRng.try_fill_bytes(&mut iv).map_err(|e| {
+            PackagerError::EncryptionError(format!("Failed to generate secure random IV: {e}"))
+        })?;
+        Ok(iv)
     }
 
-    /// Generate key from passphrase.
-    #[must_use]
-    pub fn from_passphrase(passphrase: &str) -> Vec<u8> {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+    /// Derive a 16-byte AES-128 key from a passphrase using PBKDF2-HMAC-SHA256.
+    ///
+    /// `salt` should be a unique, random value (at least 16 bytes recommended)
+    /// generated once per key and stored/transmitted alongside the derived key
+    /// (a salt is not secret, but it must not be reused across unrelated keys).
+    /// Callers can generate one via [`Self::generate_iv`] or any other CSPRNG
+    /// source. Uses [`PBKDF2_ITERATIONS`] rounds.
+    ///
+    /// This function is deterministic: the same `passphrase` and `salt` always
+    /// produce the same key, while different salts (or passphrases) produce
+    /// different keys.
+    ///
+    /// # Errors
+    /// Returns [`PackagerError::EncryptionError`] if the underlying HMAC
+    /// cannot be initialized (this only happens for pathological key sizes
+    /// and should not occur in practice for `str` passphrases).
+    pub fn from_passphrase(passphrase: &str, salt: &[u8]) -> PackagerResult<Vec<u8>> {
+        let mut key = [0u8; 16];
+        pbkdf2::pbkdf2::<pbkdf2::hmac::Hmac<sha2::Sha256>>(
+            passphrase.as_bytes(),
+            salt,
+            PBKDF2_ITERATIONS,
+            &mut key,
+        )
+        .map_err(|e| {
+            PackagerError::EncryptionError(format!("Failed to derive key from passphrase: {e}"))
+        })?;
 
-        let mut hasher = DefaultHasher::new();
-        passphrase.hash(&mut hasher);
-        let hash = hasher.finish();
-
-        let mut key = Vec::with_capacity(16);
-        for i in 0..16 {
-            #[allow(clippy::cast_possible_truncation)]
-            key.push(((hash >> (i * 4)) & 0xFF) as u8);
-        }
-
-        key
+        Ok(key.to_vec())
     }
 }
 
@@ -387,8 +413,64 @@ mod tests {
 
     #[test]
     fn test_key_generation() {
-        let key = KeyGenerator::generate_aes128_key();
+        let key = KeyGenerator::generate_aes128_key().expect("RNG should succeed in test");
         assert_eq!(key.len(), 16);
+    }
+
+    #[test]
+    fn test_key_generation_is_random_not_derived_from_timestamp() {
+        // Two successive calls must produce different keys (probabilistic
+        // uniqueness check for a CSPRNG). With the old timestamp-derived
+        // implementation, calls in quick succession could collide or be
+        // trivially brute-forced; a CSPRNG must not.
+        let key1 = KeyGenerator::generate_aes128_key().expect("RNG should succeed in test");
+        let key2 = KeyGenerator::generate_aes128_key().expect("RNG should succeed in test");
+        assert_eq!(key1.len(), 16);
+        assert_eq!(key2.len(), 16);
+        assert_ne!(key1, key2, "successive CSPRNG keys must not collide");
+    }
+
+    #[test]
+    fn test_iv_generation_is_random() {
+        let iv1 = KeyGenerator::generate_iv().expect("RNG should succeed in test");
+        let iv2 = KeyGenerator::generate_iv().expect("RNG should succeed in test");
+        assert_eq!(iv1.len(), 16);
+        assert_eq!(iv2.len(), 16);
+        assert_ne!(iv1, iv2, "successive CSPRNG IVs must not collide");
+    }
+
+    #[test]
+    fn test_from_passphrase_is_deterministic_for_same_salt() {
+        let salt = b"a fixed test salt of 16B";
+        let key1 = KeyGenerator::from_passphrase("correct horse battery staple", salt)
+            .expect("KDF should succeed in test");
+        let key2 = KeyGenerator::from_passphrase("correct horse battery staple", salt)
+            .expect("KDF should succeed in test");
+        assert_eq!(key1.len(), 16);
+        assert_eq!(
+            key1, key2,
+            "PBKDF2 must be deterministic for same passphrase+salt"
+        );
+    }
+
+    #[test]
+    fn test_from_passphrase_differs_for_different_salt() {
+        let key1 = KeyGenerator::from_passphrase("correct horse battery staple", b"salt-one")
+            .expect("KDF should succeed in test");
+        let key2 = KeyGenerator::from_passphrase("correct horse battery staple", b"salt-two")
+            .expect("KDF should succeed in test");
+        assert_ne!(key1, key2, "different salts must derive different keys");
+    }
+
+    #[test]
+    fn test_from_passphrase_differs_for_different_passphrase() {
+        let salt = b"a fixed test salt of 16B";
+        let key1 = KeyGenerator::from_passphrase("password one", salt).expect("KDF should succeed");
+        let key2 = KeyGenerator::from_passphrase("password two", salt).expect("KDF should succeed");
+        assert_ne!(
+            key1, key2,
+            "different passphrases must derive different keys"
+        );
     }
 
     #[test]

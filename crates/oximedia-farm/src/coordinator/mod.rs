@@ -332,13 +332,13 @@ mod tests {
         Arc::new(Coordinator::new(config).await.unwrap())
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_coordinator_creation() {
         let coord = create_test_coordinator().await;
         assert_eq!(coord.worker_count(), 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_job_submission() {
         let coord = create_test_coordinator().await;
 
@@ -360,7 +360,7 @@ mod tests {
         assert_eq!(retrieved.id, job_id);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_job_cancellation() {
         let coord = create_test_coordinator().await;
 

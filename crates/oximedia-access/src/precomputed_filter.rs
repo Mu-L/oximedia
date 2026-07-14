@@ -19,7 +19,7 @@
 //! H(z) = (b0 + b1·z⁻¹ + b2·z⁻²) / (1 + a1·z⁻¹ + a2·z⁻²)
 //! ```
 //!
-//! The [`BiquadCoefficients`] struct stores `(b0, b1, b2, a1, a2)`.
+//! The [`crate::precomputed_filter::BiquadCoefficients`] struct stores `(b0, b1, b2, a1, a2)`.
 
 use std::collections::HashMap;
 

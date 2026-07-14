@@ -4,7 +4,7 @@
 //! initialised" and "new plugin is ready".  Naive approaches drop the old
 //! plugin immediately, causing in-flight requests to fail.
 //!
-//! This module extends the basic [`GracefulReload`] pattern from
+//! This module extends the basic [`crate::hot_reload::GracefulReload`] pattern from
 //! `hot_reload` with a *double-buffered* swap strategy:
 //!
 //! 1. The **old** plugin remains active and continues handling requests.

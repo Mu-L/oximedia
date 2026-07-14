@@ -22,6 +22,6 @@ pub use system::GpuMetrics;
 #[cfg(not(target_arch = "wasm32"))]
 pub use system::{
     CpuMetrics, DiskMetrics, MemoryMetrics, NetworkMetrics, SystemMetrics, SystemMetricsCollector,
-    TemperatureMetrics,
+    SystemMetricsConfig, TemperatureMetrics,
 };
 pub use types::{Counter, Gauge, Histogram, Metric, MetricKind, MetricLabels, MetricName, Summary};

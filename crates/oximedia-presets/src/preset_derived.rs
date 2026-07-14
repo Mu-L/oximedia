@@ -2,7 +2,7 @@
 //!
 //! This module provides a higher-level, value-oriented alternative to the
 //! field-level [`crate::preset_inheritance`] registry.  Instead of working
-//! with opaque [`InheritableField`] variants you register a
+//! with opaque [`crate::preset_inheritance::InheritableField`] variants you register a
 //! [`DerivedPreset`] that carries typed [`PresetParamValue`] overrides and
 //! call [`DerivedPresetRegistry::resolve`] to obtain a flat
 //! [`ResolvedPreset`] ready for use.

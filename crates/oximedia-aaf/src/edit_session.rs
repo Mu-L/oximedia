@@ -65,7 +65,7 @@ impl UnknownProperty {
 /// Obtain one via [`AafEditSession::open`] (path-based) or
 /// [`AafEditSession::from_reader`] (generic reader).
 ///
-/// Call [`save_to`] to write the modified file back to disk.
+/// Call [`save_to`](Self::save_to) to write the modified file back to disk.
 pub struct AafEditSession {
     /// Path of the original file (if opened from disk).
     pub source_path: Option<PathBuf>,

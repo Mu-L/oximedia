@@ -3,6 +3,35 @@
 //! ELA is a forensic technique that identifies areas within an image that are at
 //! different compression levels. Modified areas will appear at a different error
 //! level than the rest of the image.
+//!
+//! # Methodology
+//!
+//! The implementation in `compute_ela` recompresses the image at a fixed
+//! JPEG quality (`ELA_QUALITY`) and measures the per-pixel Euclidean color
+//! distance between the original and the recompressed copy
+//! (`calculate_pixel_error`). Because JPEG's 8×8 block DCT quantization
+//! converges toward a stable fixed point after repeated compression at the
+//! *same* quality, regions that were compressed at a different quality (or
+//! never compressed at all, e.g. a pasted-in raw patch) exhibit a
+//! measurably different residual error than the rest of the frame — the
+//! basis of the classic "ELA hot spot" signature. Anomalies are flagged via
+//! an adaptive threshold (`mean + 2·σ`, floored at `BASE_THRESHOLD`; see
+//! `calculate_adaptive_threshold`) and via the fraction of high-error
+//! pixels in the error distribution (`analyze_error_distribution`).
+//! [`perform_ela_custom_quality`] and `analyze_regions_tiled` extend this
+//! to multi-quality and tiled/region-local analysis respectively, which
+//! helps localize small tampered regions that a single global quality level
+//! might average away.
+//!
+//! # References
+//!
+//! - N. Krawetz, "A Picture's Worth: Digital Image Analysis and
+//!   Forensics", Black Hat USA (2007) — introduces Error Level Analysis.
+//! - H. Farid, "Exposing Digital Forgeries From JPEG Ghosts", IEEE
+//!   Transactions on Information Forensics and Security, 4(1), 154–160
+//!   (2009) — the underlying "recompress and diff" principle generalized
+//!   across a range of quality factors ("JPEG ghosts"), which motivates the
+//!   multi-quality variant here.
 
 use crate::flat_array2::FlatArray2;
 use crate::{ForensicTest, ForensicsError, ForensicsResult};
@@ -14,6 +43,16 @@ const ELA_QUALITY: u8 = 90;
 
 /// Threshold for anomaly detection (adaptive)
 const BASE_THRESHOLD: f64 = 15.0;
+
+/// Block edge length (pixels) for localized ELA anomaly detection.
+const ANOMALY_BLOCK: usize = 16;
+
+/// Two-sided z-score at which a block's mean error counts as an outlier.
+const ANOMALY_Z: f64 = 2.5;
+
+/// Minimum number of connected outlier blocks that constitute a localized
+/// anomaly (isolated single-block outliers are treated as compression noise).
+const MIN_ANOMALY_BLOCKS: usize = 4;
 
 /// ELA result with detailed analysis
 #[derive(Debug, Clone)]
@@ -60,6 +99,17 @@ pub fn perform_ela(image: &RgbImage) -> ForensicsResult<ForensicTest> {
     if distribution.2 > 0.15 {
         test.tampering_detected = true;
         test.add_finding("High percentage of pixels with elevated error levels".to_string());
+    }
+
+    // A spatially-coherent block of pixels whose recompression error departs
+    // from the global error level — in either direction — localizes a spliced
+    // region even when the whole frame stays below the absolute thresholds
+    // above (e.g. a foreign patch pasted into a lightly compressed host).
+    if detect_localized_error_anomaly(&ela_result.error_map) {
+        test.tampering_detected = true;
+        test.add_finding(
+            "Localized error-level anomaly consistent with a spliced region".to_string(),
+        );
     }
 
     test.set_confidence(ela_result.confidence);
@@ -190,6 +240,95 @@ fn detect_anomalies(error_map: &FlatArray2<f64>, threshold: f64) -> bool {
     // If more than 5% of pixels are anomalous, flag as suspicious
     let anomaly_ratio = anomaly_count as f64 / total_pixels as f64;
     anomaly_ratio > 0.05
+}
+
+/// Detect a spatially-coherent region whose block-mean ELA error deviates from
+/// the global block-mean distribution by more than [`ANOMALY_Z`] standard
+/// deviations. Unlike [`detect_anomalies`], which uses an absolute error
+/// threshold, this comparison is scale-relative and two-sided, so it localizes
+/// tampering in frames whose overall error level is low (a foreign patch reads
+/// as either a hot or a cold spot relative to the host). Isolated outlier
+/// blocks — the hallmark of ordinary JPEG quantization noise — are rejected by
+/// requiring a connected cluster of at least [`MIN_ANOMALY_BLOCKS`] blocks.
+fn detect_localized_error_anomaly(error_map: &FlatArray2<f64>) -> bool {
+    let (height, width) = error_map.dim();
+    let blocks_y = height / ANOMALY_BLOCK;
+    let blocks_x = width / ANOMALY_BLOCK;
+    if blocks_x < 2 || blocks_y < 2 {
+        return false;
+    }
+
+    let mut block_means = vec![0.0_f64; blocks_x * blocks_y];
+    for by in 0..blocks_y {
+        for bx in 0..blocks_x {
+            let mut sum = 0.0;
+            for yy in by * ANOMALY_BLOCK..by * ANOMALY_BLOCK + ANOMALY_BLOCK {
+                for xx in bx * ANOMALY_BLOCK..bx * ANOMALY_BLOCK + ANOMALY_BLOCK {
+                    sum += error_map[[yy, xx]];
+                }
+            }
+            block_means[by * blocks_x + bx] = sum / (ANOMALY_BLOCK * ANOMALY_BLOCK) as f64;
+        }
+    }
+
+    let count = block_means.len() as f64;
+    let mean = block_means.iter().sum::<f64>() / count;
+    let variance = block_means.iter().map(|m| (m - mean).powi(2)).sum::<f64>() / count;
+    let std_dev = variance.sqrt();
+    if std_dev <= f64::EPSILON {
+        return false;
+    }
+
+    let cutoff = ANOMALY_Z * std_dev;
+    let outliers: Vec<bool> = block_means
+        .iter()
+        .map(|m| (m - mean).abs() > cutoff)
+        .collect();
+
+    largest_connected_cluster(&outliers, blocks_x, blocks_y) >= MIN_ANOMALY_BLOCKS
+}
+
+/// Size of the largest 8-connected cluster of `true` cells in a row-major
+/// `width × height` boolean grid.
+fn largest_connected_cluster(grid: &[bool], width: usize, height: usize) -> usize {
+    let mut visited = vec![false; grid.len()];
+    let mut best = 0;
+    let mut stack: Vec<usize> = Vec::new();
+
+    for start in 0..grid.len() {
+        if !grid[start] || visited[start] {
+            continue;
+        }
+        visited[start] = true;
+        stack.push(start);
+        let mut size = 0;
+
+        while let Some(idx) = stack.pop() {
+            size += 1;
+            let cx = idx % width;
+            let cy = idx / width;
+            for dy in -1i64..=1 {
+                for dx in -1i64..=1 {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    let nx = cx as i64 + dx;
+                    let ny = cy as i64 + dy;
+                    if nx < 0 || ny < 0 || nx as usize >= width || ny as usize >= height {
+                        continue;
+                    }
+                    let nidx = ny as usize * width + nx as usize;
+                    if grid[nidx] && !visited[nidx] {
+                        visited[nidx] = true;
+                        stack.push(nidx);
+                    }
+                }
+            }
+        }
+        best = best.max(size);
+    }
+
+    best
 }
 
 /// Analyze error distribution (low, medium, high)
@@ -628,7 +767,7 @@ pub fn analyze_regions(
 ///
 /// `x` and `y` are the top-left pixel coordinates of the tile; `score` is the
 /// mean absolute error level across the tile after JPEG recompression at
-/// [`ELA_QUALITY`].
+/// `ELA_QUALITY`.
 #[derive(Debug, Clone)]
 pub struct ElaRegion {
     /// Left pixel column of the tile.
@@ -712,6 +851,83 @@ pub fn analyze_regions_tiled_default(image: &RgbImage) -> ForensicsResult<Vec<El
 mod tests {
     use super::*;
     use image::RgbImage;
+
+    fn make_uniform_image(val: u8) -> image::RgbImage {
+        let mut img = image::RgbImage::new(64, 64);
+        for px in img.pixels_mut() {
+            *px = image::Rgb([val, val, val]);
+        }
+        img
+    }
+
+    fn add_noise(img: &image::RgbImage, level: u8) -> image::RgbImage {
+        let mut noisy = img.clone();
+        for (i, px) in noisy.pixels_mut().enumerate() {
+            let noise = (i as u8).wrapping_mul(37) % (level.max(1) * 2);
+            px[0] = px[0].saturating_add(noise).saturating_sub(level);
+        }
+        noisy
+    }
+
+    #[test]
+    fn test_ela_monotone_with_noise() {
+        // ELA mean_error should be higher for noisier images than for clean ones.
+        // JPEG quantization makes strict pixel-level monotonicity hard to guarantee
+        // for all intermediate noise levels, so we verify the key directional signal:
+        // the clean (noise=0) image has the lowest error, and the most noisy image
+        // (noise=32) has higher error than noise=0.
+        let base = make_uniform_image(128);
+        let levels: [u8; 4] = [0, 8, 16, 32];
+        let results: Vec<_> = levels
+            .iter()
+            .map(|&level| {
+                let img = if level == 0 {
+                    base.clone()
+                } else {
+                    add_noise(&base, level)
+                };
+                perform_ela_custom_quality(&img, 90).expect("ELA should succeed")
+            })
+            .collect();
+        let clean_error = results[0].mean_error;
+        let max_error = results
+            .iter()
+            .map(|r| r.mean_error)
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            max_error > clean_error,
+            "noisy images should produce higher mean_error than clean image \
+             (clean={clean_error}, errors={:?})",
+            results.iter().map(|r| r.mean_error).collect::<Vec<_>>()
+        );
+        // The most heavily noised image (level=32) must produce higher error than clean.
+        assert!(
+            results[3].mean_error > clean_error,
+            "noise=32 image should exceed clean mean_error \
+             (clean={clean_error}, noise32={})",
+            results[3].mean_error
+        );
+    }
+
+    #[test]
+    fn test_ela_base_image_low_error() {
+        let img = make_uniform_image(128);
+        let result = perform_ela_custom_quality(&img, 90).expect("ELA should succeed");
+        assert!(
+            result.mean_error < 20.0,
+            "uniform image should have low mean_error, got {}",
+            result.mean_error
+        );
+    }
+
+    #[test]
+    fn test_ela_custom_quality_no_panic() {
+        let img = make_uniform_image(64);
+        for quality in [10u8, 50, 90, 100] {
+            perform_ela_custom_quality(&img, quality)
+                .unwrap_or_else(|e| panic!("ELA panicked at quality {quality}: {e}"));
+        }
+    }
 
     #[test]
     fn test_pixel_error_calculation() {

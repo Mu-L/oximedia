@@ -234,7 +234,7 @@ impl QueryCache {
         result
     }
 
-    /// Convenience: check whether the action is allowed (see [`check`]).
+    /// Convenience: check whether the action is allowed (see [`QueryCache::check`]).
     #[must_use]
     pub fn is_allowed(&mut self, req: &CheckRequest, now: u64) -> bool {
         self.check(req, now).is_allowed()

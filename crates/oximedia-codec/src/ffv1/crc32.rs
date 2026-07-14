@@ -51,13 +51,11 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore]
     fn test_crc32_empty() {
         assert_eq!(crc32_mpeg2(&[]), 0);
     }
 
     #[test]
-    #[ignore]
     fn test_crc32_known_vector() {
         // Verify CRC is deterministic and non-trivial for known input.
         // FFV1 uses polynomial 0x04C11DB7 with initial value 0 (not 0xFFFFFFFF).
@@ -69,7 +67,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_crc32_single_byte() {
         // Verify table lookup works for single bytes.
         let crc = crc32_mpeg2(&[0x00]);
@@ -77,7 +74,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_crc32_deterministic() {
         let data = b"FFV1 lossless video codec";
         let c1 = crc32_mpeg2(data);
@@ -86,7 +82,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_crc32_different_data() {
         let a = crc32_mpeg2(b"hello");
         let b = crc32_mpeg2(b"world");

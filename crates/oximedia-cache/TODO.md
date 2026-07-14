@@ -26,7 +26,7 @@
 - [x] Add `cache_serialization` module for persisting cache state to disk on shutdown and restoring on startup (verified 2026-05-16; src/cache_serialization.rs)
 
 ## Performance
-- [ ] Replace HashMap with a more cache-friendly data structure in `lru_cache` (e.g., Swiss table) (verified-open 2026-05-16: no hashbrown/Swiss table in lru_cache.rs)
+- [x] Replace HashMap with a more cache-friendly data structure in `lru_cache` (e.g., Swiss table) (Wave 28: swapped `std::collections::HashMap` → `hashbrown::HashMap` (Swiss table, foldhash default hasher) in lru_cache.rs:8 — byte-identical public API + list-driven LRU semantics, all 529 tests pass unchanged; added benches/lru_bench.rs put/get_hit/mixed at 100K)
 - [x] Add SIMD-accelerated hash computation for `bloom_filter` FNV-1a double hashing (Wave 13: hash_batch_fnv1a, AVX2+NEON+scalar, bloom_filter.rs)
 - [x] Implement sharded LRU cache for concurrent access without global lock contention (verified 2026-05-16; src/sharded_lru.rs)
 - [x] Use arena allocation for `tiered_cache` tier entries to reduce allocator pressure (Wave 13: BumpArena, TierEntry::Arena, tiered_cache.rs)

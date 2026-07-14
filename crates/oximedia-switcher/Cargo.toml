@@ -21,10 +21,10 @@ thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["full"] }
 
 [lints.rust]
 unsafe_code = "allow"

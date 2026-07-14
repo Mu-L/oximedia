@@ -4,17 +4,17 @@
 //! This module addresses the monitoring gap left by the `gpu` feature (which
 //! only covers NVIDIA cards via NVML).  It provides:
 //!
-//! - **[`AmdGpuReader`]** — reads AMD GPU metrics from `/sys/class/drm/card*/` on
+//! - **[`AmdGpuReader`](crate::gpu_metrics_sysfs::AmdGpuReader)** — reads AMD GPU metrics from `/sys/class/drm/card*/` on
 //!   Linux.  Covers utilisation, VRAM, temperature, power draw, and clock
 //!   frequencies from the `amdgpu` kernel driver's hwmon sysfs nodes.
-//! - **[`AppleGpuMetrics`]** — reads Apple Silicon / Intel-Iris GPU metrics
+//! - **[`AppleGpuMetrics`](crate::gpu_metrics_sysfs::AppleGpuMetrics)** — reads Apple Silicon / Intel-Iris GPU metrics
 //!   from IOKit-compatible virtual paths available in macOS's `/proc`-like
 //!   `sysctl` namespace and the `powermetrics` data model exposed through
 //!   sysfs-style files in recent macOS versions.  On non-macOS targets this
 //!   struct returns zeroed metrics.
-//! - **[`GpuMetricsSnapshot`]** — a unified, vendor-agnostic GPU metrics
+//! - **[`GpuMetricsSnapshot`](crate::gpu_metrics_sysfs::GpuMetricsSnapshot)** — a unified, vendor-agnostic GPU metrics
 //!   record that both backends populate.
-//! - **[`GpuMetricsCollector`]** — aggregates metrics from all detected GPUs
+//! - **[`GpuMetricsCollector`](crate::gpu_metrics_sysfs::GpuMetricsCollector)** — aggregates metrics from all detected GPUs
 //!   (AMD + Apple) and returns a `Vec<GpuMetricsSnapshot>`.
 //!
 //! # Platform support

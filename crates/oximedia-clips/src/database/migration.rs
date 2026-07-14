@@ -1,62 +1,83 @@
 //! Database schema migration utilities.
+//!
+//! Runs against the Pure-Rust OxiSQL engine (`oxisql-sqlite-compat`); no C
+//! `libsqlite3-sys` is involved.
 
 use crate::error::ClipResult;
-use sqlx::{Row, SqlitePool};
+use oxisql_core::Connection;
+use oxisql_sqlite_compat::SqliteConnection;
 
 /// Migrates the database to the latest schema version.
 ///
 /// # Errors
 ///
 /// Returns an error if the migration fails.
-pub async fn migrate_database(pool: &SqlitePool) -> ClipResult<()> {
+pub async fn migrate_database(conn: &SqliteConnection) -> ClipResult<()> {
     // Create version table
-    sqlx::query(
+    conn.execute(
         r"
         CREATE TABLE IF NOT EXISTS schema_version (
             version INTEGER PRIMARY KEY,
             applied_at TEXT NOT NULL
         )
         ",
+        &[],
     )
-    .execute(pool)
     .await?;
 
     // Get current version
-    let current_version = get_current_version(pool).await?;
+    let current_version = get_current_version(conn).await?;
 
     // Apply migrations
     if current_version < 1 {
-        apply_migration_v1(pool).await?;
+        apply_migration_v1(conn).await?;
     }
 
     if current_version < 2 {
-        apply_migration_v2(pool).await?;
+        apply_migration_v2(conn).await?;
     }
 
     if current_version < 3 {
-        apply_migration_v3(pool).await?;
+        apply_migration_v3(conn).await?;
     }
 
     Ok(())
 }
 
-async fn get_current_version(pool: &SqlitePool) -> ClipResult<i32> {
-    let row = sqlx::query("SELECT MAX(version) as version FROM schema_version")
-        .fetch_optional(pool)
+async fn get_current_version(conn: &SqliteConnection) -> ClipResult<i64> {
+    let rows = conn
+        .query("SELECT MAX(version) FROM schema_version", &[])
         .await?;
 
-    if let Some(row) = row {
-        Ok(row.try_get("version").unwrap_or(0))
-    } else {
-        Ok(0)
-    }
+    // MAX(...) over an empty table yields a single NULL row.
+    Ok(rows
+        .first()
+        .map(|row| row.try_get_by_index::<Option<i64>>(0))
+        .transpose()?
+        .flatten()
+        .unwrap_or(0))
 }
 
-async fn apply_migration_v1(pool: &SqlitePool) -> ClipResult<()> {
+/// Records the completion of migration *version* with the current timestamp.
+///
+/// The timestamp is bound as an RFC 3339 string from the host clock instead
+/// of relying on the SQL `datetime('now')` function, keeping the statement
+/// engine-agnostic.
+async fn record_migration(conn: &SqliteConnection, version: i64) -> ClipResult<()> {
+    let applied_at = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO schema_version (version, applied_at) VALUES ($1, $2)",
+        &[&version, &applied_at],
+    )
+    .await?;
+    Ok(())
+}
+
+async fn apply_migration_v1(conn: &SqliteConnection) -> ClipResult<()> {
     // Create the core clips table.  This must happen here (and not rely on
     // storage.rs) so that the migration path is self-contained when invoked
     // directly (e.g. in tests using an in-memory database).
-    sqlx::query(
+    conn.execute(
         r"
         CREATE TABLE IF NOT EXISTS clips (
             id TEXT PRIMARY KEY,
@@ -77,23 +98,17 @@ async fn apply_migration_v1(pool: &SqlitePool) -> ClipResult<()> {
             custom_metadata TEXT
         )
         ",
+        &[],
     )
-    .execute(pool)
     .await?;
 
     // Record migration
-    sqlx::query("INSERT INTO schema_version (version, applied_at) VALUES (1, datetime('now'))")
-        .execute(pool)
-        .await?;
-
-    Ok(())
+    record_migration(conn, 1).await
 }
 
-async fn apply_migration_v2(pool: &SqlitePool) -> ClipResult<()> {
-    // Future migration placeholder
-
+async fn apply_migration_v2(conn: &SqliteConnection) -> ClipResult<()> {
     // Create bins table
-    sqlx::query(
+    conn.execute(
         r"
         CREATE TABLE IF NOT EXISTS bins (
             id TEXT PRIMARY KEY,
@@ -104,12 +119,12 @@ async fn apply_migration_v2(pool: &SqlitePool) -> ClipResult<()> {
             modified_at TEXT NOT NULL
         )
         ",
+        &[],
     )
-    .execute(pool)
     .await?;
 
     // Create clip_bins junction table
-    sqlx::query(
+    conn.execute(
         r"
         CREATE TABLE IF NOT EXISTS clip_bins (
             clip_id TEXT NOT NULL,
@@ -119,84 +134,90 @@ async fn apply_migration_v2(pool: &SqlitePool) -> ClipResult<()> {
             FOREIGN KEY (bin_id) REFERENCES bins(id) ON DELETE CASCADE
         )
         ",
+        &[],
     )
-    .execute(pool)
     .await?;
 
     // Record migration
-    sqlx::query("INSERT INTO schema_version (version, applied_at) VALUES (2, datetime('now'))")
-        .execute(pool)
-        .await?;
-
-    Ok(())
+    record_migration(conn, 2).await
 }
 
 /// Migration v3: Add indexes on `keywords` and `rating` columns for faster
 /// filtered queries.
-async fn apply_migration_v3(pool: &SqlitePool) -> ClipResult<()> {
+async fn apply_migration_v3(conn: &SqliteConnection) -> ClipResult<()> {
     // Index on the `rating` column – used heavily by rating-based filters.
-    sqlx::query(
+    conn.execute(
         r"
         CREATE INDEX IF NOT EXISTS idx_clips_rating
             ON clips (rating)
         ",
+        &[],
     )
-    .execute(pool)
     .await?;
 
     // Index on the `keywords` column – SQLite FTS5 would be ideal, but a
     // plain B-tree index on the JSON string still speeds up `LIKE '%keyword%'`
     // scans for moderate-sized libraries.
-    sqlx::query(
+    conn.execute(
         r"
         CREATE INDEX IF NOT EXISTS idx_clips_keywords
             ON clips (keywords)
         ",
+        &[],
     )
-    .execute(pool)
     .await?;
 
     // Composite index on (is_favorite, rating) for common "show favorites
     // above a threshold" queries.
-    sqlx::query(
+    conn.execute(
         r"
         CREATE INDEX IF NOT EXISTS idx_clips_favorite_rating
             ON clips (is_favorite, rating)
         ",
+        &[],
     )
-    .execute(pool)
     .await?;
 
     // Record migration
-    sqlx::query("INSERT INTO schema_version (version, applied_at) VALUES (3, datetime('now'))")
-        .execute(pool)
-        .await?;
-
-    Ok(())
+    record_migration(conn, 3).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::sqlite::SqliteConnectOptions;
-    use std::str::FromStr;
 
     #[tokio::test]
     async fn test_migration() {
-        let options = SqliteConnectOptions::from_str(":memory:")
-            .expect("operation should succeed")
-            .create_if_missing(true);
-        let pool = SqlitePool::connect_with(options)
+        let conn = SqliteConnection::open_memory()
             .await
-            .expect("connect_with should succeed");
+            .expect("open_memory should succeed");
 
-        migrate_database(&pool)
+        migrate_database(&conn)
             .await
             .expect("operation should succeed");
 
-        let version = get_current_version(&pool)
+        let version = get_current_version(&conn)
             .await
             .expect("get_current_version should succeed");
         assert!(version >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_migration_is_idempotent() {
+        let conn = SqliteConnection::open_memory()
+            .await
+            .expect("open_memory should succeed");
+
+        migrate_database(&conn)
+            .await
+            .expect("first migration should succeed");
+        migrate_database(&conn)
+            .await
+            .expect("second migration should succeed");
+
+        let version = get_current_version(&conn)
+            .await
+            .expect("get_current_version should succeed");
+        assert_eq!(version, 3, "re-running migrations must not add versions");
     }
 }

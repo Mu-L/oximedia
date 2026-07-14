@@ -4,7 +4,7 @@
 //! capable of identifying cut, gradual, dissolve, and fade transitions between
 //! scenes. Maintains a rolling frame-feature history for temporal analysis.
 //!
-//! The [`IntegralImage`](crate::integral_image::IntegralImage) type is used
+//! The [`IntegralImage`] type is used
 //! inside [`extract_features`] to compute spatial variance in O(1) per region
 //! instead of the naïve O(W×H) per query.
 
@@ -607,9 +607,9 @@ mod tests {
         let y_size = (width * height) as usize;
         let uv_size = ((width / 2) * (height / 2)) as usize;
         let mut v = Vec::with_capacity(y_size + 2 * uv_size);
-        v.extend(std::iter::repeat(y_val).take(y_size));
-        v.extend(std::iter::repeat(128u8).take(uv_size)); // U
-        v.extend(std::iter::repeat(128u8).take(uv_size)); // V
+        v.extend(std::iter::repeat_n(y_val, y_size));
+        v.extend(std::iter::repeat_n(128u8, uv_size)); // U
+        v.extend(std::iter::repeat_n(128u8, uv_size)); // V
         v
     }
 
@@ -621,8 +621,8 @@ mod tests {
             .map(|i| if i % 2 == 0 { 0u8 } else { 255u8 })
             .collect();
         let mut v = v_y;
-        v.extend(std::iter::repeat(128u8).take(uv_size));
-        v.extend(std::iter::repeat(128u8).take(uv_size));
+        v.extend(std::iter::repeat_n(128u8, uv_size));
+        v.extend(std::iter::repeat_n(128u8, uv_size));
         v
     }
 
@@ -1234,8 +1234,8 @@ mod tests {
         for i in 0..y_size {
             frame.push((i % 256) as u8);
         }
-        frame.extend(std::iter::repeat(128u8).take(uv_size));
-        frame.extend(std::iter::repeat(128u8).take(uv_size));
+        frame.extend(std::iter::repeat_n(128u8, uv_size));
+        frame.extend(std::iter::repeat_n(128u8, uv_size));
 
         let feats = extract_features(&frame, w, h, 0);
         assert!(
@@ -1257,8 +1257,8 @@ mod tests {
         for i in 0..y_size {
             frame.push(if i % 2 == 0 { 0u8 } else { 255u8 });
         }
-        frame.extend(std::iter::repeat(128u8).take(uv_size));
-        frame.extend(std::iter::repeat(128u8).take(uv_size));
+        frame.extend(std::iter::repeat_n(128u8, uv_size));
+        frame.extend(std::iter::repeat_n(128u8, uv_size));
 
         let feats = extract_features(&frame, w, h, 0);
         assert!(
@@ -1291,8 +1291,8 @@ mod tests {
         for i in 0..y_size {
             ramp_frame.push((i % 256) as u8);
         }
-        ramp_frame.extend(std::iter::repeat(128u8).take(uv_size));
-        ramp_frame.extend(std::iter::repeat(128u8).take(uv_size));
+        ramp_frame.extend(std::iter::repeat_n(128u8, uv_size));
+        ramp_frame.extend(std::iter::repeat_n(128u8, uv_size));
 
         detector.push_frame(&ramp_frame, 0, w, h);
 

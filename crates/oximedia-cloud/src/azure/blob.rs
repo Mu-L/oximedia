@@ -40,6 +40,7 @@ impl AzureBlobStorage {
     /// contains invalid base64.
     #[allow(clippy::unused_async)]
     pub async fn new(account_name: String, container_name: String) -> Result<Self> {
+        crate::tls_provider::install_default_crypto_provider();
         let access_key_b64 = std::env::var("AZURE_STORAGE_KEY")
             .map_err(|_| CloudError::Authentication("AZURE_STORAGE_KEY not set".to_string()))?;
 

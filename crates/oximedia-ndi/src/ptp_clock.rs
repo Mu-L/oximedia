@@ -174,7 +174,7 @@ impl PtpClockState {
 ///
 /// Feed [`PtpSyncSample`]s into [`PtpClock::process_sample`]; the servo
 /// adjusts the accumulated offset estimate.  The caller can query
-/// [`PtpClock::corrected_now`] to obtain the current master-time estimate.
+/// [`PtpClock::to_master_time`] to obtain the current master-time estimate.
 pub struct PtpClock {
     config: PtpServoConfig,
     state: PtpClockState,

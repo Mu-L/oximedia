@@ -7,6 +7,7 @@
 //! The graph is built from `MobNode` descriptors and explicit edge pairs
 //! `(from_mob_id, to_mob_id)`.
 
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 // ─── MobType ─────────────────────────────────────────────────────────────────
@@ -94,9 +95,18 @@ impl MobGraph {
     /// Build a `MobGraph` from a slice of nodes and a slice of directed edges.
     ///
     /// Edges are `(from_mob_id, to_mob_id)` pairs.
+    ///
+    /// The mob index (`mobs` HashMap) is built in parallel using Rayon, which
+    /// speeds up large compositions with thousands of mobs.  Edge construction
+    /// remains sequential because `HashMap::entry` is not thread-safe and the
+    /// number of edges is typically small relative to the node count.
     #[must_use]
     pub fn build(mobs: &[MobNode], references: &[(u64, u64)]) -> Self {
-        let mob_map: HashMap<u64, MobNode> = mobs.iter().map(|n| (n.mob_id, n.clone())).collect();
+        // Parallel collect: each thread processes its partition and Rayon
+        // merges the per-thread HashMaps into one via the `FromParallelIterator`
+        // implementation on `HashMap`.
+        let mob_map: HashMap<u64, MobNode> =
+            mobs.par_iter().map(|n| (n.mob_id, n.clone())).collect();
 
         let mut edge_map: HashMap<u64, Vec<u64>> = HashMap::new();
         for (from, to) in references {
@@ -956,6 +966,86 @@ mod tests {
         let path = path.expect("path to 4");
         assert_eq!(path.first(), Some(&1));
         assert_eq!(path.last(), Some(&4));
+    }
+
+    // ── Parallel build ──────────────────────────────────────────────────
+
+    /// Verify that the parallel `MobGraph::build` produces the same node map
+    /// and edge map as a reference sequential build (same inputs, both paths).
+    #[test]
+    fn test_mob_graph_parallel_build_matches_sequential() {
+        // Build a moderately large graph so rayon uses multiple threads.
+        let node_count = 500u64;
+        let nodes: Vec<MobNode> = (0..node_count)
+            .map(|i| {
+                let mob_type = match i % 4 {
+                    0 => MobType::Composition,
+                    1 => MobType::Master,
+                    2 => MobType::Source,
+                    _ => MobType::FileSrc,
+                };
+                MobNode::new(i, mob_type, format!("mob_{i}"))
+            })
+            .collect();
+
+        // Create a chain of edges: 0→1, 1→2, …, 498→499  plus some skips.
+        let mut edges: Vec<(u64, u64)> = (0..node_count - 1).map(|i| (i, i + 1)).collect();
+        // Add some fan-out edges for variety.
+        edges.push((0, 50));
+        edges.push((0, 100));
+        edges.push((100, 200));
+        edges.push((200, 400));
+
+        // Build via the (now parallel) MobGraph::build.
+        let parallel_graph = MobGraph::build(&nodes, &edges);
+
+        // Build a reference sequential graph.
+        let seq_mob_map: HashMap<u64, MobNode> =
+            nodes.iter().map(|n| (n.mob_id, n.clone())).collect();
+        let mut seq_edge_map: HashMap<u64, Vec<u64>> = HashMap::new();
+        for (from, to) in &edges {
+            seq_edge_map.entry(*from).or_default().push(*to);
+        }
+
+        // Node maps must contain identical keys and mob names.
+        assert_eq!(
+            parallel_graph.mobs.len(),
+            seq_mob_map.len(),
+            "node count mismatch"
+        );
+        for (id, node) in &seq_mob_map {
+            let par_node = parallel_graph
+                .mobs
+                .get(id)
+                .unwrap_or_else(|| panic!("mob_id {id} missing from parallel graph"));
+            assert_eq!(par_node.name, node.name, "name mismatch for mob {id}");
+            assert_eq!(
+                par_node.mob_type, node.mob_type,
+                "type mismatch for mob {id}"
+            );
+        }
+
+        // Edge maps must be identical (same keys, same destination sets —
+        // order within a destination Vec may differ due to parallelism).
+        assert_eq!(
+            parallel_graph.edges.len(),
+            seq_edge_map.len(),
+            "edge-map key count mismatch"
+        );
+        for (from, seq_tos) in &seq_edge_map {
+            let par_tos = parallel_graph
+                .edges
+                .get(from)
+                .unwrap_or_else(|| panic!("from={from} missing from parallel edge map"));
+            let mut seq_sorted = seq_tos.clone();
+            let mut par_sorted = par_tos.clone();
+            seq_sorted.sort_unstable();
+            par_sorted.sort_unstable();
+            assert_eq!(
+                seq_sorted, par_sorted,
+                "edge destinations differ for from={from}"
+            );
+        }
     }
 
     // ── Statistics extended ─────────────────────────────────────────────

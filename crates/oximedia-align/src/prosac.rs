@@ -399,7 +399,11 @@ impl ProsacEstimator {
 
 // -- Adaptive iteration count -------------------------------------------------
 
-fn adaptive_max_iterations(inlier_ratio: f64, min_samples: usize, confidence: f64) -> f64 {
+pub(crate) fn adaptive_max_iterations(
+    inlier_ratio: f64,
+    min_samples: usize,
+    confidence: f64,
+) -> f64 {
     if inlier_ratio <= 0.0 || inlier_ratio >= 1.0 {
         return 1.0;
     }

@@ -10,8 +10,6 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-#[cfg(not(target_arch = "wasm32"))]
-use sqlx::Row;
 use uuid::Uuid;
 
 /// A grant of rights from an owner for an asset
@@ -134,6 +132,52 @@ impl RightsGrant {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Decode a `rights_grants` row (all 11 columns) into a [`RightsGrant`].
+    pub(crate) fn from_row(r: &oxisql_core::Row) -> Result<Self> {
+        let territory_json: Option<String> = r.try_get("territory_json")?;
+        let territory = territory_json.and_then(|json| serde_json::from_str(&json).ok());
+
+        let usage_json: Option<String> = r.try_get("usage_restrictions_json")?;
+        let usage_restrictions = usage_json.and_then(|json| serde_json::from_str(&json).ok());
+
+        let start_date_s: String = r.try_get("start_date")?;
+        let start_date = DateTime::parse_from_rfc3339(&start_date_s)
+            .map_err(|e| RightsError::InvalidLicense(format!("Invalid start_date: {e}")))?
+            .with_timezone(&Utc);
+        let end_date = r
+            .try_get::<Option<String>>("end_date")?
+            .map(|s| {
+                DateTime::parse_from_rfc3339(&s)
+                    .map_err(|e| RightsError::InvalidLicense(format!("Invalid end_date: {e}")))
+                    .map(|dt| dt.with_timezone(&Utc))
+            })
+            .transpose()?;
+        let created_at_s: String = r.try_get("created_at")?;
+        let created_at = DateTime::parse_from_rfc3339(&created_at_s)
+            .map_err(|e| RightsError::InvalidLicense(format!("Invalid created_at: {e}")))?
+            .with_timezone(&Utc);
+        let updated_at_s: String = r.try_get("updated_at")?;
+        let updated_at = DateTime::parse_from_rfc3339(&updated_at_s)
+            .map_err(|e| RightsError::InvalidLicense(format!("Invalid updated_at: {e}")))?
+            .with_timezone(&Utc);
+        let license_type_s: String = r.try_get("license_type")?;
+
+        Ok(RightsGrant {
+            id: r.try_get("id")?,
+            asset_id: r.try_get("asset_id")?,
+            owner_id: r.try_get("owner_id")?,
+            license_type: LicenseType::from_str(&license_type_s),
+            start_date,
+            end_date,
+            is_exclusive: r.try_get::<i64>("is_exclusive")? != 0,
+            territory,
+            usage_restrictions,
+            created_at,
+            updated_at,
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     /// Save grant to database
     pub async fn save(&self, db: &RightsDatabase) -> Result<()> {
         let territory_json = self
@@ -146,12 +190,13 @@ impl RightsGrant {
             .as_ref()
             .map(|u| serde_json::to_string(u).unwrap_or_default());
 
-        sqlx::query(
-            r"
+        db.pool()
+            .execute(
+                r"
             INSERT INTO rights_grants
             (id, asset_id, owner_id, license_type, start_date, end_date,
              is_exclusive, territory_json, usage_restrictions_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             ON CONFLICT(id) DO UPDATE SET
                 asset_id = excluded.asset_id,
                 owner_id = excluded.owner_id,
@@ -163,20 +208,21 @@ impl RightsGrant {
                 usage_restrictions_json = excluded.usage_restrictions_json,
                 updated_at = excluded.updated_at
             ",
-        )
-        .bind(&self.id)
-        .bind(&self.asset_id)
-        .bind(&self.owner_id)
-        .bind(self.license_type.as_str())
-        .bind(self.start_date.to_rfc3339())
-        .bind(self.end_date.map(|d| d.to_rfc3339()))
-        .bind(self.is_exclusive as i32)
-        .bind(territory_json)
-        .bind(usage_json)
-        .bind(self.created_at.to_rfc3339())
-        .bind(self.updated_at.to_rfc3339())
-        .execute(db.pool())
-        .await?;
+                &[
+                    &self.id,
+                    &self.asset_id,
+                    &self.owner_id,
+                    &self.license_type.as_str(),
+                    &self.start_date.to_rfc3339(),
+                    &self.end_date.map(|d| d.to_rfc3339()),
+                    &i64::from(self.is_exclusive),
+                    &territory_json,
+                    &usage_json,
+                    &self.created_at.to_rfc3339(),
+                    &self.updated_at.to_rfc3339(),
+                ],
+            )
+            .await?;
 
         Ok(())
     }
@@ -184,126 +230,45 @@ impl RightsGrant {
     #[cfg(not(target_arch = "wasm32"))]
     /// Load grant from database by ID
     pub async fn load(db: &RightsDatabase, id: &str) -> Result<Option<Self>> {
-        let row = sqlx::query(
-            r"
+        let row = db
+            .pool()
+            .query_optional(
+                r"
             SELECT id, asset_id, owner_id, license_type, start_date, end_date,
                    is_exclusive, territory_json, usage_restrictions_json, created_at, updated_at
-            FROM rights_grants WHERE id = ?
+            FROM rights_grants WHERE id = $1
             ",
-        )
-        .bind(id)
-        .fetch_optional(db.pool())
-        .await?;
+                &[&id],
+            )
+            .await?;
 
-        row.map(|r| {
-            let territory_json: Option<String> = r.get("territory_json");
-            let territory = territory_json.and_then(|json| serde_json::from_str(&json).ok());
-
-            let usage_json: Option<String> = r.get("usage_restrictions_json");
-            let usage_restrictions = usage_json.and_then(|json| serde_json::from_str(&json).ok());
-
-            let start_date = DateTime::parse_from_rfc3339(r.get("start_date"))
-                .map_err(|e| RightsError::InvalidLicense(format!("Invalid start_date: {e}")))?
-                .with_timezone(&Utc);
-            let end_date = r
-                .get::<Option<String>, _>("end_date")
-                .map(|s| {
-                    DateTime::parse_from_rfc3339(&s)
-                        .map_err(|e| RightsError::InvalidLicense(format!("Invalid end_date: {e}")))
-                        .map(|dt| dt.with_timezone(&Utc))
-                })
-                .transpose()?;
-            let created_at = DateTime::parse_from_rfc3339(r.get("created_at"))
-                .map_err(|e| RightsError::InvalidLicense(format!("Invalid created_at: {e}")))?
-                .with_timezone(&Utc);
-            let updated_at = DateTime::parse_from_rfc3339(r.get("updated_at"))
-                .map_err(|e| RightsError::InvalidLicense(format!("Invalid updated_at: {e}")))?
-                .with_timezone(&Utc);
-
-            Ok(RightsGrant {
-                id: r.get("id"),
-                asset_id: r.get("asset_id"),
-                owner_id: r.get("owner_id"),
-                license_type: LicenseType::from_str(r.get("license_type")),
-                start_date,
-                end_date,
-                is_exclusive: r.get::<i32, _>("is_exclusive") != 0,
-                territory,
-                usage_restrictions,
-                created_at,
-                updated_at,
-            })
-        })
-        .transpose()
+        row.map(|r| Self::from_row(&r)).transpose()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     /// List all grants for an asset
     pub async fn list_for_asset(db: &RightsDatabase, asset_id: &str) -> Result<Vec<Self>> {
-        let rows = sqlx::query(
-            r"
+        let rows = db
+            .pool()
+            .query(
+                r"
             SELECT id, asset_id, owner_id, license_type, start_date, end_date,
                    is_exclusive, territory_json, usage_restrictions_json, created_at, updated_at
-            FROM rights_grants WHERE asset_id = ?
+            FROM rights_grants WHERE asset_id = $1
             ORDER BY created_at DESC
             ",
-        )
-        .bind(asset_id)
-        .fetch_all(db.pool())
-        .await?;
+                &[&asset_id],
+            )
+            .await?;
 
-        rows.into_iter()
-            .map(|r| {
-                let territory_json: Option<String> = r.get("territory_json");
-                let territory = territory_json.and_then(|json| serde_json::from_str(&json).ok());
-
-                let usage_json: Option<String> = r.get("usage_restrictions_json");
-                let usage_restrictions =
-                    usage_json.and_then(|json| serde_json::from_str(&json).ok());
-
-                let start_date = DateTime::parse_from_rfc3339(r.get("start_date"))
-                    .map_err(|e| RightsError::InvalidLicense(format!("Invalid start_date: {e}")))?
-                    .with_timezone(&Utc);
-                let end_date = r
-                    .get::<Option<String>, _>("end_date")
-                    .map(|s| {
-                        DateTime::parse_from_rfc3339(&s)
-                            .map_err(|e| {
-                                RightsError::InvalidLicense(format!("Invalid end_date: {e}"))
-                            })
-                            .map(|dt| dt.with_timezone(&Utc))
-                    })
-                    .transpose()?;
-                let created_at = DateTime::parse_from_rfc3339(r.get("created_at"))
-                    .map_err(|e| RightsError::InvalidLicense(format!("Invalid created_at: {e}")))?
-                    .with_timezone(&Utc);
-                let updated_at = DateTime::parse_from_rfc3339(r.get("updated_at"))
-                    .map_err(|e| RightsError::InvalidLicense(format!("Invalid updated_at: {e}")))?
-                    .with_timezone(&Utc);
-
-                Ok(RightsGrant {
-                    id: r.get("id"),
-                    asset_id: r.get("asset_id"),
-                    owner_id: r.get("owner_id"),
-                    license_type: LicenseType::from_str(r.get("license_type")),
-                    start_date,
-                    end_date,
-                    is_exclusive: r.get::<i32, _>("is_exclusive") != 0,
-                    territory,
-                    usage_restrictions,
-                    created_at,
-                    updated_at,
-                })
-            })
-            .collect()
+        rows.iter().map(Self::from_row).collect()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     /// Delete grant from database
     pub async fn delete(db: &RightsDatabase, id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM rights_grants WHERE id = ?")
-            .bind(id)
-            .execute(db.pool())
+        db.pool()
+            .execute("DELETE FROM rights_grants WHERE id = $1", &[&id])
             .await?;
         Ok(())
     }

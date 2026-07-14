@@ -409,7 +409,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore]
     fn test_header_srgb() {
         let header = JxlHeader::srgb(1920, 1080, 3).expect("valid header");
         assert_eq!(header.width, 1920);
@@ -420,7 +419,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_header_srgb_rgba() {
         let header = JxlHeader::srgb(100, 100, 4).expect("valid header");
         assert!(header.has_alpha);
@@ -429,7 +427,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_header_gray() {
         let header = JxlHeader::srgb(64, 64, 1).expect("valid header");
         assert_eq!(header.color_space, JxlColorSpace::Gray);
@@ -437,28 +434,24 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_header_invalid_channels() {
         assert!(JxlHeader::srgb(100, 100, 0).is_err());
         assert!(JxlHeader::srgb(100, 100, 5).is_err());
     }
 
     #[test]
-    #[ignore]
     fn test_header_zero_dimensions() {
         assert!(JxlHeader::srgb(0, 100, 3).is_err());
         assert!(JxlHeader::srgb(100, 0, 3).is_err());
     }
 
     #[test]
-    #[ignore]
     fn test_header_data_size() {
         let header = JxlHeader::srgb(10, 10, 3).expect("valid");
         assert_eq!(header.data_size(), 10 * 10 * 3);
     }
 
     #[test]
-    #[ignore]
     fn test_config_lossless() {
         let config = JxlConfig::new_lossless();
         assert!(config.lossless);
@@ -466,7 +459,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_config_lossy() {
         let config = JxlConfig::new_lossy(50.0);
         assert!(!config.lossless);
@@ -474,14 +466,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_config_effort() {
         let config = JxlConfig::new_lossless().with_effort(3);
         assert_eq!(config.effort, 3);
     }
 
     #[test]
-    #[ignore]
     fn test_config_validate() {
         assert!(JxlConfig::new_lossless().validate().is_ok());
         let mut bad = JxlConfig::new_lossless();
@@ -490,13 +480,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_codestream_signature() {
         assert_eq!(JXL_CODESTREAM_SIGNATURE, [0xFF, 0x0A]);
     }
 
     #[test]
-    #[ignore]
     fn test_container_signature() {
         assert_eq!(JXL_CONTAINER_SIGNATURE.len(), 12);
         // First 4 bytes are box size (12), next 4 are "JXL " type

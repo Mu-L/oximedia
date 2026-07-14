@@ -18,7 +18,7 @@ workspace = true
 [dependencies]
 oximedia-core = { workspace = true }
 oximedia-codec = { workspace = true, default-features = true }
-tokio = { workspace = true, features = ["net", "sync", "time", "io-util"] }
+tokio = { workspace = true, features = ["full"] }
 thiserror = { workspace = true }
 bytes = { workspace = true }
 tracing = { workspace = true }

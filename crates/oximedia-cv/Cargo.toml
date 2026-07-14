@@ -12,6 +12,10 @@ keywords = ["computer-vision", "video", "tracking", "multimedia", "image"]
 categories = ["multimedia::images", "multimedia", "science"]
 readme = "README.md"
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lints]
 workspace = true
 

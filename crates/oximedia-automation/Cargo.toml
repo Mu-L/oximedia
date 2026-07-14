@@ -18,7 +18,7 @@ oximedia-playlist = { workspace = true }
 oximedia-switcher = { workspace = true }
 oximedia-timecode = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tracing = { workspace = true }
@@ -28,19 +28,27 @@ bytes = { workspace = true }
 bitflags = { workspace = true }
 crossbeam-channel = { workspace = true }
 axum = { workspace = true }
-tokio-serial = "5.4"
-mlua = { workspace = true }
+tokio-serial = "5.5"
+# mlua is optional: it embeds the Lua 5.4 C interpreter via lua-src/mlua-sys
+# (vendored C build). It is only compiled in when the non-default
+# `lua-scripting` feature is enabled — see the [features] section below and
+# `src/script/engine.rs`. The default (Pure Rust) build does not pull in
+# mlua/lua-src at all.
+mlua = { workspace = true, optional = true }
 chrono = { workspace = true }
 toml = { workspace = true }
-num_cpus = "1.17"
+num_cpus = { workspace = true }
 quick-xml = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros", "test-util"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = { workspace = true }
 
 [features]
 default = []
+# Opt-in, C-backed: embeds Lua 5.4 via mlua (vendored lua-src C build).
+# Disabled by default so the default build of this crate is 100% Pure Rust.
+lua-scripting = ["dep:mlua"]
 
 [lib]
 name = "oximedia_automation"

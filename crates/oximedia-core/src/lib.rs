@@ -9,19 +9,58 @@
 //! - **Memory management**: Buffer pools for zero-copy operations
 //! - **HDR support**: HDR metadata, transfer functions, color primaries, and conversions
 //!
-//! # Green List Only
+//! # Patent-Free Codec Philosophy
 //!
-//! `OxiMedia` only supports patent-free codecs:
+//! OxiMedia is committed to a **Green List** policy: only patent-free, royalty-free
+//! codecs are supported.  This design decision is principled and deliberate:
 //!
-//! | Video | Audio | Subtitle |
-//! |-------|-------|----------|
-//! | AV1   | Opus  | `WebVTT`   |
-//! | VP9   | Vorbis| ASS/SSA  |
-//! | VP8   | FLAC  | SRT      |
-//! | Theora| PCM   |          |
+//! - **Legal safety**: Patent-encumbered codecs such as H.264, H.265 (HEVC), and AAC
+//!   require licence fees from organisations like MPEG LA, Via LA, and Dolby.  Using
+//!   them without a licence exposes distributors to significant legal risk.
+//! - **Open-source compatibility**: Copyleft (GPL/AGPL) projects cannot legally bundle
+//!   patent-restricted code; the Green List ensures frictionless composition.
+//! - **Long-term viability**: Patent-free codecs (AV1, VP9, Opus, FLAC, etc.) are
+//!   backed by major industry consortia and carry no royalty obligations now or in
+//!   the future.
 //!
-//! Attempting to use patent-encumbered codecs (H.264, H.265, AAC, etc.)
-//! will result in a [`PatentViolation`](error::OxiError::PatentViolation) error.
+//! ## Green List — supported codecs
+//!
+//! | Category | Codec | Notes |
+//! |----------|-------|-------|
+//! | Video | AV1 | AOMedia royalty-free |
+//! | Video | VP9 / VP8 | Google/WebM royalty-free |
+//! | Video | Theora | Xiph.org royalty-free |
+//! | Video | MJPEG | Baseline JPEG patents expired |
+//! | Video | ProRes 422 | Decoding is patent-unencumbered |
+//! | Video | DNxHD / VC-3 | Decoding is patent-unencumbered |
+//! | Video | MPEG-2 | Core patents expired Feb 2023 |
+//! | Video | FFV1 | RFC 9043, lossless |
+//! | Image | JPEG 2000 | All patents expired 2010 |
+//! | Image | JPEG-LS | HP patents expired 2017–2019 |
+//! | Image | JPEG XS | Patent-free broadcast codec |
+//! | Image | JPEG-XL | ISO/IEC 18181 royalty-free |
+//! | Image | WebP / PNG / GIF | Widely royalty-free |
+//! | Audio | Opus | IETF/Xiph.org royalty-free |
+//! | Audio | Vorbis | Xiph.org royalty-free |
+//! | Audio | FLAC | Xiph.org lossless royalty-free |
+//! | Audio | ALAC | Apple Apache-2.0 royalty-free |
+//! | Audio | MP3 | MPEG-1/2 Layer III patents expired 2017 |
+//! | Audio | PCM | Uncompressed, always royalty-free |
+//! | Subtitle | WebVTT / ASS / SRT | Open subtitle formats |
+//!
+//! Attempting to use patent-encumbered codecs (H.264, H.265, AAC, AC-3, DTS, etc.)
+//! will result in an [`OxiError::PatentViolation`]
+//! error, which carries the codec name for diagnostics.  Parsing those names via
+//! [`CodecId::from_str`](types::CodecId) returns `Err` immediately.
+//!
+//! ```
+//! use oximedia_core::error::OxiError;
+//!
+//! // Directly creating a PatentViolation (e.g. when a container demuxer
+//! // encounters an H.264 track):
+//! let err = OxiError::patent_violation("H.264/AVC");
+//! assert!(err.is_patent_violation());
+//! ```
 //!
 //! ## Type System
 //!
@@ -175,6 +214,74 @@
 //! let atmos_bed = ChannelLayoutKind::DolbyAtmosBed9_1_6;
 //! assert_eq!(atmos_bed.channel_count(), 16);
 //! assert_eq!(atmos_bed.name(), "9.1.6 Atmos Bed");
+//! ```
+//!
+//! # Type Conversion Guide
+//!
+//! ## Timestamp ↔ Seconds
+//!
+//! [`Timestamp`] stores a PTS (presentation time stamp) as
+//! an integer tick count paired with a [`Rational`] time-base
+//! (seconds-per-tick).  Converting to and from wall-clock seconds:
+//!
+//! ```
+//! use oximedia_core::types::{Rational, Timestamp};
+//!
+//! // --- From seconds to Timestamp ---
+//! // Time-base 1/90000 (90 kHz MPEG clock):
+//! let tb_90k = Rational::new(1, 90_000);
+//! let ts = Timestamp::from_seconds(1.5, tb_90k);   // 1.5 seconds
+//! assert_eq!(ts.pts, 135_000);                     // 1.5 × 90_000 = 135_000 ticks
+//!
+//! // --- From Timestamp to seconds ---
+//! let ts2 = Timestamp::new(48_000, Rational::new(1, 48_000)); // 1 s at 48 kHz
+//! let secs: f64 = ts2.to_seconds();
+//! assert!((secs - 1.0).abs() < 1e-9);
+//!
+//! // --- Rescaling between time-bases ---
+//! let tb_ms = Rational::new(1, 1_000);
+//! let ts_ms = ts2.rescale(tb_ms);                  // 48 kHz → milliseconds
+//! assert_eq!(ts_ms.pts, 1_000);                    // 1 s = 1000 ms
+//! ```
+//!
+//! ## Rational ↔ f64
+//!
+//! [`Rational`] is an exact integer fraction reduced to
+//! lowest terms on construction.  Convert to/from `f64` carefully — floating-
+//! point cannot represent all rational values exactly.
+//!
+//! ```
+//! use oximedia_core::types::Rational;
+//!
+//! // Construct from numerator/denominator (auto-reduces via GCD)
+//! let r = Rational::new(3, 6);        // reduces to 1/2
+//! assert_eq!(r.num, 1);              // public field: numerator
+//! assert_eq!(r.den, 2);              // public field: denominator
+//!
+//! // Convert to f64 (lossy for non-dyadic fractions)
+//! let f: f64 = r.to_f64();
+//! assert!((f - 0.5).abs() < f64::EPSILON);
+//!
+//! // Frame-rate example: 30000/1001 (NTSC 29.97 fps)
+//! let ntsc = Rational::new(30_000, 1_001);
+//! let fps: f64 = ntsc.to_f64();
+//! assert!((fps - 29.970_029_970_029_97).abs() < 1e-9);
+//! ```
+//!
+//! ## Rational ↔ frame count
+//!
+//! When the time-base is `1/frame_rate`, `Timestamp.pts` equals the frame
+//! number (zero-based).  This is the convention used by many container
+//! parsers and codec APIs:
+//!
+//! ```
+//! use oximedia_core::types::{Rational, Timestamp};
+//!
+//! // 24 fps time-base
+//! let tb_24 = Rational::new(1, 24);
+//! let frame_10 = Timestamp::new(10, tb_24);
+//! let secs = frame_10.to_seconds();
+//! assert!((secs - 10.0 / 24.0).abs() < 1e-9);
 //! ```
 //!
 //! # Example

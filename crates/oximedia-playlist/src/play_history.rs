@@ -9,7 +9,7 @@
 const SECONDS_PER_DAY: u64 = 86_400;
 
 /// A single play event recorded in the history.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayEvent {
     /// The track that was played.
     pub track_id: u64,
@@ -65,6 +65,49 @@ impl PlayHistory {
         });
         if self.max_entries > 0 && self.events.len() > self.max_entries {
             self.events.remove(0);
+        }
+    }
+
+    /// Records a batch of play events in one vectorized pass.
+    ///
+    /// Each tuple is `(track_id, epoch, completed)`.  This is **equivalent to
+    /// calling [`record_play`](Self::record_play) for each tuple, in order**,
+    /// with respect to the appended [`PlayEvent`]s and their `play_count`
+    /// fields — but it is more efficient: the running per-track counts are
+    /// seeded in a single `O(n)` pass over the existing events, all `N`
+    /// events are appended, and any capacity overflow is evicted **once** at
+    /// the end (rather than incrementally after every push).
+    ///
+    /// # Equivalence boundary
+    ///
+    /// Strict element-by-element equality with `N` sequential `record_play`
+    /// calls holds when the history is **unbounded** (`max_entries == 0`) or
+    /// when `max_entries >= events.len() + plays.len()` (no eviction occurs).
+    /// When eviction *does* occur, the final retained window — its length and
+    /// the retained `track_id`s in order — is identical to the sequential
+    /// path; only the `play_count` recorded on events that are later evicted
+    /// may differ, because the sequential path shrinks the counting base as it
+    /// evicts mid-sequence while this method evicts in a single final step.
+    pub fn batch_record(&mut self, plays: &[(u64, u64, bool)]) {
+        use std::collections::HashMap;
+        let mut counts: HashMap<u64, u32> = HashMap::new();
+        for e in &self.events {
+            *counts.entry(e.track_id).or_insert(0) += 1;
+        }
+        self.events.reserve(plays.len());
+        for &(track_id, epoch, completed) in plays {
+            let c = counts.entry(track_id).or_insert(0);
+            *c += 1;
+            self.events.push(PlayEvent {
+                track_id,
+                timestamp_epoch: epoch,
+                completed,
+                play_count: *c,
+            });
+        }
+        if self.max_entries > 0 && self.events.len() > self.max_entries {
+            let overflow = self.events.len() - self.max_entries;
+            self.events.drain(0..overflow);
         }
     }
 
@@ -249,5 +292,108 @@ mod tests {
         h.record_play(42, 1_000, true);
         h.record_play(42, 2_000, true);
         assert_eq!(h.play_count(42), 2);
+    }
+
+    // --- batch_record ---
+
+    /// The six plays exercise repeated track ids (10 ×3, 20 ×2, 30 ×1) so the
+    /// per-track `play_count` progression is non-trivial.
+    const BATCH_PLAYS: [(u64, u64, bool); 6] = [
+        (10, 1_000, true),
+        (20, 2_000, false),
+        (10, 3_000, true),
+        (30, 4_000, true),
+        (20, 5_000, true),
+        (10, 6_000, false),
+    ];
+
+    #[test]
+    fn test_batch_record_equals_n_single_writes_unbounded() {
+        // Unbounded history (max_entries == 0): no eviction can occur, so the
+        // batch path must produce byte-for-byte identical events to N
+        // sequential record_play calls (including every play_count field).
+        let mut sequential = PlayHistory::new(0);
+        for &(track_id, epoch, completed) in &BATCH_PLAYS {
+            sequential.record_play(track_id, epoch, completed);
+        }
+
+        let mut batched = PlayHistory::new(0);
+        batched.batch_record(&BATCH_PLAYS);
+
+        // PlayEvent derives PartialEq, so we compare element-wise directly.
+        assert_eq!(sequential.events, batched.events);
+        // Spot-check that play_count actually progressed (1,1,2,1,2,3).
+        let counts: Vec<u32> = batched.events.iter().map(|e| e.play_count).collect();
+        assert_eq!(counts, vec![1, 1, 2, 1, 2, 3]);
+    }
+
+    #[test]
+    fn test_batch_record_eviction_window_matches() {
+        // Capped history (cap == 3): record_play evicts incrementally while
+        // batch_record evicts once at the end. The EQUIVALENCE BOUNDARY says
+        // the final retained WINDOW (length + retained track_ids/order) is
+        // identical, even though mid-sequence play_count assignment may differ.
+        let plays: [(u64, u64, bool); 5] = [
+            (1, 100, true),
+            (2, 200, true),
+            (3, 300, true),
+            (1, 400, true),
+            (2, 500, true),
+        ];
+
+        let mut sequential = PlayHistory::new(3);
+        for &(track_id, epoch, completed) in &plays {
+            sequential.record_play(track_id, epoch, completed);
+        }
+
+        let mut batched = PlayHistory::new(3);
+        batched.batch_record(&plays);
+
+        // Both retain exactly the last `cap` events.
+        assert_eq!(sequential.events.len(), 3);
+        assert_eq!(batched.events.len(), 3);
+
+        // The retained window — track_ids in order and their timestamps — is
+        // identical (the last 3 plays: 3@300, 1@400, 2@500).
+        let seq_window: Vec<(u64, u64)> = sequential
+            .events
+            .iter()
+            .map(|e| (e.track_id, e.timestamp_epoch))
+            .collect();
+        let batch_window: Vec<(u64, u64)> = batched
+            .events
+            .iter()
+            .map(|e| (e.track_id, e.timestamp_epoch))
+            .collect();
+        assert_eq!(seq_window, batch_window);
+        assert_eq!(batch_window, vec![(3, 300), (1, 400), (2, 500)]);
+    }
+
+    #[test]
+    fn test_batch_record_empty_is_noop() {
+        // An empty batch on a non-empty history leaves it untouched, and on a
+        // fresh history produces no events.
+        let mut seeded = make_history();
+        let before = seeded.events.clone();
+        seeded.batch_record(&[]);
+        assert_eq!(seeded.events, before);
+
+        let mut fresh = PlayHistory::new(10);
+        fresh.batch_record(&[]);
+        assert!(fresh.events.is_empty());
+    }
+
+    #[test]
+    fn test_batch_record_appends_to_existing_events() {
+        // batch_record must seed running counts from the *existing* events,
+        // not start from zero. Pre-seed track 10 once, then batch two more
+        // plays of track 10 → counts must continue 2, 3 (not 1, 2).
+        let mut h = PlayHistory::new(0);
+        h.record_play(10, 500, true);
+        h.batch_record(&[(10, 600, true), (10, 700, false)]);
+
+        let counts: Vec<u32> = h.events.iter().map(|e| e.play_count).collect();
+        assert_eq!(counts, vec![1, 2, 3]);
+        assert_eq!(h.play_count(10), 3);
     }
 }

@@ -6,11 +6,11 @@
 //!
 //! # Workflow
 //!
-//! 1. [`RoomToneAnalyzer`] measures a reference room-tone sample to build a
+//! 1. [`crate::room_tone_matcher::RoomToneAnalyzer`] measures a reference room-tone sample to build a
 //!    statistical spectral profile (mean + variance per bin).
-//! 2. [`RoomToneSynthesizer`] generates new room-tone samples whose long-term
+//! 2. [`crate::room_tone_matcher::RoomToneSynthesizer`] generates new room-tone samples whose long-term
 //!    spectral envelope matches the reference profile.
-//! 3. [`RoomToneMatcher`] wraps both and exposes the end-to-end API:
+//! 3. [`crate::room_tone_matcher::RoomToneMatcher`] wraps both and exposes the end-to-end API:
 //!    - `analyze()` — ingest reference samples
 //!    - `synthesize()` — produce fill material of any requested length
 //!    - `apply_fade()` — crossfade synthesized fill into a gap
@@ -394,7 +394,7 @@ impl RoomToneMatcher {
 
     /// Finalise the spectral profile from ingested reference audio.
     ///
-    /// Must be called before [`synthesize`].
+    /// Must be called before [`Self::synthesize`].
     ///
     /// # Errors
     ///

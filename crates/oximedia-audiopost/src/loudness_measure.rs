@@ -34,15 +34,16 @@ impl LoudnessMeasurement {
     /// ```
     /// use oximedia_audiopost::loudness_measure::LoudnessMeasurement;
     ///
-    /// // Sine wave at –23 LUFS ≈ amplitude 0.0708
+    /// // 1 kHz sine: LUFS ≈ 20·log10(amp) − 3.01 dB (sine power factor)
+    /// // − 0.691 + K-weighting gain at 1 kHz (≈ +0.9 dB) ⇒ ≈ −26.4 LUFS here.
     /// let sr = 48_000u32;
     /// let secs = 5.0f32;
-    /// let amp = 10f32.powf((-23.0 - 0.691) / 20.0); // approx –23 LUFS
+    /// let amp = 10f32.powf((-23.0 - 0.691) / 20.0); // ≈ 0.0655
     /// let samples: Vec<f32> = (0..((sr as f32 * secs) as usize))
     ///     .map(|i| amp * (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / sr as f32).sin())
     ///     .collect();
     /// let lufs = LoudnessMeasurement::compute_lufs(&samples, sr);
-    /// assert!(lufs < -20.0 && lufs > -26.0, "lufs={lufs}");
+    /// assert!(lufs < -25.0 && lufs > -28.0, "lufs={lufs}");
     /// ```
     #[must_use]
     pub fn compute_lufs(samples: &[f32], sample_rate: u32) -> f32 {

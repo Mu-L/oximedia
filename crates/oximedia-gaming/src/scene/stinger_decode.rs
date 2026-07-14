@@ -2,8 +2,8 @@
 //!
 //! Decodes a video clip from disk into a sequence of RGBA frames suitable for
 //! use by [`StingerPlayer`](super::transition::StingerPlayer).  The decode path
-//! opens the file via [`oximedia_container`]'s Matroska/WebM demuxer, dispatches
-//! to [`Vp9Decoder`] or [`Av1Decoder`] depending on the detected stream codec,
+//! opens the file via `oximedia_container`'s Matroska/WebM demuxer, dispatches
+//! to [`Vp9Decoder`](oximedia_codec::Vp9Decoder) or [`Av1Decoder`](oximedia_codec::Av1Decoder) depending on the detected stream codec,
 //! and converts each reconstructed YUV 4:2:0 plane to packed RGBA.
 //!
 //! When the file is absent, unreadable, or uses an unsupported codec the
@@ -497,6 +497,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(feature = "vp9", feature = "av1"))]
     fn test_yuv420p_all_grey() {
         use oximedia_codec::{ColorInfo, FrameType, Plane, VideoFrame};
         use oximedia_core::{PixelFormat, Rational, Timestamp};

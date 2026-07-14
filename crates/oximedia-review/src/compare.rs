@@ -181,7 +181,8 @@ impl DiffStats {
 /// Visual comparator for media review.
 pub struct MediaComparator {
     versions: Vec<CompareVersion>,
-    layout: CompareLayout,
+    /// Active comparison layout.
+    pub layout: CompareLayout,
 }
 
 impl MediaComparator {
@@ -430,6 +431,86 @@ fn compose_difference(a: &CompareVersion, b: &CompareVersion, width: u32, height
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Comparison cache
+// ---------------------------------------------------------------------------
+
+/// Cache key computed from the inputs to [`compare_cached`].
+///
+/// Changing any of the four components (layout discriminant, wipe/overlay
+/// parameter bits, version-A ID, version-B ID) invalidates the cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompareCacheKey {
+    /// Hash of `(layout_discriminant, param_bits, id_a, id_b)`.
+    hash: u64,
+}
+
+impl CompareCacheKey {
+    fn new(layout: CompareLayout, id_a: &str, id_b: &str) -> Self {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut h = DefaultHasher::new();
+        // Stable discriminant for the layout variant.
+        let disc: u8 = match layout {
+            CompareLayout::SideBySide => 0,
+            CompareLayout::TopBottom => 1,
+            CompareLayout::Wipe { .. } => 2,
+            CompareLayout::Overlay { .. } => 3,
+            CompareLayout::Difference => 4,
+            CompareLayout::InteractiveSplit { .. } => 5,
+        };
+        disc.hash(&mut h);
+        // Encode floating-point parameters as raw bits for stable hashing.
+        let param_bits: u64 = match layout {
+            CompareLayout::Wipe { position, .. } => u64::from(position.to_bits()),
+            CompareLayout::Overlay { alpha } => u64::from(alpha.to_bits()),
+            CompareLayout::InteractiveSplit { x_position } => u64::from(x_position.to_bits()),
+            _ => 0,
+        };
+        param_bits.hash(&mut h);
+        id_a.hash(&mut h);
+        id_b.hash(&mut h);
+        Self { hash: h.finish() }
+    }
+}
+
+/// A single memoised entry for [`compare_cached`].
+pub struct CompareCache {
+    key: CompareCacheKey,
+    result: CompareResult,
+}
+
+/// Memoised wrapper around [`MediaComparator::compare`].
+///
+/// `cache` is an `Option<CompareCache>` owned by the caller (e.g. a
+/// `thread_local!` slot or a field on a wrapper struct).  On a cache hit the
+/// stored [`CompareResult`] is returned by reference without touching pixel
+/// data.  On a miss the comparator runs the full composition and stores the
+/// result for the next call.
+///
+/// # Errors
+///
+/// Propagates any error returned by [`MediaComparator::compare`].
+pub fn compare_cached<'c>(
+    comparator: &MediaComparator,
+    cache: &'c mut Option<CompareCache>,
+    id_a: &str,
+    id_b: &str,
+) -> Result<&'c CompareResult, String> {
+    let key = CompareCacheKey::new(comparator.layout, id_a, id_b);
+
+    // Return the cached result if the key still matches.
+    if cache.as_ref().map_or(false, |c| c.key == key) {
+        return Ok(&cache.as_ref().expect("just confirmed Some").result);
+    }
+
+    // Cache miss — run the full composition and store.
+    let result = comparator.compare(id_a, id_b)?;
+    *cache = Some(CompareCache { key, result });
+    Ok(&cache.as_ref().expect("just set to Some").result)
 }
 
 // ---------------------------------------------------------------------------
@@ -744,5 +825,98 @@ mod tests {
             let out = compose_wipe(&a, &b, 0.5, angle, w, h);
             assert_eq!(out.len(), (w * h * 4) as usize);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // compare_cached tests
+    // -----------------------------------------------------------------------
+
+    fn make_comparator_sbs() -> MediaComparator {
+        let w = 4u32;
+        let h = 4u32;
+        let mut cmp = MediaComparator::new().with_layout(CompareLayout::SideBySide);
+        cmp.add_version(
+            CompareVersion::new("a", "A", w, h).with_frame_data(solid_rgba(w, h, 200, 0, 0, 255)),
+        );
+        cmp.add_version(
+            CompareVersion::new("b", "B", w, h).with_frame_data(solid_rgba(w, h, 100, 0, 0, 255)),
+        );
+        cmp
+    }
+
+    /// Two identical calls should return the same result from the cache.
+    #[test]
+    fn test_compare_cache_hit_skips_recompute() {
+        let cmp = make_comparator_sbs();
+        let mut cache: Option<CompareCache> = None;
+
+        let r1 = compare_cached(&cmp, &mut cache, "a", "b")
+            .expect("first call should succeed")
+            .clone();
+
+        let r2 = compare_cached(&cmp, &mut cache, "a", "b")
+            .expect("second (cached) call should succeed")
+            .clone();
+
+        assert_eq!(r1.output_data, r2.output_data);
+        assert_eq!(r1.width, r2.width);
+        assert_eq!(r1.height, r2.height);
+        assert!(cache.is_some());
+    }
+
+    /// Changing the layout should invalidate the cache and return a new result.
+    #[test]
+    fn test_compare_cache_invalidates_on_layout_change() {
+        let mut cmp = make_comparator_sbs();
+        let mut cache: Option<CompareCache> = None;
+
+        let r1 = compare_cached(&cmp, &mut cache, "a", "b")
+            .expect("first call")
+            .clone();
+
+        cmp.layout = CompareLayout::Difference;
+        let r2 = compare_cached(&cmp, &mut cache, "a", "b")
+            .expect("second call with new layout")
+            .clone();
+
+        // Difference layout produces |A−B| per channel, differing from side-by-side.
+        assert_ne!(
+            r1.output_data, r2.output_data,
+            "cache should have been invalidated by the layout change"
+        );
+    }
+
+    /// Missing version should be forwarded as an error, not silently cached.
+    #[test]
+    fn test_compare_cache_propagates_error() {
+        let cmp = make_comparator_sbs();
+        let mut cache: Option<CompareCache> = None;
+
+        let err = compare_cached(&cmp, &mut cache, "a", "nonexistent");
+        assert!(err.is_err(), "missing version should yield an error");
+        assert!(cache.is_none(), "cache must remain empty after an error");
+    }
+
+    /// Changing only the version IDs should also invalidate the cache.
+    #[test]
+    fn test_compare_cache_invalidates_on_id_change() {
+        let mut cmp = make_comparator_sbs();
+        cmp.layout = CompareLayout::Difference;
+        cmp.add_version(
+            CompareVersion::new("c", "C", 4, 4).with_frame_data(solid_rgba(4, 4, 50, 50, 50, 255)),
+        );
+        let mut cache: Option<CompareCache> = None;
+
+        let r1 = compare_cached(&cmp, &mut cache, "a", "b")
+            .expect("a vs b")
+            .clone();
+        let r2 = compare_cached(&cmp, &mut cache, "a", "c")
+            .expect("a vs c — different second version")
+            .clone();
+
+        assert_ne!(
+            r1.output_data, r2.output_data,
+            "different version IDs must produce different output"
+        );
     }
 }

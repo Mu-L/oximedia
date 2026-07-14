@@ -1,8 +1,8 @@
 //! Melody extraction and contour analysis.
 //!
 //! This module extracts the dominant melody as a sequence of discrete
-//! [`MelodyNote`]s from mono PCM audio, then analyses the resulting
-//! [`MelodyContour`] to compute musical descriptors (pitch range, average
+//! [`MelodyNote`](crate::melody_extract::MelodyNote)s from mono PCM audio, then analyses the resulting
+//! [`MelodyContour`](crate::melody_extract::MelodyContour) to compute musical descriptors (pitch range, average
 //! pitch, interval sequence) and classify the overall contour shape.
 //!
 //! ## Algorithm overview
@@ -13,12 +13,12 @@
 //!    (mean energy × `VOICED_THRESHOLD_FACTOR`).
 //! 4. Estimate fundamental frequency for each voiced hop using a
 //!    zero-crossing-based period estimator (robust for monophonic signals).
-//! 5. Group consecutive voiced hops with similar pitch into [`MelodyNote`]s.
+//! 5. Group consecutive voiced hops with similar pitch into [`MelodyNote`](crate::melody_extract::MelodyNote)s.
 //!
 //! ## Contour shape classification
 //!
-//! [`analyze_shape`] inspects the linear trend and range of the note sequence
-//! to assign one of six [`ContourShape`] variants.
+//! [`analyze_shape`](crate::melody_extract::analyze_shape) inspects the linear trend and range of the note sequence
+//! to assign one of six [`ContourShape`](crate::melody_extract::ContourShape) variants.
 //!
 //! # Example
 //!

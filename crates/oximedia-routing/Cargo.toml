@@ -24,13 +24,13 @@ petgraph = "0.8"
 hyper = { workspace = true, optional = true }
 hyper-util = { workspace = true, optional = true }
 http-body-util = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["full"] }
 serde_json = { workspace = true, optional = true }
 mdns-sd = { workspace = true, optional = true }
 
 [dev-dependencies]
-approx = "0.5"
-tokio = { workspace = true }
+approx = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
 hyper = { workspace = true }

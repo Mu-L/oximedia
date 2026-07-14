@@ -38,10 +38,10 @@
 - [x] Add lock-free ring buffers for inter-node frame passing in `port_buffer.rs` (SpscRingBuffer; AtomicUsize head/tail; lock_free_ring.rs 287L; 2026-05-30)
 
 ## Testing
-- [ ] Add integration tests for complex multi-branch graph topologies (diamond, fan-out/fan-in)
-- [ ] Add stress tests for `graph_merge.rs` with overlapping node IDs
-- [ ] Test `cycle_detect.rs` with self-loops and multi-edge cycles
-- [ ] Add benchmarks for graph execution throughput at various node counts
+- [x] Add integration tests for complex multi-branch graph topologies (diamond, fan-out/fan-in) (tests/graph_topology.rs: diamond + fan-out/fan-in topo-order validity + cycle rejection; 2026-06-06)
+- [x] Add stress tests for `graph_merge.rs` with overlapping node IDs (tests/cycle_and_merge.rs: 50/50 full-overlap remap + mixed-overlap bug-trip; FIXED Remap node-collision where a non-conflicting `other` id was silently overwritten by a remap id; 2026-06-06)
+- [x] Test `cycle_detect.rs` with self-loops and multi-edge cycles (tests/cycle_and_merge.rs: self-loop, 2-node cycle, parallel-edge collapse, mixed cycle+tail; 2026-06-06)
+- [x] Add benchmarks for graph execution throughput at various node counts (benches/graph_exec_bench.rs: ProcessingGraph::execution_order at 16/64/256/1024 nodes, seeded forward-only DAG; 2026-06-06)
 
 ## Documentation
 - [ ] Add architecture diagram in module-level docs showing node/port/connection relationships

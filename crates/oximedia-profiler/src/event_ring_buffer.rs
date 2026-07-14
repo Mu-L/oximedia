@@ -138,6 +138,21 @@ impl<T: Copy + Default, const N: usize> EventRingBuffer<T, N> {
             capacity: N,
         }
     }
+
+    /// Move all stored elements (oldest first) into `out`, then clear the buffer.
+    ///
+    /// Elements are appended to `out` in insertion order.  The ring buffer
+    /// itself performs **no allocation** — the only allocation that can occur
+    /// is whatever growth `out` requires.  Passing a `Vec` whose spare capacity
+    /// already covers [`len`](Self::len) (e.g. via
+    /// [`Vec::with_capacity`]/[`Vec::clear`] reuse) keeps the whole drain
+    /// allocation-free.
+    pub fn drain_into(&mut self, out: &mut Vec<T>) {
+        for item in self.iter() {
+            out.push(item);
+        }
+        self.clear();
+    }
 }
 
 impl<T: Copy + Default, const N: usize> Default for EventRingBuffer<T, N> {
@@ -311,5 +326,65 @@ mod tests {
     fn test_default_trait() {
         let rb: EventRingBuffer<u32, 8> = EventRingBuffer::default();
         assert!(rb.is_empty());
+    }
+
+    #[test]
+    fn test_drain_into_order_and_clear() {
+        let mut rb: EventRingBuffer<u8, 4> = EventRingBuffer::new();
+        for i in 0..3u8 {
+            rb.push(i);
+        }
+        let mut out: Vec<u8> = Vec::new();
+        rb.drain_into(&mut out);
+        assert_eq!(out, vec![0, 1, 2], "drain must yield insertion order");
+        assert!(rb.is_empty(), "buffer must be empty after drain");
+        assert_eq!(rb.len(), 0);
+    }
+
+    #[test]
+    fn test_drain_into_after_wrap_order() {
+        let mut rb: EventRingBuffer<u8, 4> = EventRingBuffer::new();
+        for i in 0..7u8 {
+            rb.push(i);
+        }
+        // Oldest-first after wrap: 3, 4, 5, 6.
+        let mut out: Vec<u8> = Vec::new();
+        rb.drain_into(&mut out);
+        assert_eq!(out, vec![3, 4, 5, 6]);
+        assert!(rb.is_empty());
+    }
+
+    #[test]
+    fn test_drain_into_reuses_buffer_without_growth() {
+        let mut rb: EventRingBuffer<u32, 4> = EventRingBuffer::new();
+        // Pre-size the output once; reuse it across drains.
+        let mut out: Vec<u32> = Vec::with_capacity(4);
+        let reserved = out.capacity();
+
+        for round in 0..3u32 {
+            out.clear();
+            for i in 0..4u32 {
+                rb.push(round * 10 + i);
+            }
+            rb.drain_into(&mut out);
+            assert_eq!(out.len(), 4);
+            assert_eq!(out[0], round * 10);
+        }
+        // Reusing a pre-sized buffer must not have forced any reallocation.
+        assert_eq!(out.capacity(), reserved, "drain buffer must not grow");
+    }
+
+    #[test]
+    fn test_capacity_constant_across_overflow() {
+        let mut rb: EventRingBuffer<u32, 8> = EventRingBuffer::new();
+        let cap_before = rb.capacity();
+        // Push far beyond capacity; a fixed array can never grow.
+        for i in 0..1_000u32 {
+            rb.push(i);
+            assert!(rb.len() <= rb.capacity(), "len must never exceed capacity");
+        }
+        assert_eq!(rb.capacity(), cap_before, "capacity must be invariant");
+        assert_eq!(rb.capacity(), 8);
+        assert_eq!(rb.len(), 8);
     }
 }

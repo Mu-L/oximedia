@@ -119,7 +119,7 @@ mod tests {
     use chrono::Duration;
     use tempfile::tempdir;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_retention_manager() {
         let dir = tempdir().expect("failed to create temp dir");
         let db_path = dir.path().join("test.db");
@@ -165,7 +165,7 @@ mod tests {
         assert_eq!(storage.count().expect("count should succeed"), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_retention_manager_start_stop() {
         let dir = tempdir().expect("failed to create temp dir");
         let db_path = dir.path().join("test.db");

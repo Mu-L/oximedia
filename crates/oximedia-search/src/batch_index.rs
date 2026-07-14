@@ -32,8 +32,6 @@
 //! assert_eq!(indexer.backend().total_indexed(), 7);
 //! ```
 
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 
 use crate::error::{SearchError, SearchResult};
@@ -418,6 +416,138 @@ pub struct PreprocessStats {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// DocIndexSink + EngineBackend — bridge to a rich document index
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A sink that can index full-fidelity documents one at a time and commit them
+/// all at once.
+///
+/// This is the bridge that lets the text-oriented [`BatchIndexer`] machinery
+/// drive a richer index (such as `SearchEngine`, which indexes visual, audio,
+/// face, OCR and colour features in addition to text) while still amortising
+/// the (expensive) commit into a single call at the end of the batch.
+///
+/// The associated [`DocIndexSink::Doc`] type is the *real* document the sink
+/// understands; [`BatchDocument`] is used only to carry the lightweight text
+/// payload and a back-reference (its `doc_id`) into the original document slice,
+/// so the buffering/auto-flush/stats logic of [`BatchIndexer`] is exercised
+/// without forcing the sink to lose any fidelity.
+pub trait DocIndexSink {
+    /// The rich document type this sink indexes.
+    type Doc;
+
+    /// Add a single document to the underlying indices **without** committing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchError`] if the document cannot be added.
+    fn index_one(&mut self, doc: &Self::Doc) -> SearchResult<()>;
+
+    /// Commit all pending writes, making every previously-added document
+    /// visible to search. Called exactly once per batch by [`EngineBackend`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchError`] if the commit fails.
+    fn commit_all(&mut self) -> SearchResult<()>;
+}
+
+/// An [`IndexBackend`] that resolves each [`BatchDocument`] back to a rich
+/// document in a borrowed slice and feeds it to a [`DocIndexSink`].
+///
+/// `write_batch` indexes (without committing) every document in the batch;
+/// `commit` performs the single, batch-wide commit on the sink. This is what
+/// gives bulk imports their throughput win: the ~6 sub-indices of a
+/// `SearchEngine` are finalised once, not once per document.
+///
+/// The `doc_id` of each [`BatchDocument`] must be the decimal string index of
+/// the corresponding entry in `docs`. [`build_batch_documents`] produces
+/// exactly this layout.
+pub struct EngineBackend<'a, S: DocIndexSink> {
+    /// The rich document index being driven.
+    sink: &'a mut S,
+    /// The original, full-fidelity documents, indexed by `BatchDocument::doc_id`.
+    docs: &'a [S::Doc],
+    /// Number of documents successfully written (pre-commit).
+    written: usize,
+    /// Number of documents made durable via `commit`.
+    committed: usize,
+}
+
+impl<'a, S: DocIndexSink> EngineBackend<'a, S> {
+    /// Create a backend bridging `sink` and the borrowed `docs` slice.
+    #[must_use]
+    pub fn new(sink: &'a mut S, docs: &'a [S::Doc]) -> Self {
+        Self {
+            sink,
+            docs,
+            written: 0,
+            committed: 0,
+        }
+    }
+
+    /// Resolve a [`BatchDocument`]'s `doc_id` back to an index into `docs`.
+    fn resolve_index(doc_id: &str) -> SearchResult<usize> {
+        doc_id.parse::<usize>().map_err(|_| {
+            SearchError::Other(format!(
+                "EngineBackend: malformed batch doc_id (expected integer index, got {doc_id:?})"
+            ))
+        })
+    }
+}
+
+// `EngineBackend` borrows the sink; it is only ever used on the thread that owns
+// that borrow, but `IndexBackend` requires `Send`. The borrow is `&mut S`, which
+// is `Send` whenever `S: Send`, so this bound is sound.
+impl<S: DocIndexSink + Send> IndexBackend for EngineBackend<'_, S>
+where
+    S::Doc: Sync,
+{
+    fn write_batch(&mut self, docs: &[BatchDocument]) -> SearchResult<()> {
+        for bd in docs {
+            let idx = Self::resolve_index(&bd.doc_id)?;
+            let full = self.docs.get(idx).ok_or_else(|| {
+                SearchError::Other(format!(
+                    "EngineBackend: batch doc index {idx} out of bounds (len {})",
+                    self.docs.len()
+                ))
+            })?;
+            self.sink.index_one(full)?;
+            self.written += 1;
+        }
+        Ok(())
+    }
+
+    fn commit(&mut self) -> SearchResult<()> {
+        // Single batch-wide commit — the throughput win.
+        self.sink.commit_all()?;
+        self.committed = self.written;
+        Ok(())
+    }
+
+    fn total_indexed(&self) -> usize {
+        self.committed
+    }
+}
+
+/// Build text-only [`BatchDocument`]s from a slice of rich documents, using the
+/// supplied `text_of` projection to extract searchable text and stamping each
+/// `doc_id` with the document's index so an [`EngineBackend`] can resolve it.
+///
+/// This is the glue used by `SearchEngine::index_documents_batch`: it lets the
+/// generic [`BatchIndexer`] buffer and auto-flush over real document text while
+/// the [`EngineBackend`] performs full-fidelity indexing against the originals.
+pub fn build_batch_documents<D, F>(docs: &[D], text_of: F) -> Vec<BatchDocument>
+where
+    F: Fn(&D) -> String,
+{
+    docs.iter()
+        .enumerate()
+        .map(|(i, d)| BatchDocument::new(i.to_string(), text_of(d)))
+        .collect()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -614,5 +744,105 @@ mod tests {
         let backend = InMemoryBackend::new();
         let indexer = BatchIndexer::with_capacity(backend, 42);
         assert_eq!(indexer.capacity(), 42);
+    }
+
+    // ── EngineBackend / DocIndexSink bridge ────────────────────────────────────
+
+    /// A minimal rich-document sink that records indexed docs and counts commits.
+    #[derive(Default)]
+    struct MockSink {
+        indexed: Vec<String>,
+        committed: Vec<String>,
+        commit_calls: usize,
+    }
+
+    impl DocIndexSink for MockSink {
+        type Doc = String;
+
+        fn index_one(&mut self, doc: &String) -> SearchResult<()> {
+            self.indexed.push(doc.clone());
+            Ok(())
+        }
+
+        fn commit_all(&mut self) -> SearchResult<()> {
+            self.commit_calls += 1;
+            self.committed = self.indexed.clone();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_build_batch_documents_stamps_index() {
+        let docs = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
+        let batch = build_batch_documents(&docs, |d| d.clone());
+        assert_eq!(batch.len(), 3);
+        assert_eq!(batch[0].doc_id, "0");
+        assert_eq!(batch[1].doc_id, "1");
+        assert_eq!(batch[2].doc_id, "2");
+        assert_eq!(batch[0].text, "alpha");
+        assert_eq!(batch[2].text, "gamma");
+    }
+
+    #[test]
+    fn test_engine_backend_commits_once_over_multiple_batches() {
+        let docs: Vec<String> = (0..10).map(|i| format!("doc-{i}")).collect();
+        let mut sink = MockSink::default();
+        {
+            let backend = EngineBackend::new(&mut sink, &docs);
+            // capacity 3 over 10 docs => 3 auto-flushes (write_batch) + 1 final flush.
+            let mut indexer = BatchIndexer::with_capacity(backend, 3);
+            for bd in build_batch_documents(&docs, |d| d.clone()) {
+                indexer.push(bd).expect("push ok");
+            }
+            indexer.flush().expect("flush ok");
+            // 4 write_batch calls (3 auto + 1 final-with-remainder), 1 commit.
+            assert_eq!(indexer.backend().total_indexed(), 10);
+        }
+        // Exactly one commit despite multiple write batches.
+        assert_eq!(sink.commit_calls, 1);
+        assert_eq!(sink.indexed.len(), 10);
+        assert_eq!(sink.committed.len(), 10);
+        assert_eq!(sink.indexed[0], "doc-0");
+        assert_eq!(sink.indexed[9], "doc-9");
+    }
+
+    #[test]
+    fn test_engine_backend_empty_does_not_commit() {
+        let docs: Vec<String> = Vec::new();
+        let mut sink = MockSink::default();
+        {
+            let backend = EngineBackend::new(&mut sink, &docs);
+            let mut indexer = BatchIndexer::with_capacity(backend, 4);
+            // No pushes; final flush over an empty buffer must be a no-op write,
+            // but BatchIndexer::flush still calls backend.commit().
+            for bd in build_batch_documents(&docs, |d: &String| d.clone()) {
+                indexer.push(bd).expect("push ok");
+            }
+            // Deliberately do NOT call flush(): with zero docs the caller path in
+            // SearchEngine short-circuits before constructing the indexer.
+            assert_eq!(indexer.backend().total_indexed(), 0);
+        }
+        assert_eq!(sink.commit_calls, 0);
+        assert_eq!(sink.indexed.len(), 0);
+    }
+
+    #[test]
+    fn test_engine_backend_rejects_bad_doc_id() {
+        let docs: Vec<String> = vec!["x".to_string()];
+        let mut sink = MockSink::default();
+        let mut backend = EngineBackend::new(&mut sink, &docs);
+        let bad = vec![BatchDocument::new("not-a-number", "x")];
+        let r = backend.write_batch(&bad);
+        assert!(r.is_err(), "malformed doc_id should error");
+    }
+
+    #[test]
+    fn test_engine_backend_rejects_out_of_bounds_index() {
+        let docs: Vec<String> = vec!["x".to_string()];
+        let mut sink = MockSink::default();
+        let mut backend = EngineBackend::new(&mut sink, &docs);
+        let oob = vec![BatchDocument::new("5", "x")];
+        let r = backend.write_batch(&oob);
+        assert!(r.is_err(), "out-of-bounds index should error");
     }
 }

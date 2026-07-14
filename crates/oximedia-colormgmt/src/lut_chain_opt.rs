@@ -87,7 +87,7 @@ impl LutChainOptimizer {
     /// Apply a merged matrix to a single colour triple.
     ///
     /// This is a convenience function for applying the result of
-    /// [`merge_matrix_pair`] / [`merge_matrix_chain`] to individual pixels.
+    /// [`Self::merge_matrix_pair`] / [`Self::merge_matrix_chain`] to individual pixels.
     #[must_use]
     pub fn apply(matrix: [[f32; 3]; 3], color: [f32; 3]) -> [f32; 3] {
         let [r, g, b] = color;

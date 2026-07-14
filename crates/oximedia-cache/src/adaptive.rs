@@ -180,7 +180,7 @@ pub enum AdjustmentKind {
     NoChange,
 }
 
-/// A recommended adjustment emitted by [`AdaptivePolicy::evaluate`].
+/// A recommended adjustment emitted by [`AdaptivePolicy::evaluate_now`].
 #[derive(Debug, Clone)]
 pub struct Adjustment {
     /// What kind of change is recommended.

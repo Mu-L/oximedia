@@ -330,6 +330,91 @@ impl DiscoveryCache {
             .insert(source.name.clone(), CacheEntry { source, expires_at });
     }
 
+    /// Insert `source`, disambiguating its name if the base name is already
+    /// taken by a *different* source (different network address).
+    ///
+    /// This mirrors NDI's real-world behaviour: when two senders on the same
+    /// machine advertise the same base name (e.g. two `"Camera"` instances),
+    /// the discovery layer must keep them distinct rather than have the second
+    /// silently overwrite the first (which is what [`Self::insert`] does, since
+    /// it keys purely by name).
+    ///
+    /// The disambiguation suffix is deterministic: ` (2)`, ` (3)`, … is
+    /// appended to the base name, picking the lowest free index. A re-announce
+    /// of an *already-cached* source (same name **and** same address) refreshes
+    /// the existing entry in place instead of creating a duplicate.
+    ///
+    /// Returns the name actually stored in the cache (which may carry a suffix),
+    /// so the caller can retrieve the entry via [`Self::get`].
+    pub fn insert_unique(&mut self, source: NdiSource, now: u64) -> String {
+        let expires_at = now.saturating_add(self.ttl_secs);
+
+        // Re-announce of an identical source: refresh in place, keep the name.
+        if let Some(existing) = self.entries.get(&source.name) {
+            if existing.source.address == source.address {
+                let name = source.name.clone();
+                self.entries
+                    .insert(name.clone(), CacheEntry { source, expires_at });
+                return name;
+            }
+        }
+
+        // Base name is free: take it as-is.
+        if !self.entries.contains_key(&source.name) {
+            let name = source.name.clone();
+            self.entries
+                .insert(name.clone(), CacheEntry { source, expires_at });
+            return name;
+        }
+
+        // Base name is taken by a different source: find the lowest free suffix.
+        // If THIS source already lives under a suffixed name (same address),
+        // refresh that entry rather than minting yet another suffix.
+        let base = source.name.clone();
+        let mut index: u32 = 2;
+        loop {
+            let candidate = format!("{base} ({index})");
+            match self.entries.get(&candidate) {
+                Some(existing) if existing.source.address == source.address => {
+                    // Same source previously assigned this suffix: refresh it.
+                    let mut renamed = source;
+                    renamed.name = candidate.clone();
+                    self.entries.insert(
+                        candidate.clone(),
+                        CacheEntry {
+                            source: renamed,
+                            expires_at,
+                        },
+                    );
+                    return candidate;
+                }
+                Some(_) => {
+                    // Suffix occupied by a different source: try the next index.
+                    index = index.saturating_add(1);
+                }
+                None => {
+                    let mut renamed = source;
+                    renamed.name = candidate.clone();
+                    self.entries.insert(
+                        candidate.clone(),
+                        CacheEntry {
+                            source: renamed,
+                            expires_at,
+                        },
+                    );
+                    return candidate;
+                }
+            }
+        }
+    }
+
+    /// Retrieve a cached source by its exact (possibly disambiguated) name,
+    /// regardless of expiry.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<NdiSource> {
+        self.entries.get(name).map(|e| e.source.clone())
+    }
+
     /// Return all sources that have not yet expired as of `now`.
     #[must_use]
     pub fn get_active(&self, now: u64) -> Vec<NdiSource> {
@@ -730,6 +815,122 @@ mod tests {
         cache.insert(src, 5); // new expiry = 15
                               // At t=14, should still be active
         assert_eq!(cache.get_active(14).len(), 1);
+    }
+
+    #[test]
+    fn test_discovery_cache_unique_naming_collision_avoidance() {
+        // Two distinct sources (different addresses) advertise the SAME base
+        // name. insert_unique must keep them BOTH, assigning a deterministic
+        // disambiguation suffix to the second so neither is lost.
+        let mut cache = DiscoveryCache::new(60);
+
+        let first = NdiSource::new("Camera", "192.168.1.10:5960");
+        let second = NdiSource::new("Camera", "192.168.1.11:5960");
+
+        let name_a = cache.insert_unique(first.clone(), 1000);
+        let name_b = cache.insert_unique(second.clone(), 1000);
+
+        // The two resulting names must be unique.
+        assert_ne!(name_a, name_b, "collision was not avoided");
+        assert_eq!(name_a, "Camera", "first registrant keeps the base name");
+        assert_eq!(name_b, "Camera (2)", "second gets deterministic suffix");
+
+        // BOTH sources are retrievable under their assigned names...
+        let got_a = cache.get(&name_a).expect("first source retrievable");
+        let got_b = cache.get(&name_b).expect("second source retrievable");
+        assert_eq!(got_a.address, "192.168.1.10:5960");
+        assert_eq!(got_b.address, "192.168.1.11:5960");
+
+        // ...and both are simultaneously active (the first was NOT overwritten).
+        let active = cache.get_active(1059);
+        assert_eq!(active.len(), 2, "both same-named sources must survive");
+        let names: std::collections::HashSet<&str> =
+            active.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains("Camera"));
+        assert!(names.contains("Camera (2)"));
+    }
+
+    #[test]
+    fn test_discovery_cache_unique_naming_reannounce_refreshes() {
+        // A re-announce of the SAME source (same name AND same address) must
+        // refresh in place — it must NOT mint a fresh suffix each time.
+        let mut cache = DiscoveryCache::new(10);
+        let src = NdiSource::new("Studio", "10.0.0.5:5960");
+
+        let n1 = cache.insert_unique(src.clone(), 0);
+        let n2 = cache.insert_unique(src.clone(), 3); // re-announce later
+        assert_eq!(n1, "Studio");
+        assert_eq!(n2, "Studio", "re-announce must not create a duplicate name");
+        assert_eq!(cache.len(), 1, "re-announce must not grow the cache");
+
+        // The refresh extended the TTL (expiry moved from 10 to 13).
+        assert_eq!(
+            cache.get_active(12).len(),
+            1,
+            "TTL was refreshed on re-announce"
+        );
+
+        // A DIFFERENT source under the suffixed name, then a re-announce of it,
+        // must also refresh its suffixed slot rather than chain new suffixes.
+        let other = NdiSource::new("Studio", "10.0.0.6:5960");
+        let s1 = cache.insert_unique(other.clone(), 3);
+        let s2 = cache.insert_unique(other.clone(), 4);
+        assert_eq!(s1, "Studio (2)");
+        assert_eq!(s2, "Studio (2)", "suffixed source re-announce stays stable");
+        assert_eq!(cache.len(), 2, "still exactly two distinct sources");
+    }
+
+    #[test]
+    fn test_discovery_cache_n_distinct_sources_all_unique() {
+        // Register N distinctly-named sources: all present, all unique, count
+        // correct. (No suffixing needed since every base name differs.)
+        let mut cache = DiscoveryCache::new(120);
+        const N: usize = 8;
+
+        let mut assigned: Vec<String> = Vec::with_capacity(N);
+        for i in 0..N {
+            let src = NdiSource::new(format!("Cam{i}"), format!("192.168.0.{i}:5960"));
+            assigned.push(cache.insert_unique(src, 500));
+        }
+
+        // All N are present.
+        assert_eq!(cache.len(), N);
+        let active = cache.get_active(600);
+        assert_eq!(active.len(), N, "all N distinct sources active");
+
+        // Every assigned name is unique and equals its requested base name.
+        let unique: std::collections::HashSet<&str> = assigned.iter().map(String::as_str).collect();
+        assert_eq!(unique.len(), N, "all names unique");
+        for (i, name) in assigned.iter().enumerate() {
+            assert_eq!(*name, format!("Cam{i}"), "distinct names keep base form");
+            assert!(cache.get(name).is_some(), "Cam{i} retrievable");
+        }
+    }
+
+    #[test]
+    fn test_discovery_cache_three_way_same_name_collision() {
+        // Three different sources sharing one base name → "X", "X (2)", "X (3)".
+        let mut cache = DiscoveryCache::new(60);
+        let a = cache.insert_unique(NdiSource::new("X", "1.1.1.1:5960"), 0);
+        let b = cache.insert_unique(NdiSource::new("X", "2.2.2.2:5960"), 0);
+        let c = cache.insert_unique(NdiSource::new("X", "3.3.3.3:5960"), 0);
+        assert_eq!(a, "X");
+        assert_eq!(b, "X (2)");
+        assert_eq!(c, "X (3)");
+        assert_eq!(cache.len(), 3);
+        // All three resolve back to their distinct addresses.
+        assert_eq!(
+            cache.get("X").map(|s| s.address),
+            Some("1.1.1.1:5960".to_string())
+        );
+        assert_eq!(
+            cache.get("X (2)").map(|s| s.address),
+            Some("2.2.2.2:5960".to_string())
+        );
+        assert_eq!(
+            cache.get("X (3)").map(|s| s.address),
+            Some("3.3.3.3:5960".to_string())
+        );
     }
 
     // ── NdiMetadataFrame ─────────────────────────────────────────────────────

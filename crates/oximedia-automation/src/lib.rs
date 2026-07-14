@@ -19,7 +19,7 @@
 //!         ├── Logging (BatchedAsRunLogger, Event Logger)
 //!         ├── Monitoring (SystemMonitor, Metrics Collector)
 //!         ├── Remote Control (REST via axum, WebSocket)
-//!         └── Script Engine (Lua 5.4 via mlua)
+//!         └── Script Engine (Lua 5.4 via mlua, opt-in `lua-scripting` feature)
 //! ```
 //!
 //! # Device Control Protocols
@@ -28,10 +28,16 @@
 //! - **Sony 9-pin** — RS-422 7-byte frame; `SONY_CMD1_TRANSPORT=0x20`; Stop/Play/Record/FF/Rewind
 //! - **GPI/GPO** — General Purpose Interface triggers and outputs
 //!
-//! # Lua Scripting
+//! # Lua Scripting (opt-in, C-backed)
 //!
 //! `ScriptEngine` embeds Lua 5.4 (mlua, vendored) with a sandbox:
 //! 1 M instructions, 32 MiB memory, 5 s max duration; FIFO script cache of 64 entries.
+//!
+//! Lua support is **not** part of the default (Pure Rust) build: it is compiled in
+//! only when the non-default `lua-scripting` Cargo feature is enabled (`mlua`
+//! embeds a vendored Lua 5.4 C interpreter via `lua-src`/`mlua-sys`). Without the
+//! feature, `ScriptEngine` still exists with the same public API, but every method
+//! that needs a Lua VM returns a clear `Err` instead of executing anything.
 //!
 //! # Key Subsystems
 //!

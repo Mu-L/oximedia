@@ -52,7 +52,7 @@ fuzz_target!(|data: &[u8]| {
                 let _ = value.is_null();
                 let _ = value.as_number();
                 let _ = value.as_boolean();
-                let _ = value.as_string();
+                let _ = value.as_str();
             }
             Err(_) => {
                 // Decoding error - stop processing
@@ -71,12 +71,12 @@ fuzz_target!(|data: &[u8]| {
         Ok(header) => {
             // Successfully parsed chunk header
             // Access fields without causing panic
-            let _ = header.basic_header_type();
-            let _ = header.chunk_stream_id();
+            let _ = header.format;
+            let _ = header.chunk_stream_id;
             let _ = header.timestamp();
-            let _ = header.message_length();
-            let _ = header.message_type();
-            let _ = header.message_stream_id();
+            let _ = header.message.message_length;
+            let _ = header.message.message_type;
+            let _ = header.message.message_stream_id;
         }
         Err(_) => {
             // Parsing error - this is expected for random data
@@ -90,7 +90,7 @@ fuzz_target!(|data: &[u8]| {
         // Create a synthetic previous header
         let mut synthetic_buf = data;
         if let Ok(synthetic_header) = ChunkHeader::decode(&mut synthetic_buf, &prev_headers) {
-            let csid = synthetic_header.chunk_stream_id();
+            let csid = synthetic_header.chunk_stream_id;
             prev_headers_with_data.insert(csid, synthetic_header);
 
             // Try parsing with the previous header context

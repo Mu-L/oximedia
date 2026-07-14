@@ -13,7 +13,7 @@
 //! - **Energy** — RMS energy averaged across the full stem.
 //! - **Onset count** — number of detected transients using adaptive thresholding.
 //!
-//! The [`MultiTrackAnalyzer::combined_tempo`] method returns a weighted average
+//! The [`MultiTrackAnalyzer::combined_tempo`](crate::multitrack::MultiTrackAnalyzer::combined_tempo) method returns a weighted average
 //! of per-stem tempos, with drum stems weighted 2× relative to other stems.
 
 #![allow(dead_code)]
@@ -134,7 +134,7 @@ impl MultiTrackAnalyzer {
 
     /// Run analysis on all registered stems and return one [`StemAnalysis`] per stem.
     ///
-    /// The order matches the order in which stems were added via [`add_stem`].
+    /// The order matches the order in which stems were added via [`Self::add_stem`].
     #[must_use]
     pub fn analyze_all(&self) -> Vec<StemAnalysis> {
         self.stems.iter().map(|r| analyze_stem(r)).collect()

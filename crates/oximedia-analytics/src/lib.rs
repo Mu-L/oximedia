@@ -44,9 +44,10 @@ pub use cohort::{
     CohortRetentionCell, CohortWindow, UserEvent, ViewerEvent,
 };
 pub use engagement::{
-    compute_engagement, decompose_time_series, exponential_moving_average, linear_regression_slope,
-    ContentEngagementScore, ContentRanker, DecomposedSeries, EmaConfig, EmaResult,
-    EngagementComponents, EngagementTrend, EngagementWeights, SeasonalPeriod, TrendDirection,
+    compute_engagement, compute_engagement_with_social, decompose_time_series,
+    exponential_moving_average, linear_regression_slope, ContentEngagementScore, ContentRanker,
+    DecomposedSeries, EmaConfig, EmaResult, EngagementComponents, EngagementTrend,
+    EngagementWeights, SeasonalPeriod, SocialSignals, TrendDirection,
 };
 pub use error::AnalyticsError;
 pub use funnel::{

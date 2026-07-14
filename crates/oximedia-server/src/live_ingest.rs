@@ -224,6 +224,25 @@ pub struct SrtIngestServer {
     session_counter: Arc<Mutex<u64>>,
 }
 
+/// Locks `mutex`, spin-waiting instead of panicking if it is momentarily
+/// held.
+///
+/// Callers of this helper hold `&mut self` on [`SrtIngestServer`], which
+/// statically guarantees no other reference to the server (and therefore no
+/// other holder of any of its internal mutexes) can exist — none of these
+/// mutexes are ever cloned out of the struct or handed to a spawned task.
+/// Under that invariant `try_lock()` always succeeds on the first attempt;
+/// the loop exists only so this can never panic even if that invariant is
+/// ever violated by a future refactor.
+fn lock_uncontended<T>(mutex: &Mutex<T>) -> tokio::sync::MutexGuard<'_, T> {
+    loop {
+        if let Ok(guard) = mutex.try_lock() {
+            return guard;
+        }
+        std::thread::yield_now();
+    }
+}
+
 impl SrtIngestServer {
     /// Creates a new ingest server with the given configuration.
     pub fn new(config: SrtIngestConfig) -> Self {
@@ -245,26 +264,13 @@ impl SrtIngestServer {
     /// handshake is performed.  Use [`Self::accept_connection`] for the
     /// wired path.
     ///
-    /// # Panics
-    ///
-    /// Panics if any of the internal mutexes are concurrently held — which
-    /// cannot happen because the method takes `&mut self`, granting
-    /// exclusive access to the server.
+    /// `&mut self` grants exclusive access to the server, so the internal
+    /// mutexes below are always uncontended in practice (see
+    /// `lock_uncontended`); this method cannot panic.
     pub fn accept_session(&mut self, client_addr: String, now_ms: u64) -> String {
-        // `&mut self` guarantees no other reference exists, therefore no
-        // other task can be holding any of these mutexes.
-        let mut counter_guard = self
-            .session_counter
-            .try_lock()
-            .expect("session_counter mutex uncontested in &mut self path");
-        let mut id_gen_guard = self
-            .id_gen
-            .try_lock()
-            .expect("id_gen mutex uncontested in &mut self path");
-        let mut sessions_guard = self
-            .sessions
-            .try_lock()
-            .expect("sessions mutex uncontested in &mut self path");
+        let mut counter_guard = lock_uncontended(&self.session_counter);
+        let mut id_gen_guard = lock_uncontended(&self.id_gen);
+        let mut sessions_guard = lock_uncontended(&self.sessions);
 
         *counter_guard = counter_guard.wrapping_add(1);
         let id = id_gen_guard.gen_id(*counter_guard);
@@ -381,10 +387,7 @@ impl SrtIngestServer {
     /// `bytes` is the number of additional bytes received since the last update.
     /// `lost` is the number of additional lost packets since the last update.
     pub fn update_session(&mut self, id: &str, bytes: u64, lost: u64) {
-        let mut sessions_guard = self
-            .sessions
-            .try_lock()
-            .expect("sessions mutex uncontested in &mut self path");
+        let mut sessions_guard = lock_uncontended(&self.sessions);
         if let Some(session) = sessions_guard.get_mut(id) {
             session.bytes_received = session.bytes_received.saturating_add(bytes);
             session.packets_lost = session.packets_lost.saturating_add(lost);
@@ -427,10 +430,7 @@ impl SrtIngestServer {
 
     /// Removes a session by ID.  Returns `true` if it existed.
     pub fn remove_session(&mut self, id: &str) -> bool {
-        let mut sessions_guard = self
-            .sessions
-            .try_lock()
-            .expect("sessions mutex uncontested in &mut self path");
+        let mut sessions_guard = lock_uncontended(&self.sessions);
         sessions_guard.remove(id).is_some()
     }
 

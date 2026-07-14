@@ -6,12 +6,17 @@
 pub mod ad_scene;
 pub mod generator;
 pub mod mix;
+pub mod scene_analysis;
 pub mod script;
 pub mod template;
 pub mod timing;
 
 pub use generator::{AudioDescriptionConfig, AudioDescriptionGenerator};
 pub use mix::{AudioDescriptionMixer, MixConfig, MixStrategy};
+pub use scene_analysis::{
+    gaps_from_silence, SceneAudioDescriber, SceneDescriptionConfig, SceneTrigger,
+    DEFAULT_AD_WORDS_PER_MINUTE,
+};
 pub use script::{AudioDescriptionEntry, AudioDescriptionScript};
 pub use template::{
     ActionDescriptor, DescriptionStyle, SceneContext, SceneTemplateEngine, SettingDescriptor,

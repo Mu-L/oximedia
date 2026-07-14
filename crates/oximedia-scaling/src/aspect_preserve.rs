@@ -333,4 +333,143 @@ mod tests {
         assert_eq!(g.scaled_width, 1920);
         assert_eq!(g.scaled_height, 1080);
     }
+
+    // ── Aspect-ratio helper ───────────────────────────────────────────────────
+
+    fn aspect_ratio(w: u32, h: u32) -> f64 {
+        w as f64 / h as f64
+    }
+
+    fn assert_aspect_preserved(orig_w: u32, orig_h: u32, out_w: u32, out_h: u32) {
+        let orig = aspect_ratio(orig_w, orig_h);
+        let out = aspect_ratio(out_w, out_h);
+        assert!(
+            (orig - out).abs() < 0.02,
+            "aspect mismatch: {orig:.4} vs {out:.4}"
+        );
+    }
+
+    // ── 32:9 ultrawide (3840×1080) → 1920×1080 (16:9) ──────────────────────
+
+    #[test]
+    fn test_ultrawide_contain() {
+        // 32:9 source scaled into 16:9 target — must fit entirely inside
+        let ap = AspectPreserver::new(FitMode::Contain);
+        let g = ap.compute_output_dims(3840, 1080, 1920, 1080);
+        assert!(
+            g.scaled_width <= 1920,
+            "scaled_width {} must not exceed target 1920",
+            g.scaled_width
+        );
+        assert!(
+            g.scaled_height <= 1080,
+            "scaled_height {} must not exceed target 1080",
+            g.scaled_height
+        );
+        assert!(
+            g.has_padding(),
+            "32:9 → 16:9 Contain must produce letterbox padding"
+        );
+        assert_aspect_preserved(3840, 1080, g.scaled_width, g.scaled_height);
+        assert_eq!(g.frame_width, 1920);
+        assert_eq!(g.frame_height, 1080);
+    }
+
+    #[test]
+    fn test_ultrawide_cover() {
+        // 32:9 source covering a 16:9 target — both dimensions must be ≥ target
+        let ap = AspectPreserver::new(FitMode::Cover);
+        let g = ap.compute_output_dims(3840, 1080, 1920, 1080);
+        assert!(
+            g.scaled_width >= 1920 && g.scaled_height >= 1080,
+            "Cover scaled_width={} scaled_height={} must both be ≥ 1920×1080",
+            g.scaled_width,
+            g.scaled_height
+        );
+        assert_aspect_preserved(3840, 1080, g.scaled_width, g.scaled_height);
+        assert_eq!(g.frame_width, 1920);
+        assert_eq!(g.frame_height, 1080);
+    }
+
+    // ── 9:16 portrait (1080×1920) → 1920×1080 ──────────────────────────────
+
+    #[test]
+    fn test_portrait_contain() {
+        // Tall portrait source into landscape target — must letterbox with horizontal padding
+        let ap = AspectPreserver::new(FitMode::Contain);
+        let g = ap.compute_output_dims(1080, 1920, 1920, 1080);
+        assert!(
+            g.scaled_width <= 1920,
+            "scaled_width {} must fit inside 1920",
+            g.scaled_width
+        );
+        assert!(
+            g.scaled_height <= 1080,
+            "scaled_height {} must fit inside 1080",
+            g.scaled_height
+        );
+        // Portrait fitted into landscape: narrower than target → horizontal (pillarbox) padding
+        assert!(
+            g.offset_x > 0,
+            "portrait Contain into landscape must produce horizontal pillarbox; offset_x={}",
+            g.offset_x
+        );
+        assert_aspect_preserved(1080, 1920, g.scaled_width, g.scaled_height);
+    }
+
+    #[test]
+    fn test_portrait_cover() {
+        // Portrait source covering a landscape target — both dims ≥ target
+        let ap = AspectPreserver::new(FitMode::Cover);
+        let g = ap.compute_output_dims(1080, 1920, 1920, 1080);
+        assert!(
+            g.scaled_width >= 1920 && g.scaled_height >= 1080,
+            "Cover scaled_width={} scaled_height={} must both be ≥ 1920×1080",
+            g.scaled_width,
+            g.scaled_height
+        );
+        assert_aspect_preserved(1080, 1920, g.scaled_width, g.scaled_height);
+    }
+
+    // ── 2.39:1 anamorphic (2390×1000) → 1920×1080 ──────────────────────────
+
+    #[test]
+    fn test_anamorphic_contain() {
+        // 2.39:1 anamorphic source into 16:9 target — fits with padding
+        let ap = AspectPreserver::new(FitMode::Contain);
+        let g = ap.compute_output_dims(2390, 1000, 1920, 1080);
+        assert!(
+            g.scaled_width <= 1920,
+            "scaled_width {} must fit inside 1920",
+            g.scaled_width
+        );
+        assert!(
+            g.scaled_height <= 1080,
+            "scaled_height {} must fit inside 1080",
+            g.scaled_height
+        );
+        assert!(
+            g.has_padding(),
+            "2.39:1 → 16:9 Contain must produce padding"
+        );
+        assert_aspect_preserved(2390, 1000, g.scaled_width, g.scaled_height);
+        assert_eq!(g.frame_width, 1920);
+        assert_eq!(g.frame_height, 1080);
+    }
+
+    #[test]
+    fn test_anamorphic_cover() {
+        // 2.39:1 anamorphic source covering 16:9 target — both dims ≥ target
+        let ap = AspectPreserver::new(FitMode::Cover);
+        let g = ap.compute_output_dims(2390, 1000, 1920, 1080);
+        assert!(
+            g.scaled_width >= 1920 && g.scaled_height >= 1080,
+            "Cover scaled_width={} scaled_height={} must both be ≥ 1920×1080",
+            g.scaled_width,
+            g.scaled_height
+        );
+        assert_aspect_preserved(2390, 1000, g.scaled_width, g.scaled_height);
+        assert_eq!(g.frame_width, 1920);
+        assert_eq!(g.frame_height, 1080);
+    }
 }

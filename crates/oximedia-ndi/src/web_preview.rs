@@ -296,9 +296,9 @@ pub fn encode_jpeg_rgb(pixels: &[u8], width: u32, height: u32, quality: u8) -> O
 
 /// Shared state for the web preview server.
 ///
-/// The actual HTTP listener is started separately by calling
-/// [`WebPreviewServer::start`]; this struct holds the shared broadcaster
-/// that the HTTP handler reads.
+/// The actual HTTP listener is started separately by calling the embedding
+/// application's own `start`-style entry point; this struct holds the shared
+/// broadcaster that the HTTP handler reads.
 pub struct WebPreviewServer {
     /// Server configuration.
     pub config: PreviewConfig,
@@ -527,8 +527,7 @@ mod tests {
     #[test]
     fn test_downscale_rgb_basic() {
         // 4x4 red image downscaled to 2x2
-        let src: Vec<u8> = std::iter::repeat([255u8, 0u8, 0u8])
-            .take(4 * 4)
+        let src: Vec<u8> = std::iter::repeat_n([255u8, 0u8, 0u8], 4 * 4)
             .flatten()
             .collect();
         let dst = downscale_rgb(&src, 4, 4, 2, 2);

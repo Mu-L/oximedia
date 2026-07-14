@@ -4,7 +4,7 @@
 - 33 modules providing clip management: database, subclips, grouping (bins/folders/collections), logging (keywords/markers/ratings/notes), takes, proxy association, smart collections, search, import/export
 - Sub-directories: `clip/`, `database/`, `export/`, `group/`, `import/`, `logging/`, `marker/`, `note/`, `proxy/`, `rating/`, `search/`, `subclip/`, `take/`, `trim/`
 - Platform-conditional: `database`, `import`, `manager` excluded on `wasm32`
-- Uses `sqlx` for async database, `tokio` for async I/O
+- Uses Pure-Rust OxiSQL (`oxisql-sqlite-compat`) for async database, `tokio` for async I/O
 
 ## Enhancements
 - [x] Add `clip_fingerprint` module to lib.rs exports (file exists at `src/clip_fingerprint.rs` but not declared)
@@ -30,8 +30,8 @@
 ## Performance
 - [x] Add database index on `keywords` and `rating` columns for faster filtered queries (verified 2026-06-01; `idx_clips_rating` + `idx_clips_keywords` + `idx_clips_favorite_rating` in `src/database/migration.rs`)
 - [x] Implement batch `add_clips()` method in `ClipManager` with single transaction for bulk import (verified 2026-06-01; `pub async fn add_clips` at `src/manager.rs:118` delegates to `database.batch_save_clips`)
-- [ ] Cache `SmartCollection` query results with invalidation on clip metadata changes
-- [ ] Use prepared statement caching in `database` module to avoid repeated SQL parsing
+- [x] Cache `SmartCollection` query results with invalidation on clip metadata changes (verified 2026-06-06; field-dependency auto-invalidation: `SmartRule::depends_on`→`ClipField`, `SmartCollection::dependency_fields`, and `ClipManager::{invalidate_smart_collections_for, invalidate_all_smart_collections}` wired into `update_clip` via `changed_fields` diff over an interior-mutability `Mutex<Vec<SmartCollection>>` registry in `src/manager.rs` + `src/group/smart.rs`)
+- [x] Use prepared statement caching in `database` module to avoid repeated SQL parsing (verified 2026-06-06; explicit `.persistent(true)` on the hot read paths `get_clip`/`get_all_clips`/`search_clips`/`get_clips_page` in `src/database/storage.rs`)
 - [x] Add pagination support to `search` and `ClipManager::list_clips()` for large clip libraries (verified 2026-06-01; `list_clips(page, page_size)` + `LIMIT ? OFFSET ?` in `src/database/storage.rs:334`)
 
 ## Testing
@@ -51,7 +51,7 @@
 ## 0.1.8 follow-up (added 2026-05-29 by /ultra)
 - [x] Fix WASM regression — `uuid` and `serde_json` listed under `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]` but 11 source files import them unconditionally (done 2026-05-29)
   - **Goal:** `cargo check --target wasm32-unknown-unknown -p oximedia-clips` passes cleanly.
-  - **Design:** Move `uuid` and `serde_json` to unconditional `[dependencies]` (both are pure-Rust, WASM-safe crates; `uuid` already has `js` feature in workspace dep). Keep `tokio`, `sqlx`, `oximedia-audio`, `oximedia-container` under the wasm-cfg gate.
+  - **Design:** Move `uuid` and `serde_json` to unconditional `[dependencies]` (both are pure-Rust, WASM-safe crates; `uuid` already has `js` feature in workspace dep). Keep `tokio`, `oxisql-sqlite-compat`, `oximedia-audio`, `oximedia-container` under the wasm-cfg gate.
   - **Files:** `Cargo.toml`
   - **Tests:** `cargo check --target wasm32-unknown-unknown -p oximedia-clips`
   - **Risk:** Negligible — both deps compile cleanly to wasm32.

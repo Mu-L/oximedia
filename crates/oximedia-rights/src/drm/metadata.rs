@@ -83,28 +83,30 @@ impl DrmMetadata {
 
         let now = Utc::now();
 
-        sqlx::query(
-            r"
+        db.pool()
+            .execute(
+                r"
             INSERT INTO drm_metadata
             (id, asset_id, drm_type, encryption_key_id, content_id, license_url, metadata_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             ON CONFLICT(id) DO UPDATE SET
                 encryption_key_id = excluded.encryption_key_id,
                 license_url = excluded.license_url,
                 updated_at = excluded.updated_at
             ",
-        )
-        .bind(&self.id)
-        .bind(&self.asset_id)
-        .bind(self.drm_type.as_str())
-        .bind(&self.encryption_key_id)
-        .bind(&self.content_id)
-        .bind(&self.license_url)
-        .bind(metadata_json.to_string())
-        .bind(now.to_rfc3339())
-        .bind(now.to_rfc3339())
-        .execute(db.pool())
-        .await?;
+                &[
+                    &self.id,
+                    &self.asset_id,
+                    &self.drm_type.as_str(),
+                    &self.encryption_key_id,
+                    &self.content_id,
+                    &self.license_url,
+                    &metadata_json.to_string(),
+                    &now.to_rfc3339(),
+                    &now.to_rfc3339(),
+                ],
+            )
+            .await?;
 
         Ok(())
     }

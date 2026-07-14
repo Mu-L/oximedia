@@ -12,7 +12,7 @@
 //! - **`CapacityScore`** — a single composite 0–100 score across all tracked
 //!   resources, allowing quick at-a-glance health assessment.
 //! - **`CapacityAdvisor`** — the central struct that holds per-resource
-//!   utilisation samples, computes headroom, and emits [`ScaleRecommendation`]
+//!   utilisation samples, computes headroom, and emits `ScaleRecommendation`
 //!   values when thresholds are crossed.
 //!
 //! # Design rationale

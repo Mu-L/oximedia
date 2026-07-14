@@ -53,11 +53,11 @@
   - **Risk:** `smallvec` may already be a workspace dep — check before adding.
 
 ## Testing
-- [ ] Add conformance tests with real-world EDL files from major NLE systems (Avid, Premiere, Resolve)
-- [ ] Test `cmx3600.rs` parser with EDLs containing complex wipe patterns and key events
-- [ ] Add fuzz testing for `parser.rs` with malformed EDL inputs
-- [ ] Test `motion.rs` speed effect parsing with reverse playback and freeze frames
-- [ ] Test `edl_timeline.rs` conversion accuracy with overlapping events
+- [x] Add conformance tests with real-world EDL files from major NLE systems (Avid, Premiere, Resolve) — hand-authored CMX 3600 strings pin cut/dissolve/wipe/key classification, reel extraction, serialize round-trip, and the duration-column parser limitation (`tests/cmx3600_conformance.rs:25` `test_cmx_cut_then_dissolve`, `:90` `test_cmx_serialize_roundtrip`, `:122` `test_cmx_rejects_duration_column`)
+- [x] Test `cmx3600.rs` parser with EDLs containing complex wipe patterns and key events — wipe + key classification via `parse_cmx`, and wipe-without-pattern rejection via the main parser (`tests/cmx3600_conformance.rs:66` `test_cmx_wipe_and_key`, `tests/parser_fuzz.rs:81` `test_wipe_without_pattern_is_rejected`)
+- [x] Add fuzz testing for `parser.rs` with malformed EDL inputs — seeded xorshift PRNG feeds ~1200 random ASCII lines/blobs (never panics/hangs) plus the silent-skip and inverted-timecode contracts (`tests/parser_fuzz.rs:142` `test_parse_edl_fuzz_never_panics`, `:43` `test_parse_edl_silently_skips_malformed`, `:62` `test_parse_edl_inverted_timecode_errors`)
+- [x] Test `motion.rs` speed effect parsing with reverse playback and freeze frames — reverse/freeze constructors, effective speed, validate() rejection rules, and the M2 comment round-trip (`tests/motion_timeline.rs:14` `test_motion_effect_constructors_and_validation`, `:60` `test_motion_m2_comment_roundtrip`)
+- [x] Test `edl_timeline.rs` conversion accuracy with overlapping events — TimelineAnalyzer overlap + merged-coverage accounting, plus the EDL→timeline bridge clip-frame mapping (`tests/motion_timeline.rs:191` `test_timeline_analyzer_overlap_and_coverage`, `:82` `test_convert_edl_to_timeline_clip_frames`)
 - [x] Add round-trip tests for all supported formats — `test_cmx3600_roundtrip` (3-event EDL), `test_ale_parse_basic`
 - [ ] Test `reel_registry.rs` with duplicate reel name handling
 

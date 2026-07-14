@@ -23,7 +23,7 @@ Part of the [OxiMedia](https://github.com/cool-japan/oximedia) sovereign media f
 
 ```toml
 [dependencies]
-oximedia-video = "0.1"
+oximedia-video = "0.1.9"
 ```
 
 ```rust
@@ -146,4 +146,4 @@ Licensed under the terms specified in the workspace root.
 
 Copyright (c) COOLJAPAN OU (Team Kitasan)
 
-Version: 0.1.8 — 2026-05-29 — 801 tests
+Version: 0.1.9 — 2026-07-08 — extensively tested

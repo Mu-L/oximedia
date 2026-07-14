@@ -150,7 +150,7 @@ impl OcioConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`ColorError::InvalidProfile`] if the YAML is malformed
+    /// Returns [`ColorError::Parse`] if the YAML is malformed
     /// or if no `ocio_profile_version` key is found.
     pub fn from_str(input: &str) -> Result<Self> {
         let parser = OcioParser::new(input);

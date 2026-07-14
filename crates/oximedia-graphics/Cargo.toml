@@ -26,8 +26,8 @@ oximedia-image.workspace = true
 
 # Graphics rendering
 tiny-skia = "0.12"
-fontdue = "0.9"
-ab_glyph = "0.2"
+fontdue.workspace = true
+ab_glyph.workspace = true
 kurbo = "0.13"
 palette = "0.7"
 
@@ -40,7 +40,7 @@ pollster = { workspace = true, optional = true }
 resvg = "0.47"
 
 # Template and control
-tera = "1"
+tera = "2"
 
 # getrandom v0.2 (via palette -> phf -> rand 0.8) requires "js" feature on wasm32
 # getrandom v0.4 (via rand 0.10) requires "wasm_js" feature on wasm32
@@ -49,7 +49,7 @@ getrandom02 = { workspace = true }
 getrandom = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["full"] }
 axum = { workspace = true, optional = true }
 
 [features]

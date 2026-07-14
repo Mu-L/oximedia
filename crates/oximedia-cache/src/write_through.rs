@@ -182,6 +182,8 @@ pub struct WriteThroughStats {
     /// [`put`]: WriteThroughCache::put
     pub writes: u64,
     /// Number of [`put`] operations that failed due to a backing-store error.
+    ///
+    /// [`put`]: WriteThroughCache::put
     pub write_errors: u64,
 }
 

@@ -1032,7 +1032,7 @@ fn decompress_packbits(data: &[u8]) -> ImageResult<Vec<u8>> {
             }
             let byte = data[i];
             i += 1;
-            output.extend(std::iter::repeat(byte).take(count));
+            output.extend(std::iter::repeat_n(byte, count));
         }
     }
 

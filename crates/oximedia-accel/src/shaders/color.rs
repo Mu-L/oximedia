@@ -230,6 +230,10 @@ pub const YUV420P_TO_RGB_GLSL: &str = r"
 /// 256-element `shared` tile.  After `barrier()` the colour transform reads
 /// from the tile; for the U/V subsampled planes the three 2×2 quad neighbours
 /// are also read from the tile, eliminating four global reads per 2×2 quad.
+///
+/// Only compiled with the `vulkan-backend` feature: the `vulkano_shaders::shader!`
+/// proc-macro compiles this GLSL to SPIR-V at build time via `shaderc-sys`.
+#[cfg(feature = "vulkan-backend")]
 #[allow(missing_docs)]
 pub mod rgb_to_yuv420p {
     vulkano_shaders::shader! {
@@ -346,6 +350,10 @@ pub mod rgb_to_yuv420p {
 /// before `barrier()`.  The colour transform reads Y from the tile; U/V are
 /// read from global memory because they are already subsampled (one value per
 /// 2×2 quad, so four threads share each U/V fetch — already coalesced).
+///
+/// Only compiled with the `vulkan-backend` feature: the `vulkano_shaders::shader!`
+/// proc-macro compiles this GLSL to SPIR-V at build time via `shaderc-sys`.
+#[cfg(feature = "vulkan-backend")]
 #[allow(missing_docs)]
 pub mod yuv420p_to_rgb {
     vulkano_shaders::shader! {

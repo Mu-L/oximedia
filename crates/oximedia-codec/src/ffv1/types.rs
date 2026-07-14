@@ -283,7 +283,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore]
     fn test_version_roundtrip() {
         for v in [
             Ffv1Version::V0,
@@ -298,13 +297,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_version_invalid() {
         assert!(Ffv1Version::from_u8(4).is_err());
     }
 
     #[test]
-    #[ignore]
     fn test_colorspace() {
         assert_eq!(Ffv1Colorspace::YCbCr.plane_count(), 3);
         assert_eq!(Ffv1Colorspace::Rgb.plane_count(), 3);
@@ -313,7 +310,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_chroma_type_shifts() {
         assert_eq!(Ffv1ChromaType::Chroma420.h_shift(), 1);
         assert_eq!(Ffv1ChromaType::Chroma420.v_shift(), 1);
@@ -324,7 +320,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_chroma_type_from_shifts() {
         assert_eq!(
             Ffv1ChromaType::from_shifts(1, 1).expect("valid"),
@@ -342,7 +337,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_config_plane_dimensions() {
         let config = Ffv1Config {
             width: 1920,
@@ -356,7 +350,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_config_validation() {
         let mut config = Ffv1Config {
             width: 1920,
@@ -374,7 +367,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_max_sample_value() {
         let config = Ffv1Config {
             bits_per_raw_sample: 8,

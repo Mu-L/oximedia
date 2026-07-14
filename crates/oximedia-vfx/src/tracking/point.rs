@@ -172,7 +172,7 @@ impl PointTracker {
     /// Track point in new frame and return the position with explicit sub-pixel
     /// accuracy via parabolic interpolation (Foroosh et al. 2002).
     ///
-    /// Unlike [`track`], this always applies parabolic interpolation on the NCC
+    /// Unlike [`PointTracker::track`], this always applies parabolic interpolation on the NCC
     /// surface around the integer-peak position regardless of the `subpixel`
     /// flag in [`TrackingConfig`].  It returns the raw `(f32, f32)` sub-pixel
     /// position rather than a [`TrackingResult`].

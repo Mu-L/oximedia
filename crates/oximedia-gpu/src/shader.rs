@@ -1,6 +1,6 @@
 //! Shader compilation and pipeline management
 
-use crate::{GpuDevice, Result};
+use crate::{GpuDevice, Result, Shared};
 use std::borrow::Cow;
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
@@ -19,7 +19,7 @@ pub enum ShaderSource<'a> {
 
 /// Shader compiler and pipeline builder
 pub struct ShaderCompiler {
-    device: std::sync::Arc<wgpu::Device>,
+    device: Shared<wgpu::Device>,
 }
 
 impl ShaderCompiler {
@@ -27,7 +27,7 @@ impl ShaderCompiler {
     #[must_use]
     pub fn new(device: &GpuDevice) -> Self {
         Self {
-            device: std::sync::Arc::clone(device.device()),
+            device: device.device().clone(),
         }
     }
 

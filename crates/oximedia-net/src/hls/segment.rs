@@ -493,8 +493,10 @@ pub struct SegmentFetcher {
     base_url: Option<String>,
     /// Fetch configuration.
     config: FetchConfig,
-    /// HTTP client (lazily initialised on first fetch to avoid TLS-provider
-    /// panics in environments that have not called `rustls::crypto::ring::default_provider().install_global()`).
+    /// HTTP client (lazily initialised on first fetch; `client()` installs
+    /// the Pure-Rust `rustls-rustcrypto` process-wide default `CryptoProvider`
+    /// on demand so this never panics even if no other entry point has
+    /// called `oximedia_net::install_default_crypto_provider()` yet).
     client: Option<Client>,
     /// Total bytes downloaded.
     bytes_downloaded: u64,
@@ -543,6 +545,12 @@ impl SegmentFetcher {
     /// Returns a reference to the HTTP client, building it on first call.
     fn client(&mut self) -> NetResult<&Client> {
         if self.client.is_none() {
+            // Ensure the process-wide Pure-Rust `rustls-rustcrypto` provider
+            // is installed before building the TLS-capable client below
+            // (idempotent; safe even if another entry point already
+            // installed one).
+            crate::tls_provider::install_default_crypto_provider();
+
             let c = Client::builder()
                 .timeout(self.config.timeout)
                 .build()

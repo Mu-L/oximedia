@@ -1,6 +1,6 @@
 //! Offline bounce/render engine for the mixer.
 //!
-//! The [`OfflineBouncer`] processes the entire mixer graph faster-than-realtime,
+//! The [`OfflineBouncer`](crate::bounce::OfflineBouncer) processes the entire mixer graph faster-than-realtime,
 //! writing the output to a buffer.  A progress callback is invoked periodically
 //! so the caller can update a UI or cancel the operation.
 

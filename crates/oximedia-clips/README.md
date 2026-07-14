@@ -6,11 +6,11 @@ Professional clip management and logging system for OxiMedia, providing database
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.8 — 2026-05-29 — 554 tests
+Version: 0.1.9 — 2026-07-08 — extensively tested
 
 ## Features
 
-- **Clip Database** — SQLite-backed persistent storage with async I/O via sqlx
+- **Clip Database** — SQLite-backed persistent storage with async I/O via Pure-Rust OxiSQL (`oxisql-sqlite-compat`)
 - **Subclip Creation** — Create subclips with precise in/out points
 - **Clip Grouping** — Bins, folders, and collections organization
 - **Professional Logging** — Keywords, markers, ratings, and notes
@@ -29,7 +29,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-clips = "0.1.8"
+oximedia-clips = "0.1.9"
 ```
 
 ```rust
@@ -63,7 +63,7 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 - `Take`, `TakeSelector` — Take management
 
 **Modules:**
-- `database` — SQLite persistence layer (sqlx-based async)
+- `database` — SQLite persistence layer (OxiSQL-based async, Pure Rust)
 - `search` — Full-text and field search
 - `export` — EDL/XML/CSV/JSON export
 - `clip_timeline` — Timeline view of clips

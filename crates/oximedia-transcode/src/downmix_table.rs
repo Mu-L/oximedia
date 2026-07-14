@@ -21,8 +21,8 @@
 //! | 2.1           | stereo, mono               |
 //! | stereo        | mono                       |
 //!
-//! Each conversion is expressed as a [`DownmixRule`] — a list of
-//! [`DownmixCoefficient`] entries that map `(input_channel, output_channel)` pairs
+//! Each conversion is expressed as a [`crate::downmix_table::DownmixRule`] — a list of
+//! [`crate::downmix_table::DownmixCoefficient`] entries that map `(input_channel, output_channel)` pairs
 //! to linear mix coefficients.
 
 use std::fmt;

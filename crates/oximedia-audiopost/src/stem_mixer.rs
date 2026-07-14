@@ -1,7 +1,7 @@
 //! Stem-based stereo mixing.
 //!
 //! A **stem** is a mono audio track belonging to a named category (drums, bass,
-//! melody, vocals, etc.).  A [`StemMix`] holds any number of stems and can
+//! melody, vocals, etc.).  A [`crate::stem_mixer::StemMix`] holds any number of stems and can
 //! render them to a stereo output pair using per-stem gain, pan, mute, and solo
 //! controls.
 //!

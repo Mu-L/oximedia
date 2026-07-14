@@ -4,7 +4,7 @@
 - 100+ source files across codecs (Opus, Vorbis, FLAC, MP3, PCM), DSP (biquad, compressor, delay, EQ, limiter, reverb), effects (chorus, flanger, phaser, LFO), spectrum (FFT, analyzer, spectrogram, waveform, features), fingerprint (constellation, hash, matching, database), loudness (EBU R128, ATSC A/85, K-weighting, gating, true peak), meters (VU, PPM, peak, RMS, correlation, goniometer, Dolby, ITU), spatial (ambisonics, binaural, panning, reverb), description (ducking, mixing, synthesis, timing, metadata)
 - `AudioDecoder`/`AudioEncoder` traits, `AudioFrame`, `ChannelLayout`, `Resampler`
 - Feature-gated codecs: opus, vorbis, flac, mp3, pcm
-- Dependencies: oximedia-core, rubato, audioadapter, oxifft, bytes
+- Dependencies: oximedia-core, oxifft, bytes (Pure Rust; rubato/audioadapter removed in favor of the in-crate windowed-sinc polyphase resampler)
 
 ## Enhancements
 - [x] Add gapless playback support with proper encoder delay/padding handling in codec traits
@@ -14,7 +14,7 @@
 - [x] Add wet/dry mix parameter to all `effects` (chorus, flanger, phaser)
 - [x] Implement sidechain input for `compressor` and `gate` (external key signal)
 - [x] Add auto-gain in `loudness/normalize` to maintain consistent output level after processing (verified 2026-05-16; src/auto_gain.rs:560 lines AutoGain)
-- [x] Implement `Resampler` quality presets (draft/good/best) mapping to rubato configurations
+- [x] Implement `Resampler` quality presets (draft/good/best) mapping to windowed-sinc filter configurations (Pure-Rust engine, 2026-07-08)
 - [x] Add `AudioFrame` format conversion utilities (interleaved <-> planar, bit depth conversion)
 - [x] Implement FLAC encoder compression level parameter (0-8) in `flac/encoder` (verified 2026-05-16; src/flac/encoder.rs:24 CompressionLevel(u8) 0-8, with_compression_level:150)
 
@@ -43,6 +43,7 @@
 - [x] Add FLAC round-trip test: encode -> decode -> bit-exact comparison (8 tests in tests/conformance_tests.rs)
 - [ ] Test Opus encoder/decoder with ITU-T P.862 PESQ-like quality metric (requires external PESQ library; deferred)
 - [x] Add `loudness` EBU R128 conformance test with EBU test signals (8 tests in tests/conformance_tests.rs)
+- [x] Fix `loudness/gate.rs` power double-weighting bug + golden calibration (2026-06-05; corrected golden K-weighting term 2026-06-06; `calculate_block_power`/`calculate_block_power_planar` divided by `weight_sum*frames`, double-counting the channel weights already folded into `power_sum` — understated loudness by ~10·log10(frames). Divisor corrected to `frames` only — crates/oximedia-audio/src/loudness/gate.rs:115 + :159. Golden 1 kHz tests in tests/conformance_tests.rs run the FULL K-weighted `R128Meter` path; the BS.1770-4 K-weighting magnitude at 1 kHz/48 kHz is **+3.4554 dB** (|H_K|²=2.21586, curve crosses 0 dB near ~2 kHz, NOT 1 kHz), so the golden absolutes are unweighted+3.4554: mono amp 1.0→−0.25, 0.5→−6.27, 0.1→−20.25 LUFS; stereo channel-sum Δ=+3.0103 LU (K-weighting cancels in the diff) → −17.24 LUFS abs; silence/near-silent→−∞; direct `GatingProcessor::calculate_block_power` divisor lock bypasses K-weighting (mono a², stereo 2·a²). Verified: all 7 R128 golden + 7 transcode ebu_r128_conformance tests pass.)
 - [x] Test `meters/vu` ballistics against IEC 60268-10 specified rise/fall times (8 tests in tests/conformance_tests.rs)
 - [x] Test `spatial/ambisonics` encoding/decoding round-trip for 1st order (4 tests in tests/conformance_tests.rs)
 - [x] Add `fingerprint` matching accuracy test with time-stretched and pitch-shifted audio (4 tests in tests/conformance_tests.rs)

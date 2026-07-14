@@ -40,7 +40,10 @@ pub struct ImpulseRegion {
     pub end: usize,
     /// Classification.
     pub kind: ImpulseKind,
-    /// Peak deviation magnitude (normalised to input max-absolute-value).
+    /// Impulse magnitude: the region's peak absolute amplitude divided by the
+    /// RMS of the adjacent clean context (how far above the local noise floor
+    /// the click/pop rises). Falls back to the raw peak when no clean context
+    /// is available.
     pub magnitude: f32,
 }
 
@@ -109,7 +112,7 @@ impl ClickRemover {
         let flags = self.detect(samples);
 
         // Step 2: Group consecutive flagged samples into regions
-        let regions = self.group_regions(&flags, n);
+        let regions = self.group_regions(samples, &flags);
 
         // Step 3: Repair each region
         let mut repaired = Vec::with_capacity(regions.len());
@@ -149,7 +152,12 @@ impl ClickRemover {
     }
 
     /// Group consecutive flagged samples into `ImpulseRegion`s.
-    fn group_regions(&self, flags: &[bool], _n: usize) -> Vec<ImpulseRegion> {
+    ///
+    /// Each region's `magnitude` is computed by [`Self::region_magnitude`] as the
+    /// ratio of the region's peak absolute amplitude to the RMS of the clean
+    /// signal immediately surrounding it — i.e. how far above the local noise
+    /// floor the impulse rises.
+    fn group_regions(&self, samples: &[f32], flags: &[bool]) -> Vec<ImpulseRegion> {
         let mut regions = Vec::new();
         let mut i = 0;
         while i < flags.len() {
@@ -165,17 +173,69 @@ impl ClickRemover {
                 } else {
                     ImpulseKind::Pop
                 };
+                let magnitude = self.region_magnitude(samples, start, end);
                 regions.push(ImpulseRegion {
                     start,
                     end,
                     kind,
-                    magnitude: 1.0, // placeholder
+                    magnitude,
                 });
             } else {
                 i += 1;
             }
         }
         regions
+    }
+
+    /// Compute the magnitude of an impulsive region `[start, end)` as the ratio
+    /// of its peak absolute amplitude to the RMS of the adjacent clean context.
+    ///
+    /// The context is drawn from up to `self.config.window` samples on each side
+    /// of the region (clamped to the signal bounds and excluding the region
+    /// itself). A magnitude near `1.0` means the impulse barely exceeds the
+    /// surrounding signal energy; larger values indicate sharper clicks/pops.
+    /// When no clean context exists, the raw peak amplitude is returned so the
+    /// value still reflects the impulse strength rather than a fabricated
+    /// constant.
+    fn region_magnitude(&self, samples: &[f32], start: usize, end: usize) -> f32 {
+        let n = samples.len();
+        let end = end.min(n);
+        if start >= end {
+            return 0.0;
+        }
+
+        // Peak absolute amplitude within the flagged region.
+        let peak = samples[start..end]
+            .iter()
+            .fold(0.0f32, |m, &s| m.max(s.abs()));
+
+        // RMS of the clean context immediately surrounding the region.
+        let ctx = self.config.window.max(1);
+        let left_lo = start.saturating_sub(ctx);
+        let right_hi = (end + ctx).min(n);
+
+        let mut sum_sq = 0.0f64;
+        let mut count = 0usize;
+        for &s in &samples[left_lo..start] {
+            sum_sq += f64::from(s) * f64::from(s);
+            count += 1;
+        }
+        for &s in &samples[end..right_hi] {
+            sum_sq += f64::from(s) * f64::from(s);
+            count += 1;
+        }
+
+        if count == 0 {
+            return peak;
+        }
+
+        let rms = (sum_sq / count as f64).sqrt() as f32;
+        if rms > 1e-9 {
+            peak / rms
+        } else {
+            // Silent surrounding context: the impulse stands alone.
+            peak
+        }
     }
 
     /// Repair a single impulsive region using interpolation or AR prediction.
@@ -498,8 +558,10 @@ mod tests {
         let remover = ClickRemover::new(config);
         let short_flags = [false, true, true, true, false];
         let long_flags = [false, true, true, true, true, true, true, false];
-        let short_regions = remover.group_regions(&short_flags, short_flags.len());
-        let long_regions = remover.group_regions(&long_flags, long_flags.len());
+        let short_samples = vec![0.1f32; short_flags.len()];
+        let long_samples = vec![0.1f32; long_flags.len()];
+        let short_regions = remover.group_regions(&short_samples, &short_flags);
+        let long_regions = remover.group_regions(&long_samples, &long_flags);
         assert_eq!(short_regions[0].kind, ImpulseKind::Click);
         assert_eq!(long_regions[0].kind, ImpulseKind::Pop);
     }

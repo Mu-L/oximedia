@@ -1,6 +1,33 @@
 //! Dolby Vision metadata levels.
 //!
 //! This module defines metadata structures for different Dolby Vision levels.
+//!
+//! # Metadata level reference table
+//!
+//! Dolby Vision RPUs carry their dynamic and static grading data as a set of
+//! numbered "levels", each with its own purpose and field layout. The table
+//! below summarizes every level modeled by this crate; see each struct's own
+//! docs for exact field semantics and unit scaling.
+//!
+//! | Level | Struct | Scope | Purpose | Key fields |
+//! |---|---|---|---|---|
+//! | L1 | [`Level1Metadata`] | Per-frame | Dynamic frame statistics used to drive the reshaping/tone curve for the current picture. | `min_pq`, `max_pq`, `avg_pq` |
+//! | L2 | [`Level2Metadata`] | Per-frame, per-target-display | Trim pass: manual color-grading adjustments (from a colorist trim session) for one target display. Multiple L2 blocks may exist per frame, one per `target_display_index`. | `target_display_index`, `trim_slope`/`trim_offset`/`trim_power`, `trim_chroma_weight`, `trim_saturation_gain`, `ms_weight`, `saturation_vector_field`, `hue_vector_field` |
+//! | L3 | [`Level3Metadata`] | Reserved | Reserved for future use by the Dolby Vision spec; carried through as an opaque byte buffer. | `reserved` |
+//! | L4 | [`Level4Metadata`] | Per-frame or sequence | Global dimming / backward-compatible (HDR10) anchor: the reference luminance the base layer was graded at, so a non-DV display can approximate global dimming. | `anchor_pq`, `anchor_power`, `active_area_flag` |
+//! | L5 | [`Level5Metadata`] | Per-frame | Active area: letterbox/pillarbox offsets describing the image region within the coded frame (e.g. to exclude black bars from tone mapping). | `active_area_left_offset`/`right`/`top`/`bottom_offset` |
+//! | L6 | [`Level6Metadata`] | Sequence (static) | HDR10 fallback/compatibility metadata: `MaxCLL`/`MaxFALL` and mastering-display color volume (SMPTE ST 2086), for non-DV HDR10 playback. | `max_cll`, `max_fall`, `min_display_mastering_luminance`, `max_display_mastering_luminance`, `master_display_primaries`, `master_display_white_point` |
+//! | L7 | [`Level7Metadata`] | Sequence (static) | Source display color volume: gamut and luminance range of the mastering display used for grading, for gamut-aware display management. | `source_min_pq`/`source_max_pq`, `source_primary_index`, `red_primary`/`green_primary`/`blue_primary`, `white_point` |
+//! | L8 | [`Level8Metadata`] | Per-frame, per-target-display | Target display characteristics: describes one specific target display (peak/black luminance, primaries, EOTF, physical size, viewing environment) that L2 trims are computed for. | `target_display_index`, `target_max_pq`/`target_min_pq`, `target_primary_index`, `target_eotf`, `diagonal_size`, `peak_luminance`, `diffuse_white_luminance`, `ambient_luminance`, `surround_reflection` |
+//! | L9 | [`Level9Metadata`] | Sequence (static) | Source display characteristics: mastering-display primaries and luminance range used as the reference for display management (complements L7). | `source_primary_index`, `source_max_pq`/`source_min_pq`, `source_diagonal` |
+//! | L10 | [`Level10Metadata`] | Reserved | Reserved for future use; carried through as an opaque byte buffer. | `reserved` |
+//! | L11 | [`Level11Metadata`] | Per-frame or sequence | Content type and creative-intent description: content classification plus display-management hints (sharpness, noise reduction, temporal filtering) applied downstream of tone mapping. | `content_type`, `whitepoint`, `reference_mode_flag`, `sharpness`, `noise_reduction`, `mpeg_noise_reduction`, `frame_rate`, `temporal_filter_strength` |
+//!
+//! [`parser::parse_rpu_bitstream`](crate::parser::parse_rpu_bitstream) parses
+//! L1, L2, L5, L6, L8, L9, and L11 unconditionally for every RPU (L3, L4, L7,
+//! and L10 are represented in this crate's data model but not emitted by the
+//! current bitstream parser/writer pair); absent levels simply decode to
+//! their `Default` value.
 
 /// Level 1 metadata: Frame-level metadata.
 #[derive(Debug, Clone, Default)]

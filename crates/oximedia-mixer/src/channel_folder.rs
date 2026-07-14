@@ -1,6 +1,6 @@
 //! Channel folding: stereo-to-mono and mono-to-stereo conversion.
 //!
-//! The [`ChannelFolder`] provides conversion between channel formats as
+//! The [`ChannelFolder`](crate::channel_folder::ChannelFolder) provides conversion between channel formats as
 //! a processing chain option:
 //!
 //! - **Stereo to mono**: Sum left and right channels, divide by 2 to prevent

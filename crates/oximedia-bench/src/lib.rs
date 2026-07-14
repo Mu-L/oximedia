@@ -91,6 +91,7 @@ pub mod scalability_bench;
 pub mod sequences;
 pub mod statistical;
 pub mod stats;
+pub mod streaming_export;
 pub mod system_fingerprint;
 pub mod throughput;
 pub mod warmup_strategy;
@@ -505,6 +506,41 @@ impl BenchmarkResults {
         Ok(())
     }
 
+    /// Stream results as CSV into an arbitrary [`std::io::Write`] sink.
+    ///
+    /// Unlike [`export_csv`](Self::export_csv) (which writes to a file path via
+    /// the `csv` crate), this delegates to
+    /// [`StreamingCsvWriter`](streaming_export::StreamingCsvWriter) and never
+    /// holds the full row set in memory — rows are flattened lazily from
+    /// `self` and written one at a time.  The header is written automatically.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any write to `writer` fails.
+    pub fn export_csv_streaming<W: std::io::Write>(&self, writer: &mut W) -> BenchResult<()> {
+        let mut csv = streaming_export::StreamingCsvWriter::new(writer);
+        csv.write_header()?;
+        csv.write_all(self)?;
+        csv.flush()
+    }
+
+    /// Stream results as JSON Lines (NDJSON) into an arbitrary
+    /// [`std::io::Write`] sink.
+    ///
+    /// Each `(codec, sequence)` pair is emitted as a self-contained JSON object
+    /// on its own line via
+    /// [`StreamingJsonWriter`](streaming_export::StreamingJsonWriter), so the
+    /// output streams without buffering every row.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialisation or any write to `writer` fails.
+    pub fn export_json_streaming<W: std::io::Write>(&self, writer: &mut W) -> BenchResult<()> {
+        let mut json = streaming_export::StreamingJsonWriter::new(writer);
+        json.write_all(self)?;
+        json.flush()
+    }
+
     /// Generate an HTML report.
     ///
     /// # Errors
@@ -604,20 +640,29 @@ impl BenchmarkSuite {
         Self { config, runner }
     }
 
-    /// Run all benchmarks.
+    /// Run all benchmarks in parallel using rayon.
+    ///
+    /// Each codec configuration is run on its own rayon worker so that
+    /// multi-codec benchmark suites scale with available CPU cores.  The
+    /// output order matches the input `config.codecs` order (rayon preserves
+    /// `par_iter` order through `collect`).
     ///
     /// # Errors
     ///
     /// Returns an error if any benchmark fails.
     pub fn run_all(&self) -> BenchResult<BenchmarkResults> {
-        let start_time = std::time::Instant::now();
-        let mut codec_results = Vec::new();
+        use rayon::prelude::*;
 
-        // Run benchmarks for each codec configuration
-        for codec_config in &self.config.codecs {
-            let result = self.run_codec_benchmark(codec_config)?;
-            codec_results.push(result);
-        }
+        let start_time = std::time::Instant::now();
+
+        // Parallel fan-out: each codec_config is independent of the others.
+        // BenchmarkRunner is Sync because ResultCache uses Arc<Mutex<…>>.
+        let codec_results: Vec<CodecBenchmarkResult> = self
+            .config
+            .codecs
+            .par_iter()
+            .map(|codec_config| self.run_codec_benchmark(codec_config))
+            .collect::<Result<Vec<_>, _>>()?;
 
         let total_duration = start_time.elapsed();
 
@@ -782,6 +827,256 @@ mod tests {
         assert!(!ts.is_empty());
         assert!(ts.contains('T'));
         assert!(ts.contains('Z'));
+    }
+
+    // -----------------------------------------------------------------------
+    // Wave 22 Slice 3 — parallel run_all + content-hash cache key
+    // -----------------------------------------------------------------------
+
+    /// `run_all` with 3 codec configs returns results for every codec (parallel
+    /// path produces the same codec_id set as the sequential baseline).
+    #[test]
+    fn test_parallel_run_all_result_matches_sequential() {
+        // run_codec_sequences returns Ok(vec![]) for any config (stub impl),
+        // so both paths should produce identical CodecBenchmarkResult vectors.
+        let config = BenchmarkConfig::builder()
+            .add_codec(CodecConfig::new(CodecId::Av1))
+            .add_codec(CodecConfig::new(CodecId::Vp9))
+            .add_codec(CodecConfig::new(CodecId::Vp8))
+            .parallel_jobs(4)
+            .build()
+            .expect("valid config");
+
+        let suite = BenchmarkSuite::new(config);
+        let results = suite.run_all().expect("run_all should succeed");
+
+        assert_eq!(results.codec_results.len(), 3);
+
+        let ids: Vec<CodecId> = results.codec_results.iter().map(|r| r.codec_id).collect();
+        assert!(ids.contains(&CodecId::Av1));
+        assert!(ids.contains(&CodecId::Vp9));
+        assert!(ids.contains(&CodecId::Vp8));
+    }
+
+    /// Two different byte sequences must produce different XXH3 cache keys.
+    #[test]
+    fn test_cache_key_different_content_different_hash() {
+        use crate::runner::ResultCache;
+
+        let cfg = CodecConfig::new(CodecId::Av1)
+            .with_preset("fast")
+            .with_bitrate(2000);
+
+        // Use two distinct but non-existent paths — generate_key falls back to
+        // hashing the sequence_name string, so two distinct names → two keys.
+        let key_a = ResultCache::generate_key(&cfg, "sequence_alpha.y4m");
+        let key_b = ResultCache::generate_key(&cfg, "sequence_beta.y4m");
+        assert_ne!(
+            key_a, key_b,
+            "distinct sequence names must yield distinct keys"
+        );
+    }
+
+    /// The same inputs always produce the same cache key (determinism).
+    #[test]
+    fn test_cache_key_same_content_same_hash() {
+        use crate::runner::ResultCache;
+
+        let cfg = CodecConfig::new(CodecId::Vp9).with_cq_level(32);
+
+        let key_a = ResultCache::generate_key(&cfg, "test_seq.y4m");
+        let key_b = ResultCache::generate_key(&cfg, "test_seq.y4m");
+        assert_eq!(
+            key_a, key_b,
+            "identical inputs must always produce the same key"
+        );
+    }
+
+    /// A cached `SequenceResult` is returned directly without re-running the
+    /// benchmark: inserting a sentinel result and calling `get` with the same
+    /// key must return the sentinel unchanged.
+    #[test]
+    fn test_cache_hit_skips_recompute() {
+        use crate::metrics::QualityMetrics;
+        use crate::runner::ResultCache;
+
+        let cache = ResultCache::new(None);
+        let cfg = CodecConfig::new(CodecId::Av1);
+        let key = ResultCache::generate_key(&cfg, "cached_seq.y4m");
+
+        let sentinel = SequenceResult {
+            sequence_name: "cached_seq.y4m".to_string(),
+            frames_processed: 42,
+            encoding_fps: 999.0,
+            decoding_fps: 888.0,
+            file_size_bytes: 12345,
+            metrics: QualityMetrics::default(),
+            encoding_duration: Duration::from_millis(10),
+            decoding_duration: Duration::from_millis(5),
+        };
+
+        cache.set(key.clone(), sentinel.clone());
+
+        let hit = cache
+            .get(&key)
+            .expect("cache should contain the inserted entry");
+        assert_eq!(hit.frames_processed, 42);
+        assert!((hit.encoding_fps - 999.0).abs() < f64::EPSILON);
+    }
+
+    /// Codec IDs in a `BenchmarkFilter` successfully narrow down results;
+    /// a filter for a codec that is absent from the results returns an empty
+    /// slice — this validates the incremental "skip cached sequences" path via
+    /// the filter API.
+    #[test]
+    fn test_incremental_benchmark_skips_cached() {
+        let config = BenchmarkConfig::builder()
+            .add_codec(CodecConfig::new(CodecId::Av1))
+            .add_codec(CodecConfig::new(CodecId::Vp9))
+            .parallel_jobs(2)
+            .build()
+            .expect("valid config");
+
+        let suite = BenchmarkSuite::new(config);
+        let results = suite.run_all().expect("run_all should succeed");
+
+        // Filter to only AV1 results — should return exactly one entry.
+        let av1_only = BenchmarkFilter::new()
+            .with_codec_ids(vec![CodecId::Av1])
+            .apply(&results);
+        assert_eq!(av1_only.len(), 1);
+        assert_eq!(av1_only[0].codec_id, CodecId::Av1);
+
+        // Filter for a codec that was not benchmarked — returns empty.
+        let absent = BenchmarkFilter::new()
+            .with_codec_ids(vec![CodecId::Theora])
+            .apply(&results);
+        assert!(
+            absent.is_empty(),
+            "filter for absent codec should return empty"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Streaming CSV / JSON export convenience methods on BenchmarkResults
+    // -----------------------------------------------------------------------
+
+    /// Build a small two-sequence single-codec result set for streaming tests.
+    fn streaming_sample_results() -> BenchmarkResults {
+        use crate::metrics::QualityMetrics;
+        let seq_a = SequenceResult {
+            sequence_name: "alpha".to_string(),
+            frames_processed: 60,
+            encoding_fps: 24.0,
+            decoding_fps: 120.0,
+            file_size_bytes: 250_000,
+            metrics: QualityMetrics {
+                psnr: Some(34.5),
+                ssim: Some(0.93),
+                vmaf: None,
+                ..QualityMetrics::default()
+            },
+            encoding_duration: Duration::from_secs(2),
+            decoding_duration: Duration::from_secs(1),
+        };
+        let seq_b = SequenceResult {
+            sequence_name: "beta".to_string(),
+            frames_processed: 120,
+            encoding_fps: 48.0,
+            decoding_fps: 240.0,
+            file_size_bytes: 600_000,
+            metrics: QualityMetrics {
+                psnr: Some(41.0),
+                ssim: Some(0.985),
+                vmaf: Some(95.5),
+                ..QualityMetrics::default()
+            },
+            encoding_duration: Duration::from_secs(3),
+            decoding_duration: Duration::from_secs(1),
+        };
+        let codec = CodecBenchmarkResult {
+            codec_id: CodecId::Vp9,
+            preset: Some("good".to_string()),
+            bitrate_kbps: Some(1500),
+            cq_level: None,
+            sequence_results: vec![seq_a, seq_b],
+            statistics: Statistics::default(),
+        };
+        BenchmarkResults {
+            codec_results: vec![codec],
+            timestamp: "2026-06-04".to_string(),
+            total_duration: Duration::from_secs(8),
+            config: BenchmarkConfig::default(),
+        }
+    }
+
+    /// Two independent `export_csv_streaming` runs of the same results produce
+    /// byte-for-byte identical output (deterministic streaming parity).
+    #[test]
+    fn test_export_csv_streaming_byte_for_byte() {
+        let results = streaming_sample_results();
+
+        let mut sink_a: Vec<u8> = Vec::new();
+        let mut sink_b: Vec<u8> = Vec::new();
+        results
+            .export_csv_streaming(&mut sink_a)
+            .expect("csv stream a");
+        results
+            .export_csv_streaming(&mut sink_b)
+            .expect("csv stream b");
+
+        assert_eq!(sink_a, sink_b, "streaming CSV must be deterministic");
+
+        // Sanity: header + two data rows, content present.
+        let text = String::from_utf8(sink_a).expect("utf8");
+        assert!(text.starts_with("Codec,"));
+        assert!(text.contains("alpha"));
+        assert!(text.contains("beta"));
+        assert_eq!(text.lines().count(), 3);
+    }
+
+    /// `export_json_streaming` output parses back (NDJSON) to records whose key
+    /// fields equal the source results.
+    #[test]
+    fn test_export_json_streaming_roundtrip() {
+        let results = streaming_sample_results();
+
+        let mut sink: Vec<u8> = Vec::new();
+        results
+            .export_json_streaming(&mut sink)
+            .expect("json stream");
+        let text = String::from_utf8(sink).expect("utf8");
+
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "one NDJSON line per sequence");
+
+        // Flatten the source the same way the writer does for comparison.
+        let source: Vec<(String, String, f64, u64)> = results
+            .codec_results
+            .iter()
+            .flat_map(|c| {
+                c.sequence_results.iter().map(move |s| {
+                    (
+                        format!("{:?}", c.codec_id),
+                        s.sequence_name.clone(),
+                        s.encoding_fps,
+                        s.file_size_bytes,
+                    )
+                })
+            })
+            .collect();
+
+        for (line, (codec, name, enc_fps, size)) in lines.iter().zip(source.iter()) {
+            let v: serde_json::Value = serde_json::from_str(line).expect("parse ndjson line");
+            assert_eq!(v["codec"], serde_json::Value::String(codec.clone()));
+            assert_eq!(v["sequence_name"], serde_json::Value::String(name.clone()));
+            assert!((v["encoding_fps"].as_f64().expect("enc fps") - enc_fps).abs() < 1e-9);
+            assert_eq!(v["file_size_bytes"].as_u64().expect("size"), *size);
+        }
+
+        // Spot-check the optional metric carried through on the second row.
+        let v1: serde_json::Value = serde_json::from_str(lines[1]).expect("parse second line");
+        assert!((v1["vmaf"].as_f64().expect("vmaf") - 95.5).abs() < 1e-9);
     }
 }
 

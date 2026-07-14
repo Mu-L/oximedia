@@ -2,7 +2,7 @@
 //!
 //! Allows building named templates of QC checks that can be saved to a library
 //! and instantiated per-job.  Templates support **inheritance**: a custom template
-//! can extend a built-in preset via [`QcTemplateRef`], overriding only the fields
+//! can extend a built-in preset via [`crate::qc_template::QcTemplateRef`], overriding only the fields
 //! that differ from the parent.
 //!
 //! # Template Inheritance

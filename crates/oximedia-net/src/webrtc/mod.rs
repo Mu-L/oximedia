@@ -1,11 +1,21 @@
 //! WebRTC protocol implementation.
 //!
-//! This module provides a complete WebRTC implementation including:
+//! This module provides WebRTC building blocks including:
 //! - ICE (Interactive Connectivity Establishment) for NAT traversal
 //! - DTLS for encryption
 //! - SCTP over DTLS for data channels
 //! - RTP/RTCP for media transport
 //! - SDP for session negotiation
+//!
+//! # ⚠️ Experimental — DTLS-SRTP is not implemented
+//!
+//! The **DTLS-SRTP handshake and media encryption are not implemented** (see
+//! the `dtls` module). Signaling (SDP offer/answer, ICE candidates, real self-signed
+//! certificate fingerprints) works, but [`PeerConnection`] cannot establish a
+//! secure media/data path: the handshake fails loudly rather than returning a
+//! fabricated connection with all-zero SRTP keys. **Do not use WebRTC media
+//! transport for confidential media until a real DTLS-SRTP handshake is
+//! implemented.**
 //!
 //! # Key Types
 //!

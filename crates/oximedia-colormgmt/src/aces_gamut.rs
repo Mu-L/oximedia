@@ -520,7 +520,7 @@ impl AcesCuspTable {
     ///
     /// Six representative hue angles (0°, 60°, 120°, 180°, 240°, 300°) in
     /// CIECAM02 hue space are sampled and the resulting cusps are returned,
-    /// sorted by hue.  The CIECAM02 lightness (J ∈ [0,100]) and chroma (C) are
+    /// sorted by hue.  The CIECAM02 lightness (J ∈ \[0,100\]) and chroma (C) are
     /// normalised into the \[0,1\] convention used by [`AcesCuspPoint`]:
     ///
     /// - `lightness = J / 100`

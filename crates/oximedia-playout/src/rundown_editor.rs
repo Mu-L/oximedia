@@ -12,7 +12,7 @@
 //! - **Duration recalculation** — gap / over-run analysis after each edit
 //! - **History stack** — linear undo / redo (up to configurable depth)
 //!
-//! All mutating operations produce an [`EditOp`] value that is pushed onto
+//! All mutating operations produce an [`EditOp`](crate::rundown_editor::EditOp) value that is pushed onto
 //! the undo stack so that changes can be reversed.
 
 #![allow(dead_code)]

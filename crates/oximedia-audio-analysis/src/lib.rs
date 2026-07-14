@@ -483,9 +483,22 @@ fn compute_window_uncached(window_type: WindowType, size: usize) -> Vec<f32> {
 }
 
 fn hann_window(size: usize) -> Vec<f32> {
+    // Symmetric Hann (raised-cosine) window: 0.5·(1 − cos(2π·i/(N−1))).
+    //
+    // NOTE: the cosine argument MUST span a full 2π over the window. An earlier
+    // version used `PI` (not `2·PI`), which produced only a half-cosine ramp
+    // rising from 0 to 1 — not a symmetric bell. That degenerate window has very
+    // poor spectral concentration: a pure tone leaked across the entire spectrum,
+    // pulling the spectral centroid far above the true pitch and making it swing
+    // wildly with sub-bin phase (e.g. a 440 Hz tone reported a ~1800–3000 Hz
+    // centroid instead of ~440 Hz), which in turn produced dozens of spurious
+    // splice detections in the forensic edit detector.
+    if size <= 1 {
+        return vec![1.0; size];
+    }
     (0..size)
         .map(|i| {
-            let x = std::f32::consts::PI * i as f32 / (size - 1) as f32;
+            let x = 2.0 * std::f32::consts::PI * i as f32 / (size - 1) as f32;
             0.5 * (1.0 - x.cos())
         })
         .collect()
@@ -577,6 +590,20 @@ mod tests {
                                  // Hann window maximum should be near center
         let max_val = hann.iter().copied().fold(0.0_f32, f32::max);
         assert!(max_val > 0.9); // Maximum value should be close to 1
+
+        // A correct *symmetric* Hann window must also taper back to ~0 at the END
+        // and peak in the MIDDLE. (A degenerate half-cosine ramp — the previous
+        // bug — ends at 1.0 and peaks at the last sample, failing both checks.)
+        assert!(
+            hann[size - 1] < 0.01,
+            "Hann must taper to ~0 at the end, got {}",
+            hann[size - 1]
+        );
+        assert!(
+            hann[size / 2] > 0.99,
+            "Hann must peak (~1.0) near the center, got {}",
+            hann[size / 2]
+        );
     }
 
     #[test]

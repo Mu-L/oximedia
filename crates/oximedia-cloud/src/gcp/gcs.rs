@@ -38,6 +38,7 @@ impl GcsStorage {
     /// Returns an error if GCP authentication fails
     #[allow(clippy::unused_async)]
     pub async fn new(bucket: String, project_id: String) -> Result<Self> {
+        crate::tls_provider::install_default_crypto_provider();
         let client = Client::new();
 
         // In production, would use Google Auth library to get token
@@ -57,6 +58,7 @@ impl GcsStorage {
     /// Create from existing access token
     #[must_use]
     pub fn from_token(bucket: String, project_id: String, access_token: String) -> Self {
+        crate::tls_provider::install_default_crypto_provider();
         Self {
             client: Client::new(),
             bucket,
@@ -76,6 +78,7 @@ impl GcsStorage {
         service_account_email: String,
         private_key_pem: String,
     ) -> Self {
+        crate::tls_provider::install_default_crypto_provider();
         Self {
             client: Client::new(),
             bucket,

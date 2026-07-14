@@ -24,15 +24,16 @@ oximedia-codec = { workspace = true, default-features = true }
 oximedia-quality = { workspace = true }
 oximedia-graph.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-csv = "1"
+csv = { workspace = true }
 statistical = "1.0"
 rayon.workspace = true
 bytes.workspace = true
 sysinfo = { workspace = true }
 rand = { workspace = true }
+xxhash-rust = { workspace = true, features = ["xxh3"] }
 
 [dev-dependencies]
 tempfile.workspace = true

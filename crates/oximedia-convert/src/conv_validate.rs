@@ -400,6 +400,7 @@ fn query_available_space(dir: &std::path::Path) -> u64 {
 /// /dev/disk1     999999999  12345   888888888  2%   /
 /// ```
 /// The "Available" column is column index 3 (0-based) on the second line.
+#[cfg(unix)]
 fn parse_df_available(df_output: &str) -> Option<u64> {
     let mut lines = df_output.lines().skip(1); // skip header
     let data_line = lines.next()?;
@@ -668,6 +669,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn parse_df_available_standard_output() {
         let df_output = "Filesystem     1K-blocks      Used  Available Use% Mounted on\n\
              /dev/disk1s1   487396864  92345678  390000000   2% /\n";

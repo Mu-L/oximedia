@@ -6,7 +6,7 @@ Collaborative review and approval workflow for OxiMedia. Provides comprehensive 
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.8 | Tests: 776 — 2026-05-29
+Version: 0.1.9 | Tests: extensively tested — 2026-07-08
 
 ## Features
 
@@ -30,7 +30,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-review = "0.1.8"
+oximedia-review = "0.1.9"
 ```
 
 ```rust

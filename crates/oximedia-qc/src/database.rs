@@ -4,16 +4,52 @@
 //! enabling historical tracking and trend analysis.
 
 #[cfg(feature = "database")]
-use rusqlite::{params, Connection};
+use oxisql_core::{ToSqlValue, Value};
+#[cfg(feature = "database")]
+use oxisql_sqlite_compat::SqliteConnectionBlocking;
 
 use crate::report::QcReport;
 use oximedia_core::{OxiError, OxiResult};
 use std::path::Path;
 
+#[cfg(feature = "database")]
+fn map_oxi(e: impl std::fmt::Display) -> OxiError {
+    OxiError::Io(std::io::Error::other(format!("SQLite error: {e}")))
+}
+
+#[cfg(feature = "database")]
+fn col_i64(row: &oxisql_core::Row, idx: usize) -> OxiResult<i64> {
+    match row.get_by_index(idx) {
+        Some(Value::I64(n)) => Ok(*n),
+        Some(Value::Null) | None => Ok(0),
+        Some(other) => Err(OxiError::Io(std::io::Error::other(format!(
+            "column {idx}: expected integer, got {}",
+            other.type_name()
+        )))),
+    }
+}
+
+#[cfg(feature = "database")]
+fn col_real_or_zero(row: &oxisql_core::Row, idx: usize) -> f64 {
+    match row.get_by_index(idx) {
+        Some(Value::F64(f)) => *f,
+        Some(Value::I64(n)) => *n as f64,
+        _ => 0.0,
+    }
+}
+
+#[cfg(feature = "database")]
+fn col_opt_text(row: &oxisql_core::Row, idx: usize) -> Option<String> {
+    match row.get_by_index(idx) {
+        Some(Value::Text(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
 /// Database for QC results.
 #[cfg(feature = "database")]
 pub struct QcDatabase {
-    conn: Connection,
+    conn: SqliteConnectionBlocking,
 }
 
 #[cfg(feature = "database")]
@@ -24,12 +60,12 @@ impl QcDatabase {
     ///
     /// Returns an error if the database cannot be opened or initialized.
     pub fn open<P: AsRef<Path>>(path: P) -> OxiResult<Self> {
-        let conn = Connection::open(path).map_err(|e| {
+        let path_str = path.as_ref().to_string_lossy().into_owned();
+        let conn = SqliteConnectionBlocking::open(&path_str).map_err(|e| {
             OxiError::Io(std::io::Error::other(format!(
                 "Failed to open database: {e}"
             )))
         })?;
-
         let db = Self { conn };
         db.initialize_schema()?;
         Ok(db)
@@ -41,21 +77,32 @@ impl QcDatabase {
     ///
     /// Returns an error if the database cannot be created.
     pub fn in_memory() -> OxiResult<Self> {
-        let conn = Connection::open_in_memory().map_err(|e| {
+        let conn = SqliteConnectionBlocking::open_memory().map_err(|e| {
             OxiError::Io(std::io::Error::other(format!(
                 "Failed to create in-memory database: {e}"
             )))
         })?;
-
         let db = Self { conn };
         db.initialize_schema()?;
         Ok(db)
     }
 
+    fn exec(&self, sql: &str, params: &[&dyn ToSqlValue]) -> OxiResult<u64> {
+        self.conn.execute(sql, params).map_err(map_oxi)
+    }
+
+    fn query_rows(
+        &self,
+        sql: &str,
+        params: &[&dyn ToSqlValue],
+    ) -> OxiResult<Vec<oxisql_core::Row>> {
+        self.conn.query(sql, params).map_err(map_oxi)
+    }
+
     /// Initializes the database schema.
     fn initialize_schema(&self) -> OxiResult<()> {
         self.conn
-            .execute(
+            .execute_batch(
                 "CREATE TABLE IF NOT EXISTS qc_reports (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 file_path TEXT NOT NULL,
@@ -66,18 +113,8 @@ impl QcDatabase {
                 failed_checks INTEGER NOT NULL,
                 validation_duration REAL,
                 report_json TEXT NOT NULL
-            )",
-                [],
-            )
-            .map_err(|e| {
-                OxiError::Io(std::io::Error::other(format!(
-                    "Failed to create qc_reports table: {e}"
-                )))
-            })?;
-
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS qc_issues (
+            );
+            CREATE TABLE IF NOT EXISTS qc_issues (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 report_id INTEGER NOT NULL,
                 rule_name TEXT NOT NULL,
@@ -87,38 +124,16 @@ impl QcDatabase {
                 timestamp_seconds REAL,
                 recommendation TEXT,
                 FOREIGN KEY (report_id) REFERENCES qc_reports(id)
-            )",
-                [],
+            );
+            CREATE INDEX IF NOT EXISTS idx_qc_reports_file_path ON qc_reports(file_path);
+            CREATE INDEX IF NOT EXISTS idx_qc_reports_timestamp ON qc_reports(timestamp);",
             )
+            .map(|_| ())
             .map_err(|e| {
                 OxiError::Io(std::io::Error::other(format!(
-                    "Failed to create qc_issues table: {e}"
+                    "Failed to create schema: {e}"
                 )))
-            })?;
-
-        self.conn
-            .execute(
-                "CREATE INDEX IF NOT EXISTS idx_qc_reports_file_path ON qc_reports(file_path)",
-                [],
-            )
-            .map_err(|e| {
-                OxiError::Io(std::io::Error::other(format!(
-                    "Failed to create index: {e}"
-                )))
-            })?;
-
-        self.conn
-            .execute(
-                "CREATE INDEX IF NOT EXISTS idx_qc_reports_timestamp ON qc_reports(timestamp)",
-                [],
-            )
-            .map_err(|e| {
-                OxiError::Io(std::io::Error::other(format!(
-                    "Failed to create index: {e}"
-                )))
-            })?;
-
-        Ok(())
+            })
     }
 
     /// Stores a QC report in the database.
@@ -134,26 +149,25 @@ impl QcDatabase {
             )))
         })?;
 
-        let tx = self.conn.transaction().map_err(|e| {
-            OxiError::Io(std::io::Error::other(format!(
-                "Failed to start transaction: {e}"
-            )))
-        })?;
+        let overall_passed_i = report.overall_passed as i64;
+        let total_checks_i = report.total_checks as i64;
+        let passed_checks_i = report.passed_checks as i64;
+        let failed_checks_i = report.failed_checks as i64;
 
-        tx.execute(
+        self.exec(
             "INSERT INTO qc_reports (
                 file_path, timestamp, overall_passed, total_checks,
                 passed_checks, failed_checks, validation_duration, report_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                &report.file_path,
-                &report.timestamp,
-                report.overall_passed as i32,
-                report.total_checks as i64,
-                report.passed_checks as i64,
-                report.failed_checks as i64,
-                report.validation_duration,
-                report_json,
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            &[
+                &report.file_path.as_str(),
+                &report.timestamp.as_str(),
+                &overall_passed_i,
+                &total_checks_i,
+                &passed_checks_i,
+                &failed_checks_i,
+                &report.validation_duration,
+                &report_json,
             ],
         )
         .map_err(|e| {
@@ -162,24 +176,39 @@ impl QcDatabase {
             )))
         })?;
 
-        let report_id = tx.last_insert_rowid();
+        let rows = self
+            .query_rows("SELECT last_insert_rowid()", &[])
+            .map_err(|e| {
+                OxiError::Io(std::io::Error::other(format!(
+                    "Failed to get report id: {e}"
+                )))
+            })?;
+        let report_id = match rows.first().and_then(|r| r.get_by_index(0)) {
+            Some(Value::I64(n)) => *n,
+            _ => {
+                return Err(OxiError::Io(std::io::Error::other(
+                    "Failed to get last_insert_rowid",
+                )))
+            }
+        };
 
         // Store individual issues
         for result in &report.results {
             if !result.passed {
-                tx.execute(
+                let stream_index_i = result.stream_index.map(|idx| idx as i64);
+                self.exec(
                     "INSERT INTO qc_issues (
                         report_id, rule_name, severity, message,
                         stream_index, timestamp_seconds, recommendation
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![
-                        report_id,
-                        &result.rule_name,
-                        result.severity.to_string(),
-                        &result.message,
-                        result.stream_index.map(|idx| idx as i64),
-                        result.timestamp,
-                        &result.recommendation,
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    &[
+                        &report_id,
+                        &result.rule_name.as_str(),
+                        &result.severity.to_string().as_str(),
+                        &result.message.as_str(),
+                        &stream_index_i,
+                        &result.timestamp,
+                        &result.recommendation.as_deref(),
                     ],
                 )
                 .map_err(|e| {
@@ -189,12 +218,6 @@ impl QcDatabase {
                 })?;
             }
         }
-
-        tx.commit().map_err(|e| {
-            OxiError::Io(std::io::Error::other(format!(
-                "Failed to commit transaction: {e}"
-            )))
-        })?;
 
         Ok(report_id)
     }
@@ -206,22 +229,11 @@ impl QcDatabase {
     /// Returns an error if the query fails.
     #[cfg(feature = "json")]
     pub fn get_reports_for_file(&self, file_path: &str) -> OxiResult<Vec<QcReport>> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT report_json FROM qc_reports WHERE file_path = ?1 ORDER BY timestamp DESC",
+        let rows = self
+            .query_rows(
+                "SELECT report_json FROM qc_reports WHERE file_path = $1 ORDER BY timestamp DESC",
+                &[&file_path],
             )
-            .map_err(|e| {
-                OxiError::Io(std::io::Error::other(format!(
-                    "Failed to prepare statement: {e}"
-                )))
-            })?;
-
-        let reports = stmt
-            .query_map([file_path], |row| {
-                let json: String = row.get(0)?;
-                Ok(json)
-            })
             .map_err(|e| {
                 OxiError::Io(std::io::Error::other(format!(
                     "Failed to execute query: {e}"
@@ -229,10 +241,15 @@ impl QcDatabase {
             })?;
 
         let mut result = Vec::new();
-        for report_json in reports {
-            let json = report_json.map_err(|e| {
-                OxiError::Io(std::io::Error::other(format!("Failed to read row: {e}")))
-            })?;
+        for row in &rows {
+            let json = match row.get_by_index(0) {
+                Some(Value::Text(s)) => s.clone(),
+                _ => {
+                    return Err(OxiError::Io(std::io::Error::other(
+                        "Failed to read report_json row",
+                    )))
+                }
+            };
             let report: QcReport = serde_json::from_str(&json).map_err(|e| {
                 OxiError::Io(std::io::Error::other(format!(
                     "Failed to deserialize report: {e}"
@@ -250,39 +267,34 @@ impl QcDatabase {
     ///
     /// Returns an error if the query fails.
     pub fn get_file_statistics(&self, file_path: &str) -> OxiResult<FileStatistics> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT
-                COUNT(*) as total_runs,
-                COALESCE(SUM(overall_passed), 0) as passed_runs,
-                AVG(validation_duration) as avg_duration,
-                MAX(timestamp) as last_check
-            FROM qc_reports WHERE file_path = ?1",
+        let rows = self
+            .query_rows(
+                "SELECT COUNT(*) as total_runs,
+                 COALESCE(SUM(overall_passed), 0) as passed_runs,
+                 AVG(validation_duration) as avg_duration,
+                 MAX(timestamp) as last_check
+                 FROM qc_reports WHERE file_path = $1",
+                &[&file_path],
             )
-            .map_err(|e| {
-                OxiError::Io(std::io::Error::other(format!(
-                    "Failed to prepare statement: {e}"
-                )))
-            })?;
-
-        let stats = stmt
-            .query_row([file_path], |row| {
-                Ok(FileStatistics {
-                    file_path: file_path.to_string(),
-                    total_runs: row.get::<_, i64>(0)? as usize,
-                    passed_runs: row.get::<_, i64>(1)? as usize,
-                    avg_duration: row.get::<_, f64>(2).unwrap_or(0.0),
-                    last_check: row.get(3).ok(),
-                })
-            })
             .map_err(|e| {
                 OxiError::Io(std::io::Error::other(format!(
                     "Failed to execute query: {e}"
                 )))
             })?;
 
-        Ok(stats)
+        let row = rows.first().ok_or_else(|| {
+            OxiError::Io(std::io::Error::other(
+                "No rows returned for file statistics",
+            ))
+        })?;
+
+        Ok(FileStatistics {
+            file_path: file_path.to_string(),
+            total_runs: col_i64(row, 0)? as usize,
+            passed_runs: col_i64(row, 1)? as usize,
+            avg_duration: col_real_or_zero(row, 2),
+            last_check: col_opt_text(row, 3),
+        })
     }
 
     /// Gets overall database statistics.
@@ -291,38 +303,33 @@ impl QcDatabase {
     ///
     /// Returns an error if the query fails.
     pub fn get_overall_statistics(&self) -> OxiResult<OverallStatistics> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT
-                COUNT(DISTINCT file_path) as total_files,
-                COUNT(*) as total_runs,
-                SUM(overall_passed) as passed_runs,
-                AVG(validation_duration) as avg_duration
-            FROM qc_reports",
+        let rows = self
+            .query_rows(
+                "SELECT COUNT(DISTINCT file_path) as total_files,
+                 COUNT(*) as total_runs,
+                 SUM(overall_passed) as passed_runs,
+                 AVG(validation_duration) as avg_duration
+                 FROM qc_reports",
+                &[],
             )
-            .map_err(|e| {
-                OxiError::Io(std::io::Error::other(format!(
-                    "Failed to prepare statement: {e}"
-                )))
-            })?;
-
-        let stats = stmt
-            .query_row([], |row| {
-                Ok(OverallStatistics {
-                    total_files: row.get::<_, i64>(0)? as usize,
-                    total_runs: row.get::<_, i64>(1)? as usize,
-                    passed_runs: row.get::<_, i64>(2)? as usize,
-                    avg_duration: row.get::<_, f64>(3).unwrap_or(0.0),
-                })
-            })
             .map_err(|e| {
                 OxiError::Io(std::io::Error::other(format!(
                     "Failed to execute query: {e}"
                 )))
             })?;
 
-        Ok(stats)
+        let row = rows.first().ok_or_else(|| {
+            OxiError::Io(std::io::Error::other(
+                "No rows returned for overall statistics",
+            ))
+        })?;
+
+        Ok(OverallStatistics {
+            total_files: col_i64(row, 0)? as usize,
+            total_runs: col_i64(row, 1)? as usize,
+            passed_runs: col_i64(row, 2)? as usize,
+            avg_duration: col_real_or_zero(row, 3),
+        })
     }
 }
 

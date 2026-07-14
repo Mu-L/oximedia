@@ -14,8 +14,8 @@
 //! 3. Delivers the best quality/efficiency trade-off for the media type.
 //! 4. Falls back gracefully when the first-choice codec is unavailable.
 //!
-//! [`CodecNegotiator`] encodes all of this logic through a capability matrix
-//! and an ordered [`FallbackChain`].
+//! [`crate::codec_negotiation::CodecNegotiator`] encodes all of this logic through a capability matrix
+//! and an ordered [`crate::codec_negotiation::FallbackChain`].
 
 use std::collections::HashMap;
 

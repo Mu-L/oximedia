@@ -149,7 +149,7 @@ pub fn deep_prior_denoise(
 /// - `mean_I` = mean of guide in window
 /// - `mean_p` = mean of input in window
 /// - `var_I`  = variance of guide in window
-/// - `cov_Ip` = covariance of guide and input in window = E[I*P] - E[I]*E[P]
+/// - `cov_Ip` = covariance of guide and input in window = `E[I*P] - E[I]*E[P]`
 /// - `a_k = cov_Ip / (var_I + eps)`
 /// - `b_k = mean_p - a_k * mean_I`
 /// - Output: `q[i] = mean_a[i] * I[i] + mean_b[i]`

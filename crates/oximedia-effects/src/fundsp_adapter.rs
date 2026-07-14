@@ -7,7 +7,7 @@
 //!
 //! # Overview
 //!
-//! [`FunDspAdapter`] wraps any [`AudioEffect`] as a FunDSP stereo [`AudioNode`]
+//! [`FunDspAdapter`] wraps any `AudioEffect` as a FunDSP stereo `AudioNode`
 //! (2-in / 2-out).  This lets `AudioEffect` implementations participate in
 //! FunDSP signal graphs without any manual FFI or intermediate conversion.
 //!

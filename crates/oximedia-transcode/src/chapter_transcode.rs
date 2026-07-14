@@ -10,11 +10,11 @@
 //! different start time than the source — for example when a trim or cut
 //! operation has been applied.  This module handles:
 //!
-//! - Representing individual [`ChapterInfo`] entries.
-//! - Collecting them in a [`ChapterMap`] with builder-style helpers.
+//! - Representing individual [`crate::chapter_transcode::ChapterInfo`] entries.
+//! - Collecting them in a [`crate::chapter_transcode::ChapterMap`] with builder-style helpers.
 //! - Adjusting timestamps for a trimmed output via
-//!   [`ChapterMap::adjust_for_trim`].
-//! - Merging two [`ChapterMap`] instances (useful for concatenation).
+//!   [`crate::chapter_transcode::ChapterMap::adjust_for_trim`].
+//! - Merging two [`crate::chapter_transcode::ChapterMap`] instances (useful for concatenation).
 //! - Exporting/importing a simple line-based text format.
 
 #![allow(clippy::cast_precision_loss)]

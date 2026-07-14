@@ -474,4 +474,289 @@ mod tests {
         assert_eq!(ordered[0].id, id_high);
         assert_eq!(ordered[1].id, id_low);
     }
+
+    // -----------------------------------------------------------------------
+    // Simulated network failure and partial-transfer tests
+    // -----------------------------------------------------------------------
+
+    /// Simulate a partial transfer that stalls mid-way, then fails with a
+    /// network error.  Verify that the error is recorded, the transferred byte
+    /// count reflects the last known progress, and status becomes `Failed`.
+    #[test]
+    fn test_partial_transfer_then_network_failure() {
+        let mut mgr = TransferManager::new();
+        let id = mgr.submit(
+            42,
+            "remote://host/asset.mxf",
+            "/mnt/local/asset.mxf",
+            TransferDirection::Download,
+            1_000_000,
+        );
+
+        mgr.start(id);
+        // Transfer progresses to 40 %.
+        mgr.update_progress(id, 400_000);
+        {
+            let job = mgr.get(id).expect("job must exist");
+            assert_eq!(job.transferred_bytes, 400_000);
+            assert_eq!(job.status, TransferStatus::InProgress);
+        }
+
+        // Network failure at 40 %.
+        mgr.fail(id, "network error: connection reset by peer");
+        {
+            let job = mgr.get(id).expect("job must exist");
+            assert_eq!(job.status, TransferStatus::Failed);
+            // Byte count is frozen at the last progress snapshot.
+            assert_eq!(job.transferred_bytes, 400_000);
+            assert_eq!(
+                job.last_error.as_deref(),
+                Some("network error: connection reset by peer")
+            );
+        }
+    }
+
+    /// After a partial transfer failure the byte count is preserved across a
+    /// retry (the retry only resets status to Queued; bytes_transferred is NOT
+    /// reset by the manager — the caller controls that via `update_progress`).
+    #[test]
+    fn test_retry_preserves_partial_byte_count() {
+        let mut mgr = TransferManager::new();
+        let id = submit_job(&mut mgr);
+
+        mgr.start(id);
+        mgr.update_progress(id, 512 * 1024); // 50 % of 1 MiB
+        mgr.fail(id, "timeout");
+
+        // Retry resets status to Queued but must not lose progress bytes.
+        assert!(mgr.retry(id), "first retry must succeed");
+        let job = mgr.get(id).expect("job must exist after retry");
+        assert_eq!(job.status, TransferStatus::Queued);
+        assert_eq!(job.retry_count, 1);
+        // transferred_bytes unchanged — the caller will re-set it upon resume.
+        assert_eq!(job.transferred_bytes, 512 * 1024);
+        assert!(job.last_error.is_none());
+    }
+
+    /// A job that has exhausted all its retry budget must remain `Failed` and
+    /// `can_retry()` must return `false`.
+    ///
+    /// With `max_retries = 3`:
+    ///   - Failures 1–3 can each be retried (retry_count goes 0 → 1 → 2 → 3).
+    ///   - Failure 4 cannot: retry_count (3) == max_retries (3) → `can_retry() = false`.
+    #[test]
+    fn test_max_retries_exhausted_after_repeated_failures() {
+        let mut mgr = TransferManager::new();
+        let id = submit_job(&mut mgr); // max_retries = 3
+
+        // Consume the retry budget: fail → retry, repeated max_retries times.
+        for attempt in 1..=3_u32 {
+            mgr.start(id);
+            mgr.fail(id, format!("error attempt {attempt}"));
+            assert!(
+                mgr.get(id).expect("must exist").can_retry(),
+                "should still be retryable at attempt {attempt}"
+            );
+            assert!(mgr.retry(id), "retry() must succeed at attempt {attempt}");
+        }
+
+        // Now retry_count == max_retries (3). One more failure exhausts the budget.
+        mgr.start(id);
+        mgr.fail(id, "final error");
+        let job = mgr.get(id).expect("must exist");
+        assert!(
+            !job.can_retry(),
+            "must not be retryable after {} retries",
+            job.max_retries
+        );
+        assert!(!mgr.retry(id), "retry() must refuse after budget exhausted");
+        assert_eq!(
+            mgr.get(id).expect("must exist").status,
+            TransferStatus::Failed,
+            "status must remain Failed after exhaustion"
+        );
+    }
+
+    /// Simulates the typical failure-then-complete scenario:
+    ///   1. Transfer starts.
+    ///   2. Transient network hiccup → fail at 30 %.
+    ///   3. Retry → resume, complete.
+    ///
+    /// Verifies that the job ends in `Completed` and `transferred_bytes == total_bytes`.
+    #[test]
+    fn test_transient_failure_then_eventual_success() {
+        let mut mgr = TransferManager::new();
+        let total: u64 = 2_000_000;
+        let id = mgr.submit(
+            7,
+            "s3://bucket/clip.mov",
+            "/local/clip.mov",
+            TransferDirection::Download,
+            total,
+        );
+
+        // First attempt: fails after 30 %.
+        mgr.start(id);
+        mgr.update_progress(id, total * 30 / 100);
+        mgr.fail(id, "TCP RST");
+
+        // Retry and complete.
+        assert!(mgr.retry(id));
+        mgr.start(id);
+        mgr.complete(id);
+
+        let job = mgr.get(id).expect("must exist");
+        assert_eq!(job.status, TransferStatus::Completed);
+        assert_eq!(job.transferred_bytes, total);
+        assert_eq!(job.retry_count, 1);
+    }
+
+    /// Multiple concurrent jobs can fail independently; each tracks its own
+    /// error message and retry counter.
+    #[test]
+    fn test_multiple_independent_failures() {
+        let mut mgr = TransferManager::new();
+        let ids: Vec<u64> = (0..5)
+            .map(|i| {
+                mgr.submit(
+                    i,
+                    format!("remote://host/file_{i}.mxf"),
+                    format!("/local/file_{i}.mxf"),
+                    TransferDirection::Download,
+                    100_000 * (i + 1),
+                )
+            })
+            .collect();
+
+        // Start all, fail each with a unique message.
+        for &id in &ids {
+            mgr.start(id);
+        }
+        for (idx, &id) in ids.iter().enumerate() {
+            mgr.update_progress(id, 10_000 * (idx as u64 + 1));
+            mgr.fail(id, format!("packet loss at node {idx}"));
+        }
+
+        // Verify each job has its own distinct error and failed status.
+        for (idx, &id) in ids.iter().enumerate() {
+            let job = mgr.get(id).expect("must exist");
+            assert_eq!(job.status, TransferStatus::Failed);
+            let expected_err = format!("packet loss at node {idx}");
+            assert_eq!(job.last_error.as_deref(), Some(expected_err.as_str()));
+            assert_eq!(job.transferred_bytes, 10_000 * (idx as u64 + 1));
+        }
+
+        // Purge terminal jobs — all 5 are Failed, so all should be removed.
+        let removed = mgr.purge_terminal();
+        assert_eq!(removed, 5);
+        assert!(mgr.is_empty());
+    }
+
+    /// Failing an already-failed job is idempotent (status stays `Failed`,
+    /// last_error is overwritten with the new message).
+    #[test]
+    fn test_fail_is_idempotent_and_overwrites_error() {
+        let mut mgr = TransferManager::new();
+        let id = submit_job(&mut mgr);
+
+        mgr.fail(id, "first error");
+        mgr.fail(id, "second error — overwrites first");
+
+        let job = mgr.get(id).expect("must exist");
+        assert_eq!(job.status, TransferStatus::Failed);
+        assert_eq!(
+            job.last_error.as_deref(),
+            Some("second error — overwrites first")
+        );
+    }
+
+    /// A paused job that receives a simulated network failure should be
+    /// cancellable (cancel is valid for any non-terminal state).
+    #[test]
+    fn test_cancel_paused_job_after_partial_transfer() {
+        let mut mgr = TransferManager::new();
+        let id = submit_job(&mut mgr);
+
+        mgr.start(id);
+        mgr.update_progress(id, 256 * 1024); // 25 %
+        mgr.pause(id);
+        assert_eq!(
+            mgr.get(id).expect("must exist").status,
+            TransferStatus::Paused
+        );
+
+        // Network comes back but user decides to cancel.
+        assert!(mgr.cancel(id));
+        assert_eq!(
+            mgr.get(id).expect("must exist").status,
+            TransferStatus::Cancelled
+        );
+        // Cancelling a cancelled job must return false (terminal).
+        assert!(!mgr.cancel(id));
+    }
+
+    /// Priority ordering must be preserved even when some higher-priority jobs
+    /// have failed: only `Queued` jobs appear in `queued_by_priority`.
+    #[test]
+    fn test_priority_ordering_unaffected_by_failed_jobs() {
+        let mut mgr = TransferManager::new();
+
+        // Submit three jobs with ascending priorities.
+        let id_low = mgr.submit(
+            1,
+            "/src/low",
+            "/dst/low",
+            TransferDirection::LocalToLocal,
+            1,
+        );
+        let id_mid = mgr.submit(
+            2,
+            "/src/mid",
+            "/dst/mid",
+            TransferDirection::LocalToLocal,
+            1,
+        );
+        let id_high = mgr.submit(
+            3,
+            "/src/high",
+            "/dst/high",
+            TransferDirection::LocalToLocal,
+            1,
+        );
+
+        if let Some(j) = mgr.jobs.get_mut(&id_low) {
+            j.priority = 1;
+        }
+        if let Some(j) = mgr.jobs.get_mut(&id_mid) {
+            j.priority = 5;
+        }
+        if let Some(j) = mgr.jobs.get_mut(&id_high) {
+            j.priority = 10;
+        }
+
+        // Fail the highest-priority job.
+        mgr.start(id_high);
+        mgr.fail(id_high, "NFS timeout");
+
+        // queued_by_priority must now return only the two remaining queued jobs.
+        let queued = mgr.queued_by_priority();
+        assert_eq!(queued.len(), 2, "only non-terminal queued jobs returned");
+        assert_eq!(queued[0].id, id_mid, "mid-priority first");
+        assert_eq!(queued[1].id, id_low, "low-priority second");
+    }
+
+    /// Zero-byte transfer completes immediately (progress() == 1.0 from the start).
+    #[test]
+    fn test_zero_byte_transfer_progress_is_complete() {
+        let mut mgr = TransferManager::new();
+        let id = mgr.submit(
+            99,
+            "/src/empty",
+            "/dst/empty",
+            TransferDirection::LocalToLocal,
+            0,
+        );
+        let job = mgr.get(id).expect("must exist");
+        assert_eq!(job.progress(), 1.0, "zero-byte transfer must report 100 %");
+    }
 }

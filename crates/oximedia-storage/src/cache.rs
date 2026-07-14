@@ -626,10 +626,15 @@ impl<S: CloudStorage + Send + Sync> CloudStorage for CachedStorage<S> {
 /// Cache statistics
 #[derive(Debug, Clone)]
 pub struct CacheStats {
+    /// Number of entries currently held in the cache.
     pub entries: usize,
+    /// Total size in bytes of all cached entries.
     pub size_bytes: u64,
+    /// Configured maximum cache size in bytes.
     pub max_size_bytes: u64,
+    /// Number of entries with unwritten (dirty) local changes.
     pub dirty_entries: usize,
+    /// Fraction of lookups served from the cache (`0.0`–`1.0`).
     pub hit_rate: f64,
 }
 

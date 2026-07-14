@@ -1,8 +1,9 @@
 // Copyright 2017 Brian Langenberger
 // Copyright 2024-2026 COOLJAPAN OU (Team Kitasan)
 //
-// Licensed under the Apache License, Version 2.0 or the MIT license,
-// at your option. See the LICENSE-APACHE / LICENSE-MIT files for details.
+// Licensed under the Apache License, Version 2.0
+// <http://www.apache.org/licenses/LICENSE-2.0>. See `lib.rs` for upstream
+// attribution (this crate derives from `bitstream-io` 4.9.0).
 
 //! Big-endian `Endianness` implementation.
 //!

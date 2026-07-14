@@ -458,7 +458,10 @@ fn test_loudness_range_measurement() {
 // ============================================================
 #[test]
 fn test_stereo_channel_weighting() {
-    // EBU R128 weights stereo channels equally
+    // EBU R128 / ITU-R BS.1770-4 weight L and R equally (Gi = 1.0 each) but
+    // *sum* their powers: L = −0.691 + 10·log10(Σ Gi·z_i). Two identical
+    // unity-weight channels therefore measure +10·log10(2) = +3.0103 LU louder
+    // than the same signal as a single (mono) channel — they are NOT equal.
     let num_samples = (SAMPLE_RATE * 10.0) as usize;
     let amplitude = 0.1;
     let freq = 1000.0;
@@ -493,12 +496,14 @@ fn test_stereo_channel_weighting() {
     let stereo_lufs = measure_integrated_lufs(&stereo_samples);
 
     if mono_lufs.is_finite() && stereo_lufs.is_finite() {
-        // Stereo with identical channels should measure same as mono
-        // (EBU R128 sums channel powers, but each channel is weighted 1.0)
-        let diff = (stereo_lufs - mono_lufs).abs();
+        // Stereo with two identical unity-weight channels SUMS their powers, so
+        // it reads exactly +10·log10(2) = +3.0103 LU above the mono measurement.
+        let delta = stereo_lufs - mono_lufs;
         assert!(
-            diff < 1.0,
-            "Stereo {stereo_lufs:.2} vs mono {mono_lufs:.2} LUFS: diff {diff:.2} LU should be <1"
+            (delta - 3.0103).abs() < 0.3,
+            "Stereo {stereo_lufs:.2} vs mono {mono_lufs:.2} LUFS: delta {delta:.3} LU \
+             should be the +3.0103 LU channel-sum (got {:.3} off)",
+            (delta - 3.0103).abs()
         );
     }
 }

@@ -388,6 +388,11 @@ mod tests {
     fn test_bandwidth_estimator() {
         let mut est = BandwidthEstimator::new(Duration::from_secs(1));
         est.record(1000);
+        // `estimate()` is `total_bytes / elapsed_since_oldest_sample`; it is only
+        // positive once a measurable interval has elapsed. Without an explicit
+        // wait the two monotonic-clock reads can coincide under load (elapsed ==
+        // 0 -> estimate == 0), so guarantee a non-zero interval before asserting.
+        std::thread::sleep(Duration::from_millis(10));
         assert!(est.estimate() > 0.0);
     }
 

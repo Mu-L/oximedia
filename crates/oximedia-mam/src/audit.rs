@@ -376,43 +376,55 @@ impl AuditLogger {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<AuditLog>> {
+        // `field` names below are all hardcoded literals (never user-controlled), so
+        // the only concern is binding each value correctly — see the `bind_filters!`
+        // macro below, which mirrors this exact conditional order so each `$N` lines
+        // up with the right bound value. (The previous implementation only ever
+        // collected `user_id`/`resource_id` into `bindings` — a plain untyped `Vec`
+        // that only compiled because those two happen to share a type (`Uuid`) — and
+        // the other 5 filters' matched values were discarded entirely via `_action`/
+        // `_resource_type`/`_success`/`_start_time`/`_end_time` bindings, even though
+        // their `$N` placeholder was still added to the query text. Worse, `bindings`
+        // itself was NEVER passed to `.bind()` at all — only `limit`/`offset` were
+        // bound. Every one of the 7 filters was therefore non-functional: any
+        // `query_logs` call using ANY filter would fail at execution time with a
+        // bind-parameter count mismatch. This was a pre-existing bug unrelated to any
+        // dependency version, just newly surfaced by sqlx 0.9's `SqlSafeStr` audit
+        // gate forcing a look at this call site.)
         let mut query = String::from("SELECT * FROM audit_logs WHERE 1=1");
-        let mut bindings = Vec::new();
         let mut param_num = 1;
 
-        if let Some(user_id) = filter.user_id {
+        if filter.user_id.is_some() {
             query.push_str(&format!(" AND user_id = ${param_num}"));
-            bindings.push(user_id);
             param_num += 1;
         }
 
-        if let Some(_action) = &filter.action {
+        if filter.action.is_some() {
             query.push_str(&format!(" AND action = ${param_num}"));
             param_num += 1;
         }
 
-        if let Some(_resource_type) = &filter.resource_type {
+        if filter.resource_type.is_some() {
             query.push_str(&format!(" AND resource_type = ${param_num}"));
             param_num += 1;
         }
 
-        if let Some(resource_id) = filter.resource_id {
+        if filter.resource_id.is_some() {
             query.push_str(&format!(" AND resource_id = ${param_num}"));
-            bindings.push(resource_id);
             param_num += 1;
         }
 
-        if let Some(_success) = filter.success {
+        if filter.success.is_some() {
             query.push_str(&format!(" AND success = ${param_num}"));
             param_num += 1;
         }
 
-        if let Some(_start_time) = filter.start_time {
+        if filter.start_time.is_some() {
             query.push_str(&format!(" AND timestamp >= ${param_num}"));
             param_num += 1;
         }
 
-        if let Some(_end_time) = filter.end_time {
+        if filter.end_time.is_some() {
             query.push_str(&format!(" AND timestamp <= ${param_num}"));
             param_num += 1;
         }
@@ -422,7 +434,39 @@ impl AuditLogger {
             param_num + 1
         ));
 
-        let logs = sqlx::query_as::<_, AuditLog>(&query)
+        // Binds `filter`'s present fields in the SAME order the WHERE clause above
+        // appended them.
+        macro_rules! bind_filters {
+            ($q:expr) => {{
+                let mut q = $q;
+                if let Some(user_id) = filter.user_id {
+                    q = q.bind(user_id);
+                }
+                if let Some(action) = &filter.action {
+                    q = q.bind(action.clone());
+                }
+                if let Some(resource_type) = &filter.resource_type {
+                    q = q.bind(resource_type.clone());
+                }
+                if let Some(resource_id) = filter.resource_id {
+                    q = q.bind(resource_id);
+                }
+                if let Some(success) = filter.success {
+                    q = q.bind(success);
+                }
+                if let Some(start_time) = filter.start_time {
+                    q = q.bind(start_time);
+                }
+                if let Some(end_time) = filter.end_time {
+                    q = q.bind(end_time);
+                }
+                q
+            }};
+        }
+
+        // `query`'s only dynamic parts are the `$N` placeholders bound above;
+        // audited safe for sqlx 0.9's `SqlSafeStr` gate.
+        let logs = bind_filters!(sqlx::query_as::<_, AuditLog>(sqlx::AssertSqlSafe(query)))
             .bind(limit)
             .bind(offset)
             .fetch_all(self.db.pool())

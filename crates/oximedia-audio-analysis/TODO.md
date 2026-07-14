@@ -38,7 +38,7 @@
 - [x] Add overlap-save method for efficient long-duration spectral analysis (verified 2026-06-01: src/spectral/overlap_save.rs 257-line OverlapSaveAnalyzer)
 - [x] Implement parallel analysis of independent modules in `AudioAnalyzer::analyze` with rayon (implemented 2026-06-01: src/lib.rs — nested `rayon::join` runs spectral/pitch/formants/dynamics/transients concurrently; voice analysis remains sequential after pitch; `SpectralAnalyzer` uses `Mutex` for `Sync`; tests: `test_parallel_analyze_matches_sequential`)
 - [x] Cache window function coefficients across `SpectralAnalyzer` instances (static lazy) (implemented 2026-06-01: src/lib.rs — `WINDOW_CACHE: OnceLock<Mutex<HashMap<(u8,usize), Arc<Vec<f32>>>>>` upgraded to `Arc`-backed cache; `get_or_compute_window()` returns `Arc<Vec<f32>>` — no Vec copy on cache hit; `SpectralAnalyzer` stores `Arc<Vec<f32>>`; tests: `test_window_cache_identical` (ptr_eq for cache hit), `test_window_cache_different_sizes`)
-- [ ] Optimize `formant/analyze` LPC computation with Levinson-Durbin recursion in-place (verified-open 2026-05-16: not yet implemented)
+- [x] Optimize `formant/analyze` LPC computation with Levinson-Durbin recursion in-place (verified 2026-06-06: in-place symmetric LD update reusing the `LpcScratch` `a` buffer at src/formant/analyze.rs:125-162)
 
 ## Testing
 - [ ] Test `pitch/track` YIN accuracy against PTDB-TUG pitch reference dataset values

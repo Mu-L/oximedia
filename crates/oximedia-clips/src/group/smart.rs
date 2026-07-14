@@ -121,6 +121,37 @@ pub enum SmartRule {
     },
 }
 
+/// A clip metadata field that a [`SmartRule`] can depend on.
+///
+/// Each [`SmartRule`] filters on exactly one logical field; mapping a rule to
+/// its field (via [`SmartRule::depends_on`]) lets the manager invalidate only
+/// the smart collections whose query actually depends on a changed field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ClipField {
+    /// The clip's display name.
+    Name,
+    /// The clip's star rating.
+    Rating,
+    /// The clip's favorite flag.
+    Favorite,
+    /// The clip's rejected flag.
+    Rejected,
+    /// The clip's keyword list.
+    Keywords,
+    /// The clip's file path.
+    FilePath,
+    /// The clip's duration (in frames).
+    Duration,
+    /// The clip's creation timestamp.
+    CreatedDate,
+    /// The clip's last-modified timestamp.
+    ModifiedDate,
+    /// The clip's markers.
+    Markers,
+    /// The clip's custom metadata (JSON blob).
+    CustomMetadata,
+}
+
 /// Comparison operator for rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Comparison {
@@ -280,6 +311,16 @@ impl SmartCollection {
     pub fn set_match_mode(&mut self, mode: MatchMode) {
         self.match_mode = mode;
     }
+
+    /// Returns the set of clip fields this collection's rules depend on.
+    ///
+    /// A change to any field in this set could alter which clips match, so the
+    /// cache must be invalidated when such a field changes. Used by the manager
+    /// to perform fine-grained (per-field) auto-invalidation.
+    #[must_use]
+    pub fn dependency_fields(&self) -> std::collections::HashSet<ClipField> {
+        self.rules.iter().map(SmartRule::depends_on).collect()
+    }
 }
 
 impl SmartRule {
@@ -355,6 +396,30 @@ impl SmartRule {
                         .and_then(|v| v.get(key).and_then(|val| val.as_str().map(String::from)))
                 })
                 .is_some_and(|v| &v == value),
+        }
+    }
+
+    /// Returns the single clip field this rule filters on.
+    ///
+    /// This is a total mapping: every rule variant filters on exactly one
+    /// logical field. It drives field-dependency cache invalidation — when that
+    /// field changes on a clip, collections containing this rule are stale.
+    #[must_use]
+    pub const fn depends_on(&self) -> ClipField {
+        match self {
+            Self::Keyword { .. } => ClipField::Keywords,
+            Self::Rating { .. } => ClipField::Rating,
+            Self::IsFavorite { .. } => ClipField::Favorite,
+            Self::IsRejected { .. } => ClipField::Rejected,
+            Self::FileName { .. } => ClipField::FilePath,
+            Self::Duration { .. } => ClipField::Duration,
+            Self::CreatedDate { .. } => ClipField::CreatedDate,
+            Self::ModifiedDate { .. } => ClipField::ModifiedDate,
+            Self::HasMarkers => ClipField::Markers,
+            // `HasNotes` is evaluated against custom metadata (notes are not yet
+            // a first-class field on `Clip`), so it depends on `CustomMetadata`.
+            Self::HasNotes => ClipField::CustomMetadata,
+            Self::CustomMetadata { .. } => ClipField::CustomMetadata,
         }
     }
 }
@@ -515,5 +580,106 @@ mod tests {
         // Second call: cache is valid, no polling interval → skip.
         let refreshed = smart.refresh_if_needed(&clips);
         assert!(!refreshed);
+    }
+
+    #[test]
+    fn test_smart_rule_depends_on_mapping() {
+        let date = Utc::now();
+        let cases: Vec<(SmartRule, ClipField)> = vec![
+            (
+                SmartRule::Keyword {
+                    keyword: "x".to_string(),
+                },
+                ClipField::Keywords,
+            ),
+            (
+                SmartRule::Rating {
+                    operator: Comparison::Equal,
+                    value: Rating::FourStars,
+                },
+                ClipField::Rating,
+            ),
+            (
+                SmartRule::IsFavorite { is_favorite: true },
+                ClipField::Favorite,
+            ),
+            (
+                SmartRule::IsRejected { is_rejected: true },
+                ClipField::Rejected,
+            ),
+            (
+                SmartRule::FileName {
+                    pattern: "a".to_string(),
+                },
+                ClipField::FilePath,
+            ),
+            (
+                SmartRule::Duration {
+                    operator: Comparison::GreaterThan,
+                    frames: 10,
+                },
+                ClipField::Duration,
+            ),
+            (
+                SmartRule::CreatedDate {
+                    operator: Comparison::LessThan,
+                    date,
+                },
+                ClipField::CreatedDate,
+            ),
+            (
+                SmartRule::ModifiedDate {
+                    operator: Comparison::LessThan,
+                    date,
+                },
+                ClipField::ModifiedDate,
+            ),
+            (SmartRule::HasMarkers, ClipField::Markers),
+            (SmartRule::HasNotes, ClipField::CustomMetadata),
+            (
+                SmartRule::CustomMetadata {
+                    key: "k".to_string(),
+                    value: "v".to_string(),
+                },
+                ClipField::CustomMetadata,
+            ),
+        ];
+
+        for (rule, expected) in cases {
+            assert_eq!(
+                rule.depends_on(),
+                expected,
+                "rule {rule:?} should depend on {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dependency_fields_collects_all_rules() {
+        let rules = vec![
+            SmartRule::Rating {
+                operator: Comparison::GreaterThanOrEqual,
+                value: Rating::FourStars,
+            },
+            SmartRule::Keyword {
+                keyword: "interview".to_string(),
+            },
+            SmartRule::IsFavorite { is_favorite: true },
+            // Duplicate field (another keyword rule) must collapse in the set.
+            SmartRule::Keyword {
+                keyword: "broll".to_string(),
+            },
+        ];
+        let smart = SmartCollection::new("Mixed", rules, MatchMode::All);
+
+        let fields = smart.dependency_fields();
+        assert!(fields.contains(&ClipField::Rating));
+        assert!(fields.contains(&ClipField::Keywords));
+        assert!(fields.contains(&ClipField::Favorite));
+        // Rating + Keywords + Favorite = 3 distinct fields (two keyword rules
+        // collapse to a single Keywords entry).
+        assert_eq!(fields.len(), 3);
+        // A field no rule depends on must be absent.
+        assert!(!fields.contains(&ClipField::Duration));
     }
 }

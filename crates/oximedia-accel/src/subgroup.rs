@@ -21,6 +21,7 @@
 
 #![allow(dead_code)]
 
+#[cfg(feature = "vulkan-backend")]
 use crate::device::VulkanDevice;
 
 /// Minimum subgroup size across all known GPU vendors.
@@ -160,8 +161,9 @@ impl SubgroupOperations {
 
 /// Subgroup capabilities for a Vulkan 1.1+ device.
 ///
-/// Use [`SubgroupCapabilities::query_from_device`] to populate from a real device,
-/// or [`SubgroupCapabilities::default`] for a conservative fallback.
+/// Use `SubgroupCapabilities::query_from_device` (only available with the
+/// `vulkan-backend` feature) to populate from a real device, or
+/// [`SubgroupCapabilities::default`] for a conservative fallback.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SubgroupCapabilities {
     /// Pipeline stages where subgroup operations are supported.
@@ -191,6 +193,10 @@ impl SubgroupCapabilities {
     /// - Compute stage subgroup support
     /// - Basic + arithmetic operations (sufficient for parallel reduction)
     /// - Subgroup size = `DEFAULT_SUBGROUP_SIZE` (32)
+    ///
+    /// Only available when the `vulkan-backend` feature is enabled, since
+    /// [`VulkanDevice`] is a Vulkan-specific type.
+    #[cfg(feature = "vulkan-backend")]
     #[must_use]
     pub fn query_from_device(_device: &VulkanDevice) -> Self {
         // NOTE: vulkano 0.35 exposes `PhysicalDevice::properties().subgroup_properties`

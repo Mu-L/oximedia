@@ -5,8 +5,6 @@ use crate::database::RightsDatabase;
 use crate::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-#[cfg(not(target_arch = "wasm32"))]
-use sqlx::Row;
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -69,28 +67,55 @@ impl AuditEntry {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Decode an `audit_trail` row into an [`AuditEntry`].
+    pub(crate) fn from_row(r: &oxisql_core::Row) -> Result<Self> {
+        let changes_json: Option<String> = r.try_get("changes_json")?;
+        let changes = changes_json
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default();
+
+        let timestamp_s: String = r.try_get("timestamp")?;
+        let timestamp = DateTime::parse_from_rfc3339(&timestamp_s)
+            .unwrap_or_else(|_| Utc::now().fixed_offset())
+            .with_timezone(&Utc);
+
+        Ok(AuditEntry {
+            id: r.try_get("id")?,
+            entity_type: r.try_get("entity_type")?,
+            entity_id: r.try_get("entity_id")?,
+            action: r.try_get("action")?,
+            user_id: r.try_get("user_id")?,
+            changes,
+            timestamp,
+            ip_address: r.try_get("ip_address")?,
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     /// Save to database
     pub async fn save(&self, db: &RightsDatabase) -> Result<()> {
         let changes_json = serde_json::to_string(&self.changes)
             .map_err(|e| crate::RightsError::Serialization(e.to_string()))?;
 
-        sqlx::query(
-            r"
+        db.pool()
+            .execute(
+                r"
             INSERT INTO audit_trail
             (id, entity_type, entity_id, action, user_id, changes_json, timestamp, ip_address)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ",
-        )
-        .bind(&self.id)
-        .bind(&self.entity_type)
-        .bind(&self.entity_id)
-        .bind(&self.action)
-        .bind(&self.user_id)
-        .bind(&changes_json)
-        .bind(self.timestamp.to_rfc3339())
-        .bind(&self.ip_address)
-        .execute(db.pool())
-        .await?;
+                &[
+                    &self.id,
+                    &self.entity_type,
+                    &self.entity_id,
+                    &self.action,
+                    &self.user_id,
+                    &changes_json,
+                    &self.timestamp.to_rfc3339(),
+                    &self.ip_address,
+                ],
+            )
+            .await?;
 
         Ok(())
     }
@@ -118,41 +143,21 @@ impl<'a> AuditTrail<'a> {
         entity_type: &str,
         entity_id: &str,
     ) -> Result<Vec<AuditEntry>> {
-        let rows = sqlx::query(
-            r"
+        let rows = self
+            .db
+            .pool()
+            .query(
+                r"
             SELECT id, entity_type, entity_id, action, user_id, changes_json, timestamp, ip_address
             FROM audit_trail
-            WHERE entity_type = ? AND entity_id = ?
+            WHERE entity_type = $1 AND entity_id = $2
             ORDER BY timestamp DESC
             ",
-        )
-        .bind(entity_type)
-        .bind(entity_id)
-        .fetch_all(self.db.pool())
-        .await?;
+                &[&entity_type, &entity_id],
+            )
+            .await?;
 
-        Ok(rows
-            .into_iter()
-            .map(|r| {
-                let changes_json: Option<String> = r.get("changes_json");
-                let changes = changes_json
-                    .and_then(|json| serde_json::from_str(&json).ok())
-                    .unwrap_or_default();
-
-                AuditEntry {
-                    id: r.get("id"),
-                    entity_type: r.get("entity_type"),
-                    entity_id: r.get("entity_id"),
-                    action: r.get("action"),
-                    user_id: r.get("user_id"),
-                    changes,
-                    timestamp: DateTime::parse_from_rfc3339(r.get("timestamp"))
-                        .unwrap_or_else(|_| Utc::now().fixed_offset())
-                        .with_timezone(&Utc),
-                    ip_address: r.get("ip_address"),
-                }
-            })
-            .collect())
+        rows.iter().map(AuditEntry::from_row).collect()
     }
 }
 

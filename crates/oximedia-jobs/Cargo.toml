@@ -16,15 +16,14 @@ readme = "README.md"
 workspace = true
 
 [dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["full"] }
 thiserror.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 
 # Database
-rusqlite = { workspace = true }
-r2d2 = { workspace = true }
-r2d2_sqlite = { workspace = true }
+oxisql-core = { workspace = true }
+oxisql-sqlite-compat = { workspace = true }
 
 # Serialization
 serde = { workspace = true }

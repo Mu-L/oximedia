@@ -3,11 +3,21 @@
 //! Provides PQ/HLG transfer function conversions, tone mapping, HDR format
 //! detection, and metadata querying — all operating in-memory without
 //! file-system access, suitable for browser-based HDR video workflows.
+//!
+//! ## Data plane
+//!
+//! Frame/buffer-crossing APIs use `Float32Array` (`&[f32]` / `Vec<f32>`),
+//! never `Float64Array` -- single-value transfer-function calls (e.g.
+//! [`wasm_pq_oetf`]) take/return a plain `f64` scalar, which wasm-bindgen
+//! marshals as a JS `number`, not a typed array, so no boundary buffer
+//! concern applies there.
 
 use wasm_bindgen::prelude::*;
 
-use oximedia_hdr::transfer_function::{hlg_eotf, hlg_oetf, pq_eotf, pq_oetf, sdr_gamma, sdr_gamma_inv, TransferFunction};
-use oximedia_hdr::tone_mapping::{ToneMappingConfig, ToneMappingOperator, ToneMapper};
+use oximedia_hdr::tone_mapping::{ToneMapper, ToneMappingConfig, ToneMappingOperator};
+use oximedia_hdr::transfer_function::{
+    hlg_eotf, hlg_oetf, pq_eotf, pq_oetf, sdr_gamma, sdr_gamma_inv, TransferFunction,
+};
 
 // ---------------------------------------------------------------------------
 // Error helper
@@ -75,51 +85,72 @@ pub fn wasm_sdr_gamma_inv(linear_value: f64) -> f64 {
 
 /// Convert an entire PQ-encoded frame buffer to scene-linear.
 ///
-/// `data` is a flat array of PQ signal values in [0, 1] (any number of channels).
-/// Returns the corresponding linear values (normalised to 10 000 nits).
+/// `data` is a flat `Float32Array` of PQ signal values in [0, 1] (any number
+/// of channels). Returns the corresponding linear values (normalised to
+/// 10 000 nits).
 ///
 /// # Errors
 /// Returns an error if any value is outside [0, 1].
 #[wasm_bindgen]
-pub fn wasm_pq_eotf_frame(data: &[f64]) -> Result<Vec<f64>, JsValue> {
+pub fn wasm_pq_eotf_frame(data: &[f32]) -> Result<Vec<f32>, JsValue> {
     data.iter()
-        .map(|&v| pq_eotf(v).map_err(|e| js_err(e)))
+        .map(|&v| {
+            pq_eotf(f64::from(v))
+                .map(|r| r as f32)
+                .map_err(|e| js_err(e))
+        })
         .collect()
 }
 
 /// Convert an entire scene-linear frame buffer to PQ-encoded signals.
 ///
-/// `data` is a flat array of linear values normalised to 10 000 nits (≥ 0).
-/// Returns PQ signal values in [0, 1].
+/// `data` is a flat `Float32Array` of linear values normalised to 10 000
+/// nits (≥ 0). Returns PQ signal values in [0, 1].
 ///
 /// # Errors
 /// Returns an error if any value is negative.
 #[wasm_bindgen]
-pub fn wasm_pq_oetf_frame(data: &[f64]) -> Result<Vec<f64>, JsValue> {
+pub fn wasm_pq_oetf_frame(data: &[f32]) -> Result<Vec<f32>, JsValue> {
     data.iter()
-        .map(|&v| pq_oetf(v).map_err(|e| js_err(e)))
+        .map(|&v| {
+            pq_oetf(f64::from(v))
+                .map(|r| r as f32)
+                .map_err(|e| js_err(e))
+        })
         .collect()
 }
 
 /// Convert an entire HLG-encoded frame buffer to scene-linear.
 ///
+/// `data` is a flat `Float32Array` of HLG signal values in [0, 1].
+///
 /// # Errors
 /// Returns an error if any value is outside [0, 1].
 #[wasm_bindgen]
-pub fn wasm_hlg_eotf_frame(data: &[f64]) -> Result<Vec<f64>, JsValue> {
+pub fn wasm_hlg_eotf_frame(data: &[f32]) -> Result<Vec<f32>, JsValue> {
     data.iter()
-        .map(|&v| hlg_eotf(v).map_err(|e| js_err(e)))
+        .map(|&v| {
+            hlg_eotf(f64::from(v))
+                .map(|r| r as f32)
+                .map_err(|e| js_err(e))
+        })
         .collect()
 }
 
 /// Convert a scene-linear frame buffer to HLG-encoded signals.
 ///
+/// `data` is a flat `Float32Array` of scene-linear values in [0, 1].
+///
 /// # Errors
 /// Returns an error if any value is negative.
 #[wasm_bindgen]
-pub fn wasm_hlg_oetf_frame(data: &[f64]) -> Result<Vec<f64>, JsValue> {
+pub fn wasm_hlg_oetf_frame(data: &[f32]) -> Result<Vec<f32>, JsValue> {
     data.iter()
-        .map(|&v| hlg_oetf(v).map_err(|e| js_err(e)))
+        .map(|&v| {
+            hlg_oetf(f64::from(v))
+                .map(|r| r as f32)
+                .map_err(|e| js_err(e))
+        })
         .collect()
 }
 
@@ -207,7 +238,11 @@ pub fn wasm_hdr_tone_map(
             let lum = 0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2];
             let mapped_lum = mapper.map_luminance(lum);
             // Preserve hue/ratio: scale each channel by the luminance ratio.
-            let scale = if lum > 1e-7 { mapped_lum / lum } else { mapped_lum };
+            let scale = if lum > 1e-7 {
+                mapped_lum / lum
+            } else {
+                mapped_lum
+            };
             [px[0] * scale, px[1] * scale, px[2] * scale]
         })
         .collect();
@@ -263,10 +298,9 @@ impl WasmHdrConverter {
         let (transfer, description) = match transfer_function.to_ascii_lowercase().as_str() {
             "pq" | "st2084" | "hdr10" => (TransferFunction::Pq, "PQ (SMPTE ST 2084)".to_string()),
             "hlg" | "arib_b67" => (TransferFunction::Hlg, "HLG (ARIB STD-B67)".to_string()),
-            "sdr_gamma" | "sdr" | "gamma22" => (
-                TransferFunction::SdrGamma(2.2),
-                "SDR Gamma 2.2".to_string(),
-            ),
+            "sdr_gamma" | "sdr" | "gamma22" => {
+                (TransferFunction::SdrGamma(2.2), "SDR Gamma 2.2".to_string())
+            }
             "linear" => (TransferFunction::Linear, "Linear (no transfer)".to_string()),
             other => {
                 return Err(js_err(format!(
@@ -285,29 +319,31 @@ impl WasmHdrConverter {
         self.description.clone()
     }
 
-    /// Apply the EOTF (encoded → linear) to a buffer of signal values.
+    /// Apply the EOTF (encoded → linear) to a `Float32Array` buffer of signal values.
     ///
     /// # Errors
     /// Returns an error if any signal value is out of the valid range.
-    pub fn apply_eotf(&self, data: &[f64]) -> Result<Vec<f64>, JsValue> {
+    pub fn apply_eotf(&self, data: &[f32]) -> Result<Vec<f32>, JsValue> {
         data.iter()
             .map(|&v| {
                 self.transfer
-                    .to_linear(v)
+                    .to_linear(f64::from(v))
+                    .map(|r| r as f32)
                     .map_err(|e| js_err(format!("{e}")))
             })
             .collect()
     }
 
-    /// Apply the OETF (linear → encoded) to a buffer of linear values.
+    /// Apply the OETF (linear → encoded) to a `Float32Array` buffer of linear values.
     ///
     /// # Errors
     /// Returns an error if any linear value is out of the valid range.
-    pub fn apply_oetf(&self, data: &[f64]) -> Result<Vec<f64>, JsValue> {
+    pub fn apply_oetf(&self, data: &[f32]) -> Result<Vec<f32>, JsValue> {
         data.iter()
             .map(|&v| {
                 self.transfer
-                    .from_linear(v)
+                    .from_linear(f64::from(v))
+                    .map(|r| r as f32)
                     .map_err(|e| js_err(format!("{e}")))
             })
             .collect()
@@ -345,7 +381,10 @@ mod tests {
         let linear = 0.5_f64;
         let encoded = wasm_pq_oetf(linear).expect("pq oetf ok");
         let decoded = wasm_pq_eotf(encoded).expect("pq eotf ok");
-        assert!((decoded - linear).abs() < 1e-9, "PQ roundtrip: {decoded} != {linear}");
+        assert!(
+            (decoded - linear).abs() < 1e-9,
+            "PQ roundtrip: {decoded} != {linear}"
+        );
     }
 
     #[test]
@@ -353,7 +392,10 @@ mod tests {
         let linear = 0.3_f64;
         let encoded = wasm_hlg_oetf(linear).expect("hlg oetf ok");
         let decoded = wasm_hlg_eotf(encoded).expect("hlg eotf ok");
-        assert!((decoded - linear).abs() < 1e-9, "HLG roundtrip: {decoded} != {linear}");
+        assert!(
+            (decoded - linear).abs() < 1e-9,
+            "HLG roundtrip: {decoded} != {linear}"
+        );
     }
 
     #[test]
@@ -361,7 +403,10 @@ mod tests {
         let linear = 0.4_f64;
         let encoded = wasm_sdr_gamma_inv(linear);
         let decoded = wasm_sdr_gamma(encoded);
-        assert!((decoded - linear).abs() < 1e-9, "SDR gamma roundtrip: {decoded} != {linear}");
+        assert!(
+            (decoded - linear).abs() < 1e-9,
+            "SDR gamma roundtrip: {decoded} != {linear}"
+        );
     }
 
     #[test]
@@ -386,7 +431,7 @@ mod tests {
 
     #[test]
     fn test_hlg_eotf_frame_length() {
-        let data: Vec<f64> = (0..10).map(|i| i as f64 / 10.0).collect();
+        let data: Vec<f32> = (0..10).map(|i| i as f32 / 10.0).collect();
         let out = wasm_hlg_eotf_frame(&data).expect("frame ok");
         assert_eq!(out.len(), 10);
     }
@@ -449,11 +494,11 @@ mod tests {
     #[test]
     fn test_wasm_hdr_converter_pq_roundtrip() {
         let converter = WasmHdrConverter::new("pq").expect("ok");
-        let linear = vec![0.0, 0.1, 0.5, 1.0];
+        let linear: Vec<f32> = vec![0.0, 0.1, 0.5, 1.0];
         let encoded = converter.apply_oetf(&linear).expect("oetf ok");
         let decoded = converter.apply_eotf(&encoded).expect("eotf ok");
         for (orig, dec) in linear.iter().zip(decoded.iter()) {
-            assert!((dec - orig).abs() < 1e-8, "mismatch: {dec} != {orig}");
+            assert!((dec - orig).abs() < 1e-5, "mismatch: {dec} != {orig}");
         }
     }
 

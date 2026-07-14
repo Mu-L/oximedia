@@ -393,10 +393,15 @@ impl RetransmitBuffer {
     /// retransmitted within the TSBPD window).
     pub fn evict_old(&mut self, max_age: Duration) -> u32 {
         let now = Instant::now();
+        // Evict entries that have *reached* `max_age` (inclusive): a packet whose
+        // age equals the staleness threshold can no longer help the receiver, and
+        // `evict_old(Duration::ZERO)` is defined to drop everything. A strict `>`
+        // would spare a just-recorded entry whenever the monotonic clock has not
+        // advanced since `on_sent` (elapsed == 0), making eviction nondeterministic.
         let stale: Vec<u32> = self
             .pending
             .values()
-            .filter(|e| now.duration_since(e.sent_at) > max_age)
+            .filter(|e| now.duration_since(e.sent_at) >= max_age)
             .map(|e| e.seq)
             .collect();
         let count = stale.len() as u32;

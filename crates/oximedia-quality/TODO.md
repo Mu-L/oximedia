@@ -39,11 +39,11 @@
 - [x] Use pre-allocated buffers in `Frame` operations to reduce allocation in tight loops (done 2026-06-01: frame_pool.rs FramePool with acquire/release; zero-copy resize; exported as oximedia_quality::FramePool)
 
 ## Testing
-- [ ] Add golden reference tests — compare metric outputs against known-correct values from published papers
-- [ ] Test metric monotonicity — verify PSNR/SSIM increase as distortion decreases
-- [ ] Add tests for 10-bit and 12-bit Frame data (HDR content)
-- [ ] Test `PoolingMethod` with edge cases (single frame, all-identical scores, NaN values)
-- [ ] Benchmark quality metrics against reference implementations (compare speed and accuracy)
+- [x] Add golden reference tests — compare metric outputs against known-correct values from published papers
+- [x] Test metric monotonicity — verify PSNR/SSIM increase as distortion decreases
+- [x] Add tests for 10-bit and 12-bit Frame data (HDR content)
+- [x] Test `PoolingMethod` with edge cases (single frame, all-identical scores, NaN values)
+- [x] Benchmark quality metrics against reference implementations (compare speed and accuracy) — speed: `benches/metrics_bench.rs` criterion groups `bench_psnr`/`bench_ssim`/`bench_vmaf` over [640×360, 1280×720] (gradient ref vs +5-luma distorted); accuracy: already covered by `src/golden_tests.rs` (20+ analytic known-answer tests incl. the all-plane-Δ exact `20·log10(255/8)` identity) — 0.1.9 Wave 27
 
 ## Documentation
 - [ ] Add metric interpretation guide — what PSNR/SSIM/VMAF scores mean in practice

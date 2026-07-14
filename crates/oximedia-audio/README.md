@@ -6,7 +6,7 @@ Audio codec implementations and DSP tools for the OxiMedia multimedia framework.
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.8 — 2026-05-29 — 1199 tests
+Version: 0.1.9 — 2026-07-08 — extensively tested
 
 ## Overview
 
@@ -28,7 +28,7 @@ Enable specific codecs via Cargo features (all enabled by default):
 
 ```toml
 [dependencies]
-oximedia-audio = { version = "0.1.8", features = ["opus", "vorbis", "flac", "mp3"] }
+oximedia-audio = { version = "0.1.9", features = ["opus", "vorbis", "flac", "mp3"] }
 ```
 
 ### DSP
@@ -89,13 +89,16 @@ The `spatial` module provides 3D spatial audio processing (binaural, ambisonics,
 
 ### Resampling
 
-High-quality sample rate conversion via rubato:
+High-quality sample rate conversion via a Pure-Rust band-limited
+windowed-sinc polyphase interpolator (Blackman-Harris windowed, per-phase
+DC-normalized, exact rational position tracking — no C/C++ dependencies):
 
 ```rust
-use oximedia_audio::resample::{Resampler, Quality};
+use oximedia_audio::{Resampler, ResamplerQuality};
 
-let mut resampler = Resampler::new(44100, 48000, 2, Quality::High)?;
-let output = resampler.process(&input)?;
+let mut resampler = Resampler::new(44100, 48000, 2, ResamplerQuality::High)?;
+let output = resampler.resample(&input_frame)?;
+let tail = resampler.flush()?; // drain stream tail at end of input
 ```
 
 ## Usage
@@ -156,7 +159,7 @@ src/
 ├── error.rs            # AudioError and AudioResult
 ├── frame.rs            # AudioFrame, AudioBuffer
 ├── traits.rs           # AudioDecoder, AudioEncoder traits
-├── resample.rs         # Sample rate conversion (rubato)
+├── resample.rs         # Sample rate conversion (Pure-Rust windowed-sinc)
 ├── dsp/                # Digital signal processing
 ├── effects/            # Modulation effects
 ├── spectrum/           # Frequency-domain analysis

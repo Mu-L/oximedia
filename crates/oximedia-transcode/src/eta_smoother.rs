@@ -4,16 +4,16 @@
 //! unstable: a short burst of fast frames can make the ETA jump from 10 minutes
 //! to 2 minutes and back.  This module provides two complementary smoothers:
 //!
-//! - [`RollingEtaSmoother`] — maintains a fixed-size ring-buffer of past ETA
+//! - [`crate::eta_smoother::RollingEtaSmoother`] — maintains a fixed-size ring-buffer of past ETA
 //!   samples and returns their arithmetic mean.  Simple and auditable.
 //!
-//! - [`ExponentialEtaSmoother`] — applies an exponentially weighted moving
+//! - [`crate::eta_smoother::ExponentialEtaSmoother`] — applies an exponentially weighted moving
 //!   average (EWMA) with a configurable smoothing factor `α`.  Reacts faster
 //!   than a rolling window when genuine progress accelerates, while still
 //!   damping noise.
 //!
-//! Both implement the [`EtaSmoother`] trait so they can be used interchangeably
-//! in a [`SmoothedProgressTracker`].
+//! Both implement the [`crate::eta_smoother::EtaSmoother`] trait so they can be used interchangeably
+//! in a [`crate::eta_smoother::SmoothedProgressTracker`].
 //!
 //! # Example
 //!

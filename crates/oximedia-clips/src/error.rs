@@ -11,7 +11,7 @@ pub enum ClipError {
     /// Database error.
     #[cfg(not(target_arch = "wasm32"))]
     #[error("Database error: {0}")]
-    Database(#[from] sqlx::Error),
+    Database(#[from] oxisql_core::OxiSqlError),
 
     /// Clip not found.
     #[error("Clip not found: {0}")]

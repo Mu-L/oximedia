@@ -34,7 +34,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use oximedia_net::dash::{Mpd, parse_iso8601_duration};
+use oximedia_net::dash::Mpd;
 
 fuzz_target!(|data: &[u8]| {
     // Convert data to UTF-8 string
@@ -44,9 +44,6 @@ fuzz_target!(|data: &[u8]| {
     // Test MPD parsing
     // This should never panic even on completely invalid XML
     let _ = Mpd::parse(&text);
-
-    // Test ISO 8601 duration parsing with the input
-    let _ = parse_iso8601_duration(&text);
 
     // Test parsing with various modifications to explore edge cases
     if !text.is_empty() {
@@ -109,7 +106,8 @@ fuzz_target!(|data: &[u8]| {
         let _ = Mpd::parse(&combined);
     }
 
-    // Test ISO 8601 duration patterns
+    // Test ISO 8601 duration parsing via the MPD attribute path
+    // (the internal duration parser runs on these attribute values)
     let duration_patterns = [
         "PT1H30M",
         "PT30S",
@@ -122,7 +120,12 @@ fuzz_target!(|data: &[u8]| {
     ];
 
     for pattern in &duration_patterns {
-        let combined = format!("{}{}", pattern, text);
-        let _ = parse_iso8601_duration(&combined);
+        let combined = format!(
+            "<MPD mediaPresentationDuration=\"{}{}\" minBufferTime=\"{}\"></MPD>",
+            pattern,
+            text.chars().take(64).collect::<String>().replace('"', ""),
+            pattern
+        );
+        let _ = Mpd::parse(&combined);
     }
 });

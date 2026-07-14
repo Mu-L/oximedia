@@ -51,6 +51,8 @@ mod gpu_tests {
             power_preference: wgpu::PowerPreference::None,
             compatible_surface: None,
             force_fallback_adapter: false,
+            // native/trusted context; limit-bucketing is only a browser-fingerprinting mitigation
+            apply_limit_buckets: false,
         }));
         if adapter.is_err() {
             return None;

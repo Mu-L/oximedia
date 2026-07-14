@@ -36,10 +36,10 @@
 
 ## Testing
 - [x] Add format round-trip tests for all 17 `CaptionFormat` variants: export then reimport (SRT and WebVTT done; remaining formats deferred)
-- [ ] Test CEA-608 control code encoding/decoding against reference SCC files
-- [ ] Add `caption_qc` test suite with intentionally flawed captions to verify all checks trigger
+- [x] Test CEA-608 control code encoding/decoding against reference SCC files
+- [x] Add `caption_qc` test suite with intentionally flawed captions to verify all checks trigger
 - [ ] Test `accessibility` module WCAG compliance scoring against known pass/fail samples
-- [ ] Add stress test for `live_caption` with high-frequency caption updates (10+ per second)
+- [x] Add stress test for `live_caption` with high-frequency caption updates (10+ per second)
 - [ ] Test `encoding_rs` integration for correct handling of non-UTF-8 STL files (ISO 6937)
 - [ ] Test `caption_merge` correctly handles overlapping timestamps from different sources
 

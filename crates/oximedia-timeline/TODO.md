@@ -42,7 +42,7 @@
 ## Performance
 - [x] Implement interval tree in `timeline` for O(log n) clip lookup by time position instead of linear scan
 - [x] Add frame cache warming in `playback` that pre-renders upcoming frames based on playhead velocity (verified 2026-05-16; src/cache_warming.rs:609 lines)
-- [ ] Use memory-mapped audio file access in `audio` mixer for large project with many audio clips (verified-open 2026-05-16: no mmap in audio.rs)
+- [ ] Use memory-mapped audio file access in `audio` mixer for large project with many audio clips (verified-open 2026-05-16: no mmap in audio.rs; audio.rs is gain/fade/pan config only with no file I/O — mmap change not applicable)
 - [x] Implement incremental render in `renderer` that only re-composites tracks with changed clips (verified 2026-05-16; src/incremental_render.rs:729 lines)
 - [x] Add lazy clip loading in `import` that defers media probing until clip is first accessed on timeline (verified 2026-05-16; src/lazy_clip.rs:600 lines)
 - [x] Parallelize multi-track rendering in render using rayon (done 2026-06-01)
@@ -55,10 +55,10 @@
 ## Testing
 - [ ] Add integration test for full edit workflow: create timeline -> add tracks -> insert clips -> add transition -> export EDL -> verify output
 - [ ] Test `razor_tool` split at various positions (clip start, middle, end, on transition boundary)
-- [ ] Add `nested_timeline` depth test with 3+ levels of nesting and verify correct frame resolution
+- [x] Add `nested_timeline` depth test with 3+ levels of nesting and verify correct frame resolution (done 2026-06-05; tests/timeline_integration.rs:test_nested_timeline_3_levels_frame_resolution)
 - [ ] Test `multicam` angle switching with 4+ camera angles and verify correct source selection per cut
-- [ ] Add round-trip test: Timeline -> EDL export -> EDL import -> compare timelines for equivalence
-- [ ] Test `timeline_diff` with known edit operations and verify diff correctly identifies changes
+- [x] Add round-trip test: Timeline -> EDL export -> EDL import -> compare timelines for equivalence (done 2026-06-05; tests/timeline_integration.rs:test_edl_roundtrip_equivalence)
+- [x] Test `timeline_diff` with known edit operations and verify diff correctly identifies changes (done 2026-06-05; tests/timeline_integration.rs:test_timeline_diff_{insert,move,delete}_clip)
 
 ## Documentation
 - [ ] Add NLE (Non-Linear Editor) concepts guide explaining tracks, clips, transitions, and keyframes

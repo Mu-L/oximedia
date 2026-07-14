@@ -5,6 +5,25 @@
 //! single stateful object.  It is designed for in-memory playback of complete
 //! media files loaded into a `Uint8Array` in the browser.
 //!
+//! # AV1 decode honesty (0.1.9)
+//!
+//! `next_frame()` returns an `Err` for AV1-coded video tracks instead of a
+//! frame. `crates/oximedia-codec`'s `Av1Decoder::send_packet` only parses
+//! OBU/frame headers and pushes a `VideoFrame::allocate()`d buffer (all
+//! zeros) onto its output queue — `decode_frame_with_pipeline` /
+//! `decode_tiles` / the rest of the tile/coefficient/reconstruction pipeline
+//! exist but are never called from that path, so tile group data is
+//! discarded and no real pixel is ever written. Wiring this player to that
+//! decoder would silently hand callers solid-black "decoded" frames, which
+//! is the exact defect `WasmAv1Decoder` was removed from this crate's public
+//! surface for in 0.1.9 (see `TODO.md`, "Removed: dishonest decoders"). This
+//! player used to wrap `Av1Decoder` the same way and hand its unpopulated
+//! buffers back as if they were real frames; it now surfaces the limitation
+//! as an explicit error instead of staying silent. VP8/VP9 video and all
+//! audio codecs are not decoded by this player either (see `next_audio` and
+//! `decode_video_packet`); use a real `VideoDecoder`/`AudioDecoder`
+//! (WebCodecs) or `crates/oximedia-codec` natively for actual playback.
+//!
 //! # State Machine
 //!
 //! ```text
@@ -12,12 +31,14 @@
 //!                        │
 //!               next_frame() / next_audio()
 //!                        │
-//!                    [Playing]
-//!                        │
 //!                  (EOF reached)
 //!                        │
 //!                     [Done]
 //! ```
+//!
+//! There is no separate `Playing` state: packet reads happen directly in
+//! `Loaded` until EOF moves the player to `Done` (see the AV1 note above for
+//! why this player never actually produces decoded frames today).
 //!
 //! # JavaScript Example
 //!
@@ -36,7 +57,8 @@
 //! // Seek to 5 seconds
 //! player.seek(5000);
 //!
-//! // Decode frames one by one
+//! // Decode frames one by one (throws for AV1 — see "AV1 decode honesty"
+//! // above; use WebCodecs VideoDecoder for real playback).
 //! let frame;
 //! while ((frame = player.next_frame()) !== null) {
 //!     // frame is a Uint8Array of YUV420p data
@@ -56,8 +78,6 @@
 use wasm_bindgen::prelude::*;
 
 use bytes::Bytes;
-use oximedia_codec::traits::{DecoderConfig, VideoDecoder};
-use oximedia_codec::Av1Decoder;
 use oximedia_core::CodecId;
 
 use crate::container::{probe_format, ContainerFormat, Packet, PacketFlags};
@@ -72,11 +92,11 @@ use crate::io::ByteSource;
 enum PlayerState {
     /// No media loaded.
     Idle,
-    /// Media has been loaded and headers parsed.
+    /// Media has been loaded and headers parsed; packet reads happen in this
+    /// state (there is no separate "actively playing" state — see the
+    /// module-level docs).
     Loaded,
-    /// Media is actively being decoded.
-    Playing,
-    /// All packets have been decoded.
+    /// All packets have been consumed (EOF reached).
     Done,
 }
 
@@ -113,11 +133,17 @@ struct TrackInfo {
 /// synchronous frame/audio chunk iteration suitable for a WASM single-threaded
 /// environment.
 ///
-/// Supports the following container and codec combinations:
+/// Probes the following container/codec combinations for `media_info()`:
 /// - **Matroska / WebM** with AV1, VP8, VP9 video
 /// - **MP4** with AV1 video
 /// - **Ogg** / FLAC audio
 /// - **WAV** audio (PCM pass-through)
+///
+/// Actual frame decode is more limited than probing: `next_frame()` returns
+/// an `Err` for AV1 (see the module-level "AV1 decode honesty" docs) and
+/// `Ok(None)` for VP8/VP9 (decoder not wired up); `next_audio()` never
+/// decodes real audio samples. Use WebCodecs or `crates/oximedia-codec`
+/// natively for real playback.
 #[wasm_bindgen]
 pub struct WasmMediaPlayer {
     /// Internal state of the player.
@@ -132,8 +158,6 @@ pub struct WasmMediaPlayer {
     video_track: Option<TrackInfo>,
     /// Audio track descriptor.
     audio_track: Option<TrackInfo>,
-    /// AV1 video decoder (used when video codec is AV1).
-    av1_decoder: Option<Av1Decoder>,
     /// Current seek position in milliseconds.
     seek_ms: u64,
     /// Total duration in milliseconds (if known).
@@ -162,7 +186,6 @@ impl WasmMediaPlayer {
             container_format: None,
             video_track: None,
             audio_track: None,
-            av1_decoder: None,
             seek_ms: 0,
             duration_ms: None,
             video_frame_count: 0,
@@ -206,9 +229,6 @@ impl WasmMediaPlayer {
         // Parse stream headers to populate track info
         self.parse_headers()?;
 
-        // Initialise video decoder if we have a video track
-        self.init_video_decoder()?;
-
         self.state = PlayerState::Loaded;
         self.eof = false;
         Ok(())
@@ -223,8 +243,8 @@ impl WasmMediaPlayer {
     ///
     /// # Errors
     ///
-    /// Returns an error if the player is not in the `Loaded` or `Playing`
-    /// state, or if the seek target is out of range.
+    /// Returns an error if the player has not been `load()`ed yet, or if the
+    /// seek target is out of range.
     pub fn seek(&mut self, timestamp_ms: u64) -> Result<(), JsValue> {
         match self.state {
             PlayerState::Idle => {
@@ -245,10 +265,6 @@ impl WasmMediaPlayer {
                 .map_err(|e| crate::utils::js_err(&format!("WasmMediaPlayer seek error: {e}")))?;
         }
 
-        // Reset decoder state on seek
-        if let Some(ref mut dec) = self.av1_decoder {
-            dec.reset();
-        }
         self.video_packet_queue.clear();
         self.audio_packet_queue.clear();
         self.eof = false;
@@ -265,7 +281,10 @@ impl WasmMediaPlayer {
     ///
     /// # Errors
     ///
-    /// Returns an error if decoding fails.
+    /// Returns an error if decoding fails, and always errors for an
+    /// AV1-coded video track — see the module-level "AV1 decode honesty"
+    /// docs. VP8/VP9 tracks decode no frames (`Ok(None)` until EOF): no
+    /// decoder is wired up for them in this player.
     pub fn next_frame(&mut self) -> Result<Option<js_sys::Uint8Array>, JsValue> {
         if self.state == PlayerState::Idle {
             return Err(crate::utils::js_err(
@@ -291,15 +310,6 @@ impl WasmMediaPlayer {
                 None => {
                     self.eof = true;
                     self.state = PlayerState::Done;
-                    // Flush decoder
-                    if let Some(ref mut dec) = self.av1_decoder {
-                        let _ = dec.flush();
-                        if let Ok(Some(frame)) = dec.receive_frame() {
-                            self.video_frame_count += 1;
-                            let yuv = Self::assemble_yuv420p(&frame);
-                            return Ok(Some(js_sys::Uint8Array::from(yuv.as_slice())));
-                        }
-                    }
                     return Ok(None);
                 }
             };
@@ -385,7 +395,6 @@ impl WasmMediaPlayer {
         let state_str = match self.state {
             PlayerState::Idle => "Idle",
             PlayerState::Loaded => "Loaded",
-            PlayerState::Playing => "Playing",
             PlayerState::Done => "Done",
         };
 
@@ -454,7 +463,6 @@ impl WasmMediaPlayer {
         match self.state {
             PlayerState::Idle => "Idle".to_string(),
             PlayerState::Loaded => "Loaded".to_string(),
-            PlayerState::Playing => "Playing".to_string(),
             PlayerState::Done => "Done".to_string(),
         }
     }
@@ -484,7 +492,6 @@ impl WasmMediaPlayer {
         self.container_format = None;
         self.video_track = None;
         self.audio_track = None;
-        self.av1_decoder = None;
         self.seek_ms = 0;
         self.duration_ms = None;
         self.video_frame_count = 0;
@@ -576,34 +583,6 @@ impl WasmMediaPlayer {
         Ok(())
     }
 
-    /// Initialise the appropriate video decoder based on `video_track`.
-    fn init_video_decoder(&mut self) -> Result<(), JsValue> {
-        let codec = match self.video_track.as_ref() {
-            Some(t) => t.codec,
-            None => return Ok(()), // no video track
-        };
-
-        match codec {
-            CodecId::Av1 => {
-                let config = DecoderConfig {
-                    codec: CodecId::Av1,
-                    extradata: None,
-                    threads: 1,
-                    low_latency: true,
-                };
-                let dec = Av1Decoder::new(config)
-                    .map_err(|e| crate::utils::js_err(&format!("WasmMediaPlayer AV1 init: {e}")))?;
-                self.av1_decoder = Some(dec);
-            }
-            _ => {
-                // VP8 / VP9 / other: decoder not yet wired up in this player;
-                // packets will be returned as raw bytes via next_frame().
-            }
-        }
-
-        Ok(())
-    }
-
     /// Read the next raw packet from the byte source.
     ///
     /// Returns `None` at EOF.
@@ -638,62 +617,23 @@ impl WasmMediaPlayer {
         }
     }
 
-    /// Send a raw packet to the AV1 decoder and return a YUV420p buffer if a
-    /// frame was produced.
-    fn decode_video_packet(&mut self, data: &[u8]) -> Result<Option<js_sys::Uint8Array>, JsValue> {
-        let decoder = match self.av1_decoder.as_mut() {
-            Some(d) => d,
-            None => return Ok(None),
-        };
-
-        let pts = self.video_frame_count as i64 * 33;
-        decoder
-            .send_packet(data, pts)
-            .map_err(|e| crate::utils::js_err(&format!("WasmMediaPlayer AV1 decode: {e}")))?;
-
-        match decoder.receive_frame() {
-            Ok(Some(frame)) => {
-                // Update video track dimensions from decoded frame
-                if let Some(ref mut track) = self.video_track {
-                    track.width = frame.width;
-                    track.height = frame.height;
-                }
-                self.state = PlayerState::Playing;
-                self.video_frame_count += 1;
-                let yuv = Self::assemble_yuv420p(&frame);
-                Ok(Some(js_sys::Uint8Array::from(yuv.as_slice())))
+    /// Handle a raw video packet for the current `video_track`.
+    ///
+    /// Returns `Err` for an AV1-coded track: this player does not decode
+    /// AV1 (see the module-level "AV1 decode honesty" docs) rather than
+    /// silently handing back an unpopulated buffer. For every other coded
+    /// video track, no decoder is wired up in this player either, so this
+    /// always returns `Ok(None)` (the caller's read loop then keeps
+    /// consuming packets until EOF).
+    fn decode_video_packet(&mut self, _data: &[u8]) -> Result<Option<js_sys::Uint8Array>, JsValue> {
+        if let Some(track) = self.video_track.as_ref() {
+            if track.codec == CodecId::Av1 {
+                return Err(crate::utils::js_err(
+                    "AV1 decode is not supported in the browser build; use WebCodecs VideoDecoder",
+                ));
             }
-            Ok(None) => Ok(None),
-            Err(e) => Err(crate::utils::js_err(&format!(
-                "WasmMediaPlayer receive_frame: {e}"
-            ))),
         }
-    }
-
-    /// Assemble a YUV420p byte buffer from a decoded `VideoFrame`.
-    fn assemble_yuv420p(frame: &oximedia_codec::VideoFrame) -> Vec<u8> {
-        let y_size = (frame.width * frame.height) as usize;
-        let uv_w = (frame.width + 1) / 2;
-        let uv_h = (frame.height + 1) / 2;
-        let uv_size = (uv_w * uv_h) as usize;
-        let total = y_size + 2 * uv_size;
-
-        let mut buf = vec![0u8; total];
-
-        if let Some(y) = frame.planes.first() {
-            let n = y.data.len().min(y_size);
-            buf[..n].copy_from_slice(&y.data[..n]);
-        }
-        if let Some(u) = frame.planes.get(1) {
-            let n = u.data.len().min(uv_size);
-            buf[y_size..y_size + n].copy_from_slice(&u.data[..n]);
-        }
-        if let Some(v) = frame.planes.get(2) {
-            let n = v.data.len().min(uv_size);
-            buf[y_size + uv_size..y_size + uv_size + n].copy_from_slice(&v.data[..n]);
-        }
-
-        buf
+        Ok(None)
     }
 }
 
@@ -785,5 +725,31 @@ mod tests {
         let info = player.media_info();
         // Should include codec and stream info
         assert!(info.contains("stream_count"));
+    }
+
+    /// Regression test for the AV1 decode-honesty fix: `next_frame()` must
+    /// error instead of returning an unpopulated (silently black) frame for
+    /// an AV1-coded track. `crate::utils::js_err` is native-safe (returns
+    /// `JsValue::null()` off wasm32), and this error path never touches
+    /// `js_sys::Uint8Array`, so it is safe to exercise on the native target.
+    #[test]
+    fn test_next_frame_av1_track_errors() {
+        let mut player = WasmMediaPlayer::new();
+        // Minimal EBML / Matroska magic bytes — parse_headers() assumes an
+        // AV1 video track for any Matroska/WebM container.
+        let data = vec![
+            0x1A, 0x45, 0xDF, 0xA3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0,
+        ];
+        player.load(&data).expect("load should succeed");
+        assert_eq!(player.state(), "Loaded");
+
+        let result = player.next_frame();
+        assert!(
+            result.is_err(),
+            "next_frame() must reject AV1 rather than return an unpopulated frame"
+        );
+        // The player must not have silently reported a decoded frame.
+        assert_eq!(player.video_frame_count(), 0);
     }
 }

@@ -640,4 +640,94 @@ mod tests {
     fn test_sequence_duration_empty() {
         assert_eq!(sequence_duration(&[]), Duration::ZERO);
     }
+
+    // ── Wave 27: edge-case hardening ─────────────────────────────────────────
+
+    #[test]
+    fn test_schedule_gapless_single_item() {
+        // A single entry starts at ZERO; there is no following entry, so the
+        // trailing-crossfade overlap is never applied.
+        let entries = vec![GaplessEntry::new(7, Duration::from_secs(42))];
+        let sched = schedule_gapless(&entries);
+        assert_eq!(sched.len(), 1);
+        assert_eq!(sched[0], (7, Duration::ZERO));
+    }
+
+    #[test]
+    fn test_schedule_gapless_single_item_with_crossfade_ignored() {
+        // Even when a single entry carries a crossfade segment, the last entry
+        // has no successor so its overlap is dropped — it still starts at ZERO.
+        let cf = CrossfadeSegment::new(Duration::from_secs(5), FadeCurve::EqualPower);
+        let entries = vec![GaplessEntry::new(7, Duration::from_secs(42)).with_crossfade(cf)];
+        let sched = schedule_gapless(&entries);
+        assert_eq!(sched, vec![(7, Duration::ZERO)]);
+    }
+
+    #[test]
+    fn test_zero_duration_entry_no_nan() {
+        // A zero-duration entry carrying a crossfade longer than itself must
+        // not panic or underflow; saturating_sub clamps the advance to ZERO.
+        let cf = CrossfadeSegment::new(Duration::from_secs(3), FadeCurve::Logarithmic);
+        let entries = vec![
+            GaplessEntry::new(1, Duration::ZERO).with_crossfade(cf),
+            GaplessEntry::new(2, Duration::from_secs(10)),
+        ];
+        let sched = schedule_gapless(&entries);
+        assert_eq!(sched.len(), 2);
+        // First starts at ZERO; second cannot start before it (no underflow).
+        assert_eq!(sched[0].1, Duration::ZERO);
+        assert_eq!(sched[1].1, Duration::ZERO);
+        // sequence_duration is finite and well-defined for the same input.
+        let total = sequence_duration(&entries);
+        assert_eq!(total, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_fade_curves_no_nan_at_boundaries() {
+        // Every curve, at the canonical boundary positions, must yield finite
+        // gains within [0, 1] with the documented endpoint conventions:
+        //   fade_out(0.0) == 1.0, fade_out(1.0) == 0.0
+        //   fade_in(0.0)  == 0.0, fade_in(1.0)  == 1.0
+        let curves = [
+            FadeCurve::Linear,
+            FadeCurve::EqualPower,
+            FadeCurve::Logarithmic,
+            FadeCurve::LogarithmicSymmetric,
+            FadeCurve::Exponential,
+            FadeCurve::SCurve,
+        ];
+        for curve in curves {
+            for &t in &[0.0_f64, 0.5, 1.0] {
+                let out = curve.fade_out_gain(t);
+                let inp = curve.fade_in_gain(t);
+                assert!(out.is_finite(), "fade_out NaN/inf for {curve:?} at t={t}");
+                assert!(inp.is_finite(), "fade_in NaN/inf for {curve:?} at t={t}");
+                assert!(
+                    (0.0..=1.0001).contains(&out),
+                    "fade_out out of range for {curve:?} at t={t}: {out}"
+                );
+                assert!(
+                    (0.0..=1.0001).contains(&inp),
+                    "fade_in out of range for {curve:?} at t={t}: {inp}"
+                );
+            }
+            // Endpoint conventions hold for every curve.
+            assert!(
+                approx_eq(curve.fade_out_gain(0.0), 1.0, 1e-6),
+                "fade_out(0.0) != 1.0 for {curve:?}"
+            );
+            assert!(
+                approx_eq(curve.fade_out_gain(1.0), 0.0, 1e-6),
+                "fade_out(1.0) != 0.0 for {curve:?}"
+            );
+            assert!(
+                approx_eq(curve.fade_in_gain(0.0), 0.0, 1e-6),
+                "fade_in(0.0) != 0.0 for {curve:?}"
+            );
+            assert!(
+                approx_eq(curve.fade_in_gain(1.0), 1.0, 1e-6),
+                "fade_in(1.0) != 1.0 for {curve:?}"
+            );
+        }
+    }
 }

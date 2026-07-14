@@ -16,7 +16,7 @@ readme = "README.md"
 workspace = true
 
 [dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["full"] }
 thiserror.workspace = true
 bytes.workspace = true
 tracing.workspace = true
@@ -51,10 +51,10 @@ dashmap = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true }
 
-# System information
-num_cpus = "1.17"
-hostname = "0.4"
-sys-info = "0.9"
+# System information (Pure Rust — no external `cc`/C compilation, unlike sys-info)
+num_cpus = { workspace = true }
+hostname.workspace = true
+sysinfo = { workspace = true }
 
 [features]
 ## Enable S3/object-storage integration for distributed segment I/O.
@@ -63,5 +63,8 @@ s3 = []
 k8s = []
 
 [build-dependencies]
-tonic-build = "0.14"
-tonic-prost-build = "0.14"
+tonic-build = { workspace = true }
+tonic-prost-build = { workspace = true }
+# Pure-Rust protobuf compiler (parses .proto files directly; no external
+# `protoc` binary required at build time — replaces protoc-based codegen).
+protox = { workspace = true }

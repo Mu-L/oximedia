@@ -1,7 +1,7 @@
 //! Frame cache for amortising per-frame decoding cost across multiple QC rules.
 //!
-//! [`FrameCache`] stores decoded frames keyed by `(file_id, frame_idx)` with a
-//! bounded LRU eviction policy.  All entries are wrapped in [`Arc`] so callers
+//! [`crate::frame_cache::FrameCache`] stores decoded frames keyed by `(file_id, frame_idx)` with a
+//! bounded LRU eviction policy.  All entries are wrapped in [`std::sync::Arc`] so callers
 //! share ownership without copying data.
 //!
 //! The cache is intentionally scoped to a single validation run — do **not**

@@ -134,17 +134,17 @@ impl AudioExtractor {
                 .execute()
                 .await
                 .map_err(|e| ConversionError::Transcode(e.to_string()))?;
+
+            Ok(())
         }
 
         #[cfg(target_arch = "wasm32")]
         {
             let _ = output;
-            return Err(ConversionError::UnsupportedFormat(
+            Err(ConversionError::UnsupportedFormat(
                 "Audio extraction is not supported on wasm32".to_string(),
-            ));
+            ))
         }
-
-        Ok(())
     }
 
     /// Extract audio with a specific track index.

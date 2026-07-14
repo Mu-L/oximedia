@@ -27,7 +27,7 @@ oxifft = { workspace = true }
 rayon = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["full"] }
 criterion.workspace = true
 
 [[bench]]

@@ -21,7 +21,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 image = { workspace = true }
-num-traits = "0.2"
+num-traits = { workspace = true }
 rayon = { workspace = true }
 
 [features]
@@ -29,7 +29,7 @@ default = []
 cv = ["oximedia-cv"]
 
 [dev-dependencies]
-approx = "0.5"
+approx = { workspace = true }
 
 [lib]
 name = "oximedia_forensics"

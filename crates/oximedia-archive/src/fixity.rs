@@ -9,8 +9,8 @@
 
 use crate::{ArchiveError, ArchiveResult, ChecksumSet, VerificationConfig};
 use chrono::{DateTime, Duration, Utc};
+use oxisql_core::Connection;
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -41,7 +41,7 @@ pub enum FixityCheckResult {
 pub async fn check_fixity(
     path: &Path,
     current_checksums: &ChecksumSet,
-    pool: &sqlx::SqlitePool,
+    pool: &oxisql_sqlite_compat::SqliteConnection,
 ) -> ArchiveResult<FixityStatus> {
     let path_str = path.to_string_lossy().to_string();
 
@@ -136,72 +136,128 @@ pub async fn check_fixity(
 
 /// Get check statistics for a file
 async fn get_check_statistics(
-    pool: &sqlx::SqlitePool,
+    pool: &oxisql_sqlite_compat::SqliteConnection,
     file_path: &str,
 ) -> ArchiveResult<(u32, u32)> {
-    let row = sqlx::query(
-        r"
+    let rows = pool
+        .query(
+            r"
         SELECT
             COUNT(*) as total,
             SUM(CASE WHEN status = 'fail' THEN 1 ELSE 0 END) as failed
         FROM fixity_checks
-        WHERE file_path = ?
+        WHERE file_path = $1
         ",
-    )
-    .bind(file_path)
-    .fetch_one(pool)
-    .await?;
+            &[&file_path],
+        )
+        .await?;
 
-    let total: i64 = row.get("total");
-    let failed: i64 = row.get("failed");
+    let row = rows
+        .into_iter()
+        .next()
+        .ok_or_else(|| ArchiveError::Validation("COUNT(*) query returned no row".to_string()))?;
+    let total: i64 = row.try_get("total")?;
+    // SUM(...) over zero rows is NULL, not 0; coerce to 0 in that case.
+    let failed: i64 = row.try_get::<Option<i64>>("failed")?.unwrap_or(0);
 
     Ok((total as u32, failed as u32))
 }
 
-/// Record a fixity check in the database
+/// A single fixity-check row that can be accumulated in memory and flushed
+/// to the database as part of a batched transaction.
+struct FixityCheckRow {
+    file_path: String,
+    check_time: String,
+    status: &'static str,
+    error_message: Option<String>,
+    blake3_match: Option<bool>,
+    md5_match: Option<bool>,
+    sha256_match: Option<bool>,
+    crc32_match: Option<bool>,
+}
+
+/// Build a `FixityCheckRow` from the check outcome without touching the DB.
+fn build_fixity_row(
+    file_path: &str,
+    passed: bool,
+    checksums_match: &HashMap<String, bool>,
+) -> FixityCheckRow {
+    FixityCheckRow {
+        file_path: file_path.to_string(),
+        check_time: Utc::now().to_rfc3339(),
+        status: if passed { "pass" } else { "fail" },
+        error_message: if passed {
+            None
+        } else {
+            Some(format!("Checksum mismatch detected: {checksums_match:?}"))
+        },
+        blake3_match: checksums_match.get("blake3").copied(),
+        md5_match: checksums_match.get("md5").copied(),
+        sha256_match: checksums_match.get("sha256").copied(),
+        crc32_match: checksums_match.get("crc32").copied(),
+    }
+}
+
+/// Insert a slice of rows inside a single SQLite transaction.
+///
+/// Batching writes turns N individual INSERT round-trips into one commit,
+/// giving roughly N× throughput for high-volume fixity verification runs.
+async fn flush_fixity_rows(
+    pool: &oxisql_sqlite_compat::SqliteConnection,
+    rows: &[FixityCheckRow],
+) -> ArchiveResult<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.transaction().await?;
+    for row in rows {
+        tx.execute(
+            r"
+            INSERT INTO fixity_checks
+                (file_path, check_time, status, error_message,
+                 blake3_match, md5_match, sha256_match, crc32_match)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ",
+            &[
+                &row.file_path,
+                &row.check_time,
+                &row.status,
+                &row.error_message,
+                &row.blake3_match,
+                &row.md5_match,
+                &row.sha256_match,
+                &row.crc32_match,
+            ],
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Record a single fixity check immediately (for one-off API calls outside
+/// of the scheduled batch path).
 async fn record_fixity_check(
-    pool: &sqlx::SqlitePool,
+    pool: &oxisql_sqlite_compat::SqliteConnection,
     file_path: &str,
     passed: bool,
     checksums_match: &HashMap<String, bool>,
 ) -> ArchiveResult<()> {
-    let check_time = Utc::now().to_rfc3339();
-    let status = if passed { "pass" } else { "fail" };
-
-    let blake3_match = checksums_match.get("blake3").copied();
-    let md5_match = checksums_match.get("md5").copied();
-    let sha256_match = checksums_match.get("sha256").copied();
-    let crc32_match = checksums_match.get("crc32").copied();
-
-    let error_message = if passed {
-        None
-    } else {
-        Some(format!("Checksum mismatch detected: {checksums_match:?}"))
-    };
-
-    sqlx::query(
-        r"
-        INSERT INTO fixity_checks (file_path, check_time, status, error_message, blake3_match, md5_match, sha256_match, crc32_match)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ",
-    )
-    .bind(file_path)
-    .bind(&check_time)
-    .bind(status)
-    .bind(&error_message)
-    .bind(blake3_match)
-    .bind(md5_match)
-    .bind(sha256_match)
-    .bind(crc32_match)
-    .execute(pool)
-    .await?;
-
-    Ok(())
+    let row = build_fixity_row(file_path, passed, checksums_match);
+    flush_fixity_rows(pool, std::slice::from_ref(&row)).await
 }
 
-/// Run scheduled fixity checks
+/// Number of fixity-check rows to accumulate before flushing a transaction.
+const FIXITY_BATCH_SIZE: usize = 100;
+
+/// Run scheduled fixity checks.
+///
+/// DB inserts are batched: rows are accumulated in memory and flushed every
+/// `FIXITY_BATCH_SIZE` checks (and once more at the end) inside a single
+/// SQLite transaction per batch.  This gives roughly N× throughput for
+/// high-volume verification runs compared to one INSERT per check.
 pub async fn run_scheduled_checks(
-    pool: &sqlx::SqlitePool,
+    pool: &oxisql_sqlite_compat::SqliteConnection,
     config: &VerificationConfig,
 ) -> ArchiveResult<FixityReport> {
     info!(
@@ -212,18 +268,18 @@ pub async fn run_scheduled_checks(
     let cutoff_date = Utc::now() - Duration::days(config.fixity_check_interval_days as i64);
     let cutoff_str = cutoff_date.to_rfc3339();
 
-    // Find files that need checking
-    let rows = sqlx::query(
-        r"
+    // Find files that need checking.
+    let rows = pool
+        .query(
+            r"
         SELECT file_path, last_verified_at
         FROM checksums
-        WHERE last_verified_at IS NULL OR last_verified_at < ?
+        WHERE last_verified_at IS NULL OR last_verified_at < $1
         ORDER BY last_verified_at ASC NULLS FIRST
         ",
-    )
-    .bind(&cutoff_str)
-    .fetch_all(pool)
-    .await?;
+            &[&cutoff_str],
+        )
+        .await?;
 
     let mut report = FixityReport {
         check_time: Utc::now(),
@@ -236,8 +292,11 @@ pub async fn run_scheduled_checks(
         failed_files: Vec::new(),
     };
 
+    // Pending rows waiting to be flushed in the next transaction.
+    let mut pending: Vec<FixityCheckRow> = Vec::with_capacity(FIXITY_BATCH_SIZE);
+
     for row in rows {
-        let file_path: String = row.get("file_path");
+        let file_path: String = row.try_get("file_path")?;
         let path = PathBuf::from(&file_path);
 
         if !path.exists() {
@@ -248,26 +307,47 @@ pub async fn run_scheduled_checks(
             continue;
         }
 
-        match check_file_fixity(&path, pool, config).await {
-            Ok(status) => match status.status {
-                FixityCheckResult::Pass => report.passed += 1,
-                FixityCheckResult::Fail => {
-                    report.failed += 1;
-                    report.failed_files.push(path.clone());
-                    warn!("Fixity check failed for {}", path.display());
+        match check_file_fixity_deferred(&path, pool, config).await {
+            Ok((status, maybe_row)) => {
+                if let Some(db_row) = maybe_row {
+                    pending.push(db_row);
                 }
-                FixityCheckResult::NoBaseline => report.no_baseline += 1,
-                FixityCheckResult::FileNotFound => {
-                    report.not_found += 1;
-                    report
-                        .errors
-                        .push((path.clone(), "File not found".to_string()));
+
+                match status.status {
+                    FixityCheckResult::Pass => report.passed += 1,
+                    FixityCheckResult::Fail => {
+                        report.failed += 1;
+                        report.failed_files.push(path.clone());
+                        warn!("Fixity check failed for {}", path.display());
+                    }
+                    FixityCheckResult::NoBaseline => report.no_baseline += 1,
+                    FixityCheckResult::FileNotFound => {
+                        report.not_found += 1;
+                        report
+                            .errors
+                            .push((path.clone(), "File not found".to_string()));
+                    }
                 }
-            },
+
+                // Flush a batch when the buffer is full.
+                if pending.len() >= FIXITY_BATCH_SIZE {
+                    if let Err(e) = flush_fixity_rows(pool, &pending).await {
+                        error!("Batch fixity flush failed: {e}");
+                    }
+                    pending.clear();
+                }
+            }
             Err(e) => {
                 report.errors.push((path.clone(), e.to_string()));
                 error!("Error checking fixity for {}: {}", path.display(), e);
             }
+        }
+    }
+
+    // Flush any remaining rows.
+    if !pending.is_empty() {
+        if let Err(e) = flush_fixity_rows(pool, &pending).await {
+            error!("Final fixity flush failed: {e}");
         }
     }
 
@@ -279,37 +359,40 @@ pub async fn run_scheduled_checks(
     Ok(report)
 }
 
-/// Check fixity for a single file (complete workflow)
-async fn check_file_fixity(
+/// Deferred-insert variant: run the full single-file fixity workflow and
+/// return the `FixityStatus` result together with an optional DB row.
+///
+/// The caller is responsible for flushing the returned `FixityCheckRow` to
+/// the database — typically as part of a batch transaction.  When `None` is
+/// returned no row needs inserting (file not found, or only baseline created).
+async fn check_file_fixity_deferred(
     path: &Path,
-    pool: &sqlx::SqlitePool,
+    pool: &oxisql_sqlite_compat::SqliteConnection,
     config: &VerificationConfig,
-) -> ArchiveResult<FixityStatus> {
+) -> ArchiveResult<(FixityStatus, Option<FixityCheckRow>)> {
     if !path.exists() {
-        return Ok(FixityStatus {
-            file_path: path.to_path_buf(),
-            last_check: Utc::now(),
-            status: FixityCheckResult::FileNotFound,
-            checksums_match: HashMap::new(),
-            days_since_last_check: 0,
-            total_checks: 0,
-            failed_checks: 0,
-        });
+        return Ok((
+            FixityStatus {
+                file_path: path.to_path_buf(),
+                last_check: Utc::now(),
+                status: FixityCheckResult::FileNotFound,
+                checksums_match: HashMap::new(),
+                days_since_last_check: 0,
+                total_checks: 0,
+                failed_checks: 0,
+            },
+            None,
+        ));
     }
 
-    // Compute current checksums
     let checksums = crate::checksum::compute_checksums(path, config).await?;
+    let (mut status, maybe_row) = check_fixity_deferred(path, &checksums, pool).await?;
 
-    // Check fixity
-    let mut status = check_fixity(path, &checksums, pool).await?;
-
-    // Update last verified timestamp
     let path_str = path.to_string_lossy().to_string();
     if let Some(mut record) = crate::checksum::ChecksumRecord::load(pool, &path_str).await? {
         record.update_verified(pool).await?;
     }
 
-    // Log PREMIS event if enabled
     if config.enable_premis_logging {
         log_premis_event(
             pool,
@@ -324,18 +407,112 @@ async fn check_file_fixity(
         .await?;
     }
 
-    // Quarantine if auto-quarantine is enabled and check failed
     if config.auto_quarantine && status.status == FixityCheckResult::Fail {
         if let Err(e) =
             crate::quarantine::quarantine_file(path, pool, config, "Fixity check failed").await
         {
             error!("Failed to quarantine {}: {}", path.display(), e);
         } else {
-            status.status = FixityCheckResult::Fail; // Keep as fail but note it's quarantined
+            status.status = FixityCheckResult::Fail;
         }
     }
 
-    Ok(status)
+    Ok((status, maybe_row))
+}
+
+/// Like [`check_fixity`] but returns a pending `FixityCheckRow` instead of
+/// inserting it — the caller batches and flushes rows at its own pace.
+///
+/// Returns `None` for the row when no baseline exists (baseline is created
+/// in that case; no check row is needed yet).
+async fn check_fixity_deferred(
+    path: &Path,
+    current_checksums: &ChecksumSet,
+    pool: &oxisql_sqlite_compat::SqliteConnection,
+) -> ArchiveResult<(FixityStatus, Option<FixityCheckRow>)> {
+    let path_str = path.to_string_lossy().to_string();
+    let baseline = crate::checksum::ChecksumRecord::load(pool, &path_str).await?;
+
+    if let Some(baseline) = baseline {
+        let mut checksums_match = HashMap::new();
+        let mut all_match = true;
+
+        if let (Some(ref current), Some(ref stored)) = (&current_checksums.blake3, &baseline.blake3)
+        {
+            let m = current == stored;
+            checksums_match.insert("blake3".to_string(), m);
+            all_match = all_match && m;
+        }
+        if let (Some(ref current), Some(ref stored)) = (&current_checksums.md5, &baseline.md5) {
+            let m = current == stored;
+            checksums_match.insert("md5".to_string(), m);
+            all_match = all_match && m;
+        }
+        if let (Some(ref current), Some(ref stored)) = (&current_checksums.sha256, &baseline.sha256)
+        {
+            let m = current == stored;
+            checksums_match.insert("sha256".to_string(), m);
+            all_match = all_match && m;
+        }
+        if let (Some(ref current), Some(ref stored)) = (&current_checksums.crc32, &baseline.crc32) {
+            let m = current == stored;
+            checksums_match.insert("crc32".to_string(), m);
+            all_match = all_match && m;
+        }
+
+        let days_since_last = if let Some(last_verified) = baseline.last_verified_at {
+            (Utc::now() - last_verified).num_days()
+        } else {
+            (Utc::now() - baseline.created_at).num_days()
+        };
+
+        let (total_checks, failed_checks) = get_check_statistics(pool, &path_str).await?;
+
+        // Build the row but do NOT insert — caller will batch-flush.
+        let db_row = build_fixity_row(&path_str, all_match, &checksums_match);
+
+        let check_result = if all_match {
+            FixityCheckResult::Pass
+        } else {
+            FixityCheckResult::Fail
+        };
+
+        let status = FixityStatus {
+            file_path: path.to_path_buf(),
+            last_check: Utc::now(),
+            status: check_result,
+            checksums_match,
+            days_since_last_check: days_since_last,
+            total_checks: total_checks + 1,
+            failed_checks: if all_match {
+                failed_checks
+            } else {
+                failed_checks + 1
+            },
+        };
+
+        Ok((status, Some(db_row)))
+    } else {
+        // No baseline — create one; no check row needed.
+        let file_size = fs::metadata(path).await?.len() as i64;
+        let record =
+            crate::checksum::ChecksumRecord::new(path, file_size, current_checksums.clone());
+        record.save(pool).await?;
+        info!("Created baseline checksums for {}", path.display());
+
+        Ok((
+            FixityStatus {
+                file_path: path.to_path_buf(),
+                last_check: Utc::now(),
+                status: FixityCheckResult::NoBaseline,
+                checksums_match: HashMap::new(),
+                days_since_last_check: 0,
+                total_checks: 0,
+                failed_checks: 0,
+            },
+            None,
+        ))
+    }
 }
 
 /// Fixity report
@@ -393,23 +570,24 @@ impl PremisEvent {
     }
 
     /// Save to database
-    pub async fn save(&self, pool: &sqlx::SqlitePool) -> ArchiveResult<()> {
+    pub async fn save(&self, pool: &oxisql_sqlite_compat::SqliteConnection) -> ArchiveResult<()> {
         let event_date_time_str = self.event_date_time.to_rfc3339();
 
-        sqlx::query(
+        pool.execute(
             r"
             INSERT INTO premis_events (event_id, event_type, event_date_time, event_detail, event_outcome, event_outcome_detail, linking_object_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             ",
+            &[
+                &self.event_id,
+                &self.event_type,
+                &event_date_time_str,
+                &self.event_detail,
+                &self.event_outcome,
+                &self.event_outcome_detail,
+                &self.linking_object_id,
+            ],
         )
-        .bind(&self.event_id)
-        .bind(&self.event_type)
-        .bind(&event_date_time_str)
-        .bind(&self.event_detail)
-        .bind(&self.event_outcome)
-        .bind(&self.event_outcome_detail)
-        .bind(&self.linking_object_id)
-        .execute(pool)
         .await?;
 
         Ok(())
@@ -417,36 +595,36 @@ impl PremisEvent {
 
     /// Load events for a file
     pub async fn load_for_file(
-        pool: &sqlx::SqlitePool,
+        pool: &oxisql_sqlite_compat::SqliteConnection,
         linking_object_id: &str,
     ) -> ArchiveResult<Vec<Self>> {
-        let rows = sqlx::query(
-            r"
+        let rows = pool
+            .query(
+                r"
             SELECT event_id, event_type, event_date_time, event_detail, event_outcome, event_outcome_detail, linking_object_id
             FROM premis_events
-            WHERE linking_object_id = ?
+            WHERE linking_object_id = $1
             ORDER BY event_date_time DESC
             ",
-        )
-        .bind(linking_object_id)
-        .fetch_all(pool)
-        .await?;
+                &[&linking_object_id],
+            )
+            .await?;
 
         let mut events = Vec::new();
         for row in rows {
-            let event_date_time_str: String = row.get("event_date_time");
+            let event_date_time_str: String = row.try_get("event_date_time")?;
             let event_date_time = DateTime::parse_from_rfc3339(&event_date_time_str)
-                .map_err(|e| ArchiveError::Database(sqlx::Error::Decode(Box::new(e))))?
+                .map_err(|e| ArchiveError::Validation(format!("event_date_time decode: {e}")))?
                 .with_timezone(&Utc);
 
             events.push(Self {
-                event_id: row.get("event_id"),
-                event_type: row.get("event_type"),
+                event_id: row.try_get("event_id")?,
+                event_type: row.try_get("event_type")?,
                 event_date_time,
-                event_detail: row.get("event_detail"),
-                event_outcome: row.get("event_outcome"),
-                event_outcome_detail: row.get("event_outcome_detail"),
-                linking_object_id: row.get("linking_object_id"),
+                event_detail: row.try_get("event_detail")?,
+                event_outcome: row.try_get("event_outcome")?,
+                event_outcome_detail: row.try_get("event_outcome_detail")?,
+                linking_object_id: row.try_get("linking_object_id")?,
             });
         }
 
@@ -456,7 +634,7 @@ impl PremisEvent {
 
 /// Log a PREMIS event
 pub async fn log_premis_event(
-    pool: &sqlx::SqlitePool,
+    pool: &oxisql_sqlite_compat::SqliteConnection,
     linking_object_id: &str,
     event_type: &str,
     outcome: &str,
@@ -729,7 +907,10 @@ fn uuid_simple() -> String {
 }
 
 /// Detect bit rot by comparing file sizes and modification times
-pub async fn detect_bit_rot(path: &Path, pool: &sqlx::SqlitePool) -> ArchiveResult<BitRotStatus> {
+pub async fn detect_bit_rot(
+    path: &Path,
+    pool: &oxisql_sqlite_compat::SqliteConnection,
+) -> ArchiveResult<BitRotStatus> {
     let path_str = path.to_string_lossy().to_string();
 
     // Get stored record

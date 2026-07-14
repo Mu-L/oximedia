@@ -30,7 +30,7 @@ fuzz_target!(|data: &[u8]| {
                 extradata: None,
             };
 
-            let mut decoder = match OpusDecoder::new(config) {
+            let mut decoder = match OpusDecoder::new(&config) {
                 Ok(d) => d,
                 Err(_) => continue,
             };

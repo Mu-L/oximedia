@@ -1,6 +1,6 @@
 //! SIP, AFL, and PFL solo modes with signal routing.
 //!
-//! This module implements a [`SoloRouter`] that reroutes signal paths according
+//! This module implements a [`SoloRouter`](crate::solo_modes::SoloRouter) that reroutes signal paths according
 //! to three standard console solo modes:
 //!
 //! - **SIP (Solo-In-Place)**: Mutes all non-soloed channels in the main mix bus.
@@ -11,7 +11,7 @@
 //! - **PFL (Pre-Fader Listen)**: Taps the pre-fader signal of soloed channels
 //!   and routes it to the monitor bus.  The main mix is unaffected.
 //!
-//! The [`SoloRouter`] maintains per-channel solo state, solo-safe flags, and
+//! The [`SoloRouter`](crate::solo_modes::SoloRouter) maintains per-channel solo state, solo-safe flags, and
 //! exposes methods to compute gain multipliers and generate monitor bus
 //! contributions for each channel.
 

@@ -489,8 +489,8 @@ impl ProxyQualityCompare {
     /// Estimate the PSNR (dB) between a proxy frame and its original.
     ///
     /// Uses the standard PSNR formula:
-    ///   MSE = Σ(proxy[i] - original[i])² / (w * h)
-    ///   PSNR = 10 * log10(255² / MSE)
+    ///   `MSE = Σ(proxy[i] - original[i])² / (w * h)`
+    ///   `PSNR = 10 * log10(255² / MSE)`
     ///
     /// If `proxy.data` and `original.data` have fewer than `w * h` bytes,
     /// only the available samples are used.  Returns `f32::INFINITY` when

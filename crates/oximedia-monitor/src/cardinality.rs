@@ -2,18 +2,18 @@
 //!
 //! High-cardinality label sets (e.g. per-user IDs, per-request trace labels)
 //! can cause unbounded memory growth in metric stores.  This module provides a
-//! [`CardinalityGuard`] that tracks the number of distinct label combinations
+//! [`CardinalityGuard`](crate::cardinality::CardinalityGuard) that tracks the number of distinct label combinations
 //! per metric name and enforces configurable limits.
 //!
 //! Three overflow strategies are supported:
 //!
-//! | [`OverflowAction`]  | Behaviour when limit is reached                              |
+//! | [`OverflowAction`](crate::cardinality::OverflowAction)  | Behaviour when limit is reached                              |
 //! |---------------------|--------------------------------------------------------------|
-//! | `Drop`              | Returns [`CardinalityResult::Overflow`] with the original   |
+//! | `Drop`              | Returns [`CardinalityResult::Overflow`](crate::cardinality::CardinalityResult::Overflow) with the original   |
 //! |                     | label combo — caller should skip recording.                  |
-//! | `UseOverflow`       | Returns [`CardinalityResult::Overflow`] with the sentinel    |
+//! | `UseOverflow`       | Returns [`CardinalityResult::Overflow`](crate::cardinality::CardinalityResult::Overflow) with the sentinel    |
 //! |                     | string `"__overflow__"`.                                     |
-//! | `Error`             | Returns [`CardinalityResult::Error`] so the caller can log  |
+//! | `Error`             | Returns [`CardinalityResult::Error`](crate::cardinality::CardinalityResult::Error) so the caller can log  |
 //! |                     | or propagate the problem.                                    |
 //!
 //! # Example

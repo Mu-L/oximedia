@@ -1,13 +1,13 @@
 # oximedia-forensics
 
 ![Status: Stable](https://img.shields.io/badge/status-stable-green)
-![Version: 0.1.8](https://img.shields.io/badge/version-0.1.8-blue)
+![Version: 0.1.9](https://img.shields.io/badge/version-0.1.9-blue)
 
 Video and image forensics and tampering detection for OxiMedia, providing comprehensive tools for authenticity verification and forensic analysis.
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.8 — 2026-05-29 — 515 tests
+Version: 0.1.9 — 2026-07-08 — extensively tested
 
 ## Features
 
@@ -40,9 +40,9 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-forensics = "0.1.8"
+oximedia-forensics = "0.1.9"
 # With computer vision features:
-oximedia-forensics = { version = "0.1.8", features = ["cv"] }
+oximedia-forensics = { version = "0.1.9", features = ["cv"] }
 ```
 
 ## Feature Flags

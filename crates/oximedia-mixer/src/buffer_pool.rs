@@ -3,8 +3,8 @@
 //! Repeated per-block allocation of audio buffers on the realtime audio thread
 //! is a common source of latency spikes (heap allocation is non-deterministic
 //! in time and may call into the OS allocator).  This module provides an
-//! [`AudioBufferPool`] that keeps a set of pre-allocated buffers and hands them
-//! out via RAII guards ([`PooledBuffer`]).  When the guard is dropped the buffer
+//! [`AudioBufferPool`](crate::buffer_pool::AudioBufferPool) that keeps a set of pre-allocated buffers and hands them
+//! out via RAII guards ([`PooledBuffer`](crate::buffer_pool::PooledBuffer)).  When the guard is dropped the buffer
 //! is returned to the pool rather than being freed.
 //!
 //! # Design
@@ -18,7 +18,7 @@
 //!   realtime deadline begins so that checkouts during the audio callback never
 //!   block on allocation.
 //! * **Overflow allocation** — if the pool is exhausted a fresh `Vec` is
-//!   allocated on the spot and returned as a [`PooledBuffer`] that is *not*
+//!   allocated on the spot and returned as a [`PooledBuffer`](crate::buffer_pool::PooledBuffer) that is *not*
 //!   returned to the pool on drop (it is simply freed).  This guarantees
 //!   correctness at the cost of a rare allocation.
 //!
@@ -205,7 +205,7 @@ impl std::fmt::Debug for AudioBufferPool {
 /// An RAII guard wrapping a borrowed audio buffer.
 ///
 /// The buffer is automatically returned to the [`AudioBufferPool`] when this
-/// guard is dropped.  Access the underlying slice via [`Deref`] / [`DerefMut`].
+/// guard is dropped.  Access the underlying slice via [`Deref`](std::ops::Deref) / [`DerefMut`](std::ops::DerefMut).
 pub struct PooledBuffer {
     /// `Some` during the lifetime of the guard; `None` only after the
     /// `Option::take` inside `drop`.

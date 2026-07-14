@@ -3,11 +3,10 @@
 //! This module provides memory allocation tracking, usage statistics,
 //! and memory pool management for GPU buffers.
 
-use crate::{GpuBuffer, GpuDevice, GpuError, Result};
+use crate::{GpuBuffer, GpuDevice, GpuError, Result, Shared};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 
 /// Memory allocation statistics
 #[derive(Debug, Clone, Copy, Default)]
@@ -52,7 +51,7 @@ impl MemoryStats {
 
 /// Memory allocator for GPU buffers
 pub struct MemoryAllocator {
-    device: Arc<wgpu::Device>,
+    device: Shared<wgpu::Device>,
     total_allocated: AtomicU64,
     total_freed: AtomicU64,
     current_usage: AtomicU64,
@@ -65,7 +64,7 @@ impl MemoryAllocator {
     #[must_use]
     pub fn new(device: &GpuDevice) -> Self {
         Self {
-            device: Arc::clone(device.device()),
+            device: device.device().clone(),
             total_allocated: AtomicU64::new(0),
             total_freed: AtomicU64::new(0),
             current_usage: AtomicU64::new(0),
@@ -123,7 +122,7 @@ impl MemoryAllocator {
     }
 
     /// Get the device reference
-    pub fn device(&self) -> &Arc<wgpu::Device> {
+    pub fn device(&self) -> &Shared<wgpu::Device> {
         &self.device
     }
 }
@@ -131,8 +130,8 @@ impl MemoryAllocator {
 /// Memory pool for reusing GPU buffers
 pub struct MemoryPool {
     #[allow(dead_code)]
-    device: Arc<wgpu::Device>,
-    allocator: Arc<MemoryAllocator>,
+    device: Shared<wgpu::Device>,
+    allocator: Shared<MemoryAllocator>,
     pools: RwLock<HashMap<u64, Vec<GpuBuffer>>>,
 }
 
@@ -141,8 +140,8 @@ impl MemoryPool {
     #[must_use]
     pub fn new(device: &GpuDevice) -> Self {
         Self {
-            device: Arc::clone(device.device()),
-            allocator: Arc::new(MemoryAllocator::new(device)),
+            device: device.device().clone(),
+            allocator: Shared::new(MemoryAllocator::new(device)),
             pools: RwLock::new(HashMap::new()),
         }
     }
@@ -216,7 +215,7 @@ impl MemoryPool {
     }
 
     /// Get the allocator
-    pub fn allocator(&self) -> &Arc<MemoryAllocator> {
+    pub fn allocator(&self) -> &Shared<MemoryAllocator> {
         &self.allocator
     }
 }
@@ -224,12 +223,12 @@ impl MemoryPool {
 /// RAII wrapper for automatic buffer deallocation
 pub struct ManagedBuffer {
     buffer: Option<GpuBuffer>,
-    pool: Arc<MemoryPool>,
+    pool: Shared<MemoryPool>,
 }
 
 impl ManagedBuffer {
     /// Create a new managed buffer
-    pub fn new(buffer: GpuBuffer, pool: Arc<MemoryPool>) -> Self {
+    pub fn new(buffer: GpuBuffer, pool: Shared<MemoryPool>) -> Self {
         Self {
             buffer: Some(buffer),
             pool,

@@ -10,7 +10,7 @@ use crate::container_probe_parsers::{
 
 /// A stateless multi-format container prober that inspects raw byte slices.
 ///
-/// Compared to [`ContainerProber`] (magic-byte only), `MultiFormatProber`
+/// Compared to [`super::types::ContainerProber`] (magic-byte only), `MultiFormatProber`
 /// performs a shallow parse of the container structure to discover stream
 /// count, codec, dimensions, duration, and basic metadata — all without
 /// decoding any compressed data.

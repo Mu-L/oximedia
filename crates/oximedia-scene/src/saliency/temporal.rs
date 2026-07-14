@@ -472,7 +472,7 @@ pub fn temporal_saliency(
 
 /// Rolling temporal saliency accumulator for video sequences.
 ///
-/// Holds the previous frame so successive calls to [`push`] can compute
+/// Holds the previous frame so successive calls to [`TemporalSaliencyAccumulator::push`] can compute
 /// the inter-frame motion component.  The first call returns `None`
 /// (no previous frame available).
 pub struct TemporalSaliencyAccumulator {

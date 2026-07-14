@@ -10,6 +10,37 @@
 //! gamma), rotation, trim, DPR, metadata, animation, background, border,
 //! padding, compression strategy, and error handling.
 //!
+//! # [`TransformParams`] fields, defaults, and valid ranges
+//!
+//! Every field below defaults to the value shown when omitted from a URL or
+//! query string (see [`TransformParams::default`] and the `parser` module's
+//! `parse_param` for the corresponding URL key names / short aliases).
+//!
+//! | Field | Type | Default | Valid range / values |
+//! |-------|------|---------|-----------------------|
+//! | [`width`](TransformParams::width) | `Option<u32>` | `None` | `1..=`[`MAX_DIMENSION`] (12000) |
+//! | [`height`](TransformParams::height) | `Option<u32>` | `None` | `1..=`[`MAX_DIMENSION`] (12000) |
+//! | [`quality`](TransformParams::quality) | `u8` | [`DEFAULT_QUALITY`] (85) | `1..=100` |
+//! | [`format`](TransformParams::format) | [`OutputFormat`] | [`OutputFormat::Auto`] | `auto`, `avif`, `webp`, `jpeg`, `png`, `gif`, `baseline`, `json` |
+//! | [`fit`](TransformParams::fit) | [`FitMode`] | [`FitMode::ScaleDown`] | `scale-down`, `contain`, `cover`, `crop`, `pad`, `fill` |
+//! | [`gravity`](TransformParams::gravity) | [`Gravity`] | [`Gravity::Center`] | `auto`, `center`, `top`, `bottom`, `left`, `right`, `face`, `"<x>x<y>"` focal point |
+//! | [`sharpen`](TransformParams::sharpen) | `f64` | `0.0` (off) | `0.0..=`[`MAX_SHARPEN`] (10.0) |
+//! | [`blur`](TransformParams::blur) | `f64` | `0.0` (off) | `0.0..=`[`MAX_BLUR_RADIUS`] (250.0) |
+//! | [`brightness`](TransformParams::brightness) | `f64` | `0.0` (no change) | `-1.0..=1.0` |
+//! | [`contrast`](TransformParams::contrast) | `f64` | `0.0` (no change) | `-1.0..=1.0` |
+//! | [`gamma`](TransformParams::gamma) | `f64` | `1.0` (no change) | `0.0..=`[`MAX_GAMMA`] (10.0), exclusive of `0.0` |
+//! | [`rotate`](TransformParams::rotate) | [`Rotation`] | [`Rotation::Deg0`] | `0`, `90`, `180`, `270`, `auto` (EXIF-driven) |
+//! | [`trim`](TransformParams::trim) | `Option<Trim>` | `None` | 1 or 4 non-negative pixel counts (`top,right,bottom,left`) |
+//! | [`dpr`](TransformParams::dpr) | `f64` | `1.0` ([`MIN_DPR`]) | [`MIN_DPR`]`..=`[`MAX_DPR`] (1.0..=4.0) |
+//! | [`metadata`](TransformParams::metadata) | [`MetadataMode`] | [`MetadataMode::None`] | `keep`, `copyright`, `none` |
+//! | [`anim`](TransformParams::anim) | `bool` | `true` (preserve frames) | `true`, `false` |
+//! | [`background`](TransformParams::background) | [`Color`] | transparent | CSS hex (`#rgb`, `#rrggbb`, `#rrggbbaa`) or named colour |
+//! | [`border`](TransformParams::border) | `Option<Border>` | `None` | `width:color` or `t,r,b,l:color` |
+//! | [`pad`](TransformParams::pad) | `Option<Padding>` | `None` | 1, 2 (`tb,lr`), or 4 fractional values in `0.0..=1.0` |
+//! | [`compression`](TransformParams::compression) | `Option<String>` | `None` | `fast`, `default`/`normal`, `best`/`slow` |
+//! | [`onerror`](TransformParams::onerror) | `Option<String>` | `None` | e.g. `"redirect"` |
+//! | [`output_options`](TransformParams::output_options) | `Option<`[`OutputOptions`]`>` | `None` | see [`OutputOptions`] (progressive JPEG, per-encode quality override) |
+//!
 //! # Example
 //!
 //! ```
@@ -1143,6 +1174,161 @@ impl TransformParams {
         parts.join(",")
     }
 
+    /// Serialize these parameters back into a canonical comma-separated
+    /// transform string that [`parse_transform_string`] re-parses into an
+    /// equal `TransformParams`.
+    ///
+    /// [`parse_transform_string`]: crate::parser::parse_transform_string
+    ///
+    /// Unlike [`cache_key`](Self::cache_key) — which sorts keys alphabetically
+    /// and deliberately omits round-trip-irrelevant fields such as `onerror`
+    /// (so that distinct error-handling behaviour shares one cache entry) — this
+    /// method is a *true inverse* of the parser:
+    ///
+    /// - Fields are emitted in a fixed, human-readable **canonical order**
+    ///   (dimensions → quality → format → fit → gravity → effects → geometry →
+    ///   delivery options), independent of how the input string was ordered.
+    /// - Fields at their [`Default`] value are **omitted**, keeping the output
+    ///   compact and making `parse → serialize → parse` stable.
+    /// - Every emitted key is one the parser can read back, so the result is
+    ///   guaranteed to re-parse into a value equal to `self`.
+    ///
+    /// As a consequence the function is **idempotent** after the first round:
+    /// `serialize(parse(serialize(p))) == serialize(p)`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use oximedia_image_transform::parser::parse_transform_string;
+    /// use oximedia_image_transform::transform::TransformParams;
+    ///
+    /// let original = parse_transform_string("h=600,w=800,q=85").expect("parse");
+    /// let canonical = original.serialize();
+    /// // Canonical order places width before height; default quality (85) is dropped.
+    /// assert_eq!(canonical, "width=800,height=600");
+    ///
+    /// let reparsed = parse_transform_string(&canonical).expect("reparse");
+    /// assert_eq!(original, reparsed);
+    /// ```
+    pub fn serialize(&self) -> String {
+        let defaults = TransformParams::default();
+        let opt_defaults = OutputOptions::default();
+        let mut parts: Vec<String> = Vec::new();
+
+        // -- Dimensions --
+        if let Some(w) = self.width {
+            parts.push(format!("width={w}"));
+        }
+        if let Some(h) = self.height {
+            parts.push(format!("height={h}"));
+        }
+
+        // -- Quality / format --
+        if self.quality != defaults.quality {
+            parts.push(format!("quality={}", self.quality));
+        }
+        if self.format != defaults.format {
+            parts.push(format!("format={}", self.format));
+        }
+
+        // -- Fit / gravity --
+        if self.fit != defaults.fit {
+            parts.push(format!("fit={}", self.fit));
+        }
+        if self.gravity != defaults.gravity {
+            parts.push(format!("gravity={}", self.gravity));
+        }
+
+        // -- Pixel effects --
+        if (self.sharpen - defaults.sharpen).abs() > f64::EPSILON {
+            parts.push(format!("sharpen={}", self.sharpen));
+        }
+        if (self.blur - defaults.blur).abs() > f64::EPSILON {
+            parts.push(format!("blur={}", self.blur));
+        }
+        if (self.brightness - defaults.brightness).abs() > f64::EPSILON {
+            parts.push(format!("brightness={}", self.brightness));
+        }
+        if (self.contrast - defaults.contrast).abs() > f64::EPSILON {
+            parts.push(format!("contrast={}", self.contrast));
+        }
+        if (self.gamma - defaults.gamma).abs() > f64::EPSILON {
+            parts.push(format!("gamma={}", self.gamma));
+        }
+
+        // -- Geometry --
+        if self.rotate != defaults.rotate {
+            parts.push(format!("rotate={}", self.rotate));
+        }
+        if let Some(ref trim) = self.trim {
+            // Comma-free encoding: the comma is the top-level field delimiter,
+            // so four-sided values use `x` (e.g. `trim=10x5x10x5`). A uniform
+            // trim collapses to the single-value short form.
+            if trim.top == trim.right && trim.right == trim.bottom && trim.bottom == trim.left {
+                parts.push(format!("trim={}", trim.top));
+            } else {
+                parts.push(format!(
+                    "trim={}x{}x{}x{}",
+                    trim.top, trim.right, trim.bottom, trim.left
+                ));
+            }
+        }
+        if let Some(ref border) = self.border {
+            let dims = if border.top == border.right
+                && border.right == border.bottom
+                && border.bottom == border.left
+            {
+                format!("{}", border.top)
+            } else {
+                format!(
+                    "{}x{}x{}x{}",
+                    border.top, border.right, border.bottom, border.left
+                )
+            };
+            parts.push(format!("border={}:{}", dims, border.color.to_hex()));
+        }
+        if let Some(ref pad) = self.pad {
+            if pad.top == pad.right && pad.right == pad.bottom && pad.bottom == pad.left {
+                parts.push(format!("pad={}", pad.top));
+            } else {
+                parts.push(format!(
+                    "pad={}x{}x{}x{}",
+                    pad.top, pad.right, pad.bottom, pad.left
+                ));
+            }
+        }
+
+        // -- Delivery options --
+        if (self.dpr - defaults.dpr).abs() > f64::EPSILON {
+            parts.push(format!("dpr={}", self.dpr));
+        }
+        if self.metadata != defaults.metadata {
+            parts.push(format!("metadata={}", self.metadata));
+        }
+        if self.anim != defaults.anim {
+            parts.push(format!("anim={}", self.anim));
+        }
+        if self.background != defaults.background {
+            parts.push(format!("background={}", self.background.to_hex()));
+        }
+        if let Some(ref comp) = self.compression {
+            parts.push(format!("compression={comp}"));
+        }
+        if let Some(ref onerror) = self.onerror {
+            parts.push(format!("onerror={onerror}"));
+        }
+        if let Some(ref opts) = self.output_options {
+            if opts.progressive_jpeg != opt_defaults.progressive_jpeg {
+                parts.push(format!("progressive={}", opts.progressive_jpeg));
+            }
+            if opts.quality != opt_defaults.quality {
+                parts.push(format!("output_quality={}", opts.quality));
+            }
+        }
+
+        parts.join(",")
+    }
+
     /// Returns `true` if this transform is effectively a no-op.
     pub fn is_identity(&self) -> bool {
         let defaults = TransformParams::default();
@@ -1176,697 +1362,5 @@ impl fmt::Display for TransformParams {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ── Default / identity ──
-
-    #[test]
-    fn test_default_params() {
-        let p = TransformParams::default();
-        assert_eq!(p.quality, 85);
-        assert_eq!(p.fit, FitMode::ScaleDown);
-        assert_eq!(p.metadata, MetadataMode::None);
-        assert!(p.anim);
-        assert_eq!(p.gravity, Gravity::Center);
-        assert!((p.dpr - 1.0).abs() < f64::EPSILON);
-        assert!((p.gamma - 1.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_identity() {
-        let p = TransformParams::default();
-        assert!(p.is_identity());
-
-        let mut p2 = TransformParams::default();
-        p2.width = Some(800);
-        assert!(!p2.is_identity());
-    }
-
-    // ── Effective dimensions ──
-
-    #[test]
-    fn test_effective_width_no_dpr() {
-        let mut p = TransformParams::default();
-        p.width = Some(800);
-        assert_eq!(p.effective_width(), Some(800));
-    }
-
-    #[test]
-    fn test_effective_height_no_dpr() {
-        let mut p = TransformParams::default();
-        p.height = Some(600);
-        assert_eq!(p.effective_height(), Some(600));
-    }
-
-    #[test]
-    fn test_effective_width_with_dpr() {
-        let mut p = TransformParams::default();
-        p.width = Some(400);
-        p.dpr = 2.0;
-        assert_eq!(p.effective_width(), Some(800));
-    }
-
-    #[test]
-    fn test_effective_height_with_dpr() {
-        let mut p = TransformParams::default();
-        p.height = Some(300);
-        p.dpr = 2.0;
-        assert_eq!(p.effective_height(), Some(600));
-    }
-
-    #[test]
-    fn test_effective_width_clamped() {
-        let mut p = TransformParams::default();
-        p.width = Some(10000);
-        p.dpr = 3.0;
-        // 10000 * 3 = 30000 > MAX_DIMENSION, clamped
-        assert_eq!(p.effective_width(), Some(MAX_DIMENSION));
-    }
-
-    #[test]
-    fn test_effective_none() {
-        let p = TransformParams::default();
-        assert!(p.effective_width().is_none());
-        assert!(p.effective_height().is_none());
-    }
-
-    // ── Validation ──
-
-    #[test]
-    fn test_validate_valid() {
-        let mut p = TransformParams::default();
-        p.width = Some(800);
-        p.height = Some(600);
-        assert!(p.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_zero_width() {
-        let mut p = TransformParams::default();
-        p.width = Some(0);
-        assert!(p.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_exceed_dimension() {
-        let mut p = TransformParams::default();
-        p.width = Some(20000);
-        assert!(p.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_quality_zero() {
-        let mut p = TransformParams::default();
-        p.quality = 0;
-        assert!(p.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_quality_101() {
-        let mut p = TransformParams::default();
-        p.quality = 101;
-        assert!(p.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_quality_100() {
-        let mut p = TransformParams::default();
-        p.quality = 100;
-        assert!(p.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_dpr_low() {
-        let mut p = TransformParams::default();
-        p.dpr = 0.5;
-        assert!(p.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_dpr_high() {
-        let mut p = TransformParams::default();
-        p.dpr = 5.0;
-        assert!(p.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_dpr_ok() {
-        let mut p = TransformParams::default();
-        p.dpr = 2.0;
-        assert!(p.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_sharpen_ok() {
-        let mut p = TransformParams::default();
-        p.sharpen = 5.0;
-        assert!(p.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_sharpen_too_high() {
-        let mut p = TransformParams::default();
-        p.sharpen = 11.0;
-        assert!(p.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_sharpen_negative() {
-        let mut p = TransformParams::default();
-        p.sharpen = -0.1;
-        assert!(p.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_blur_ok() {
-        let mut p = TransformParams::default();
-        p.blur = 100.0;
-        assert!(p.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_blur_too_high() {
-        let mut p = TransformParams::default();
-        p.blur = 251.0;
-        assert!(p.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_brightness_ok() {
-        let mut p = TransformParams::default();
-        p.brightness = 0.5;
-        assert!(p.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_brightness_too_low() {
-        let mut p = TransformParams::default();
-        p.brightness = -1.1;
-        assert!(p.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_brightness_too_high() {
-        let mut p = TransformParams::default();
-        p.brightness = 1.1;
-        assert!(p.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_contrast_ok() {
-        let mut p = TransformParams::default();
-        p.contrast = -1.0;
-        assert!(p.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_contrast_too_high() {
-        let mut p = TransformParams::default();
-        p.contrast = 1.5;
-        assert!(p.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_gamma_ok() {
-        let mut p = TransformParams::default();
-        p.gamma = 2.2;
-        assert!(p.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_gamma_too_high() {
-        let mut p = TransformParams::default();
-        p.gamma = 11.0;
-        assert!(p.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_focal_point_ok() {
-        let mut p = TransformParams::default();
-        p.gravity = Gravity::FocalPoint(0.5, 0.5);
-        assert!(p.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_focal_point_out_of_range() {
-        let mut p = TransformParams::default();
-        p.gravity = Gravity::FocalPoint(1.1, 0.5);
-        assert!(p.validate().is_err());
-    }
-
-    // ── FitMode ──
-
-    #[test]
-    fn test_fit_parse() {
-        assert_eq!(
-            FitMode::from_str_loose("scale-down").ok(),
-            Some(FitMode::ScaleDown)
-        );
-        assert_eq!(
-            FitMode::from_str_loose("contain").ok(),
-            Some(FitMode::Contain)
-        );
-        assert_eq!(FitMode::from_str_loose("cover").ok(), Some(FitMode::Cover));
-        assert_eq!(FitMode::from_str_loose("crop").ok(), Some(FitMode::Crop));
-        assert_eq!(FitMode::from_str_loose("pad").ok(), Some(FitMode::Pad));
-        assert_eq!(FitMode::from_str_loose("fill").ok(), Some(FitMode::Fill));
-        assert!(FitMode::from_str_loose("stretch").is_err());
-    }
-
-    #[test]
-    fn test_fit_as_str() {
-        assert_eq!(FitMode::ScaleDown.as_str(), "scale-down");
-        assert_eq!(FitMode::Contain.as_str(), "contain");
-        assert_eq!(FitMode::Cover.as_str(), "cover");
-        assert_eq!(FitMode::Crop.as_str(), "crop");
-        assert_eq!(FitMode::Pad.as_str(), "pad");
-        assert_eq!(FitMode::Fill.as_str(), "fill");
-    }
-
-    #[test]
-    fn test_fit_display() {
-        assert_eq!(format!("{}", FitMode::Cover), "cover");
-    }
-
-    // ── Gravity ──
-
-    #[test]
-    fn test_gravity_parse_named() {
-        assert_eq!(Gravity::from_str_loose("auto").ok(), Some(Gravity::Auto));
-        assert_eq!(
-            Gravity::from_str_loose("center").ok(),
-            Some(Gravity::Center)
-        );
-        assert_eq!(Gravity::from_str_loose("top").ok(), Some(Gravity::Top));
-        assert_eq!(Gravity::from_str_loose("face").ok(), Some(Gravity::Face));
-        assert_eq!(
-            Gravity::from_str_loose("bottom-right").ok(),
-            Some(Gravity::BottomRight)
-        );
-    }
-
-    #[test]
-    fn test_gravity_focal_point_parse() {
-        let g = Gravity::from_str_loose("0.3x0.7");
-        assert!(g.is_ok());
-        if let Ok(Gravity::FocalPoint(x, y)) = g {
-            assert!((x - 0.3).abs() < 0.001);
-            assert!((y - 0.7).abs() < 0.001);
-        }
-    }
-
-    #[test]
-    fn test_gravity_focal_point_out_of_range() {
-        assert!(Gravity::from_str_loose("1.5x0.5").is_err());
-        assert!(Gravity::from_str_loose("0.5x-0.1").is_err());
-    }
-
-    #[test]
-    fn test_gravity_as_str() {
-        assert_eq!(Gravity::Center.as_str(), "center");
-        assert_eq!(Gravity::FocalPoint(0.5, 0.5).as_str(), "0.5x0.5");
-    }
-
-    #[test]
-    fn test_gravity_display() {
-        assert_eq!(format!("{}", Gravity::TopLeft), "top-left");
-    }
-
-    // ── OutputFormat ──
-
-    #[test]
-    fn test_format_parse() {
-        assert_eq!(
-            OutputFormat::from_str_loose("auto").ok(),
-            Some(OutputFormat::Auto)
-        );
-        assert_eq!(
-            OutputFormat::from_str_loose("AVIF").ok(),
-            Some(OutputFormat::Avif)
-        );
-        assert_eq!(
-            OutputFormat::from_str_loose("webp").ok(),
-            Some(OutputFormat::WebP)
-        );
-        assert_eq!(
-            OutputFormat::from_str_loose("JPEG").ok(),
-            Some(OutputFormat::Jpeg)
-        );
-        assert_eq!(
-            OutputFormat::from_str_loose("jpg").ok(),
-            Some(OutputFormat::Jpeg)
-        );
-        assert_eq!(
-            OutputFormat::from_str_loose("png").ok(),
-            Some(OutputFormat::Png)
-        );
-        assert_eq!(
-            OutputFormat::from_str_loose("gif").ok(),
-            Some(OutputFormat::Gif)
-        );
-        assert_eq!(
-            OutputFormat::from_str_loose("baseline").ok(),
-            Some(OutputFormat::Baseline)
-        );
-        assert_eq!(
-            OutputFormat::from_str_loose("json").ok(),
-            Some(OutputFormat::Json)
-        );
-        assert!(OutputFormat::from_str_loose("bmp").is_err());
-    }
-
-    #[test]
-    fn test_format_mime() {
-        assert_eq!(OutputFormat::Avif.mime_type(), "image/avif");
-        assert_eq!(OutputFormat::WebP.mime_type(), "image/webp");
-        assert_eq!(OutputFormat::Jpeg.mime_type(), "image/jpeg");
-        assert_eq!(OutputFormat::Png.mime_type(), "image/png");
-        assert_eq!(OutputFormat::Gif.mime_type(), "image/gif");
-        assert_eq!(OutputFormat::Json.mime_type(), "application/json");
-    }
-
-    #[test]
-    fn test_format_extension() {
-        assert_eq!(OutputFormat::Avif.file_extension(), "avif");
-        assert_eq!(OutputFormat::WebP.file_extension(), "webp");
-        assert_eq!(OutputFormat::Jpeg.file_extension(), "jpg");
-        assert_eq!(OutputFormat::Json.file_extension(), "json");
-    }
-
-    #[test]
-    fn test_format_animation() {
-        assert!(OutputFormat::Gif.supports_animation());
-        assert!(OutputFormat::WebP.supports_animation());
-        assert!(OutputFormat::Avif.supports_animation());
-        assert!(!OutputFormat::Jpeg.supports_animation());
-        assert!(!OutputFormat::Png.supports_animation());
-        assert!(!OutputFormat::Json.supports_animation());
-    }
-
-    #[test]
-    fn test_format_transparency() {
-        assert!(OutputFormat::Png.supports_transparency());
-        assert!(OutputFormat::WebP.supports_transparency());
-        assert!(!OutputFormat::Jpeg.supports_transparency());
-        assert!(!OutputFormat::Baseline.supports_transparency());
-    }
-
-    #[test]
-    fn test_format_as_str() {
-        assert_eq!(OutputFormat::Auto.as_str(), "auto");
-        assert_eq!(OutputFormat::Avif.as_str(), "avif");
-        assert_eq!(OutputFormat::WebP.as_str(), "webp");
-        assert_eq!(OutputFormat::Json.as_str(), "json");
-    }
-
-    #[test]
-    fn test_format_display() {
-        assert_eq!(format!("{}", OutputFormat::Avif), "avif");
-    }
-
-    // ── MetadataMode ──
-
-    #[test]
-    fn test_metadata_parse() {
-        assert_eq!(
-            MetadataMode::from_str_loose("keep").ok(),
-            Some(MetadataMode::Keep)
-        );
-        assert_eq!(
-            MetadataMode::from_str_loose("copyright").ok(),
-            Some(MetadataMode::Copyright)
-        );
-        assert_eq!(
-            MetadataMode::from_str_loose("none").ok(),
-            Some(MetadataMode::None)
-        );
-        assert_eq!(
-            MetadataMode::from_str_loose("strip").ok(),
-            Some(MetadataMode::None)
-        );
-    }
-
-    // ── Color ──
-
-    #[test]
-    fn test_color_from_hex_6() {
-        let c = Color::from_hex("#ff8800").expect("valid hex");
-        assert_eq!(c.r, 255);
-        assert_eq!(c.g, 136);
-        assert_eq!(c.b, 0);
-        assert_eq!(c.a, 255);
-    }
-
-    #[test]
-    fn test_color_from_hex_8() {
-        let c = Color::from_hex("#ff880080").expect("valid hex");
-        assert_eq!(c.r, 255);
-        assert_eq!(c.g, 136);
-        assert_eq!(c.b, 0);
-        assert_eq!(c.a, 128);
-    }
-
-    #[test]
-    fn test_color_from_hex_no_hash() {
-        let c = Color::from_hex("00ff00").expect("valid hex");
-        assert_eq!(c, Color::new(0, 255, 0, 255));
-    }
-
-    #[test]
-    fn test_color_from_css_rgb() {
-        let c = Color::from_css("rgb(128,64,32)").expect("valid rgb");
-        assert_eq!(c, Color::new(128, 64, 32, 255));
-    }
-
-    #[test]
-    fn test_color_from_css_rgba() {
-        let c = Color::from_css("rgba(128,64,32,0.5)").expect("valid rgba");
-        assert_eq!(c.r, 128);
-        assert_eq!(c.g, 64);
-        assert_eq!(c.b, 32);
-        assert_eq!(c.a, 128); // 0.5 * 255 = 127.5 -> 128 (rounded)
-    }
-
-    #[test]
-    fn test_color_invalid() {
-        assert!(Color::from_hex("xyz").is_err());
-        assert!(Color::from_hex("#gg0000").is_err());
-        assert!(Color::from_hex("#ff00").is_err());
-    }
-
-    #[test]
-    fn test_color_to_hex_opaque() {
-        let c = Color::new(255, 0, 128, 255);
-        assert_eq!(c.to_hex(), "ff0080");
-    }
-
-    #[test]
-    fn test_color_to_hex_transparent() {
-        let c = Color::new(255, 0, 128, 128);
-        assert_eq!(c.to_hex(), "ff008080");
-    }
-
-    #[test]
-    fn test_color_display() {
-        let c = Color::new(255, 0, 0, 255);
-        assert_eq!(format!("{c}"), "#ff0000");
-    }
-
-    #[test]
-    fn test_color_presets() {
-        assert_eq!(Color::transparent().a, 0);
-        assert_eq!(Color::white(), Color::new(255, 255, 255, 255));
-        assert_eq!(Color::black(), Color::new(0, 0, 0, 255));
-    }
-
-    // ── Rotation ──
-
-    #[test]
-    fn test_rotation_from_degrees() {
-        assert_eq!(Rotation::from_degrees(0).ok(), Some(Rotation::Deg0));
-        assert_eq!(Rotation::from_degrees(90).ok(), Some(Rotation::Deg90));
-        assert_eq!(Rotation::from_degrees(180).ok(), Some(Rotation::Deg180));
-        assert_eq!(Rotation::from_degrees(270).ok(), Some(Rotation::Deg270));
-        assert!(Rotation::from_degrees(45).is_err());
-    }
-
-    #[test]
-    fn test_rotation_from_str() {
-        assert_eq!(Rotation::from_str_loose("auto").ok(), Some(Rotation::Auto));
-        assert_eq!(Rotation::from_str_loose("90").ok(), Some(Rotation::Deg90));
-    }
-
-    #[test]
-    fn test_rotation_to_degrees() {
-        assert_eq!(Rotation::Deg90.to_degrees(), Some(90));
-        assert_eq!(Rotation::Auto.to_degrees(), None);
-    }
-
-    #[test]
-    fn test_rotation_display() {
-        assert_eq!(format!("{}", Rotation::Deg90), "90");
-        assert_eq!(format!("{}", Rotation::Auto), "auto");
-    }
-
-    // ── Compression ──
-
-    #[test]
-    fn test_compression_parse() {
-        assert_eq!(
-            Compression::from_str_loose("fast").ok(),
-            Some(Compression::Fast)
-        );
-        assert_eq!(
-            Compression::from_str_loose("default").ok(),
-            Some(Compression::Default)
-        );
-        assert_eq!(
-            Compression::from_str_loose("best").ok(),
-            Some(Compression::Best)
-        );
-        assert!(Compression::from_str_loose("invalid").is_err());
-    }
-
-    // ── Border ──
-
-    #[test]
-    fn test_border_uniform() {
-        let b = Border::uniform(5, Color::black());
-        assert_eq!(b.top, 5);
-        assert_eq!(b.right, 5);
-        assert_eq!(b.bottom, 5);
-        assert_eq!(b.left, 5);
-    }
-
-    // ── Padding ──
-
-    #[test]
-    fn test_padding_uniform() {
-        let p = Padding::uniform(0.05);
-        assert!((p.top - 0.05).abs() < 1e-9);
-        assert!((p.right - 0.05).abs() < 1e-9);
-        assert!((p.bottom - 0.05).abs() < 1e-9);
-        assert!((p.left - 0.05).abs() < 1e-9);
-    }
-
-    // ── Trim ──
-
-    #[test]
-    fn test_trim_uniform() {
-        let t = Trim::uniform(10);
-        assert_eq!(t.top, 10);
-        assert_eq!(t.right, 10);
-        assert_eq!(t.bottom, 10);
-        assert_eq!(t.left, 10);
-    }
-
-    // ── Display / cache key ──
-
-    #[test]
-    fn test_display_default_is_empty() {
-        let p = TransformParams::default();
-        assert_eq!(format!("{p}"), "");
-    }
-
-    #[test]
-    fn test_display_with_params() {
-        let mut p = TransformParams::default();
-        p.width = Some(800);
-        p.height = Some(600);
-        p.quality = 90;
-        let s = format!("{p}");
-        assert!(s.contains("width=800"));
-        assert!(s.contains("height=600"));
-        assert!(s.contains("quality=90"));
-    }
-
-    #[test]
-    fn test_cache_key_deterministic() {
-        let mut p = TransformParams::default();
-        p.width = Some(800);
-        p.quality = 90;
-        let k1 = p.cache_key();
-        let k2 = p.cache_key();
-        assert_eq!(k1, k2);
-    }
-
-    #[test]
-    fn test_cache_key_excludes_onerror() {
-        let mut p = TransformParams::default();
-        p.width = Some(800);
-        p.onerror = Some("redirect".to_string());
-        let key = p.cache_key();
-        assert!(!key.contains("onerror"));
-    }
-
-    // ── enforce_aspect_ratio ──
-
-    #[test]
-    fn test_enforce_aspect_ratio_contain_landscape() {
-        // 1600×900 inside 800×600: width-limited → 800×450
-        let (w, h) = enforce_aspect_ratio(1600, 900, 800, 600, FitMode::Contain);
-        assert_eq!(w, 800);
-        assert_eq!(h, 450);
-    }
-
-    #[test]
-    fn test_enforce_aspect_ratio_contain_portrait() {
-        // 400×800 inside 800×600: height-limited → 300×600
-        let (w, h) = enforce_aspect_ratio(400, 800, 800, 600, FitMode::Contain);
-        assert_eq!(w, 300);
-        assert_eq!(h, 600);
-    }
-
-    #[test]
-    fn test_enforce_aspect_ratio_scale_down_behaves_like_contain() {
-        let (w1, h1) = enforce_aspect_ratio(1600, 900, 800, 600, FitMode::ScaleDown);
-        let (w2, h2) = enforce_aspect_ratio(1600, 900, 800, 600, FitMode::Contain);
-        assert_eq!((w1, h1), (w2, h2));
-    }
-
-    #[test]
-    fn test_enforce_aspect_ratio_cover() {
-        // 1600×900 covering 400×400: height-scale (400/900≈0.444) < width-scale (400/1600=0.25)
-        // so we use height scale → 1600*(400/900)≈711 × 400
-        let (w, h) = enforce_aspect_ratio(1600, 900, 400, 400, FitMode::Cover);
-        assert_eq!(h, 400);
-        assert!(w >= 400, "cover width {w} must be ≥ 400");
-    }
-
-    #[test]
-    fn test_enforce_aspect_ratio_crop_behaves_like_cover() {
-        let (w1, h1) = enforce_aspect_ratio(800, 600, 200, 200, FitMode::Crop);
-        let (w2, h2) = enforce_aspect_ratio(800, 600, 200, 200, FitMode::Cover);
-        assert_eq!((w1, h1), (w2, h2));
-    }
-
-    #[test]
-    fn test_enforce_aspect_ratio_fill_returns_request() {
-        let (w, h) = enforce_aspect_ratio(1600, 900, 400, 300, FitMode::Fill);
-        assert_eq!(w, 400);
-        assert_eq!(h, 300);
-    }
-
-    #[test]
-    fn test_enforce_aspect_ratio_pad_returns_request() {
-        let (w, h) = enforce_aspect_ratio(1600, 900, 400, 300, FitMode::Pad);
-        assert_eq!(w, 400);
-        assert_eq!(h, 300);
-    }
-
-    #[test]
-    fn test_enforce_aspect_ratio_zero_src_returns_request() {
-        let (w, h) = enforce_aspect_ratio(0, 900, 400, 300, FitMode::Contain);
-        assert_eq!(w, 400);
-        assert_eq!(h, 300);
-    }
-
-    #[test]
-    fn test_enforce_aspect_ratio_square_src_cover_square_box() {
-        // 200×200 covering 100×100 — already fits exactly at scale 0.5
-        let (w, h) = enforce_aspect_ratio(200, 200, 100, 100, FitMode::Cover);
-        assert_eq!(w, 100);
-        assert_eq!(h, 100);
-    }
-}
+#[path = "transform_tests.rs"]
+mod tests;

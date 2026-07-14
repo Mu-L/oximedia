@@ -5,14 +5,14 @@
 //! (e.g. re-transcoding for different delivery formats from a shared origin,
 //! or re-running a failed job) it is wasteful to repeat the encode.
 //!
-//! This module provides a [`TranscodeCache`] that:
-//! - Keys entries on a [`CacheKey`] derived from the source content hash and
+//! This module provides a [`crate::transcode_cache::TranscodeCache`] that:
+//! - Keys entries on a [`crate::transcode_cache::CacheKey`] derived from the source content hash and
 //!   the encoding parameters hash.
-//! - Supports [`EvictionPolicy::Lru`] (Least-Recently-Used) and
-//!   [`EvictionPolicy::Lfu`] (Least-Frequently-Used) strategies.
+//! - Supports [`crate::transcode_cache::EvictionPolicy::Lru`] (Least-Recently-Used) and
+//!   [`crate::transcode_cache::EvictionPolicy::Lfu`] (Least-Frequently-Used) strategies.
 //! - Tracks per-entry metadata: creation time, last-access time, access count,
 //!   size in bytes, and codec parameters.
-//! - Reports cache statistics through [`CacheStats`].
+//! - Reports cache statistics through [`crate::transcode_cache::CacheStats`].
 //! - Thread-safe via internal `parking_lot::Mutex`.
 //!
 //! # Example
@@ -41,7 +41,10 @@
 //! assert!(cache.get(&key).is_none());
 //!
 //! // Insert after transcoding.
-//! let output_path = std::env::temp_dir().join("oximedia-transcode-cache-output.webm");
+//! let output_path = std::env::temp_dir()
+//!     .join("oximedia-transcode-cache-output.webm")
+//!     .to_string_lossy()
+//!     .into_owned();
 //! cache.insert(key.clone(), output_path, 20_000_000).unwrap();
 //!
 //! // Second lookup – hit.

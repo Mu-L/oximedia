@@ -96,32 +96,34 @@ impl RoyaltyPayment {
     #[cfg(not(target_arch = "wasm32"))]
     /// Save to database
     pub async fn save(&self, db: &RightsDatabase) -> Result<()> {
-        sqlx::query(
-            r"
+        db.pool()
+            .execute(
+                r"
             INSERT INTO royalty_payments
             (id, grant_id, owner_id, amount, currency, payment_period_start, payment_period_end,
              status, payment_date, calculation_data_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT(id) DO UPDATE SET
                 status = excluded.status,
                 payment_date = excluded.payment_date,
                 updated_at = excluded.updated_at
             ",
-        )
-        .bind(&self.id)
-        .bind(&self.grant_id)
-        .bind(&self.owner_id)
-        .bind(self.amount)
-        .bind(&self.currency)
-        .bind(self.period_start.to_rfc3339())
-        .bind(self.period_end.to_rfc3339())
-        .bind(self.status.as_str())
-        .bind(self.payment_date.map(|d| d.to_rfc3339()))
-        .bind("{}")
-        .bind(Utc::now().to_rfc3339())
-        .bind(Utc::now().to_rfc3339())
-        .execute(db.pool())
-        .await?;
+                &[
+                    &self.id,
+                    &self.grant_id,
+                    &self.owner_id,
+                    &self.amount,
+                    &self.currency,
+                    &self.period_start.to_rfc3339(),
+                    &self.period_end.to_rfc3339(),
+                    &self.status.as_str(),
+                    &self.payment_date.map(|d| d.to_rfc3339()),
+                    &"{}",
+                    &Utc::now().to_rfc3339(),
+                    &Utc::now().to_rfc3339(),
+                ],
+            )
+            .await?;
 
         Ok(())
     }

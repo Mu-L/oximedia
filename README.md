@@ -3,11 +3,17 @@
 **Pure Rust reconstruction of OpenCV + FFmpeg** — A patent-free, memory-safe multimedia and computer vision framework.
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.85+-orange.svg)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/version-v0.1.8-green.svg)](https://github.com/cool-japan/oximedia)
-[![Released](https://img.shields.io/badge/released-2026--06--02-brightgreen.svg)](https://github.com/cool-japan/oximedia)
-[![Crates](https://img.shields.io/badge/crates-109-blue.svg)](https://github.com/cool-japan/oximedia)
-[![SLOC](https://img.shields.io/badge/SLOC-~2.75M-blueviolet.svg)](https://github.com/cool-japan/oximedia)
+[![Rust](https://img.shields.io/badge/rust-1.87+-orange.svg)](https://www.rust-lang.org)
+[![Version](https://img.shields.io/badge/version-v0.1.9-green.svg)](https://github.com/cool-japan/oximedia)
+[![Released](https://img.shields.io/badge/last%20release-0.1.8%20(2026--06--02)-brightgreen.svg)](https://github.com/cool-japan/oximedia)
+[![Crates](https://img.shields.io/badge/crates-114-blue.svg)](https://github.com/cool-japan/oximedia)
+[![SLOC](https://img.shields.io/badge/SLOC-~2.95M-blueviolet.svg)](https://github.com/cool-japan/oximedia)
+
+[![OxiScope — four Pure-Rust WebAssembly video scopes running live in the browser](docs/assets/oxiscope-hero.png)](https://cooljapan.tech/oxiscope/)
+
+**OxiScope** — waveform, vectorscope, histogram and false colour, analysed at 30 fps by Pure-Rust WebAssembly, entirely in your browser. **[Try it live](https://cooljapan.tech/oxiscope/)** (your video never leaves your machine — the demo counts the bytes uploaded: 0) or run it locally with `./web/scripts/serve.sh`; see [OxiMedia Web](#oximedia-web-browser-modules) below.
+
+**Live demos:** **[OxiScope](https://cooljapan.tech/oxiscope/)** (browser scopes + colour pipeline) · **[OxiLink](https://oxilink.cooljapan.tech/)** (peer-to-peer video call with a waveform ghost-trace showing exactly what the codec changed — zero media bytes through any server) — the same WebAssembly modules, running in production twice.
 
 ## Vision
 
@@ -15,7 +21,7 @@ OxiMedia is a **clean room, Pure Rust reconstruction** of both **FFmpeg** (multi
 
 ### FFmpeg Domain
 
-Codec encoding/decoding (AV1, VP9, VP8, Theora, Opus, Vorbis, FLAC, MP3), container muxing/demuxing (MP4, MKV, MPEG-TS, OGG), streaming protocols (HLS, DASH, RTMP, SRT, WebRTC, SMPTE 2110), transcoding pipelines, filter graphs (DAG-based), audio metering (EBU R128), loudness normalization, packaging (CMAF, DRM/CENC), and server-side media delivery.
+Codec encoding and decoding for patent-free formats (AV1, VP9, VP8, Theora, Opus, Vorbis, FLAC, MP3 — encoders are functional across the board; decoder maturity varies per codec, from Verified down to bitstream-parsing-only for AV1/VP9/VP8/Vorbis: see the [Codec Matrix](#codec-matrix)), container muxing/demuxing (MP4, MKV, MPEG-TS, OGG, AVI, FLV), streaming protocols (HLS, DASH, RTMP, SRT, WebRTC, SMPTE 2110), transcoding pipelines, filter graphs (DAG-based), audio metering (EBU R128), loudness normalization, packaging (CMAF, DRM/CENC), and server-side media delivery.
 
 ### OpenCV Domain
 
@@ -28,7 +34,13 @@ Computer vision (object detection, motion tracking, video enhancement, quality a
 - **Async-First**: Built on Tokio for massive concurrency
 - **Single Binary**: No DLL dependencies, no system library requirements
 - **WASM Ready**: Runs in browser without transcoding servers
-- **Sovereign**: No C/Fortran dependencies in default features — 100% Pure Rust
+- **Sovereign**: 100% Pure Rust in the default build — as of 0.1.9, `cargo check --workspace` compiles **zero** C/C++/Fortran (no `aws-lc-sys`, `libsqlite3-sys`, `mlua-sys`, `shaderc-sys`, `zstd-sys`, or `openssl-sys` in the default dependency graph)
+
+> A handful of C-backed integrations remain available behind **opt-in, non-default**
+> Cargo features — `aws-sdk` (oximedia-cloud), `vulkan-backend` (oximedia-accel),
+> `lua-scripting` (oximedia-automation), `quic-quinn` (oximedia-videoip). Enabling
+> them accepts the C compilation cost; see
+> [Optional C-backed features](#optional-c-backed-features-opt-in-non-default).
 
 ## FFmpeg + OpenCV, Reimagined
 
@@ -36,7 +48,7 @@ Computer vision (object detection, motion tracking, video enhancement, quality a
 
 **OpenCV** is the de facto standard for computer vision, but it depends on C++ with complex CMake builds, optional proprietary modules (CUDA, Intel IPP), and heavy system-level dependencies.
 
-**OxiMedia unifies both** into a single Pure Rust framework with zero C/Fortran dependencies:
+**OxiMedia unifies both** into a single Pure Rust framework with zero C/Fortran dependencies in the default build:
 
 | | FFmpeg | OpenCV | OxiMedia |
 |---|---|---|---|
@@ -55,18 +67,19 @@ Computer vision (object detection, motion tracking, video enhancement, quality a
 
 ## Project Scale
 
-OxiMedia is a **production-grade** framework at **v0.1.8** (active cycle, 2026-06-02):
+OxiMedia is a **production-grade** framework at **v0.1.9** (active cycle):
 
 | Metric | Value |
 |--------|-------|
-| Total crates | 109 |
-| Total SLOC (Rust) | ~2,752,000 |
-| Tests passing | 100,278 (0 failures, 0 warnings — `cargo nextest run --workspace --all-features`) |
-| Stable crates | 109 |
+| Total workspace crates | 114 (110 library crates under `crates/` + `oximedia` facade + CLI + WASM + internal benchmark harness) |
+| Published to crates.io | 111 (Python bindings ship to PyPI, WASM to npm; benchmark harness is internal) |
+| Total SLOC (Rust) | ~2,951,000 (2,951,319 lines of code per `tokei`, verified 2026-07-13) |
+| Tests passing | 101,814 with `--all-features` / 100,160 with default features (0 failures, 0 warnings — `cargo nextest run --workspace`, verified 2026-07-13) |
+| Stable crates | 110 |
 | Alpha crates | 0 |
 | Partial crates | 0 |
 | License | Apache 2.0 |
-| MSRV | Rust 1.85+ |
+| MSRV | Rust 1.87+ |
 
 ## Sovereign ML Pipelines (v0.1.7+)
 
@@ -89,7 +102,7 @@ pulls in **zero** ONNX symbols and stays C/Fortran-free.
 
 ```toml
 [dependencies]
-oximedia = { version = "0.1.8", features = ["ml", "ml-scene-classifier", "ml-onnx"] }
+oximedia = { version = "0.1.9", features = ["ml", "ml-scene-classifier", "ml-onnx"] }
 ```
 
 ```rust,ignore
@@ -139,9 +152,23 @@ See [`docs/ml_guide.md`](docs/ml_guide.md) for the full feature matrix,
 per-pipeline I/O contracts, device selection details, WASM support
 matrix, and roadmap.
 
+## What's New in v0.1.9
+
+Active development cycle. Theme: **Sovereign default build, Pure-Rust infrastructure migrations, and deep correctness hardening (Waves 21–30)**.
+
+- **100% Pure Rust default build**: `cargo check --workspace` now compiles zero C/C++/Fortran. All C-backed integrations moved behind opt-in, non-default Cargo features: `aws-sdk` (oximedia-cloud), `vulkan-backend` (oximedia-accel), `lua-scripting` (oximedia-automation), `quic-quinn` (oximedia-videoip).
+- **SQLite via Pure-Rust oxisql**: every SQLite-backed persistence path migrated from `rusqlite`/`libsqlite3-sys` to [`oxisql-sqlite-compat`](https://crates.io/crates/oxisql-sqlite-compat) — the `sqlite` features are now Pure Rust too.
+- **No external `protoc` required**: gRPC schema compilation in `oximedia-farm` and `oximedia-distributed` migrated to the pure-Rust [`protox`](https://crates.io/crates/protox) parser; the system Protocol Buffers compiler is no longer a build prerequisite.
+- **Real least-squares color calibration** (`oximedia-calibrate`): 3×3 color-matching matrix solved via least squares (B·A⁻¹ with adjugate inverse, conditioning, and rank-deficiency guards), replacing the previous identity stub; ΔE2000 < 2.0 on known-answer tests.
+- **Polymorphic `.cube` LUT loader** (`oximedia-lut`): 1D and 3D `.cube` files load through a single detection path.
+- **Broadcast-audio correctness fixes**: EBU R128 gating power-normalization underread (~42.8 dB) fixed in `oximedia-audio`; STFT gain (~14 dB) and wow/flutter fixes in `oximedia-restore`; Hann-window and synthesis attenuation fixes in `oximedia-audio-analysis`; sub-frame f64 timecode drift eliminated in `oximedia-timecode`.
+- **New pro features across Waves 21–30**: DTW forced lyric alignment (`oximedia-mir`), hand-emitted PDF QC reports (`oximedia-qc`), CEA-608 odd-parity encode/decode (`oximedia-captions`), mmap-backed HLS/DASH segment store (`oximedia-server`), BS.1770-4 golden-reference metering tests, anycast/BGP-style CDN routing, ORB/BRIEF cross-frame descriptor caching (`oximedia-align`), and JWT/webhook fixes in `oximedia-server`.
+- **101,814 tests passing** with `--all-features` (100,160 with default features), 0 failures, 0 clippy warnings, 0 rustfmt diffs, all doctests green — verified 2026-07-13.
+- **`oxiarc-archive` 0.3.6 sibling-version mismatch (fixed 2026-07-14):** a same-day bump on 2026-07-13 briefly left `oxiarc-archive` calling APIs not yet present in sibling crates `oxiarc-brotli`/`oxiarc-bzip2`/`oxiarc-lzma`/`oxiarc-snappy` (then still 0.3.5). Those siblings have since published matching 0.3.6 releases, and `cargo check --workspace --all-features` now passes clean.
+
 ## What's New in v0.1.8
 
-Active cycle — latest release 2026-06-02. Theme: **Codec completeness, audio restoration, algorithmic depth, and entropy coding improvements**.
+Released 2026-06-02. Theme: **Codec completeness, audio restoration, algorithmic depth, and entropy coding improvements**.
 
 - **SILK encoder with NSQ noise-shaped quantisation** (`oximedia-audio`): Real SILK encoder path with noise-shaped quantisation loop; 440 Hz sine round-trip SNR ≥ 6 dB verified.
 - **AV1 non-square TX block coefficient decoding fixed** (`oximedia-codec`): `CoeffBuffer::pos_to_rowcol` now correctly handles non-square transform blocks, fixing a symbol-vs-position bug in AV1 entropy decoding EOB CDF paths.
@@ -231,6 +258,8 @@ Released 2026-04-20.
 |-------|-------------|--------|
 | `oximedia-core` | Core types, traits, error handling, buffer pools | Stable |
 | `oximedia-io` | I/O foundation (async media source, bit reader, Exp-Golomb) | Stable |
+| `oximedia-bitstream` | Bitstream I/O primitives (derived from bitstream-io 4.9.0, std-only) | Stable |
+| `oximedia-cache` | Caching infrastructure (LRU, tiered multi-level, predictive warming, ARC, Bloom filters) | Stable |
 | `oximedia-gpu` | GPU compute via WGPU (Vulkan/Metal/DX12) | Stable |
 | `oximedia-simd` | Hand-written SIMD kernels for codec acceleration | Stable |
 | `oximedia-accel` | GPU acceleration via Vulkan compute with CPU fallback | Stable |
@@ -244,19 +273,27 @@ Released 2026-04-20.
 
 | Crate | Description | Status |
 |-------|-------------|--------|
-| `oximedia-codec` | Video codecs (AV1, VP9, VP8, Theora) and image I/O | Stable (mixed decoder coverage — see [docs/codec_status.md](docs/codec_status.md)) |
+| `oximedia-codec` | Video codecs (AV1, VP9, VP8, Theora, MJPEG, FFV1, APV, H.263; feature-gated ProRes, DNxHD, MPEG-2, JPEG 2000/XS/LS, ALAC) and image I/O | Stable (mixed decoder coverage — see [docs/codec_status.md](docs/codec_status.md)) |
 | `oximedia-audio` | Audio codec implementations (Opus, Vorbis, FLAC, MP3) | Stable (Vorbis decode is bitstream-parsing only — see [docs/codec_status.md](docs/codec_status.md)) |
-| `oximedia-container` | Container mux/demux (MP4, MKV, MPEG-TS, OGG) | Stable |
+| `oximedia-container` | Container mux/demux (MP4, MKV, MPEG-TS, OGG, AVI, FLV) | Stable |
 | `oximedia-lut` | Color science/LUT (1D/3D, Rec.709/2020/DCI-P3/ACES, HDR) | Stable |
 | `oximedia-edl` | EDL parser/generator (CMX 3600, GVG, Sony BVE-9000) | Stable |
 | `oximedia-aaf` | SMPTE ST 377-1 AAF reader/writer for post-production | Stable |
 | `oximedia-imf` | IMF SMPTE ST 2067 (CPL, PKL, ASSETMAP, MXF essence) | Stable |
 | `oximedia-dolbyvision` | Dolby Vision RPU metadata (profiles 5/7/8/8.1/8.4) | Stable |
-| `oximedia-drm` | DRM/encryption (CENC, Widevine, PlayReady, FairPlay) | Stable |
+| `oximedia-drm` | DRM/CENC packaging and license-exchange formats | Stable (ClearKey/CENC) / **Experimental** (Widevine, PlayReady, FairPlay) |
 | `oximedia-subtitle` | Subtitle/caption rendering (SRT, WebVTT, CEA-608/708) | Stable |
 | `oximedia-timecode` | LTC and VITC timecode reading/writing | Stable |
-| `oximedia-avi` | AVI container muxer + demuxer (MJPEG-only, ≤1 GB RIFF) | Stable |
 | `oximedia-compat-ffmpeg` | FFmpeg CLI argument compatibility layer (80+ codec mappings) | Stable |
+
+> **DRM honesty note.** ClearKey (W3C EME JSON) and CENC/AES-128 encryption
+> packaging are real, fully implemented paths. The Widevine, PlayReady, and
+> FairPlay modules implement the license-exchange *message formats* and a
+> structural CDM emulation, but are **non-interoperable placeholders**: they do
+> not interoperate with production Widevine/PlayReady/FairPlay license servers
+> or hardware CDMs. Treat them as Experimental per the honesty taxonomy in
+> [docs/codec_status.md](docs/codec_status.md). (AVI mux/demux lives in
+> `oximedia-container`; the former standalone `oximedia-avi` crate was folded in.)
 
 ### Networking & Streaming
 
@@ -270,6 +307,15 @@ Released 2026-04-20.
 | `oximedia-videoip` | Patent-free video-over-IP (NDI alternative) | Stable |
 | `oximedia-timesync` | Precision Time Protocol and clock discipline | Stable |
 | `oximedia-distributed` | Distributed encoding (gRPC, load balancing, fault tolerance) | Stable |
+| `oximedia-stream` | Adaptive streaming pipeline (BOLA ABR, segment lifecycle, SCTE-35, multi-CDN, stream health) | Stable |
+| `oximedia-cdn` | CDN edge management (cache invalidation, origin failover, geo routing, anycast) | Stable |
+
+> **WebRTC DTLS-SRTP is experimental.** WebRTC signaling (SDP offer/answer, ICE,
+> real self-signed certificate fingerprints) works, but the DTLS-SRTP handshake
+> and media encryption are **not yet implemented**. The handshake fails loudly
+> rather than fabricating a connection with all-zero SRTP keys, so no media is
+> ever sent in plaintext under a "DTLS-protected" label. Do not use WebRTC media
+> transport for confidential media until a real DTLS-SRTP handshake ships.
 
 ### Video Processing
 
@@ -290,6 +336,11 @@ Released 2026-04-20.
 | `oximedia-graphics` | Broadcast graphics engine (lower thirds, tickers, animations) | Stable |
 | `oximedia-watermark` | Professional audio watermarking and steganography | Stable |
 | `oximedia-virtual` | Virtual production and LED wall tools | Stable |
+| `oximedia-video` | Video processing operations (motion compensation, frame interpolation, deinterlacing, scene detection) | Stable |
+| `oximedia-hdr` | HDR video processing (PQ/HLG transfer functions, tone mapping, dynamic metadata, HDR10+/DV profiles) | Stable |
+| `oximedia-360` | 360°/VR video (equirectangular/cubemap projections, fisheye, stereo 3D, spatial metadata) | Stable |
+| `oximedia-image-transform` | Cloudflare Images-compatible URL image transformation (on-the-fly resize, format negotiation) | Stable |
+| `oximedia-restoration` | Image restoration (blind deconvolution, content-aware inpainting) | Stable |
 
 ### Audio Processing
 
@@ -303,6 +354,7 @@ Released 2026-04-20.
 | `oximedia-mir` | Music Information Retrieval (tempo, key/chord, genre/mood) | Stable |
 | `oximedia-audiopost` | Audio post-production (ADR, Foley, mixing, sound design) | Stable |
 | `oximedia-routing` | Professional audio routing and patching | Stable |
+| `oximedia-spatial` | Spatial audio (HOA Ambisonics, HRTF binaural rendering, room acoustics, VBAP, object audio) | Stable |
 
 ### Analysis & Quality
 
@@ -317,6 +369,8 @@ Released 2026-04-20.
 | `oximedia-forensics` | Video/image forensics (ELA, PRNU, copy-move detection) | Stable |
 | `oximedia-profiler` | Performance profiling (CPU/GPU/memory, flamegraphs, regression) | Stable |
 | `oximedia-dedup` | Duplicate detection (perceptual/crypto hashing, audio fingerprint) | Stable |
+| `oximedia-analytics` | Media engagement analytics (viewer behavior, A/B testing, retention curves, engagement scoring) | Stable |
+| `oximedia-neural` | Lightweight neural inference (pure Rust tensor ops, conv2d, batch norm, media models) | Stable |
 
 ### Production & Broadcast
 
@@ -329,6 +383,7 @@ Released 2026-04-20.
 | `oximedia-multicam` | Multi-camera production (angle management, auto-switching, sync) | Stable |
 | `oximedia-monitor` | System monitoring (alerting, metrics, REST API, health checks) | Stable |
 | `oximedia-captions` | Closed captioning/subtitles (CEA-608/708, TTML, WebVTT) | Stable |
+| `oximedia-caption-gen` | Caption/subtitle generation (speech alignment, Knuth-Plass line breaking, WCAG 2.1, speaker diarization) | Stable |
 | `oximedia-access` | Accessibility features (audio description, captions, transcripts, compliance) | Stable |
 | `oximedia-gaming` | Game streaming (ultra-low latency, NVENC/QSV/VCE, replay buffer) | Stable |
 
@@ -341,6 +396,7 @@ Released 2026-04-20.
 | `oximedia-conform` | Media conforming (EDL/XML/AAF timeline reconstruction) | Stable |
 | `oximedia-proxy` | Proxy generation (conforming, relinking, offline/online workflows) | Stable |
 | `oximedia-workflow` | Comprehensive workflow orchestration engine | Stable |
+| `oximedia-pipeline` | Declarative media processing DSL (typed filter graph, node composition, execution planner) | Stable |
 | `oximedia-batch` | Production batch processing engine with Lua workflows | Stable |
 | `oximedia-review` | Collaborative review and approval workflow | Stable |
 | `oximedia-collab` | Real-time CRDT-based multi-user collaboration | Stable |
@@ -370,6 +426,7 @@ Released 2026-04-20.
 |-------|-------------|--------|
 | `oximedia-py` | Python bindings via PyO3 | Stable |
 | `oximedia-ml` | Typed ML pipelines via OxiONNX (SceneClassifier, ShotBoundaryDetector, AestheticScorer, ObjectDetector, FaceEmbedder) | Stable |
+| `oximedia-compat-cv2` | OpenCV cv2 API compatibility layer (BGR ordering, ~150 OpenCV constants) | Stable |
 
 ## Green List (Supported Codecs)
 
@@ -393,14 +450,21 @@ breakdown, what is missing, and the effort required to close each gap.
 | Video | AV1 | Functional | **Bitstream-parsing** | Alliance for Open Media, royalty-free. OBU parsing complete; pixel reconstruction pipeline is stubbed (see issue #9). |
 | Video | VP9 | Functional | **Bitstream-parsing** | Google, royalty-free. Frame/tile parsing complete; reconstruction pipeline stages are no-ops. |
 | Video | VP8 | Functional | **Bitstream-parsing** | Google, royalty-free. Y-plane emitted as constant gray; no intra/inter decode. |
-| Video | Theora | Functional | **Bitstream-parsing** | Xiph.org, royalty-free. DCT, motion compensation, and per-frame pixel hand-off into `VideoFrame` (decode hand-off bug fixed in 0.1.7, issue #9); encoder↔decoder bitstream alignment for full round-trip remains outstanding. |
+| Video | Theora | Functional | Functional | Xiph.org, royalty-free. Real DCT/IDCT, quantization, intra prediction; self-consistent encode↔decode round-trip tests (≤8 LSB at Q48). P-frame/inter paths not yet exercised; not conformance-verified against libtheora. |
 | Video | MJPEG | Functional | Functional | Motion JPEG via `oximedia-image` JPEG baseline; ≥28 dB PSNR at Q85. |
 | Video | APV | Functional | Functional | ISO/IEC 23009-13 royalty-free intra-frame; real DCT + entropy decode. |
 | Video | FFV1 | Functional | Functional | RFC 9043 lossless; CRC-32 verified. |
 | Video | H.263 | Functional | Functional | Real macroblock decode, motion compensation, loop filter. |
+| Video | ProRes 422 | Functional | Functional | SMPTE RDD 36; Proxy/LT/Standard/HQ encode + full slice IDCT decode (feature `prores`, opt-in). Patent-encumbered — for format-compatibility/educational use; 4444/XQ profiles and interlaced decode not implemented. |
+| Video | DNxHD (VC-3) | — | Functional | SMPTE ST 2019-1 decode to YUV 4:2:2 (8/10-bit, CIDs 1235–1243) (feature `dnxhd`, opt-in). No encoder yet. |
+| Video | MPEG-2 | Functional (I-frame only) | Functional (I-frame only) | ISO/IEC 13818-2; intra 4:2:0/4:2:2/4:4:4 encode+decode. P/B frames and field pictures **not implemented** (feature `mpeg2`, opt-in). Patents expired Feb 2023. |
+| Video | JPEG XS | Functional | Functional | ISO/IEC 21122-1 (SMPTE ST 2110-22) encode+decode; byte-exact lossless round-trip; NLT Extended transform deferred (feature `jpegxs`, opt-in). |
+| Image | JPEG 2000 | Functional | Functional | ISO/IEC 15444-1; lossless 5-3 + lossy 9-7 encode/decode, multi-tile. Single-layer LRCP only; multi-layer/progressive deferred (feature `jpeg2000`, opt-in). |
+| Image | JPEG-LS | Functional | Functional | ISO/IEC 14495-1 LOCO-I; regular + RUN modes, near-lossless (NEAR>0), ILV 0/1/2 (feature `jpegls`, opt-in). HP patents expired 2017–2019. |
 | Audio | Opus | Functional | Functional (CELT only) | Xiph.org/IETF, royalty-free. SILK and hybrid modes are placeholder. |
 | Audio | Vorbis | Functional | **Bitstream-parsing** | Xiph.org, royalty-free. Headers parse; `decode_audio_packet` returns empty. |
 | Audio | FLAC | Functional | Functional / Verified | Lossless, royalty-free; CRC-16 verified, real LPC decode. |
+| Audio | ALAC | Functional | Functional | Apple Lossless (reference Apache-2.0 since 2011, royalty-free); byte-exact 16/20/24-bit round-trip. 32-bit and rare extended predictor modes unsupported (feature `alac`, opt-in). |
 | Audio | PCM | Verified | Verified | Unencumbered; trivial round-trip verified. |
 | Audio | MP3 | — | Functional | Playback-only (patents expired 2017). Full Huffman/IMDCT/synthesis filterbank. |
 | Image | PNG/APNG | Functional | Functional | Unencumbered; real unfilter + RGBA conversion. |
@@ -467,6 +531,13 @@ pipeline.run().await?;
 cargo add oximedia
 ```
 
+or pin the version and pick features in `Cargo.toml`:
+
+```toml
+[dependencies]
+oximedia = { version = "0.1.9", features = ["full"] }
+```
+
 ### Python (PyPI)
 
 ```bash
@@ -491,6 +562,52 @@ npm install @cooljapan/oximedia
 cargo install oximedia-cli
 ```
 
+## OxiMedia Web (browser modules)
+
+WebCodecs gives you the frames. OxiMedia gives you what to do with them.
+[`web/`](web/) is a separate, nested Cargo workspace + npm package —
+`@cooljapan/oximedia-web` — of small, independent WebAssembly modules
+(`scopes`, `color`, `scale`, `quality`) that sit *downstream* of the
+browser's own [WebCodecs](https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API)
+decoder: waveform/vectorscope/histogram/false-colour scopes, colour
+grading + tone-mapping + gamut mapping, Lanczos/Catmull-Rom/Mitchell
+resampling, and PSNR/SSIM quality metrics, each compiled to
+`wasm32-unknown-unknown` in Pure Rust with `#![forbid(unsafe_code)]`, no
+native dependencies, and no COOP/COEP requirement.
+
+It is intentionally independent of the `oximedia-wasm` crate above (which
+publishes `@cooljapan/oximedia` and covers container demux + Opus/FLAC/AV1
+decode) — see [`oximedia-wasm/README.md`](oximedia-wasm/README.md) for how
+the two relate. `oximedia-web` does not depend on the native `oximedia-*`
+crates either; its kernels are ported, dependency-free re-implementations
+sized to fit a strict per-module gzip budget (see
+[`web/README.md`](web/README.md#modules) for measured sizes).
+
+The modules already have two production consumers. The first is the
+[OxiScope demo](https://cooljapan.tech/oxiscope/) above. The second is
+**[OxiLink](https://oxilink.cooljapan.tech/)** — a peer-to-peer,
+colour-managed, scope-equipped video link built on these same modules: a
+video call that shows you exactly how much the codec changed your
+picture, and never sends that picture through anybody's server. Media
+travels browser-to-browser; the only server-side code is a signalling
+worker whose full source is published at
+[worker.js.txt](https://oxilink.cooljapan.tech/worker.js.txt) (62 lines).
+
+**Packaging is prepared; publish is pending.** `web/package.json` is filled
+in (scoped name, four subpath exports, no dependencies) and `web/dist/`
+builds cleanly from source, but `@cooljapan/oximedia-web` **has not been
+published to npm** — there is no `npm install` command for it yet. Build
+and try it locally instead:
+
+```bash
+web/scripts/serve.sh        # serves web/ at http://localhost:8080, no headers needed
+# open http://localhost:8080/demo/ for the OxiScope colorist demo
+```
+
+See [`web/README.md`](web/README.md) for the full module table, API
+pointers (`web/js/*.d.ts`), browser-support honesty notes, and known
+limitations, and [`web/TODO.md`](web/TODO.md) for milestone status.
+
 ## Current Status
 
 ### Phase Summary
@@ -510,158 +627,90 @@ cargo install oximedia-cli
 
 | Status | Count | Description |
 |--------|-------|-------------|
-| Stable | 109 | Feature-complete, tested, production-ready |
+| Stable | 110 | Feature-complete, tested, production-ready |
 | Alpha | 0 | Core functionality implemented, API may change |
 | Partial | 0 | Under active development, incomplete |
-| **Total** | **109** | Library crates under `crates/` (top-level `oximedia`, `oximedia-cli`, `oximedia-wasm` counted separately) |
+| **Total** | **110** | Library crates under `crates/` (top-level `oximedia` facade, `oximedia-cli`, `oximedia-wasm`, and the internal `oximedia-benchmarks` harness counted separately — 114 workspace members in all) |
 
 ### Detailed Status Breakdown
 
-**Stable (109 crates):**
-`oximedia-aaf`, `oximedia-accel`, `oximedia-access`, `oximedia-align`, `oximedia-analysis`,
-`oximedia-archive`, `oximedia-archive-pro`, `oximedia-audio`, `oximedia-audio-analysis`,
-`oximedia-audiopost`, `oximedia-auto`, `oximedia-automation`, `oximedia-batch`, `oximedia-bench`,
-`oximedia-calibrate`, `oximedia-captions`, `oximedia-clips`, `oximedia-cloud`, `oximedia-codec`,
-`oximedia-collab`, `oximedia-colormgmt`, `oximedia-compat-ffmpeg`, `oximedia-conform`,
-`oximedia-container`, `oximedia-convert`, `oximedia-core`, `oximedia-cv`, `oximedia-dedup`,
-`oximedia-denoise`, `oximedia-distributed`, `oximedia-dolbyvision`, `oximedia-drm`, `oximedia-edit`,
-`oximedia-edl`, `oximedia-effects`, `oximedia-farm`, `oximedia-forensics`, `oximedia-gaming`,
-`oximedia-gpu`, `oximedia-graph`, `oximedia-graphics`, `oximedia-image`, `oximedia-imf`,
-`oximedia-io`, `oximedia-jobs`, `oximedia-lut`, `oximedia-mam`, `oximedia-metadata`,
-`oximedia-metering`, `oximedia-mir`, `oximedia-mixer`, `oximedia-monitor`, `oximedia-multicam`,
-`oximedia-ndi`, `oximedia-net`, `oximedia-normalize`, `oximedia-optimize`, `oximedia-packager`,
-`oximedia-playlist`, `oximedia-playout`, `oximedia-plugin`, `oximedia-presets`, `oximedia-profiler`,
-`oximedia-proxy`, `oximedia-py`, `oximedia-qc`, `oximedia-quality`, `oximedia-recommend`,
-`oximedia-renderfarm`, `oximedia-repair`, `oximedia-restore`, `oximedia-review`, `oximedia-rights`,
+**Stable (110 crates):**
+`oximedia-360`, `oximedia-aaf`, `oximedia-accel`, `oximedia-access`, `oximedia-align`,
+`oximedia-analysis`, `oximedia-analytics`, `oximedia-archive`, `oximedia-archive-pro`,
+`oximedia-audio`, `oximedia-audio-analysis`, `oximedia-audiopost`, `oximedia-auto`,
+`oximedia-automation`, `oximedia-batch`, `oximedia-bench`, `oximedia-bitstream`, `oximedia-cache`,
+`oximedia-calibrate`, `oximedia-caption-gen`, `oximedia-captions`, `oximedia-cdn`,
+`oximedia-clips`, `oximedia-cloud`, `oximedia-codec`, `oximedia-collab`, `oximedia-colormgmt`,
+`oximedia-compat-cv2`, `oximedia-compat-ffmpeg`, `oximedia-conform`, `oximedia-container`,
+`oximedia-convert`, `oximedia-core`, `oximedia-cv`, `oximedia-dedup`, `oximedia-denoise`,
+`oximedia-distributed`, `oximedia-dolbyvision`, `oximedia-drm`, `oximedia-edit`, `oximedia-edl`,
+`oximedia-effects`, `oximedia-farm`, `oximedia-forensics`, `oximedia-gaming`, `oximedia-gpu`,
+`oximedia-graph`, `oximedia-graphics`, `oximedia-hdr`, `oximedia-image`,
+`oximedia-image-transform`, `oximedia-imf`, `oximedia-io`, `oximedia-jobs`, `oximedia-lut`,
+`oximedia-mam`, `oximedia-metadata`, `oximedia-metering`, `oximedia-mir`, `oximedia-mixer`,
+`oximedia-ml`, `oximedia-monitor`, `oximedia-multicam`, `oximedia-ndi`, `oximedia-net`,
+`oximedia-neural`, `oximedia-normalize`, `oximedia-optimize`, `oximedia-packager`,
+`oximedia-pipeline`, `oximedia-playlist`, `oximedia-playout`, `oximedia-plugin`,
+`oximedia-presets`, `oximedia-profiler`, `oximedia-proxy`, `oximedia-py`, `oximedia-qc`,
+`oximedia-quality`, `oximedia-recommend`, `oximedia-renderfarm`, `oximedia-repair`,
+`oximedia-restoration`, `oximedia-restore`, `oximedia-review`, `oximedia-rights`,
 `oximedia-routing`, `oximedia-scaling`, `oximedia-scene`, `oximedia-scopes`, `oximedia-search`,
-`oximedia-server`, `oximedia-shots`, `oximedia-simd`, `oximedia-stabilize`, `oximedia-storage`,
-`oximedia-subtitle`, `oximedia-switcher`, `oximedia-timecode`, `oximedia-timeline`,
-`oximedia-timesync`, `oximedia-transcode`, `oximedia-vfx`, `oximedia-videoip`, `oximedia-virtual`,
-`oximedia-watermark`, `oximedia-workflow`, `oximedia-avi`, `oximedia-ml`
+`oximedia-server`, `oximedia-shots`, `oximedia-simd`, `oximedia-spatial`, `oximedia-stabilize`,
+`oximedia-storage`, `oximedia-stream`, `oximedia-subtitle`, `oximedia-switcher`,
+`oximedia-timecode`, `oximedia-timeline`, `oximedia-timesync`, `oximedia-transcode`,
+`oximedia-vfx`, `oximedia-video`, `oximedia-videoip`, `oximedia-virtual`, `oximedia-watermark`,
+`oximedia-workflow`
+
+> Component status is per-crate. Within `oximedia-codec`/`oximedia-audio`, individual
+> decoder maturity varies (see the [Codec Matrix](#codec-matrix)); within
+> `oximedia-drm`, Widevine/PlayReady/FairPlay are Experimental (see the DRM honesty
+> note above); WebRTC DTLS-SRTP in `oximedia-net` is Experimental.
 
 ## Building
 
 ### Build prerequisites
 
-OxiMedia is **Pure Rust by default**, so most crates build with nothing more
-than a working Rust toolchain:
+As of 0.1.9 the **default build is 100% Pure Rust**: `cargo check --workspace`
+compiles no C, C++, or Fortran whatsoever. All you need is a working Rust
+toolchain (MSRV 1.87):
 
 ```bash
 rustup update stable
 rustup component add clippy
 ```
 
-A small number of workspace members rely on native build-time tools. If you
-build the **entire workspace** (`cargo build --workspace` / `cargo build --all`)
-or pull in one of the affected crates explicitly, you will need them on `PATH`
-before invoking `cargo`. The end-user crates published to crates.io
-(`oximedia`, `oximedia-cli`, `oximedia-py`, `@cooljapan/oximedia`) do **not**
-require any of these tools at install time.
+- **No `protoc` required.** The gRPC schemas in `oximedia-farm` and
+  `oximedia-distributed` are compiled at build time by the pure-Rust
+  [`protox`](https://crates.io/crates/protox) parser — the external Protocol
+  Buffers compiler is no longer a prerequisite.
+- **No `cmake`/`shaderc` required by default.** `oximedia-accel` builds
+  Pure Rust out of the box (CPU fallback + optional wgpu `webgpu` backend);
+  the Vulkan/shaderc path is now behind the non-default `vulkan-backend`
+  feature (see below).
+- **SQLite is Pure Rust.** All `sqlite` features (e.g. on `oximedia-archive`,
+  `oximedia-dedup`) use [`oxisql-sqlite-compat`](https://crates.io/crates/oxisql-sqlite-compat)
+  — no `libsqlite3-sys`.
 
-#### `protoc` — Protocol Buffers compiler
+#### Optional C-backed features (opt-in, non-default)
 
-Required when building:
+A few integrations wrap C/C++ libraries. Each is behind a **non-default**
+Cargo feature, so you only pay the C compilation cost (and give up the
+Pure-Rust guarantee) if you explicitly opt in:
 
-| Crate | Why |
-|-------|-----|
-| `oximedia-farm` | Distributed encoding farm — gRPC schema in `crates/oximedia-farm/proto/farm.proto` compiled via `tonic-prost-build` |
-| `oximedia-distributed` | Cluster coordinator — gRPC schema in `crates/oximedia-distributed/proto/coordinator.proto` compiled via `tonic-prost-build` |
+| Feature | Crate | What it pulls in |
+|---------|-------|------------------|
+| `aws-sdk` | `oximedia-cloud` | Official AWS SDK (`aws-sdk-s3`, MediaConvert, MediaLive, …) — pulls `ring` (C/assembly crypto) |
+| `vulkan-backend` | `oximedia-accel` | Real Vulkan compute via `vulkano` — `vulkano-shaders`/`shaderc-sys` builds the shaderc/glslang C++ toolchain (needs `cmake` ≥ 3.17, Python 3, a C++ compiler, and `git` on `PATH`) |
+| `lua-scripting` | `oximedia-automation` | Embedded Lua 5.4 interpreter via `mlua` (vendored `lua-src` C build) |
+| `quic-quinn` | `oximedia-videoip` | Real QUIC transport via `quinn` — pulls `ring` (C/assembly crypto) |
 
-Anything that depends on the two crates above transitively (notably
-`oximedia-batch`, `oximedia-renderfarm`, and `oximedia-cli`) inherits the
-requirement.
+(`metal-backend` on `oximedia-accel` is also opt-in; it links the macOS Metal
+framework via `objc` FFI rather than compiling C.)
 
-Install:
-
-```bash
-# macOS (Homebrew)
-brew install protobuf
-
-# Debian / Ubuntu
-sudo apt-get install -y protobuf-compiler
-
-# Fedora / RHEL
-sudo dnf install -y protobuf-compiler
-
-# Arch
-sudo pacman -S protobuf
-
-# Windows (choose one)
-choco install protoc                    # Chocolatey
-winget install Google.Protobuf          # winget
-vcpkg install protobuf protobuf:x64-windows
-# or download a release zip from
-#   https://github.com/protocolbuffers/protobuf/releases
-# and add the extracted bin/ directory to PATH
-```
-
-Verify with `protoc --version`. If `protoc` is installed in a non-standard
-location, set the `PROTOC` environment variable to its absolute path before
-running `cargo build`.
-
-To skip protoc entirely, exclude the affected crates:
-
-```bash
-cargo build --workspace --exclude oximedia-farm --exclude oximedia-distributed
-```
-
-#### `cmake` + `shaderc` toolchain — Vulkan compute shaders
-
-Required when building:
-
-| Crate | Why |
-|-------|-----|
-| `oximedia-accel` | GPU acceleration layer — uses the `vulkano_shaders::shader!` proc-macro to compile GLSL compute shaders to SPIR-V at build time, which pulls in `shaderc-sys` |
-
-Anything that depends on `oximedia-accel` transitively inherits the
-requirement. The dependency on `vulkano-shaders` is **not** feature-gated, so
-these tools are needed for *every* build of `oximedia-accel`.
-
-When no pre-built `shaderc` library is found on the host (the typical case on a
-fresh developer machine), `shaderc-sys` builds `shaderc` from source, which
-needs the following on `PATH`:
-
-| Tool | Notes |
-|------|-------|
-| **cmake** (>= 3.17) | Drives the C++ build of `shaderc` / `glslang` / `SPIRV-Tools` |
-| **Python 3** | Used by `glslang`'s build scripts |
-| **C++ compiler** | clang++ / g++ / MSVC `cl.exe` |
-| **git** | `shaderc-sys` clones `shaderc` sources |
-
-Install:
-
-```bash
-# macOS (Homebrew)
-brew install cmake python git
-xcode-select --install            # supplies clang++
-
-# Debian / Ubuntu
-sudo apt-get install -y cmake python3 git build-essential
-
-# Fedora / RHEL
-sudo dnf install -y cmake python3 git gcc-c++
-
-# Arch
-sudo pacman -S cmake python git base-devel
-
-# Windows (PowerShell, choose one toolchain manager)
-winget install Kitware.CMake Python.Python.3 Git.Git
-# plus MSVC Build Tools (or the Visual Studio "Desktop C++" workload)
-```
-
-Verify with `cmake --version` and `python3 --version`. The error
-`couldn't find required command: "cmake"` during `cargo build` is the
-canonical symptom of this dependency being missing.
-
-To skip cmake/shaderc entirely (the rest of the workspace is Pure Rust),
-exclude the crate:
-
-```bash
-cargo build --workspace --exclude oximedia-accel
-```
-
-The runtime `CpuFallback` backend still works at run time without a Vulkan
-driver, but the GLSL → SPIR-V compilation step at build time is unconditional.
+With these features off, `oximedia-accel` uses its Pure-Rust `CpuFallback`
+(plus the optional Pure-Rust `webgpu` backend), `oximedia-cloud` uses its
+pure-Rust HTTP storage paths, `oximedia-automation` runs without Lua, and
+`oximedia-videoip` uses its built-in transports.
 
 ### Common build commands
 
@@ -706,8 +755,8 @@ Topic-focused guides live in [`docs/`](docs/):
 - **No Unsafe**: `#![forbid(unsafe_code)]` enforced workspace-wide (except explicitly gated FFI features)
 - **Apache 2.0**: Strictly permissive licensing only
 - **Clippy Pedantic**: All pedantic lints enabled
-- **Pure Rust**: No C/Fortran dependencies in default features
-- **Patent Free**: Only royalty-free codecs and algorithms
+- **Pure Rust**: No C/C++/Fortran in the default build (verified in 0.1.9); C-backed integrations are opt-in, non-default features only
+- **Patent Free**: Only royalty-free codecs and algorithms by default (patent-encumbered ProRes decode support is opt-in, feature-gated, for format compatibility)
 
 ## Contributing
 
@@ -728,7 +777,7 @@ If you find OxiMedia useful, please consider sponsoring the project to support c
 **[https://github.com/sponsors/cool-japan](https://github.com/sponsors/cool-japan)**
 
 Your sponsorship helps us:
-- Maintain and improve 109 crates (~2.75M SLOC)
+- Maintain and improve 114 crates (~2.95M SLOC)
 - Implement new royalty-free codecs and CV algorithms
 - Keep the entire COOLJAPAN ecosystem (OxiBLAS, OxiFFT, SciRS2, etc.) 100% Pure Rust
 - Provide long-term support and security updates

@@ -19,26 +19,36 @@
 //! ```rust
 //! use oximedia_packager::streaming_output::{SegmentStream, SegmentStreamConfig, ProducedSegment};
 //!
-//! # tokio_test::block_on(async {
-//! let config = SegmentStreamConfig::default();
-//! let (mut stream, tx) = SegmentStream::new(config);
+//! // Drive the async pipeline on a current-thread Tokio runtime (only the
+//! // `rt` feature is required — no extra dev-dependency).
+//! let runtime = tokio::runtime::Builder::new_current_thread()
+//!     .enable_all()
+//!     .build()
+//!     .expect("build tokio runtime");
+//! runtime.block_on(async {
+//!     // `auto_write: false` keeps the example free of filesystem side effects.
+//!     let config = SegmentStreamConfig {
+//!         auto_write: false,
+//!         ..SegmentStreamConfig::default()
+//!     };
+//!     let (mut stream, tx) = SegmentStream::new(config);
 //!
-//! // Simulate sending two segments
-//! let seg1 = ProducedSegment {
-//!     sequence: 0,
-//!     data: vec![0u8; 512],
-//!     duration_secs: 6.0,
-//!     is_init: false,
-//!     path_hint: Some(std::env::temp_dir().join("oximedia-packager-streaming-seg0.ts")),
-//! };
-//! tx.send(seg1).await.expect("send ok");
-//! drop(tx); // close the channel
+//!     // Send a single produced segment.
+//!     let seg0 = ProducedSegment {
+//!         sequence: 0,
+//!         data: vec![0u8; 512],
+//!         duration_secs: 6.0,
+//!         is_init: false,
+//!         path_hint: Some(std::env::temp_dir().join("oximedia-packager-streaming-seg0.ts")),
+//!     };
+//!     tx.send(seg0).await.expect("send ok");
+//!     drop(tx); // close the channel
 //!
-//! // Drain produced segments (no-op writer mode for testing)
-//! while let Some(seg) = stream.next().await {
-//!     assert_eq!(seg.sequence, 0);
-//! }
-//! # });
+//!     // Drain produced segments (no disk writes: auto_write is disabled).
+//!     while let Some(seg) = stream.next().await {
+//!         assert_eq!(seg.sequence, 0);
+//!     }
+//! });
 //! ```
 
 use std::path::PathBuf;

@@ -21,6 +21,6 @@ oximedia-transcode.workspace = true
 oximedia-graph.workspace = true
 oximedia-lut.workspace = true
 oximedia-subtitle.workspace = true
-anyhow = "1"
+anyhow.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

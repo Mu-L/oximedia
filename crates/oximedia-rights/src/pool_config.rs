@@ -2,7 +2,7 @@
 //!
 //! The `RightsManager` currently creates a single SQLite connection on
 //! construction.  This module provides the configuration types and health
-//! structures needed to migrate to a pooled model (e.g. `sqlx::SqlitePool`),
+//! structures needed to migrate to a pooled model (e.g. a pooled OxiSQL handle),
 //! and tracks pool health metrics so operators can detect connection exhaustion
 //! or excessive wait times.
 //!

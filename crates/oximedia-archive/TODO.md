@@ -30,11 +30,11 @@
 - [x] Implement `split_archive` with configurable split strategies (by size, date, collection)
 
 ## Performance
-- [ ] Use memory-mapped I/O for checksum computation on large files in `checksum`
-- [ ] Implement streaming hash computation (process file in chunks) to reduce memory footprint
+- [x] Use memory-mapped I/O for checksum computation on large files in `checksum` (verified 2026-06-04; src/mmap_checksum.rs:75 hash_via_mmap hashes &mmap[..] slice directly without to_vec)
+- [x] Implement streaming hash computation (process file in chunks) to reduce memory footprint (verified 2026-06-04; src/checksum.rs:521 compute_checksums_sync chunked BufReader loop, no full-file allocation)
 - [x] Add parallel checksum computation (compute BLAKE3 + SHA-256 + CRC32 simultaneously per file)
-- [ ] Optimize `integrity_scan` with file modification time checks to skip unchanged files
-- [ ] Use connection pooling and batch SQL inserts in `fixity` for high-volume verification
+- [x] Optimize `integrity_scan` with file modification time checks to skip unchanged files (verified 2026-06-05; src/integrity_scan.rs:353 ScanCache, scan:406 skips files whose (size, mtime_ms) match cached FileScanRecord via matches_metadata:152, re-hashes changed/new via compute_checksums_mmap, rehash_count/skip_count reset per call; FileScanRecord::with_mtime:143 builder + mtime_ms field:95)
+- [x] Use connection pooling and batch SQL inserts in `fixity` for high-volume verification (verified 2026-06-04; src/fixity.rs flush_fixity_rows batches N rows per sqlx transaction, FIXITY_BATCH_SIZE=100)
 - [ ] Add `streaming_compress` with configurable buffer sizes for throughput tuning
 
 ## Testing

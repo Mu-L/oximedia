@@ -7,12 +7,12 @@
 //!
 //! # Key types
 //!
-//! - [`BrandingSlot`] — a single scheduled occurrence of a branding element.
-//! - [`BrandingInserter`] — the central scheduler that tracks which elements
+//! - [`BrandingSlot`](crate::branding_inserter::BrandingSlot) — a single scheduled occurrence of a branding element.
+//! - [`BrandingInserter`](crate::branding_inserter::BrandingInserter) — the central scheduler that tracks which elements
 //!   are active at any given timeline position and fires cue events.
-//! - [`InsertionPolicy`] — controls how conflicting overlays of the same type
+//! - [`InsertionPolicy`](crate::branding_inserter::InsertionPolicy) — controls how conflicting overlays of the same type
 //!   are handled.
-//! - [`BrandingEvent`] — the output cue event produced when an element should
+//! - [`BrandingEvent`](crate::branding_inserter::BrandingEvent) — the output cue event produced when an element should
 //!   be activated or deactivated.
 //!
 //! # Usage

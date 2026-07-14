@@ -1220,4 +1220,117 @@ mod tests {
         assert!(format!("{}", SignedUrlError::Expired(100)).contains("100"));
         assert!(format!("{}", SignedUrlError::NoSecret).contains("not configured"));
     }
+
+    // ── Resource exhaustion: output size limits ──
+
+    #[test]
+    fn test_security_output_size_within_limit() {
+        // max_width=1000, max_height=1000 — requesting 100×100 should pass.
+        let mut params = TransformParams::default();
+        params.width = Some(100);
+        params.height = Some(100);
+        let config = SecurityConfig {
+            max_width: 1000,
+            max_height: 1000,
+            ..SecurityConfig::default()
+        };
+        assert!(validate_dimensions(&params, &config).is_ok());
+    }
+
+    #[test]
+    fn test_security_output_size_exceeds_limit() {
+        // Request 10000×10000 against a tight max of 1000×1000.
+        let mut params = TransformParams::default();
+        params.width = Some(10000);
+        params.height = Some(10000);
+        let config = SecurityConfig {
+            max_width: 1000,
+            max_height: 1000,
+            ..SecurityConfig::default()
+        };
+        let result = validate_dimensions(&params, &config);
+        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(SecurityError::DimensionExceeded { .. })
+        ));
+    }
+
+    // ── Resource exhaustion: file size limits ──
+    //
+    // `SecurityConfig` carries `max_file_size` and `max_output_size` fields that
+    // downstream callers use when checking fetched/output bytes.  We exercise the
+    // `FileSizeExceeded` error variant directly (it is already part of
+    // `SecurityError`) to verify that callers can construct and match it
+    // correctly.
+
+    #[test]
+    fn test_security_file_size_within_limit() {
+        // Construct a config and confirm that a file size below the limit does
+        // not produce a FileSizeExceeded error when evaluated by a caller.
+        let config = SecurityConfig {
+            max_file_size: 100 * 1024 * 1024, // 100 MB
+            ..SecurityConfig::default()
+        };
+        let file_size: u64 = 50 * 1024 * 1024; // 50 MB
+        let result: Result<(), SecurityError> = if file_size > config.max_file_size {
+            Err(SecurityError::FileSizeExceeded {
+                size: file_size,
+                max: config.max_file_size,
+            })
+        } else {
+            Ok(())
+        };
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_security_file_size_exceeds_limit() {
+        // A file larger than max_file_size should yield FileSizeExceeded.
+        let config = SecurityConfig {
+            max_file_size: 10 * 1024 * 1024, // 10 MB
+            ..SecurityConfig::default()
+        };
+        let file_size: u64 = 200 * 1024 * 1024; // 200 MB
+        let result: Result<(), SecurityError> = if file_size > config.max_file_size {
+            Err(SecurityError::FileSizeExceeded {
+                size: file_size,
+                max: config.max_file_size,
+            })
+        } else {
+            Ok(())
+        };
+        assert!(result.is_err());
+        match result {
+            Err(SecurityError::FileSizeExceeded { size, max }) => {
+                assert_eq!(size, 200 * 1024 * 1024);
+                assert_eq!(max, 10 * 1024 * 1024);
+            }
+            _ => panic!("expected FileSizeExceeded"),
+        }
+    }
+
+    // ── Golden path: full validate_request passes ──
+
+    #[test]
+    fn test_security_golden_path() {
+        // A valid path, valid dimensions, and a file size within limits should
+        // succeed through the full validate_request function.
+        let mut params = TransformParams::default();
+        params.width = Some(800);
+        params.height = Some(600);
+        let config = SecurityConfig {
+            max_width: 2000,
+            max_height: 2000,
+            max_file_size: 100 * 1024 * 1024,
+            max_output_size: 50 * 1024 * 1024,
+            ..SecurityConfig::default()
+        };
+        // validate_request checks path traversal then dimensions.
+        assert!(validate_request("images/photo.jpg", &params, &config).is_ok());
+
+        // Also confirm file-size guard passes for a small file.
+        let file_size: u64 = 1024 * 1024; // 1 MB
+        assert!(file_size <= config.max_file_size);
+    }
 }

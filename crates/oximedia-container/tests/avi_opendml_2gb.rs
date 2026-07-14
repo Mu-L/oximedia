@@ -17,7 +17,7 @@ fn fake_jpeg(tag: u8) -> Vec<u8> {
 /// 5 KB fake frame to make the 1 MB threshold trigger at ~200 frames.
 fn large_frame(tag: u8) -> Vec<u8> {
     let mut v = vec![0xFF, 0xD8];
-    v.extend(std::iter::repeat(tag).take(5114));
+    v.extend(std::iter::repeat_n(tag, 5114));
     v.push(0xFF);
     v.push(0xD9);
     v

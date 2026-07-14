@@ -332,7 +332,7 @@ fn decode_jpeg(data: &[u8]) -> EditResult<DecodedImageData> {
         }
         _ => {
             // Unknown component count — black frame.
-            out.extend(std::iter::repeat(0u8).take(pixel_count * 4));
+            out.extend(std::iter::repeat_n(0u8, pixel_count * 4));
         }
     }
 

@@ -161,4 +161,66 @@ mod tests {
         // Should have evicted oldest entries
         assert!(manager.current_size() <= 500);
     }
+
+    // ── Stress test: rapid create/evict cycles (1000+ proxies) ─────────────
+
+    /// Drives 1000+ rapid add/evict cycles through `CacheManager` and asserts
+    /// the `current_size <= max_size` invariant holds after every single
+    /// insertion, that `current_size` always matches the true sum of the
+    /// entries still resident in the cache (no accounting drift from the
+    /// eviction bookkeeping), and that the manager never panics (e.g. no
+    /// `current_size` underflow) across the whole run. Exercises all three
+    /// eviction strategies (LRU, LFU, FIFO) under the same rapid workload.
+    #[test]
+    fn test_cache_manager_stress_rapid_create_evict_cycles() {
+        const N: usize = 1_500;
+        const MAX_SIZE: u64 = 50_000;
+
+        for strategy in [CacheStrategy::Lru, CacheStrategy::Lfu, CacheStrategy::Fifo] {
+            let temp_dir = std::env::temp_dir();
+            let mut manager = CacheManager::new(temp_dir, MAX_SIZE);
+            manager.set_strategy(strategy);
+
+            for i in 0..N {
+                // Deterministic pseudo-random size in [1, 200], always well
+                // under MAX_SIZE so a single insert can never be un-evictable.
+                let size = 1 + ((i as u64).wrapping_mul(2_654_435_761) % 200);
+                let path = PathBuf::from(format!("proxy_{i:05}.mp4"));
+
+                manager.add(path.clone(), size);
+
+                assert!(
+                    manager.current_size() <= MAX_SIZE,
+                    "[{strategy:?}] current_size {} exceeded max_size {} at cycle {i}",
+                    manager.current_size(),
+                    MAX_SIZE
+                );
+
+                // Interleave rapid access() calls (LFU/LRU bookkeeping) and
+                // occasional contains() probes on both fresh and long-evicted
+                // entries — must never panic regardless of eviction state.
+                manager.access(&path);
+                if i > 10 {
+                    let stale = PathBuf::from(format!("proxy_{:05}.mp4", i - 10));
+                    let _ = manager.contains(&stale);
+                    manager.access(&stale);
+                }
+            }
+
+            // Final invariant: current_size must equal the sum of all
+            // entries actually resident (verified via the private `cache`
+            // field, reachable because this test lives inside the module).
+            let recomputed: u64 = manager.cache.values().map(|e| e.size).sum();
+            assert_eq!(
+                manager.current_size(),
+                recomputed,
+                "[{strategy:?}] current_size accounting drifted from real cache contents after {N} cycles"
+            );
+            assert!(manager.current_size() <= MAX_SIZE);
+            assert!(
+                manager.utilization() <= 100.0,
+                "[{strategy:?}] utilization must never exceed 100%"
+            );
+        }
+    }
 }

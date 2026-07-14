@@ -283,4 +283,49 @@ mod tests {
         );
         let _ = level; // used above
     }
+
+    // ── New ABR buffer smooth-transition tests ───────────────────────────────
+
+    /// Very low buffer (well below reservoir) must select index 0 (lowest quality).
+    #[test]
+    fn test_abr_buffer_low_selects_lowest() {
+        let mut abr = default_abr(); // reservoir=5.0
+        let idx = abr.select_quality(0.1);
+        assert_eq!(idx, 0, "buffer 0.1s should select lowest quality (0)");
+    }
+
+    /// Buffer at or above upper_reservoir must select the highest quality index.
+    #[test]
+    fn test_abr_buffer_high_selects_highest() {
+        let mut abr = default_abr(); // upper_reservoir=30.0
+        let max_idx = abr.config.quality_levels.len() - 1;
+        let idx = abr.select_quality(30.0);
+        assert_eq!(
+            idx, max_idx,
+            "buffer 30.0s should select highest quality ({max_idx})"
+        );
+    }
+
+    /// Quality decisions for strictly increasing buffer levels (using independent
+    /// controllers to isolate hysteresis state) must be non-decreasing.
+    #[test]
+    fn test_abr_buffer_monotonic() {
+        let buffer_levels: &[f32] = &[0.5, 1.0, 2.0, 5.0, 10.0, 20.0];
+        let decisions: Vec<usize> = buffer_levels
+            .iter()
+            .map(|&b| {
+                // Fresh controller per sample eliminates hysteresis effects.
+                let mut abr = default_abr();
+                abr.select_quality(b)
+            })
+            .collect();
+
+        for window in decisions.windows(2) {
+            assert!(
+                window[0] <= window[1],
+                "quality decisions must be non-decreasing as buffer rises; got {:?}",
+                decisions
+            );
+        }
+    }
 }

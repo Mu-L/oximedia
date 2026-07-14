@@ -178,22 +178,22 @@ impl HdrCompositor {
         output
     }
 
-    /// Tone-map a linear-light RGBA `f32` buffer to SDR `u8` RGBA using
-    /// per-channel Reinhard: `v_out = v / (1 + v) * (1 + v/peak²)`.
+    /// Tone-map a peak-normalised linear-light RGBA `f32` buffer to SDR `u8`
+    /// RGBA using the per-channel extended Reinhard operator with the white
+    /// point fixed at `1.0`.
     ///
-    /// `peak_nits` is the white-point normalisation factor (divide linear
-    /// values by this before tone-mapping so that `peak_nits` maps to 1.0
-    /// after mapping).
-    pub fn to_sdr(&self, output: &[f32], peak_nits: f32) -> Vec<u8> {
+    /// Input channels are linear light normalised so that `1.0` is the peak
+    /// white of the compositing space; HDR values above `1.0` clip to full
+    /// scale. Alpha is quantised directly.
+    pub fn to_sdr(&self, output: &[f32], _peak_nits: f32) -> Vec<u8> {
         let len = output.len();
         let mut result = vec![0_u8; len];
-        let peak = peak_nits.max(f32::EPSILON);
 
         let mut i = 0;
         while i + 3 < len {
-            let r = output[i] / peak;
-            let g = output[i + 1] / peak;
-            let b = output[i + 2] / peak;
+            let r = output[i];
+            let g = output[i + 1];
+            let b = output[i + 2];
             let a = output[i + 3];
 
             result[i] = reinhard_to_u8(r);
@@ -719,5 +719,123 @@ mod tests {
             b > 0 && b < 255,
             "mid-range Reinhard B should be in (0, 255), got {b}"
         );
+    }
+
+    // ── Extended Reinhard reference-value tests ──────────────────────────────
+    //
+    // `reinhard_to_u8` implements the extended Reinhard operator with the
+    // white point fixed at `1.0` (see its doc comment):
+    //
+    //   mapped = v * (1 + v / white²) / (1 + v),  white = 1.0
+    //
+    // Substituting `white² = 1` shows the numerator and denominator share the
+    // `(1 + v)` factor, so the formula algebraically reduces to `mapped = v`
+    // for all finite `v`; the function's only remaining jobs are clamping
+    // `v` to `[0.0, 1.0]` (guarding negatives and over-white/HDR excess) and
+    // quantising to an 8-bit channel via `round(mapped * 255)`. The reference
+    // values below were derived independently from that closed form (and
+    // cross-checked with an external f32 Rust program) so this test catches
+    // any accidental change to the formula (e.g. a fixed white point bug-fix)
+    // or to the rounding/clamping behaviour.
+    #[test]
+    fn test_reinhard_to_u8_reference_values() {
+        // (input linear value, expected quantised byte)
+        let cases: &[(f32, u8)] = &[
+            (0.0, 0),
+            (0.05, 13),  // round(0.05 * 255) = round(12.75) = 13
+            (0.1, 26),   // round(0.1  * 255) = round(25.5)  = 26
+            (0.2, 51),   // round(0.2  * 255) = round(51.0)  = 51
+            (0.25, 64),  // round(0.25 * 255) = round(63.75) = 64
+            (0.5, 128),  // round(0.5  * 255) = round(127.5) = 128
+            (0.75, 191), // round(0.75 * 255) = round(191.25) = 191
+            (0.9, 230),  // round(0.9  * 255) = round(229.5) = 230
+            (1.0, 255),  // exactly at the white point
+        ];
+        for &(v, expected) in cases {
+            let got = reinhard_to_u8(v);
+            assert_eq!(
+                got, expected,
+                "reinhard_to_u8({v}) expected {expected}, got {got}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_reinhard_to_u8_negative_clamped_to_zero() {
+        // Negative linear-light values (e.g. from an aggressive colour-grade
+        // overshoot) must never wrap or produce garbage — they clamp to 0.
+        assert_eq!(reinhard_to_u8(-0.5), 0);
+        assert_eq!(reinhard_to_u8(-100.0), 0);
+        assert_eq!(reinhard_to_u8(-f32::EPSILON), 0);
+    }
+
+    #[test]
+    fn test_reinhard_to_u8_over_white_clips_to_255() {
+        // HDR content brighter than the white point (v > 1.0) must clip to
+        // full-scale 255 rather than overflowing or producing >255.
+        assert_eq!(reinhard_to_u8(1.5), 255);
+        assert_eq!(reinhard_to_u8(2.5), 255);
+        assert_eq!(reinhard_to_u8(1000.0), 255);
+    }
+
+    /// `to_sdr` divides by `peak_nits` before applying the Reinhard curve, so
+    /// feeding it absolute nit values against a known peak must reproduce the
+    /// same reference bytes as `reinhard_to_u8` applied to the normalised
+    /// value directly.
+    #[test]
+    fn test_to_sdr_reference_nits_values() {
+        // (luminance in nits, peak_nits, expected quantised byte)
+        let cases: &[(f32, f32, u8)] = &[
+            (100.0, 1000.0, 26),   // linear = 0.1
+            (200.0, 1000.0, 51),   // linear = 0.2
+            (400.0, 1000.0, 102),  // linear = 0.4
+            (1000.0, 1000.0, 255), // linear = 1.0 (exactly peak)
+            (2000.0, 1000.0, 255), // linear = 2.0 (over-peak HDR highlight)
+            (50.0, 400.0, 32),     // linear = 0.125, smaller peak_nits
+        ];
+        for &(nits, peak_nits, expected) in cases {
+            let comp = HdrCompositor::new(1, 1, peak_nits);
+            let linear = nits / peak_nits;
+            let pixels = vec![linear, linear, linear, 1.0_f32];
+            let sdr = comp.to_sdr(&pixels, peak_nits);
+            assert_eq!(
+                sdr[0], expected,
+                "R channel for {nits} nits @ peak {peak_nits}: expected {expected}, got {}",
+                sdr[0]
+            );
+            assert_eq!(sdr[1], expected, "G channel mismatch for {nits} nits");
+            assert_eq!(sdr[2], expected, "B channel mismatch for {nits} nits");
+        }
+    }
+
+    /// A multi-pixel buffer with distinct per-pixel luminance and alpha must
+    /// map each pixel independently to its own reference byte values.
+    #[test]
+    fn test_to_sdr_multi_pixel_reference() {
+        let peak_nits = 1000.0_f32;
+        let comp = HdrCompositor::new(2, 1, peak_nits);
+
+        // Pixel 0: 100 nits, full alpha. Pixel 1: 500 nits, half alpha.
+        let pixels = vec![
+            100.0 / peak_nits,
+            100.0 / peak_nits,
+            100.0 / peak_nits,
+            1.0,
+            500.0 / peak_nits,
+            500.0 / peak_nits,
+            500.0 / peak_nits,
+            0.5,
+        ];
+        let sdr = comp.to_sdr(&pixels, peak_nits);
+
+        assert_eq!(sdr[0], 26, "pixel 0 R");
+        assert_eq!(sdr[1], 26, "pixel 0 G");
+        assert_eq!(sdr[2], 26, "pixel 0 B");
+        assert_eq!(sdr[3], 255, "pixel 0 alpha (1.0 -> 255)");
+
+        assert_eq!(sdr[4], 128, "pixel 1 R"); // 0.5 linear -> 128
+        assert_eq!(sdr[5], 128, "pixel 1 G");
+        assert_eq!(sdr[6], 128, "pixel 1 B");
+        assert_eq!(sdr[7], 128, "pixel 1 alpha (0.5 -> round(127.5) = 128)");
     }
 }

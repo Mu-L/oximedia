@@ -1,16 +1,44 @@
 //! Hardware acceleration abstraction layer for `OxiMedia`.
 //!
 //! `oximedia-accel` provides GPU-accelerated computation for video processing
-//! operations using Vulkan compute shaders. It includes CPU fallback paths
-//! for systems without GPU support.
+//! operations. It includes a Pure-Rust CPU fallback (always available), an
+//! optional `wgpu`-backed WebGPU backend (`webgpu` feature), and an optional
+//! Vulkan compute backend (`vulkan-backend` feature) for systems that want
+//! real GPU dispatch via `vulkano`.
+//!
+//! # Pure Rust default / opt-in Vulkan backend
+//!
+//! The **default build of this crate compiles zero C/C++ code**. Vulkan
+//! support is gated behind the non-default `vulkan-backend` Cargo feature
+//! because `vulkano-shaders` compiles GLSL shaders to SPIR-V via a proc-macro
+//! that pulls in `shaderc-sys`, which builds the `shaderc`/`glslang` C++
+//! toolchain from source (see `README.md` for the native build prerequisites
+//! this entails). Without `vulkan-backend`:
+//!
+//! - [`AccelContext::new`] and `AccelContext::with_device_selector`-style
+//!   construction never attempt to load Vulkan; they select the Pure-Rust
+//!   [`cpu_fallback::CpuAccel`] backend (or `webgpu`, when that feature is
+//!   enabled and available) directly.
+//! - Every Vulkan-only module (`device`, `buffer`, `vulkan`, `kernels`,
+//!   `descriptor_pool`) is entirely absent from the compiled crate.
+//! - A runtime request that specifically requires the Vulkan backend (e.g.
+//!   `oximedia_accel::compute_backend::VulkanComputeBackend` reporting
+//!   availability) returns a clear [`AccelError`], never a panic.
+//!
+//! Enable real Vulkan dispatch with:
+//!
+//! ```toml
+//! [dependencies]
+//! oximedia-accel = { version = "*", features = ["vulkan-backend"] }
+//! ```
 //!
 //! # Features
 //!
-//! - **Device Management**: Automatic GPU device enumeration and selection
-//! - **Buffer Management**: Efficient GPU memory allocation and transfer
+//! - **Device Management**: Automatic GPU device enumeration and selection (`vulkan-backend`)
+//! - **Buffer Management**: Efficient GPU memory allocation and transfer (`vulkan-backend`)
 //! - **Compute Kernels**: Image scaling, color conversion, motion estimation
-//! - **CPU Fallback**: Automatic fallback to CPU implementations
-//! - **Safe Vulkan**: Uses vulkano for safe Vulkan API access
+//! - **CPU Fallback**: Automatic fallback to CPU implementations (always available)
+//! - **Safe Vulkan**: Uses vulkano for safe Vulkan API access (opt-in via `vulkan-backend`)
 //!
 //! # Backend Architecture
 //!
@@ -25,6 +53,9 @@
 //!          ▼                      ▼
 //!   ┌────────────┐         ┌────────────┐
 //!   │ VulkanAccel│         │ CpuFallback│
+//!   │(opt-in via │         │  (Pure     │
+//!   │vulkan-     │         │   Rust,    │
+//!   │backend)    │         │  default)  │
 //!   └────────────┘         └────────────┘
 //! ```
 //!
@@ -35,7 +66,8 @@
 //!
 //! ## Discrete GPU path (PCIe staging required)
 //!
-//! Used when [`device::DevicePreference::Discrete`] is selected (the default) and the
+//! Used when `device::DevicePreference::Discrete` is selected (the default,
+//! requires the `vulkan-backend` feature) and the
 //! GPU has its own dedicated VRAM connected via PCIe.  Two DMA transfers are
 //! required — one to upload and one to download — through a host-visible
 //! *staging buffer*:
@@ -58,7 +90,8 @@
 //!
 //! ## Integrated GPU path (UMA, direct map)
 //!
-//! Used when [`device::DevicePreference::Integrated`] is selected and the GPU
+//! Used when `device::DevicePreference::Integrated` is selected (requires the
+//! `vulkan-backend` feature) and the GPU
 //! shares system RAM (Unified Memory Architecture).  No staging copy is needed
 //! because the same physical allocation is both host-visible and device-local:
 //!
@@ -72,8 +105,8 @@
 //! The discrete path maximises GPU throughput at the cost of PCIe bandwidth;
 //! the integrated path eliminates that overhead but shares memory bandwidth
 //! with the CPU.  `AccelContext::new()` picks the discrete path by default;
-//! pass a custom [`device::DeviceSelector`] to `AccelContext::with_device_selector`
-//! to choose otherwise.
+//! pass a custom `device::DeviceSelector` to `AccelContext::with_device_selector`
+//! to choose otherwise (both require the `vulkan-backend` feature).
 //!
 //! # Example
 //!
@@ -106,18 +139,21 @@ pub mod accel_profile;
 pub mod accel_stats;
 pub mod async_compute;
 pub mod bilateral_gpu;
+#[cfg(feature = "vulkan-backend")]
 pub mod buffer;
 pub mod buffer_ring;
 pub mod cache;
 pub mod compute_backend;
 pub mod cpu_fallback;
 pub mod cpu_simd;
+#[cfg(feature = "vulkan-backend")]
 pub mod device;
 pub mod device_caps;
 pub mod dispatch;
 pub mod error;
 pub mod fence_timeline;
 pub mod gpu_ops;
+#[cfg(feature = "vulkan-backend")]
 pub mod kernels;
 pub mod memory_access;
 pub mod memory_arena;
@@ -137,6 +173,7 @@ pub mod task_scheduler;
 pub mod temporal_nr;
 pub mod traits;
 pub mod vectorize;
+#[cfg(feature = "vulkan-backend")]
 pub mod vulkan;
 pub mod webgpu_backend;
 pub mod work_item;
@@ -182,22 +219,29 @@ pub use temporal_nr::{temporal_nr_cpu, TemporalNrParams};
 pub use workgroup::{compute_optimal_workgroup, OpType};
 
 // Re-export descriptor pool
+#[cfg(feature = "vulkan-backend")]
 pub mod descriptor_pool;
 
+#[cfg(feature = "vulkan-backend")]
 use device::DeviceSelector;
 use std::sync::Arc;
+#[cfg(feature = "vulkan-backend")]
 use vulkan::VulkanAccel;
 
 /// Main acceleration context that automatically selects GPU or CPU backend.
 ///
 /// This is the primary entry point for hardware-accelerated operations.
-/// It will attempt to initialize Vulkan compute, falling back to CPU
-/// if GPU acceleration is unavailable.
+/// When the `vulkan-backend` feature is enabled it will attempt to
+/// initialize Vulkan compute first, falling back to CPU if GPU acceleration
+/// is unavailable. Without that feature (the default, Pure-Rust build) it
+/// always uses the CPU fallback backend directly — no Vulkan code is even
+/// compiled into the crate.
 pub struct AccelContext {
     backend: AccelBackend,
 }
 
 enum AccelBackend {
+    #[cfg(feature = "vulkan-backend")]
     Vulkan(Arc<VulkanAccel>),
     Cpu(Arc<cpu_fallback::CpuAccel>),
 }
@@ -205,22 +249,36 @@ enum AccelBackend {
 impl AccelContext {
     /// Creates a new acceleration context.
     ///
-    /// Attempts to initialize GPU acceleration first, falling back to CPU
-    /// if Vulkan is unavailable or device selection fails.
+    /// With the `vulkan-backend` feature enabled, attempts to initialize GPU
+    /// acceleration first, falling back to CPU if Vulkan is unavailable or
+    /// device selection fails. Without that feature (Pure-Rust default
+    /// build), always selects the CPU fallback backend.
     ///
     /// # Errors
     ///
     /// Returns an error only if both GPU and CPU initialization fail,
     /// which should be extremely rare.
     pub fn new() -> AccelResult<Self> {
-        Self::with_device_selector(&DeviceSelector::default())
+        #[cfg(feature = "vulkan-backend")]
+        {
+            Self::with_device_selector(&DeviceSelector::default())
+        }
+        #[cfg(not(feature = "vulkan-backend"))]
+        {
+            Ok(Self::cpu_only())
+        }
     }
 
-    /// Creates a new acceleration context with a custom device selector.
+    /// Creates a new acceleration context with a custom Vulkan device
+    /// selector.
+    ///
+    /// Only available when the `vulkan-backend` feature is enabled, since
+    /// [`device::DeviceSelector`] is a Vulkan-specific type.
     ///
     /// # Errors
     ///
     /// Returns an error if both GPU and CPU initialization fail.
+    #[cfg(feature = "vulkan-backend")]
     pub fn with_device_selector(selector: &DeviceSelector) -> AccelResult<Self> {
         match VulkanAccel::new(selector) {
             Ok(vulkan) => {
@@ -252,13 +310,21 @@ impl AccelContext {
     /// Returns `true` if using GPU acceleration.
     #[must_use]
     pub fn is_gpu_accelerated(&self) -> bool {
-        matches!(self.backend, AccelBackend::Vulkan(_))
+        #[cfg(feature = "vulkan-backend")]
+        {
+            matches!(self.backend, AccelBackend::Vulkan(_))
+        }
+        #[cfg(not(feature = "vulkan-backend"))]
+        {
+            false
+        }
     }
 
     /// Returns the name of the current backend.
     #[must_use]
     pub fn backend_name(&self) -> &str {
         match &self.backend {
+            #[cfg(feature = "vulkan-backend")]
             AccelBackend::Vulkan(v) => v.device_name(),
             AccelBackend::Cpu(_) => "CPU",
         }
@@ -277,6 +343,7 @@ impl HardwareAccel for AccelContext {
         filter: ScaleFilter,
     ) -> AccelResult<Vec<u8>> {
         match &self.backend {
+            #[cfg(feature = "vulkan-backend")]
             AccelBackend::Vulkan(v) => v.scale_image(
                 input, src_width, src_height, dst_width, dst_height, format, filter,
             ),
@@ -295,6 +362,7 @@ impl HardwareAccel for AccelContext {
         dst_format: oximedia_core::PixelFormat,
     ) -> AccelResult<Vec<u8>> {
         match &self.backend {
+            #[cfg(feature = "vulkan-backend")]
             AccelBackend::Vulkan(v) => {
                 v.convert_color(input, width, height, src_format, dst_format)
             }
@@ -311,6 +379,7 @@ impl HardwareAccel for AccelContext {
         block_size: u32,
     ) -> AccelResult<Vec<(i16, i16)>> {
         match &self.backend {
+            #[cfg(feature = "vulkan-backend")]
             AccelBackend::Vulkan(v) => {
                 v.motion_estimation(reference, current, width, height, block_size)
             }

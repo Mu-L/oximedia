@@ -19,7 +19,7 @@ workspace = true
 oximedia-core = { workspace = true }
 oximedia-timecode = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 chrono = { workspace = true }

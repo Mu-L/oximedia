@@ -266,7 +266,7 @@ pub fn delta_e_2000_batch_pairs(labs1: &[Lab], labs2: &[Lab]) -> crate::error::R
 ///
 /// # Returns
 /// A `Vec<f64>` of length `n * m` in row-major order:
-/// `result[i * m + j]` = ΔE(queries[i], references[j])
+/// `result[i * m + j] = ΔE(queries[i], references[j])`
 #[must_use]
 pub fn delta_e_2000_matrix(queries: &[Lab], references: &[Lab]) -> Vec<f64> {
     // Compute a shared G from the combined set

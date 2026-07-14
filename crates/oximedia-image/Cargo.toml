@@ -22,7 +22,7 @@ bytes.workspace = true
 rayon.workspace = true
 
 # Image format dependencies
-byteorder = "1.5"
+byteorder.workspace = true
 half = "2.7"
 tiff = "0.11"
 serde = { workspace = true }

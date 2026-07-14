@@ -229,6 +229,8 @@ fn color_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     power_preference: wgpu::PowerPreference::HighPerformance,
                     compatible_surface: None,
                     force_fallback_adapter: false,
+                    // native/trusted context; limit-bucketing is only a browser-fingerprinting mitigation
+                    apply_limit_buckets: false,
                 })
                 .await
                 .map_err(|e| {
@@ -427,7 +429,9 @@ fn color_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     AccelError::Synchronization(format!("WebGPU map_async failed: {e:?}"))
                 })?;
 
-            let data = buf_slice.get_mapped_range();
+            let data = buf_slice
+                .get_mapped_range()
+                .map_err(|e| AccelError::MemoryMap(format!("WebGPU buffer map failed: {e}")))?;
             let result = data.to_vec();
             drop(data);
             readback.unmap();

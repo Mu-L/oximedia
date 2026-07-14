@@ -305,7 +305,7 @@ impl LookAheadPeakLimiter {
 
     /// Process interleaved audio in-place.
     ///
-    /// The output is delayed by `lookahead_samples` frames.  Call [`flush`] after the
+    /// The output is delayed by `lookahead_samples` frames.  Call [`Self::flush`] after the
     /// last block to drain the remaining lookahead tail.
     pub fn process_in_place(&mut self, samples: &mut [f64]) {
         let channels = self.config.channels;

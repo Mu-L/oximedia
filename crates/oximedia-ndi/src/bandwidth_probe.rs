@@ -87,7 +87,7 @@ impl QualityLevel {
         }
     }
 
-    /// Select the highest quality level whose [`target_bps`] does not exceed
+    /// Select the highest quality level whose [`Self::target_bps`] does not exceed
     /// `available_bps`.  Returns [`QualityLevel::UltraLow`] when bandwidth is
     /// below the minimum threshold.
     pub fn from_bps(available_bps: u64) -> Self {

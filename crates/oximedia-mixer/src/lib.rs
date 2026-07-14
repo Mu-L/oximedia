@@ -173,7 +173,7 @@ pub mod automation_playback;
 /// Offline bounce/render engine: processes mixer graph faster-than-realtime.
 pub mod bounce;
 
-/// Lock-free audio buffer pool for reusing Vec<f32> allocations.
+/// Lock-free audio buffer pool for reusing `Vec<f32>` allocations.
 pub mod buffer_pool;
 
 /// Channel fold/unfold: mono↔stereo↔5.1↔7.1 down/up-mix with ITU-R BS.775.

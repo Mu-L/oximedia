@@ -1,6 +1,59 @@
 //! RPU parser for NAL units and bitstreams.
 //!
 //! Handles parsing of Dolby Vision RPU from HEVC SEI messages and raw bitstreams.
+//!
+//! # RPU binary format
+//!
+//! A Dolby Vision "Reference Processing Unit" (RPU) is a compact metadata
+//! bitstream carried once per coded picture. It reaches this parser through
+//! one of two containers, both handled by this module:
+//!
+//! 1. **HEVC NAL unit** ([`parse_nal_unit`]) — an unregistered user-data SEI
+//!    message (NAL type [`nal_type::UNREGISTERED_SEI`] = 62) or the
+//!    alternative dedicated RPU NAL type ([`nal_type::DV_RPU`] = 25). The
+//!    2-byte HEVC NAL header is stripped, then the SEI envelope is unwrapped
+//!    by [`parse_sei_payload`]:
+//!    - `payload_type` and `payload_size`: each a run of `0xFF`-continued
+//!      bytes (standard H.26x SEI variable-length coding).
+//!    - For `payload_type == 5` ("user data unregistered"), a mandatory
+//!      16-byte UUID is replaced in Dolby's usage by a 1-byte ITU-T T.35
+//!      `country_code` (must equal [`T35_COUNTRY_CODE`] = `0xB5`, "United
+//!      States") followed by a 2-byte `terminal_provider_code` (must equal
+//!      [`T35_TERMINAL_PROVIDER_CODE`] = `0x003C`, Dolby's registered code).
+//!      Everything after that is the raw RPU payload.
+//! 2. **Raw RPU bitstream** ([`parse_rpu_bitstream`]) — the T.35 payload
+//!    itself, an EMDF-free big-endian bit-packed structure consumed field by
+//!    field with [`oximedia_bitstream::BitReader`]:
+//!    - **RPU header** (see [`RpuHeader`], parsed by `parse_rpu_header`):
+//!      `rpu_type` (6 bits), `rpu_format` (11 bits), `vdr_seq_info_present`
+//!      (1 bit) gating an optional [`VdrSeqInfo`] block, `picture_index`
+//!      (10 bits), `change_flags` (4 bits, see [`crate::rpu::ChangeFlags`]),
+//!      `nlq_param_pred_flag` (1 bit) gating `num_nlq_param_predictors`
+//!      (4 bits), `component_order` (2 bits), `coef_data_type` (1 bit),
+//!      `coef_log2_denom` (4 bits), `mapping_color_space` (2 bits),
+//!      `mapping_chroma_format` (2 bits), `num_pivots_minus_2` (3 bits), and
+//!      `pred_pivot_value` (12 bits).
+//!    - **VDR DM data** (`parse_vdr_dm_data`) — present only when
+//!      `change_flags` contains `VDR_CHANGED`; carries the affine/polynomial
+//!      color-matrix coefficients, per-channel reshaping curves (piecewise
+//!      polynomial or MMR pivots, see `parse_reshaping_curve`), and optional
+//!      near-lossless-quantization parameters (`parse_nlq_params`) used to
+//!      reconstruct the enhancement-layer residual for Profile 7 MEL.
+//!    - **Metadata levels** — a fixed parse order of L1, L2, L5, L6, L8, L9,
+//!      L11 (see the level reference table on [`crate::metadata`]), each
+//!      parsed unconditionally in [`parse_rpu_bitstream`] by dedicated
+//!      `parse_levelN_metadata` functions; absent levels decode to their
+//!      `Default` value.
+//!
+//! Profile is not signalled explicitly in the header; it is inferred from
+//! header/`VdrSeqInfo` fields by [`detect_profile_from_header`] immediately
+//! after the header is parsed, using the heuristics documented on that
+//! function.
+//!
+//! [`parse_nal_unit_cached`] and [`parse_rpu_bitstream_cached`] wrap the
+//! above with an FNV-1a-keyed, size-bounded process-global cache
+//! ([`RPU_CACHE`]) so repeated identical byte sequences (e.g. static-metadata
+//! RPUs repeated every frame) are parsed once.
 
 use crate::{metadata::*, rpu::*, DolbyVisionError, DolbyVisionRpu, Profile, Result};
 use oximedia_bitstream::{BigEndian, BitRead, BitReader};

@@ -61,7 +61,7 @@ fn _simple_job(name: &str, priority: Priority) -> Job {
 
 /// Submit 100 jobs from 4 concurrent threads, then cancel every second one.
 /// Asserts that all submitted IDs are unique and that cancellations succeed.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_concurrent_job_submission_cancellation() {
     use std::sync::Arc as StdArc;
 

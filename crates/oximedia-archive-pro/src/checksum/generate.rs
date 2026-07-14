@@ -31,6 +31,10 @@ pub struct FileChecksum {
 pub struct ChecksumGenerator {
     algorithms: Vec<ChecksumAlgorithm>,
     buffer_size: usize,
+    /// Case-insensitive extension allow-list (without the leading dot) used by
+    /// `generate_directory` to skip files early during the `walkdir` traversal.
+    /// `None` means "no filtering, visit every file".
+    extension_filter: Option<Vec<String>>,
 }
 
 impl Default for ChecksumGenerator {
@@ -46,6 +50,7 @@ impl ChecksumGenerator {
         Self {
             algorithms: vec![ChecksumAlgorithm::Sha256],
             buffer_size: 8192,
+            extension_filter: None,
         }
     }
 
@@ -61,6 +66,41 @@ impl ChecksumGenerator {
     pub fn with_buffer_size(mut self, size: usize) -> Self {
         self.buffer_size = size;
         self
+    }
+
+    /// Restrict `generate_directory` to only the given file extensions.
+    ///
+    /// Extensions are matched case-insensitively and may be supplied with or
+    /// without a leading dot (e.g. both `"mkv"` and `".mkv"` are accepted).
+    /// This lets large heterogeneous directory trees skip opening and hashing
+    /// files that are irrelevant to the archive (logs, sidecar files, `.DS_Store`,
+    /// etc.) — the filter is applied as part of the `walkdir` iterator chain,
+    /// before any file is ever opened.
+    #[must_use]
+    pub fn with_extension_filter<I, S>(mut self, extensions: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.extension_filter = Some(
+            extensions
+                .into_iter()
+                .map(|e| e.into().trim_start_matches('.').to_lowercase())
+                .collect(),
+        );
+        self
+    }
+
+    /// Returns `true` if `path`'s extension passes the configured extension
+    /// filter (or if no filter is configured).
+    fn matches_extension_filter(&self, path: &Path) -> bool {
+        match &self.extension_filter {
+            None => true,
+            Some(allowed) => path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| allowed.iter().any(|a| a.eq_ignore_ascii_case(ext))),
+        }
     }
 
     /// Generate checksums for a single file
@@ -162,6 +202,9 @@ impl ChecksumGenerator {
             .into_iter()
             .filter_map(std::result::Result::ok)
             .filter(|e| e.file_type().is_file())
+            // Early extension filtering: reject non-matching files before they
+            // are ever converted to an owned PathBuf or opened for hashing.
+            .filter(|e| self.matches_extension_filter(e.path()))
             .map(walkdir::DirEntry::into_path)
             .collect();
 
@@ -250,5 +293,59 @@ mod tests {
 
         let hash = quick_checksum(file.path()).expect("operation should succeed");
         assert!(!hash.is_empty());
+    }
+
+    /// `generate_directory` with an extension allow-list should skip files
+    /// whose extension does not match, without erroring on them (they are
+    /// never opened or hashed at all).
+    #[test]
+    fn test_generate_directory_extension_filter() {
+        let dir = tempfile::tempdir().expect("temp dir creation should succeed");
+
+        std::fs::write(dir.path().join("master.mkv"), b"video content")
+            .expect("write mkv should succeed");
+        std::fs::write(dir.path().join("audio.flac"), b"audio content")
+            .expect("write flac should succeed");
+        std::fs::write(dir.path().join("notes.txt"), b"sidecar notes")
+            .expect("write txt should succeed");
+        std::fs::write(dir.path().join(".DS_Store"), b"junk")
+            .expect("write junk file should succeed");
+
+        let generator =
+            ChecksumGenerator::new().with_extension_filter(["mkv".to_string(), "FLAC".to_string()]);
+        let mut checksums = generator
+            .generate_directory(dir.path())
+            .expect("filtered directory generation should succeed");
+        checksums.sort_by(|a, b| a.path.cmp(&b.path));
+
+        assert_eq!(
+            checksums.len(),
+            2,
+            "only the .mkv and .flac files should have been visited"
+        );
+        let names: Vec<String> = checksums
+            .iter()
+            .filter_map(|c| c.path.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"master.mkv".to_string()));
+        assert!(names.contains(&"audio.flac".to_string()));
+        assert!(!names.iter().any(|n| n == "notes.txt"));
+        assert!(!names.iter().any(|n| n == ".DS_Store"));
+    }
+
+    /// Without a filter configured, `generate_directory` must still visit
+    /// every file (unfiltered behaviour is preserved).
+    #[test]
+    fn test_generate_directory_no_filter_visits_all_files() {
+        let dir = tempfile::tempdir().expect("temp dir creation should succeed");
+        std::fs::write(dir.path().join("a.bin"), b"aaa").expect("write should succeed");
+        std::fs::write(dir.path().join("b.dat"), b"bbb").expect("write should succeed");
+
+        let generator = ChecksumGenerator::new();
+        let checksums = generator
+            .generate_directory(dir.path())
+            .expect("unfiltered directory generation should succeed");
+        assert_eq!(checksums.len(), 2);
     }
 }

@@ -4,6 +4,20 @@
 //! Detects periods of silence or near-silence in audio streams, essential
 //! for broadcast compliance monitoring and dead-air prevention. Supports
 //! configurable threshold, minimum duration, and per-channel operation.
+//!
+//! # Relationship to the main metering pipeline
+//!
+//! This module is independent of the [`crate::ebu_r128_impl::EbuR128Meter`]
+//! filter → LKFS → gating → LRA pipeline (see the crate-level docs, "Pipeline
+//! Architecture") — it shares no state with it. It is easily confused with
+//! that pipeline's −70 LUFS absolute gate ([`crate::ebu_r128_impl`]'s
+//! `ABSOLUTE_GATE`, used by both `integrated_lufs()` and `loudness_range_lu()`),
+//! but the two serve different purposes: the absolute gate silently *excludes*
+//! low-level 400 ms blocks from the loudness statistics, while this module
+//! *reports* sustained silence as a discrete, timestamped dead-air event. Run
+//! it alongside [`crate::LoudnessMeter`] on the same audio buffer. See also
+//! [`crate::clip_counter`] and [`crate::rms_envelope`] for the other two
+//! complementary, independently-run QC modules.
 
 /// Configuration for silence detection.
 #[derive(Clone, Debug)]

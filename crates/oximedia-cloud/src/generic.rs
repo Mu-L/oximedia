@@ -29,6 +29,7 @@ impl GenericStorage {
     ///
     /// Returns an error if configuration is invalid
     pub fn new(endpoint: Url, credentials: Credentials, bucket: String) -> Result<Self> {
+        crate::tls_provider::install_default_crypto_provider();
         credentials.validate()?;
 
         Ok(Self {

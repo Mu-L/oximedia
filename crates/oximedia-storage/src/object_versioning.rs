@@ -62,7 +62,12 @@ pub enum VersioningError {
     /// The object key was not found.
     KeyNotFound(String),
     /// The specific version_id was not found for the given key.
-    VersionNotFound { key: String, version_id: String },
+    VersionNotFound {
+        /// Object key that was queried.
+        key: String,
+        /// Version identifier that could not be found.
+        version_id: String,
+    },
     /// Attempt to restore a delete-marker as if it were real content.
     CannotRestoreDeleteMarker(String),
 }

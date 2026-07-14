@@ -211,7 +211,7 @@ fn build_cusp_table(target: TargetGamut, viewing: &CiecamViewingConditions) -> V
 
 /// Public entry point: find the CIECAM02 cusp for arbitrary primaries.
 ///
-/// This wrapper exposes the otherwise-private [`find_cusp_at_hue`] so that
+/// This wrapper exposes the otherwise-private `find_cusp_at_hue` so that
 /// other modules (e.g. `aces_gamut`) can compute cusp tables from any set of
 /// CIE xy primaries without duplicating the boundary-scan algorithm.
 ///

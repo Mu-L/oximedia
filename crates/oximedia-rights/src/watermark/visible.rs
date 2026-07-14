@@ -30,21 +30,23 @@ impl VisibleWatermark {
         let id = Uuid::new_v4().to_string();
         let now = chrono::Utc::now();
 
-        sqlx::query(
-            r"
+        db.pool()
+            .execute(
+                r"
             INSERT INTO watermark_configs
             (id, asset_id, watermark_type, config_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ",
-        )
-        .bind(&id)
-        .bind(asset_id)
-        .bind("visible")
-        .bind(&config_json)
-        .bind(now.to_rfc3339())
-        .bind(now.to_rfc3339())
-        .execute(db.pool())
-        .await?;
+                &[
+                    &id,
+                    &asset_id,
+                    &"visible",
+                    &config_json,
+                    &now.to_rfc3339(),
+                    &now.to_rfc3339(),
+                ],
+            )
+            .await?;
 
         Ok(())
     }

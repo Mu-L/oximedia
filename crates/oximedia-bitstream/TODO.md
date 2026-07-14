@@ -1,6 +1,6 @@
 # oximedia-bitstream TODO
 
-Version: 0.1.8 | Status as of: 2026-05-21
+Version: 0.1.9 | Status as of: 2026-07-08
 
 ## Status: Stable
 
@@ -16,6 +16,7 @@ Version: 0.1.8 | Status as of: 2026-05-21
 - [x] Checked arithmetic operations
 - [x] Byte-level I/O abstraction
 - [x] Integration tests and doc tests
+- [x] `shl_default`/`shr_default` — enabled `unbounded_shl`/`unbounded_shr` override in `define_unsigned_integer!` macro (Rust 1.87+ stable); 30 new unit tests in `tests/integer_shifts.rs` (2026-06-24)
 
 ## In Progress [ ]
 (none)

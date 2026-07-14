@@ -21,10 +21,12 @@ oximedia-timecode.workspace = true
 thiserror.workspace = true
 uuid = { workspace = true }
 chrono = { workspace = true }
-byteorder = "1.5"
+byteorder.workspace = true
 serde = { workspace = true }
 bitflags.workspace = true
 bytes.workspace = true
+memmap2.workspace = true
+rayon.workspace = true
 
 [dev-dependencies]
 

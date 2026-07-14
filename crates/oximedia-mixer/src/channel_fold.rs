@@ -2,7 +2,7 @@
 //!
 //! This module provides free functions for common fold-down and unfold-up
 //! operations as well as the [`ChannelLayout`] enum and the higher-level
-//! [`fold_channels`] / [`unfold_channels`] dispatch functions.
+//! [`fold_channels`](crate::channel_fold::fold_channels) / [`unfold_channels`](crate::channel_fold::unfold_channels) dispatch functions.
 //!
 //! ## Fold matrices
 //!

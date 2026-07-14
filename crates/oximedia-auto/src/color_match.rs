@@ -322,4 +322,63 @@ mod tests {
         assert!((result[1] - 60.0).abs() < 1.0);
         assert!((result[2] - 80.0).abs() < 1.0);
     }
+
+    /// `compute_color_transfer` is a pure function: calling it twice with
+    /// identical `ColorStats` arguments must produce bit-identical results.
+    #[test]
+    fn test_color_transfer_identical_inputs_deterministic() {
+        let src = ColorStats {
+            mean_r: 120.0,
+            mean_g: 80.0,
+            mean_b: 60.0,
+            std_r: 25.0,
+            std_g: 15.0,
+            std_b: 10.0,
+        };
+        let dst = ColorStats {
+            mean_r: 180.0,
+            mean_g: 140.0,
+            mean_b: 90.0,
+            std_r: 40.0,
+            std_g: 30.0,
+            std_b: 20.0,
+        };
+
+        let xfer1 = compute_color_transfer(&src, &dst);
+        let xfer2 = compute_color_transfer(&src, &dst);
+
+        // All scale and offset values must be bit-identical (pure arithmetic)
+        assert_eq!(
+            xfer1.scale[0], xfer2.scale[0],
+            "R scale must be deterministic"
+        );
+        assert_eq!(
+            xfer1.scale[1], xfer2.scale[1],
+            "G scale must be deterministic"
+        );
+        assert_eq!(
+            xfer1.scale[2], xfer2.scale[2],
+            "B scale must be deterministic"
+        );
+        assert_eq!(
+            xfer1.offset[0], xfer2.offset[0],
+            "R offset must be deterministic"
+        );
+        assert_eq!(
+            xfer1.offset[1], xfer2.offset[1],
+            "G offset must be deterministic"
+        );
+        assert_eq!(
+            xfer1.offset[2], xfer2.offset[2],
+            "B offset must be deterministic"
+        );
+
+        // Sanity-check: the transfer must actually shift the R channel upward
+        // (src mean 120 → dst mean 180, so the transformed pixel should move up)
+        let pixel = xfer1.apply_pixel(100.0, 70.0, 50.0);
+        assert!(
+            pixel[0] > 100.0,
+            "R channel should shift toward dst mean (180 > 120)"
+        );
+    }
 }

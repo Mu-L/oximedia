@@ -36,9 +36,9 @@
 
 ## Performance
 - [x] Cache parsed dictionary entries to avoid re-parsing on repeated lookups (`dict_cache.rs`: LRU `DictCache`)
-- [ ] Use memory-mapped I/O for large structured storage files in `StorageReader`
-- [ ] Implement zero-copy byte slicing for essence data reading where possible
-- [ ] Add parallel mob/track parsing for large compositions with many tracks
+- [x] Use memory-mapped I/O for large structured storage files in `StorageReader`
+- [x] Implement zero-copy byte slicing for essence data reading where possible
+- [x] Add parallel mob/track parsing for large compositions with many tracks
 
 ## Testing
 - [x] Add round-trip test: create AAF -> write -> read -> verify all fields match

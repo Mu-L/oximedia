@@ -7,19 +7,357 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-07-14
+
+This is a production-readiness release: the default build is now **100% Pure
+Rust** end to end (verified — `aws-lc-sys`, `libsqlite3-sys`, `mlua-sys`,
+`shaderc-sys`, `zstd-sys`, `openssl-sys`, `rustfft`, and `realfft` are all
+absent from the default dependency graph), four real security vulnerabilities
+(cryptographic, denial-of-service, and SQL injection) inherited from earlier
+"demonstration" code were fixed, the algorithmic hardening from development
+Waves 21–30 lands for general use, and
+a new **`oximedia-web`** npm package brings four browser WebAssembly modules
+(scopes, colour, scale, quality) downstream of WebCodecs for the first time.
+
+### Security
+- **SRT payload encryption** (`oximedia-net::srt::crypto`): replaced a
+  homebrew XOR/byte-mixing "cipher" that provided no real confidentiality
+  with genuine **AES-128/192/256-CTR** (NIST SP 800-38A) via the vetted
+  RustCrypto `aes` + `ctr` crates. Key derivation replaced a toy
+  hash-and-extend construction with real **PBKDF2-HMAC-SHA256** (RFC 8018),
+  and salts now come from the process CSPRNG (`rand`) instead of a
+  timestamp-seeded LCG.
+- **HLS/DASH packager encryption key generation** (`oximedia-packager::encryption::KeyGenerator`):
+  `generate_aes128_key()`/`generate_iv()` now draw from the OS CSPRNG
+  (`rand::rngs::SysRng`) instead of deriving "random" bytes from
+  `SystemTime::now()`; `from_passphrase()` now uses real
+  PBKDF2-HMAC-SHA256 (100,000 rounds, salted) instead of a bare
+  `DefaultHasher` (SipHash, not designed for password hashing). Both
+  key-generation methods are now fallible (`PackagerResult<Vec<u8>>`) so a
+  CSPRNG failure is surfaced instead of silently producing predictable keys.
+- **MP4 sample-table parsing** (`oximedia-container::demux::mp4::boxes`):
+  `stts`/`stsc`/`stsz`/`stco`/`co64`/`stss`/`ctts` box parsers now validate
+  that the attacker-controlled 32-bit `entry_count`/`sample_count` field can
+  actually fit within the bytes remaining in the box *before* calling
+  `Vec::with_capacity`, closing a memory-exhaustion DoS where a ~20-byte
+  crafted file could trigger a multi-gigabyte allocation attempt.
+- **WebRTC DTLS-SRTP honestly demoted to Experimental** (`oximedia-net::webrtc::dtls`):
+  the module previously returned a "successful" handshake with an all-zero
+  SRTP master key/salt, silently transmitting media in plaintext under a
+  DTLS-protected label. `DtlsEndpoint::handshake()` and
+  `DtlsConnection::send`/`recv` now refuse (return an error) instead of
+  fabricating a connection, since no real DTLS 1.2 handshake or RFC 5764
+  SRTP key export is implemented yet. SDP fingerprint generation and
+  signaling are unaffected. **Do not use WebRTC media transport for
+  confidential media until this lands.**
+- **SQL injection in `oximedia-mam` smart-collection queries**
+  (`oximedia-mam::collection::CollectionManager::build_condition_sql`/
+  `execute_smart_query`): user-authored smart-collection filter conditions
+  (`QueryCondition::field`/`::value`, stored as JSON and replayed every time
+  the collection is viewed) were spliced directly into SQL text — `field`
+  was interpolated into the query with no validation at all (letting a
+  stored collection inject an arbitrary column or expression), and `value`
+  was embedded inside hand-rolled `'...'` string literals for the
+  `Equals`/`NotEquals`/`Contains`/`StartsWith`/`EndsWith` operators with no
+  escaping (a `'` in the value could break out of the literal). Fixed with a
+  new `ALLOWED_ASSET_COLUMNS` allowlist validating every user-supplied
+  `field`/`sort_by` identifier before interpolation (identifiers can never be
+  SQL bind parameters) and a `BindValue` enum that routes every condition
+  value through `sqlx`'s real parameter binding instead of string
+  formatting; surfaced while auditing call sites for sqlx 0.9's
+  `SqlSafeStr`/`AssertSqlSafe` gate.
+- `cargo-audit` advisories re-triaged for the new dependency set:
+  `RUSTSEC-2026-0049` (rustls-rustcrypto → rustls-webpki 0.102.8, reachable
+  only via oximedia-drm's non-default widevine/playready/fairplay features),
+  `RUSTSEC-2026-0174` (azure_core → http-types notice, no user-controlled
+  input reaches the affected constructors), and `RUSTSEC-2026-0192`
+  (unmaintained `ttf-parser` via fontdue/usvg font-rasterization chains,
+  application-supplied font assets only) documented in `audit.toml` with
+  unreachability rationale; the stale `RUSTSEC-2026-0002` (tantivy/ratatui →
+  `lru` unsound `IterMut`) ignore entry was removed now that it no longer
+  applies.
+- `cargo-audit`: `RUSTSEC-2026-0206` (`rustybuzz` unmaintained-crate notice,
+  not a scored vulnerability) added to `.cargo/audit.toml`'s ignore list with
+  documented unreachability rationale — reachable only via font-shaping/
+  rendering paths operating on application-supplied font assets (subtitle
+  rendering, SVG overlays), never attacker-controlled network input.
+
+### Changed
+- **Default build is now 100% Pure Rust.** All C/C++/Fortran dependencies
+  that used to be compiled unconditionally are now behind non-default,
+  opt-in Cargo features:
+  - `oximedia-server`/`oximedia-rights`: SQLite storage migrated from `sqlx`
+    (libsqlite3-sys, C) to **oxisql-sqlite-compat** (Pure Rust), via a
+    small `sqlx`-API-shaped compat shim so existing call sites needed
+    only an import-path change.
+  - `oximedia-accel`: real Vulkan compute (`vulkano`/`vulkano-shaders`, which
+    pull the shaderc/glslang C++ toolchain) gated behind the new
+    `vulkan-backend` feature (`vulkan-detect` now implies it); Pure-Rust CPU
+    fallback (and optional `webgpu`) is used by default.
+  - `oximedia-automation`: Lua scripting (`mlua`, which vendors the Lua 5.4
+    C interpreter) gated behind the new `lua-scripting` feature.
+  - `oximedia-cloud`: the official AWS SDK (`aws-sdk-*`, whose smithy TLS
+    stack only ships C-based crypto providers — `ring`/`aws-lc`/`s2n`) gated
+    behind the new `aws-sdk` feature; S3-compatible endpoints remain
+    available by default via `GenericStorage` (reqwest + rustls-rustcrypto).
+  - `oximedia-videoip`: QUIC transport (`quinn`, which requires `ring` or
+    `aws-lc-rs` since `rustls-rustcrypto` doesn't implement QUIC cipher
+    suites) gated behind the new `quic-quinn` feature.
+  - `tantivy` (oximedia-mam/search): default features trimmed to drop
+    `zstd-sys`-backed columnar compression, keeping Pure-Rust
+    `lz4-compression` only.
+  - `actix-web` (oximedia-server): default features trimmed to drop
+    `zstd`/`gzip`/`brotli` response compression (all C-backed).
+  - `azure_core`/`azure_storage`/`azure_storage_blobs`: migrated to the
+    unified `azure_storage_blob` 1.0 track with `default-features = false`
+    and explicit `reqwest` + `hmac_rust` (Pure-Rust HMAC via sha2/hmac,
+    replacing the openssl-backed default), closing the quick-xml
+    RUSTSEC-2026-0194/0195 chain pinned by the deprecated 0.21 track.
+  - `oximedia-audio`: the `rubato` resampler (which pulls `rustfft`/`realfft`)
+    replaced with a hand-written 100% Pure-Rust band-limited
+    windowed-sinc polyphase resampler (Blackman-Harris window, exact
+    rational-position accumulator for drift-free long streams, chunk-size
+    invariant output, explicit `flush()` for stream tails) — no FFT
+    dependency of any kind.
+- Added `[profile.release]` to the root `Cargo.toml`: `opt-level = 3`,
+  `lto = "thin"`, `codegen-units = 1`, `strip = true` for smaller, faster
+  release binaries across all ~109 crates.
+- `sqlx` workspace dependency trimmed from `["runtime-tokio", "sqlite"]` to
+  `["runtime-tokio", "postgres"]` (Postgres support is Pure Rust; SQLite use
+  sites migrate to `oxisql-sqlite-compat` instead).
+- `README.md`: added a "Live demos" section linking the OxiScope colour
+  pipeline demo and the new peer-to-peer **OxiLink** video-call project —
+  both running the same `oximedia-web` WebAssembly modules in production.
+- Root `Cargo.toml`: fifteen dependencies that were hardcoded identically
+  (or near-identically) across two or more member crates' `Cargo.toml`
+  files — `approx`, `csv`, `dirs`, `encoding_rs`, `flume`, `futures-util`,
+  `jsonwebtoken` (`rust_crypto` feature), `mockito`, `num-traits`,
+  `pin-project`, `protox`, `reed-solomon-erasure`, `tonic-build`,
+  `tonic-prost-build`, `unicode-segmentation` — centralized into
+  `[workspace.dependencies]` for consistent version resolution across the
+  workspace.
+
 ### Added
-- Wave 20: Speech-clarity DSP (biquad peaking + DRC + band-pass), contrast LUT SIMD (oximedia-access)
-- Wave 20: Tiled cache-blocked scaling `scale_tiled()` + `scale_reference()` bit-exact oracle (oximedia-scaling)
-- Wave 20: DataCite 4.x DOI emitter/parser, PBCore 2.1 crosswalk, `MigrationTriggerPolicy` (oximedia-archive-pro)
-- Wave 20: `batch_conform()` multi-EDL timeline merge, `ProxyDbExport`/`import_with_rebase()` (oximedia-proxy)
-- Wave 20: `SegmentPlan` + `encode_segments_parallel()` rayon-based parallel encoding (oximedia-convert)
-- Wave 20: rFFT phase-correlation via `oxifft::rfft`/`irfft` (oximedia-align)
-- Wave 20: `AnalysisScale {Full,Half,Quarter}` + `downsample_box_luma()` (oximedia-analysis)
-- Waves 12–19: SILK LTP coarse-to-fine + contour RD + fractional-lag; CDN R-tree geo-routing; compat-ffmpeg splitrs + 67 tests; core SIMD pixel conversion + work-stealing WorkQueue + AlignedVec; VMAF/SSIM/temporal-PSNR quality metrics; NDI FramePool + parallel SpeedHQ; denoise deep-image-prior; timecode 47.952/120fps + Manchester SIMD; bloom-filter conform matching; EDL lazy parse + SmallVec; buffer-pool pressure callbacks + media-time estimation; face blur/obscurity detection; histogram cache; parallel sub-analyzers; FunDSP adapter; IMF versioning + lazy CPL; multicam angle-score cache; timeline asymmetric transitions; batch QC early-term + frame cache; incremental render + prefetch; pilot-tone + Wiener SIMD; bandwidth trigger + FEC XOR SIMD; farm heartbeat batch; scene/playout classification temporal
+- **`oximedia-web`** (`web/`): a new nested Cargo workspace + npm package
+  (`@cooljapan/oximedia-web`, unpublished — packaging is prepared, publish
+  is pending explicit instruction) providing four independent,
+  tree-shakeable WebAssembly modules downstream of the browser's own
+  WebCodecs decoder — `scopes` (waveform/vectorscope/histogram/
+  false-colour), `color` (exposure/contrast/saturation, tone-mapping,
+  gamut mapping, 3D LUT), `scale` (Lanczos3/Catmull-Rom/Mitchell/bilinear
+  resampling), and `quality` (PSNR/SSIM). Ported, dependency-free
+  `f32`/`u8` kernels (no `rayon`/`scirs2`/`f64` data planes), each crate
+  `#![forbid(unsafe_code)]`, no COOP/COEP requirement, all four modules
+  comfortably under their gzip size budgets (150,072 B measured combined
+  vs. a 512,000 B soft budget, 29% — re-measured after the kernel perf
+  retune below; see `web/README.md`'s size table for the per-module
+  breakdown). Ships with the OxiScope colorist demo
+  (`web/demo/`, grading + four live scopes fed from the graded output) and
+  a reproducible benchmark harness (`web/bench/`, headless-Chrome driven,
+  zero committed/hard-coded numbers) plus four local CI-gate shell scripts
+  (`build.sh`, `size-gate.sh`, `dep-gate.sh`, `serve.sh`) — no GitHub
+  Actions workflow. See [`web/README.md`](web/README.md) and
+  [`web/TODO.md`](web/TODO.md).
+- `oximedia-web`'s public JS/TS surface (`web/js/`): hand-written ES-module
+  wrappers (`_frame.js`, `color.js`, `quality.js`, `scale.js`, `scopes.js`,
+  ~1,900 lines combined) plus matching hand-written `.d.ts` type
+  declarations wrap each crate's raw `wasm-bindgen` glue in an idiomatic,
+  tree-shakeable API — this, not the raw wasm-bindgen output, is what
+  `@cooljapan/oximedia-web`'s four subpath exports (`./scopes`, `./color`,
+  `./scale`, `./quality` in `web/package.json`) actually resolve to.
+  `web/deny.toml` (a `cargo-deny` config scoped to the `web/` nested
+  workspace — license allowlist plus the `wasm32-unknown-unknown`/
+  `x86_64-unknown-linux-gnu`/`aarch64-apple-darwin` target graph) and
+  `web/allowed-deps.txt` (the exact-name crate allowlist `dep-gate.sh`
+  diffs against) enforce the "no `rayon`/`scirs2`/heavyweight dependency"
+  constraint at CI-gate time, not just by convention.
+- `rust-toolchain.toml` pinning `channel = "stable"` with `rustfmt`/`clippy`
+  components, for reproducible CI and local builds.
+- `CONTRIBUTING.md`, `SECURITY.md`, and `CODE_OF_CONDUCT.md` at the repo root.
+- Per-crate opt-in Cargo features documented above (`vulkan-backend`,
+  `lua-scripting`, `aws-sdk`, `quic-quinn`) so downstream users can restore
+  the C-backed fast paths deliberately, without them leaking into the
+  default build.
+- Ten new `cargo-fuzz` targets in `fuzz/fuzz_targets/` — `aaf_parser`,
+  `ass_parser`, `exr_parser`, `ffv1_decoder`, `jpegxl_decoder`, `srt_parser`,
+  `tiff_parser`, `ttml_parser`, `webvtt_parser`, `y4m_parser` — extending
+  malformed-input fuzz coverage to the AAF/ASS/OpenEXR/FFV1/JPEG XL/SubRip/
+  TIFF/TTML/WebVTT/Y4M parsers, alongside the pre-existing DASH/FLAC/Opus/
+  RTMP/Vorbis targets.
+- `oximedia` facade crate: `oximedia/src/lib.rs` gained three real,
+  `cargo test --doc`-executed doctests (probing + `dedup`, `transcode`
+  config + `quality` PSNR assessment, and a `prelude` quick-start), a
+  per-example "Cookbook" table cross-referencing each `examples/*.rs` file
+  to the Cargo feature(s) it needs, and a doc-link to the underlying
+  `oximedia_*` crate on every feature-gated re-export module;
+  `oximedia/examples/ffmpeg_translate_demo.rs` demonstrates translating an
+  FFmpeg command line into an OxiMedia transcode job via the
+  `compat-ffmpeg` feature; `oximedia/tests/feature_matrix.rs` is a
+  compile-only harness proving every Cargo feature flag builds
+  independently (`cargo check --no-default-features --features <flag>` per
+  flag, parsed straight out of the crate's own `Cargo.toml`);
+  `oximedia/tests/prelude_smoke.rs` verifies `prelude::*` is usable with
+  zero optional features enabled; and `oximedia/tests/integration.rs` adds
+  cross-feature subsystem tests (always-on `OxiError`/`OxiResult`/
+  `probe_format` coverage for Matroska and MP4 headers, plus feature-gated
+  `quality`/`timecode`/`metering`/`archive` and combined `search`+`quality`
+  suites).
+- `oximedia-cli/tests/cli.rs`: a 267-line core end-to-end CLI smoke suite —
+  `--version`/`version`/`version --json` reporting, top-level `--help`,
+  invalid-subcommand error handling, and a real `probe` run against a
+  synthetic WAV file written to `std::env::temp_dir()` — alongside the
+  pre-existing, more granular `cli_help.rs`/`cli_help_per_command.rs`/
+  `probe_json_snapshot.rs`/`exit_code_smoke.rs` suites.
+- `oximedia` facade crate: `[package.metadata.docs.rs]` added to
+  `oximedia/Cargo.toml` (`all-features = true`, `rustdoc-args = ["--cfg",
+  "docsrs"]`) so the published docs.rs build renders every optional
+  feature, with `doc_cfg` feature-availability badges, instead of only the
+  defaults.
 
 ### Fixed
-- SILK NSQ 440 Hz SNR thresholds corrected to match actual round-trip floor (~5.20 dB)
-- proxy_sync.rs dead-code silencers removed
+- Repo hygiene: removed tracked build-artifact droppings that should never
+  have been committed (`crates/oximedia-core/src/hdr/mod.rs.orig`/`.rej`
+  patch-reject files, `crates/oximedia-proxy/Cargo.toml.bak`,
+  `crates/oximedia-simd/Cargo.toml.bak`, `crates/oximedia-playout/IMPLEMENTATION_SUMMARY.md`,
+  a generated `doc/` rustdoc output tree, and an orphaned
+  `linker-scripts/glibc_compat.lds` — a `PROVIDE()`-based shim aliasing ISO
+  C23 `strtol`/`strtoll`/`strtoull` symbols for a pre-compiled ONNX Runtime
+  object on glibc <2.38, unreferenced by any current build script).
+- **Root workspace tokio feature-unification** (`Cargo.toml`): pinning
+  `tokio = { features = ["full"] }` at the workspace root was silently
+  unioning `"full"` (via Cargo's workspace feature-unification) into every
+  member that declares a `tokio` dependency, including `oximedia-graph` —
+  the sole `tokio` consumer reachable from the `oximedia-wasm` wasm32
+  build graph — pulling in `mio` (`"full"` → `"net"` → `mio`) and breaking
+  `cargo check -p oximedia-wasm --target wasm32-unknown-unknown`. Root pin
+  lowered to `default-features = false` with an explicit feature list on
+  every tokio-declaring member (`oximedia-graph` gets the minimal
+  `net`-free set; every other member keeps an exact superset of its prior
+  union-derived features, zero behavioural change); the wasm32 `mio`
+  blocker is resolved.
+- **`oximedia-wasm` data-plane and decoder honesty** (`oximedia-wasm/`):
+  `Float64Array`-crossing `#[wasm_bindgen]` APIs (colour-management
+  buffers, HDR EOTF/OETF buffers, `audiopost_wasm::wasm_mix_audio`)
+  converted to `f32`/`u8`; `webcodecs_bridge.rs`'s JSON-string hot-path
+  methods (`get_video_decoder_config`, `oximedia_packet_to_encoded_chunk`)
+  replaced with typed getter classes; the standalone `WasmVp8Decoder`,
+  `WasmAv1Decoder`, and `WasmVorbisDecoder` classes removed — each wrapped
+  a decoder that produced no real output (error, unpopulated buffers, or a
+  synthetic-format-only round-trip), so shipping them was dishonest;
+  `oximedia-stabilize`/`oximedia-imf`/`oximedia-aaf`/`oximedia-analytics`
+  (unused) dependencies and a dead `/tmp`-path line pruned; the orphaned
+  `hdr_wasm`/`lut_wasm`/`spatial_wasm` modules wired into `lib.rs` (with
+  their own f64→f32 conversion); `wasm-opt` re-enabled (`-Oz`); npm
+  packaging (`build.sh`/`build-dev.sh`/`npm-publish.yml`) and `README.md`
+  corrected so only `pkg-bundler`'s `@cooljapan/oximedia` is presented as
+  published/installable — `pkg-web`/`pkg-node` are documented as
+  unpublished local build artifacts. Native check/clippy(`-D
+  warnings`)/test are clean, and the wasm32 target now compiles: the two
+  `#[cfg(target_arch = "wasm32")]` `RequestAdapterOptions` initializers in
+  `crates/oximedia-gpu/src/device.rs` were missing the `apply_limit_buckets`
+  field required by `wgpu` 30.0 (the native path already set it), so
+  `cargo check -p oximedia-wasm --target wasm32-unknown-unknown` failed;
+  both browser paths now set `apply_limit_buckets: true` (limit-bucketing is
+  a browser GPU-fingerprinting mitigation), restoring the `oximedia-gpu`
+  wasm32 build reached transitively via `oximedia-colormgmt`'s default
+  `gpu-accel` feature.
+- **wasm32 warnings-zero sweep**: `cargo check -p oximedia-wasm --target
+  wasm32-unknown-unknown` and `cargo clippy --target wasm32-unknown-unknown
+  -- -D warnings` across `oximedia-gpu`, `oximedia-convert`,
+  `oximedia-dolbyvision`, `oximedia-container`, `oximedia-monitor`, and
+  `oximedia-batch` are now clean (0 warnings, native and wasm32 alike):
+  unreachable-expression fixes in `oximedia-convert`, cfg-gated unused
+  constants in `oximedia-dolbyvision`, a genuine `Shared<T>` type-alias
+  split (`Rc` on `wasm32`, `Arc` elsewhere) resolving `arc_with_non_send_sync`
+  in `oximedia-gpu` plus matching `apply_limit_buckets: false` wasm32
+  semantics, and matching consumer-tied cfg-gates in `oximedia-container` /
+  `oximedia-monitor` / `oximedia-batch`. `docs/simd_dispatch.md`'s
+  "SSE4.2 fallback" section corrected: it no longer claims WASM SIMD128
+  "falls to SSE4.2 paths in `x86.rs`" (that module is
+  `core::arch::x86_64`-gated and never compiles on `wasm32`); it now
+  forward-references the doc's own WASM SIMD128 section instead.
+- `oximedia-server`: 13 production `.expect()`/`.unwrap()` call sites removed
+  across `admin.rs`, `rtmp/server.rs`, `webhooks.rs`, and `db.rs` — replaced
+  with proper error propagation or infallible-by-construction rewrites (e.g.
+  indexing the element just pushed instead of `.last().expect(...)`,
+  constructing default socket addresses instead of `"...".parse().expect(...)`).
+- **`oximedia-mam` list-filter bind-parameter mismatch**
+  (`AssetManager::list` in `asset.rs`, `AuditLogger::query_logs` in
+  `audit.rs`): every optional filter (`mime_type`/`min_duration`/
+  `max_duration`/`status`/`created_by` for assets; all 7 `AuditLogFilter`
+  fields for audit logs) appended its `$N` placeholder to the query text
+  but was never actually passed to `.bind()` — `audit.rs`'s `bindings` Vec
+  only compiled because `user_id`/`resource_id` happen to share a type, and
+  even that Vec was never bound. Any call supplying so much as one filter
+  would have failed at execution time with a bind-parameter count
+  mismatch. Replaced with a `bind_filters!` macro binding each present
+  field in the exact order its placeholder was appended; a pre-existing bug
+  unrelated to any dependency version, surfaced while auditing these call
+  sites for sqlx 0.9's `SqlSafeStr` gate (`sqlx::AssertSqlSafe` now wraps
+  both dynamically-built query strings, whose only dynamic content is the
+  bound `$N` placeholders).
+- Version metadata (`workspace.package.version`, all 108 crate path-dependency
+  version pins) bumped `0.1.8` → `0.1.9`.
+- **`oxiarc-*` dependency family realigned at `0.3.6`** (`Cargo.toml`):
+  `oxiarc-archive`, `oxiarc-deflate`, `oxiarc-lz4`, and `oxiarc-zstd` bumped
+  `0.3.5` → `0.3.6`. `oxiarc-archive` 0.3.6 calls APIs added in its own
+  transitive siblings (`oxiarc-brotli`/`oxiarc-bzip2`/`oxiarc-lzma`/
+  `oxiarc-snappy`/`oxiarc-core`/`oxiarc-lzhuf`) at the same `0.3.6` release;
+  crates.io confirms all of them published `0.3.6` within the same few
+  minutes on 2026-07-13 (siblings first, `oxiarc-archive` last, respecting
+  publish dependency order), and `Cargo.lock` now resolves the whole family
+  at a uniform `0.3.6`, unblocking `cargo build` for `oximedia-archive-pro`,
+  `oximedia-batch`, `oximedia-convert`, `oximedia-cli`, `oximedia-py`, and
+  `oximedia-wasm`.
+- `oximedia-transcode`: the `TranscodeCache` module-doc example passed a
+  `PathBuf` (`std::env::temp_dir().join(...)`) directly to
+  `TranscodeCache::insert`, which takes `output_path: String` — the doctest
+  did not compile. Fixed with `.to_string_lossy().into_owned()`.
+
+### Improved
+- **`oximedia-web` WASM kernel perf retune**: `scopes`/`color`/`scale`
+  per-frame kernels retuned — `scale`'s Lanczos3 h-pass monomorphised over
+  a const tap-count span with a 2-bank FMA accumulator (the prior
+  runtime-tap-count loop broke the FMA latency chain) plus a 4-tap-fused
+  v-pass and a bit-exact opaque-frame premultiply skip; `color`'s 3D LUT
+  path repacked to u64 lattice points (1 load/corner), a branchless
+  Sakamoto tetrahedron select, and a bit-identical last-pixel memo;
+  `scopes` killed per-pixel function-pointer YCbCr dispatch, added
+  vectorised row-buffer conversion and run-collapsed scatter accumulation
+  for the vectorscope/histogram, and gained a `Scopes.load_frame` +
+  `*_current()` API so a caller pays one frame-boundary copy per frame
+  instead of four. wasm SIMD128 confirmed real via `wasm-dis` v128-op
+  counts (hundreds per module, not just the codegen flag). Measured via
+  `web/bench/run.sh` (headless Chrome 150, median of 60, macOS, this
+  machine): `scopes` all-four-combined ~13.0–13.25 ms (≤16 ms budget
+  target: **met**; ≤8 ms stretch goal: not met), `color`
+  exposure+ACES+LUT33 ~24.9–25.1 ms (≤12 ms target: **not met**, ~3.7x
+  faster than the pre-retune baseline), `scale` Lanczos3 4K→1080p
+  ~51.8–52.25 ms (≤40 ms target: **not met**, ~5.4x faster). Total gzip
+  across all four modules + glue held at 150,072 B / 512,000 B soft budget
+  (29%) despite the kernel work. See `web/README.md`'s "Measured
+  performance" section for the full table and `web/TODO.md` for the
+  itemized remaining gaps (`color`/`scale` targets, both attributed to
+  `VideoFrame` copy/acquisition cost rather than the wasm kernel itself).
+
+### Development waves 21–30 (algorithmic hardening)
+- **oximedia-calibrate**: flagship fix — the ICC/display color-matrix solver
+  now performs a real least-squares 3×3 color matrix fit (`B·A⁻¹` via a 3×3
+  adjugate inverse with a condition-number/rank-deficiency guard),
+  replacing an identity-matrix stub; verified against known-answer fixtures
+  at ΔE2000 < 2.0.
+- Six pre-existing bugs fixed across the audio/video pipeline: `oximedia-restore`
+  Wiener-filter gain (~14 dB error) and wow/flutter destructive processing,
+  `oximedia-audio-analysis` Hann-window and 2048× synthesis attenuation,
+  `oximedia-graph` node-collision on merge, and related SILK NSQ 440 Hz SNR
+  threshold correction (now matches the actual round-trip floor, ~5.2 dB).
+- `oximedia-proxy`: frequency/recency-aware cache warming (`ProxyCacheWarmer`);
+  `oximedia-align`: bit-exact cross-frame descriptor cache for feature
+  matching; `oximedia-search`: reusable P@k/R@k/AP/MAP evaluation harness.
+  `oximedia-forensics`: perceptual-hash nearest-neighbor search wired in.
+- Extensive test hardening across `gpu`, `neural`, `stream`, `video`,
+  `multicam`, `normalize`, `container`, `captions`, and other crates —
+  combined test gate green with 0 clippy warnings at each wave checkpoint.
 
 ## [0.1.8] - 2026-06-02
 
@@ -417,7 +755,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `oximedia-wasm` — WebAssembly bindings
 - `oximedia-cli` — command-line interface
 
-[Unreleased]: https://github.com/cool-japan/oximedia/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/cool-japan/oximedia/compare/v0.1.9...HEAD
+[0.1.9]: https://github.com/cool-japan/oximedia/compare/v0.1.8...v0.1.9
 [0.1.2]: https://github.com/cool-japan/oximedia/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/cool-japan/oximedia/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/cool-japan/oximedia/releases/tag/v0.1.0

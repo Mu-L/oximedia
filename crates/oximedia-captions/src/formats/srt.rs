@@ -220,7 +220,7 @@ pub fn parse_srt_nom(input: &str) -> Result<Vec<SrtCueRef<'_>>> {
 /// Fast SRT parser that uses nom timestamp parsing internally but still
 /// produces an owned [`CaptionTrack`].  The intermediate
 /// `.lines().collect::<Vec<&str>>()` allocation present in the original
-/// [`parse_srt`] is replaced by a zero-alloc nom pass for the timestamp line,
+/// `parse_srt` is replaced by a zero-alloc nom pass for the timestamp line,
 /// and block splitting avoids an extra owned-string copy.
 pub fn fast_parse_srt(text: &str) -> Result<CaptionTrack> {
     let mut track = CaptionTrack::new(Language::english());

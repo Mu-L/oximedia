@@ -38,9 +38,9 @@
 ## Testing
 - [ ] Add conformance tests with known-good RPU bitstreams from reference tools
 - [ ] Test all profile conversions in `profile_convert.rs` with real-world metadata samples
-- [ ] Add fuzz testing for `parser.rs` to verify robustness against malformed RPU data
+- [x] Add fuzz testing for `parser.rs` to verify robustness against malformed RPU data
 - [ ] Test `tone_mapping.rs` output against reference DV display management pipeline
-- [ ] Add round-trip tests for all Level metadata types (L1 through L11)
+- [x] Add round-trip tests for all Level metadata types (L1 through L11)
 - [ ] Test `xml_metadata.rs` parsing against Dolby Vision XML specification samples
 
 ## Documentation

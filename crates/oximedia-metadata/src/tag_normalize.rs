@@ -8,6 +8,26 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::OnceLock;
+
+/// The forward and reverse default-mapping tables, built exactly once.
+///
+/// `with_defaults()` / `default()` previously rebuilt all ~63 default mappings
+/// on *every* construction. Building them once into this process-wide
+/// `OnceLock` and cloning the (small, owned) maps keeps behaviour identical
+/// while eliminating the repeated insert work and string allocations.
+type ForwardMap = HashMap<(TagFormat, String), CanonicalTag>;
+type ReverseMap = HashMap<(TagFormat, CanonicalTag), String>;
+static DEFAULT_MAPPINGS: OnceLock<(ForwardMap, ReverseMap)> = OnceLock::new();
+
+/// Return the shared default mapping tables, initializing them on first use.
+fn default_mappings() -> &'static (ForwardMap, ReverseMap) {
+    DEFAULT_MAPPINGS.get_or_init(|| {
+        let mut n = TagNormalizer::new();
+        n.register_defaults();
+        (n.forward, n.reverse)
+    })
+}
 
 /// Canonical tag categories for cross-format normalization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -140,10 +160,16 @@ impl TagNormalizer {
     }
 
     /// Create a normalizer pre-populated with standard mappings.
+    ///
+    /// The default mapping tables are built once per process (see
+    /// `default_mappings`) and cloned here, rather than re-registering all
+    /// ~63 default entries on every call.
     pub fn with_defaults() -> Self {
-        let mut n = Self::new();
-        n.register_defaults();
-        n
+        let (forward, reverse) = default_mappings();
+        Self {
+            forward: forward.clone(),
+            reverse: reverse.clone(),
+        }
     }
 
     /// Register a single mapping.
@@ -521,5 +547,74 @@ mod tests {
     fn test_normalizer_default_trait() {
         let n = TagNormalizer::default();
         assert!(n.mapping_count() > 0);
+    }
+
+    #[test]
+    fn test_default_mapping_count_is_stable() {
+        // The shared (OnceLock) default tables must always yield the same number
+        // of forward mappings: ID3v2 (16) + Vorbis (18) + iTunes (13) + APE (16).
+        const EXPECTED_FORWARD: usize = 63;
+        let a = TagNormalizer::with_defaults();
+        let b = TagNormalizer::with_defaults();
+        assert_eq!(a.mapping_count(), EXPECTED_FORWARD);
+        assert_eq!(b.mapping_count(), EXPECTED_FORWARD);
+        // Two independent constructions must agree on both directions.
+        assert_eq!(a.forward.len(), b.forward.len());
+        assert_eq!(a.reverse.len(), b.reverse.len());
+    }
+
+    #[test]
+    fn test_default_normalizer_constructed_twice_equal_behavior() {
+        // Build the default normalizer twice; the OnceLock-shared tables must
+        // produce identical normalization for a known input across both.
+        let first = TagNormalizer::with_defaults();
+        let second = TagNormalizer::default();
+
+        // Forward: a known ID3v2 frame key -> canonical tag, on both.
+        assert_eq!(
+            first.normalize(TagFormat::Id3v2, "TPE2"),
+            Some(CanonicalTag::AlbumArtist)
+        );
+        assert_eq!(
+            second.normalize(TagFormat::Id3v2, "TPE2"),
+            Some(CanonicalTag::AlbumArtist)
+        );
+
+        // Case-insensitive Vorbis lookup, on both.
+        assert_eq!(
+            first.normalize(TagFormat::Vorbis, "albumartist"),
+            Some(CanonicalTag::AlbumArtist)
+        );
+        assert_eq!(
+            second.normalize(TagFormat::Vorbis, "ALBUMARTIST"),
+            Some(CanonicalTag::AlbumArtist)
+        );
+
+        // Reverse: canonical -> preferred key, on both.
+        assert_eq!(
+            first.denormalize(TagFormat::ITunes, CanonicalTag::Title),
+            Some("\u{00a9}nam")
+        );
+        assert_eq!(
+            second.denormalize(TagFormat::ITunes, CanonicalTag::Title),
+            Some("\u{00a9}nam")
+        );
+    }
+
+    #[test]
+    fn test_with_defaults_clone_is_independent() {
+        // A normalizer cloned from the shared tables must be independently
+        // mutable: registering a custom mapping on one must not affect another.
+        let mut a = TagNormalizer::with_defaults();
+        let base = a.mapping_count();
+        a.register(TagMapping::new(
+            TagFormat::Id3v2,
+            "TXXX:CUSTOM",
+            CanonicalTag::Comment,
+        ));
+        let b = TagNormalizer::with_defaults();
+        assert_eq!(a.mapping_count(), base + 1);
+        assert_eq!(b.mapping_count(), base);
+        assert!(b.normalize(TagFormat::Id3v2, "TXXX:CUSTOM").is_none());
     }
 }

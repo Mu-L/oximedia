@@ -7,7 +7,8 @@
 //!
 //! # Design
 //!
-//! A [`ChapterList`] is the central store.  Each [`Chapter`] carries:
+//! A [`crate::chapter_navigator::ChapterList`] is the central store.  Each
+//! [`crate::chapter_navigator::Chapter`] carries:
 //! - A unique numeric ID
 //! - A start time in milliseconds
 //! - An optional end time (inferred from the next chapter if omitted)
@@ -15,9 +16,10 @@
 //! - An optional accessible title for screen readers that differs from the
 //!   visible title (e.g. a richer description)
 //! - An optional textual summary used to preview content before navigation
-//! - An optional content-type hint (see [`ChapterContentType`])
+//! - An optional content-type hint (see [`crate::chapter_navigator::ChapterContentType`])
 //!
-//! The [`ChapterNavigator`] wraps a [`ChapterList`] and tracks a "current"
+//! The [`crate::chapter_navigator::ChapterNavigator`] wraps a
+//! [`crate::chapter_navigator::ChapterList`] and tracks a "current"
 //! position so callers can implement prev/next navigation without storing
 //! state themselves.
 

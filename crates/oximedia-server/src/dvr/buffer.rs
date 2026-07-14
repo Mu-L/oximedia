@@ -103,11 +103,13 @@ impl DvrBuffer {
             // Check if we should finalize this segment
             let duration_ms = segment.end_timestamp - segment.start_timestamp;
             if duration_ms >= self.config.segment_duration.as_millis() as u64 {
-                // Finalize segment
-                let finished_segment = current
-                    .take()
-                    .expect("invariant: current is Some inside if let Some block");
-                self.finalize_segment(finished_segment);
+                // Finalize segment. `current` is provably `Some` here (we are
+                // inside the `if let Some(segment) = current.as_mut()` arm
+                // above), but we still match instead of `.expect()`-ing so
+                // this path can never panic even under future refactors.
+                if let Some(finished_segment) = current.take() {
+                    self.finalize_segment(finished_segment);
+                }
             }
         }
     }

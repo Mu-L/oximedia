@@ -189,9 +189,25 @@ impl std::fmt::Display for CredentialStoreError {
 /// let found = store.get("prod-s3").expect("lookup must succeed");
 /// assert_eq!(found.key_id, "AKIA…");
 /// ```
-#[derive(Debug, Default)]
 pub struct CredentialStore {
     entries: HashMap<String, CloudCredential>,
+    /// Stored refresh hooks keyed by credential name.
+    refreshers: HashMap<String, Box<dyn Fn() -> CloudCredential + Send + Sync>>,
+}
+
+impl std::fmt::Debug for CredentialStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialStore")
+            .field("entries", &self.entries)
+            .field("refreshers_count", &self.refreshers.len())
+            .finish()
+    }
+}
+
+impl Default for CredentialStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CredentialStore {
@@ -199,6 +215,7 @@ impl CredentialStore {
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
+            refreshers: HashMap::new(),
         }
     }
 
@@ -209,6 +226,68 @@ impl CredentialStore {
         }
         self.entries.insert(cred.name.clone(), cred);
         Ok(())
+    }
+
+    /// Register a credential together with a refresh hook.
+    ///
+    /// The `refresher` closure is called automatically by [`get_fresh`] when the
+    /// stored credential will expire within the requested `refresh_window`.
+    ///
+    /// Returns an error if a credential with the same name already exists.
+    ///
+    /// [`get_fresh`]: CredentialStore::get_fresh
+    pub fn register_with_refresher<F>(
+        &mut self,
+        cred: CloudCredential,
+        refresher: F,
+    ) -> Result<(), CredentialStoreError>
+    where
+        F: Fn() -> CloudCredential + Send + Sync + 'static,
+    {
+        let name = cred.name.clone();
+        self.register(cred)?;
+        self.refreshers.insert(name, Box::new(refresher));
+        Ok(())
+    }
+
+    /// Retrieve a credential, proactively refreshing it when it falls inside
+    /// `refresh_window`.
+    ///
+    /// If a refresh hook was registered via [`register_with_refresher`] and the
+    /// credential will expire within `refresh_window` (or is already expired),
+    /// the hook is invoked and the returned credential is the newly refreshed
+    /// one.  If no hook is registered the current credential is returned as-is
+    /// (the caller may still receive a [`CredentialStoreError::Expired`] error if the
+    /// credential has already elapsed).
+    ///
+    /// Returns [`CredentialStoreError::NotFound`] when no credential exists
+    /// under `name`.
+    ///
+    /// [`register_with_refresher`]: CredentialStore::register_with_refresher
+    pub fn get_fresh(
+        &mut self,
+        name: &str,
+        refresh_window: Duration,
+    ) -> Result<&CloudCredential, CredentialStoreError> {
+        // Determine whether a refresh is warranted.
+        let needs_refresh = self
+            .entries
+            .get(name)
+            .map(|c| c.expires_within(refresh_window) || c.is_expired())
+            .unwrap_or(false);
+
+        if needs_refresh {
+            // Invoke the refresher outside of the borrow on `self.entries`.
+            if let Some(refresher) = self.refreshers.get(name) {
+                let new_cred = refresher();
+                self.entries.insert(name.to_string(), new_cred);
+            }
+        }
+
+        // Delegate to the regular (expiry-checking) get.
+        self.entries
+            .get(name)
+            .ok_or_else(|| CredentialStoreError::NotFound(name.to_string()))
     }
 
     /// Retrieve a credential by name.
@@ -422,5 +501,125 @@ mod tests {
         assert!(CredentialStoreError::AlreadyExists("k".to_string())
             .to_string()
             .contains("already exists"));
+    }
+
+    // ── get_fresh tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_get_fresh_returns_existing_when_not_near_expiry() {
+        use std::sync::{Arc, Mutex};
+
+        let call_count = Arc::new(Mutex::new(0u32));
+        let counter = Arc::clone(&call_count);
+
+        let mut store = CredentialStore::new();
+        let cred = make_cred("long-lived").with_ttl(Duration::from_secs(3600));
+        store
+            .register_with_refresher(cred, move || {
+                let mut n = counter.lock().expect("lock must not be poisoned");
+                *n += 1;
+                CloudCredential::new(
+                    "long-lived",
+                    CredentialType::StaticKey,
+                    "refreshed_key",
+                    "refreshed_secret",
+                )
+                .with_ttl(Duration::from_secs(3600))
+            })
+            .expect("register_with_refresher must succeed");
+
+        // refresh_window is only 5 seconds; credential has 3600 s remaining.
+        let found = store
+            .get_fresh("long-lived", Duration::from_secs(5))
+            .expect("should return credential");
+        assert_eq!(found.key_id, "key_id");
+        assert_eq!(*call_count.lock().expect("lock must not be poisoned"), 0);
+    }
+
+    #[test]
+    fn test_get_fresh_calls_refresher_when_within_window() {
+        use std::sync::{Arc, Mutex};
+
+        let call_count = Arc::new(Mutex::new(0u32));
+        let counter = Arc::clone(&call_count);
+
+        let mut store = CredentialStore::new();
+        // Credential expires in 5 seconds — well within a 10 s window.
+        let cred = make_cred("short-lived").with_ttl(Duration::from_secs(5));
+        store
+            .register_with_refresher(cred, move || {
+                let mut n = counter.lock().expect("lock must not be poisoned");
+                *n += 1;
+                CloudCredential::new(
+                    "short-lived",
+                    CredentialType::BearerToken,
+                    "new_key",
+                    "new_token",
+                )
+                .with_ttl(Duration::from_secs(3600))
+            })
+            .expect("register_with_refresher must succeed");
+
+        let found = store
+            .get_fresh("short-lived", Duration::from_secs(10))
+            .expect("should return refreshed credential");
+
+        assert_eq!(found.key_id, "new_key");
+        assert_eq!(found.secret, "new_token");
+        assert_eq!(*call_count.lock().expect("lock must not be poisoned"), 1);
+    }
+
+    #[test]
+    fn test_get_fresh_no_refresher_returns_existing_cred() {
+        let mut store = CredentialStore::new();
+        store
+            .register(make_cred("no-refresher").with_ttl(Duration::from_secs(3600)))
+            .expect("register must succeed");
+
+        let found = store
+            .get_fresh("no-refresher", Duration::from_secs(60))
+            .expect("should return existing credential");
+        assert_eq!(found.name, "no-refresher");
+    }
+
+    #[test]
+    fn test_get_fresh_expired_cred_with_refresher_refreshes() {
+        use std::sync::{Arc, Mutex};
+
+        let call_count = Arc::new(Mutex::new(0u32));
+        let counter = Arc::clone(&call_count);
+
+        let mut store = CredentialStore::new();
+        // TTL of 1 ns guarantees the credential is expired immediately.
+        let cred = make_cred("expired-cred").with_ttl(Duration::from_nanos(1));
+        store
+            .register_with_refresher(cred, move || {
+                let mut n = counter.lock().expect("lock must not be poisoned");
+                *n += 1;
+                CloudCredential::new(
+                    "expired-cred",
+                    CredentialType::BearerToken,
+                    "fresh_key",
+                    "fresh_token",
+                )
+                .with_ttl(Duration::from_secs(3600))
+            })
+            .expect("register_with_refresher must succeed");
+
+        let found = store
+            .get_fresh("expired-cred", Duration::from_secs(30))
+            .expect("should return freshly minted credential");
+
+        assert_eq!(found.key_id, "fresh_key");
+        assert_eq!(*call_count.lock().expect("lock must not be poisoned"), 1);
+    }
+
+    #[test]
+    fn test_get_fresh_unknown_name_returns_error() {
+        let mut store = CredentialStore::new();
+        let err = store
+            .get_fresh("nonexistent", Duration::from_secs(60))
+            .unwrap_err();
+        assert!(matches!(err, CredentialStoreError::NotFound(_)));
     }
 }

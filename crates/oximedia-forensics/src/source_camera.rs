@@ -5,6 +5,41 @@
 //! noise fingerprints (PRNU), lens aberration patterns, color filter
 //! array (CFA) interpolation artifacts, and other device-specific
 //! characteristics.
+//!
+//! # Methodology
+//!
+//! [`build_prnu_fingerprint`] extracts a device's PRNU pattern from a set of
+//! reference images by high-pass filtering ([`extract_noise_residual`]) and
+//! averaging out scene content, leaving the sensor's fixed-pattern
+//! signature. [`PrnuDatabase`] then matches an unknown image's residual
+//! against enrolled [`PrnuCameraFingerprint`]s via normalized correlation
+//! ([`PrnuMatchResult`]) to attribute a source device — the same underlying
+//! technique used for tamper localization in [`crate::noise`] and
+//! [`crate::noise_analysis`], but applied device-wise rather than
+//! region-wise. [`CfaAnalysis`] and [`LensFingerprint`] provide
+//! complementary, independent device signatures: the Color Filter Array
+//! demosaicing pattern left by the camera's Bayer/X-Trans interpolation
+//! algorithm, and the lens's characteristic geometric/chromatic distortion
+//! profile, respectively. Combining multiple independent fingerprints in
+//! [`SourceCameraResult`] / [`CameraMatch`] improves robustness over any
+//! single cue.
+//!
+//! # References
+//!
+//! - J. Lukáš, J. Fridrich, M. Goljan, "Digital Camera Identification from
+//!   Sensor Pattern Noise", IEEE Transactions on Information Forensics and
+//!   Security, 1(2), 205–214 (2006) — the foundational PRNU
+//!   device-fingerprinting and matching method.
+//! - M. Kharrazi, H. T. Sencar, N. Memon, "Blind source camera
+//!   identification", IEEE ICIP (2004) — surveys CFA-interpolation and
+//!   other statistical camera-model fingerprints complementary to PRNU.
+//! - S. Bayram, H. Sencar, N. Memon, I. Avcibas, "Source camera
+//!   identification based on CFA interpolation", IEEE ICIP (2005) — the
+//!   CFA demosaicing-artifact fingerprint underlying [`CfaAnalysis`].
+//! - K. San Choi, E. Y. Lam, K. K. Y. Wong, "Source camera identification
+//!   using footprints from lens aberration", SPIE Digital Photography
+//!   (2006) — the lens-aberration fingerprint underlying
+//!   [`LensFingerprint`].
 
 use std::collections::HashMap;
 

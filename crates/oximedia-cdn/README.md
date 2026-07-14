@@ -8,7 +8,7 @@ CDN edge management, cache invalidation, and origin failover for OxiMedia
 
 Part of the [OxiMedia](https://github.com/cool-japan/oximedia) sovereign media framework.
 
-Version: 0.1.8 — 2026-05-29 — 212 tests
+Version: 0.1.9 — 2026-07-08 — extensively tested
 
 ## Features
 
@@ -24,7 +24,7 @@ Version: 0.1.8 — 2026-05-29 — 212 tests
 
 ```toml
 [dependencies]
-oximedia-cdn = "0.1"
+oximedia-cdn = "0.1.9"
 ```
 
 ```rust

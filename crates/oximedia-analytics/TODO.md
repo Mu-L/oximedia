@@ -40,7 +40,7 @@
 ## Performance
 - [x] Add streaming/incremental computation to `compute_retention` for large viewer datasets (verified 2026-06-01: IncrementalRetentionState/compute_retention_incremental — src/retention.rs:142,257)
 - [x] Implement approximate quantile computation (t-digest) for percentile metrics at scale (verified 2026-05-16; src/quantile.rs, src/percentile.rs)
-- [ ] Use integer arithmetic for `assign_variant` FNV-1a hash instead of string operations (verified-open 2026-05-16: not yet optimized)
+- [x] Use integer arithmetic for `assign_variant` FNV-1a hash instead of string operations (verified 2026-06-05: FNV-1a already operates on bytes via u32 arithmetic; pinned via test_fnv1a_exact_hash_pin — src/ab_testing.rs)
 - [x] Add batch processing for `analyze_session` across multiple sessions in parallel (implemented 2026-06-01: rayon par_iter in analyze_sessions_batch; src/session.rs:206)
 - [x] Implement reservoir sampling for memory-bounded attention heatmap generation
 
@@ -48,8 +48,8 @@
 - [x] Test `assign_variant` distribution uniformity with chi-squared test over 10K+ assignments (added 2026-06-01: test_assign_variant_chi_squared_uniformity — tests/wave15_tests.rs)
 - [x] Add tests for `winning_variant` with known p-value outcomes (verify statistical correctness) (added 2026-06-01: test_winning_variant_known_z_score, test_winning_variant_alpha_gates_significance — tests/wave15_tests.rs)
 - [x] Test `compute_retention` with synthetic viewer data: 100% retention, 50% linear drop, step function (added 2026-06-01: test_compute_retention_synthetic_curves — tests/wave15_tests.rs)
-- [ ] Test `drop_off_points` detection accuracy with synthetic retention curves
-- [ ] Test `linear_regression_slope` against known regression datasets
+- [x] Test `drop_off_points` detection accuracy with synthetic retention curves (added 2026-06-05: test_drop_off_detects_large_drop, test_drop_off_empty_result_when_no_drop, test_drop_off_strict_boundary — src/retention.rs)
+- [x] Test `linear_regression_slope` against known regression datasets (added 2026-06-05: test_slope_known_answer, test_slope_negative, test_slope_fewer_than_two_points, test_slope_zero_denominator — src/engagement.rs)
 - [ ] Add test for `attention_heatmap` with overlapping and non-overlapping session segments
 
 ## Documentation

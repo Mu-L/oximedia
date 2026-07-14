@@ -4,6 +4,41 @@
 //! characteristics typically differ from the surrounding content.  This module
 //! estimates per-block noise using the Median Absolute Deviation (MAD) and
 //! then flags statistical outliers (> 2.5 σ from the mean) as likely spliced.
+//!
+//! # Methodology
+//!
+//! [`SplicingDetector::estimate_noise_by_region`] computes a robust noise
+//! estimate for each `block_size × block_size` tile using the Median
+//! Absolute Deviation of high-pass residuals, which — unlike a plain
+//! standard deviation — is resistant to being skewed by the very edges and
+//! textures that a splice boundary introduces. Blocks whose noise level
+//! deviates from the frame's global median noise by more than
+//! `sigma_threshold` (default 2.5) standard deviations are flagged as
+//! [`SplicingIndicator`]s, since a spliced-in region almost always carries
+//! a different noise floor than its host image (different sensor, ISO, or
+//! post-processing history). [`SplicingDetector::analyze_boundary_artifacts`]
+//! complements this whole-region noise check with a temporal, frame-pair
+//! analysis for video: it measures 8×8 blocking-grid energy, color-balance
+//! shift, and high-frequency energy delta between consecutive frames
+//! ([`BoundaryArtifactAnalysis`]), which spike at the boundary where a
+//! spliced clip is inserted into an otherwise continuous sequence.
+//!
+//! # References
+//!
+//! - B. Mahdian, S. Saic, "Using noise inconsistencies for blind image
+//!   forensics", Image and Vision Computing, 27(10), 1497–1503 (2009) — the
+//!   foundational per-block noise-level inconsistency method this module's
+//!   `estimate_noise_map` / [`SplicingIndicator`] implements.
+//! - X. Pan, X. Zhang, S. Lyu, "Exposing Image Splicing with Inconsistent
+//!   Local Noise Variances", IEEE International Conference on
+//!   Computational Photography (2012) — refines local noise-variance
+//!   estimation (via a similar MAD-style robust estimator) specifically for
+//!   splicing localization.
+//! - M. Chen, J. Fridrich, M. Goljan, J. Lukáš, "Determining Image Origin
+//!   and Integrity Using Sensor Noise", IEEE Transactions on Information
+//!   Forensics and Security, 3(1), 74–90 (2008) — complementary
+//!   PRNU-correlation approach to splicing detection (see
+//!   [`crate::noise`] / [`crate::noise_analysis`]).
 
 #![allow(dead_code)]
 

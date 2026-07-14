@@ -148,17 +148,15 @@ pub struct ProgressStreamReceiver {
 impl ProgressStreamReceiver {
     /// Await the next update, returning `None` when the stream is closed.
     pub async fn next(&mut self) -> Option<ProgressUpdate> {
-        self.rx.recv().await.map(|u| {
+        self.rx.recv().await.inspect(|_| {
             self.received_count += 1;
-            u
         })
     }
 
     /// Non-blocking poll: returns `None` if no update is immediately available.
     pub fn try_next(&mut self) -> Option<ProgressUpdate> {
-        self.rx.try_recv().ok().map(|u| {
+        self.rx.try_recv().ok().inspect(|_| {
             self.received_count += 1;
-            u
         })
     }
 

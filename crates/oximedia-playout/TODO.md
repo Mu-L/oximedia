@@ -35,9 +35,9 @@
 ## Testing
 - [ ] Add integration test for full playout lifecycle (start -> load playlist -> play -> stop)
 - [ ] Test `failover` module under simulated source failure conditions
-- [ ] Add frame timing accuracy tests verifying sub-millisecond jitter in `playback`
+- [x] Add frame timing accuracy tests verifying sub-millisecond jitter in `playback` (done 2026-06-05: new `PlaybackEngine::presentation_time(frame_index)` — deterministic, `Instant::now()`-free presentation timeline surfacing the private `ClockState::next_frame_time`/`drift_us` math (src/playback.rs:814); tests/playback_scheduler.rs verifies 25/50/29.97 fps deltas hug `frame_timing()` within ±1 µs with zero accumulated jitter over 300 frames)
 - [ ] Test `ad_insertion` SCTE-35 splice point accuracy with various content boundaries
-- [ ] Add stress test for `scheduler` with rapid playlist swaps during live playout
+- [x] Add stress test for `scheduler` with rapid playlist swaps during live playout (done 2026-06-05: tests/playback_scheduler.rs `test_scheduler_stress_1000_ops_oracle` — 1000 add/remove/clear+re-add swap ops vs a live-id oracle, plus non-decreasing ordering, empty/unknown-id no-ops, identical-swap no-doubling, mid-playout swap, and import/export round-trip)
 
 ## Documentation
 - [ ] Document signal chain architecture (input -> decode -> process -> compose -> encode -> output)

@@ -44,6 +44,13 @@
 #![forbid(unsafe_code)]
 
 pub mod auto_scaling;
+/// AWS SDK backend (S3 + Elemental media services).
+///
+/// Opt-in only: requires the non-default `aws-sdk` cargo feature because the
+/// AWS smithy TLS stack has no Pure-Rust crypto provider (ring / aws-lc /
+/// s2n are all C). The default build stays 100% Pure Rust; S3-compatible
+/// endpoints are served by [`generic::GenericStorage`] instead.
+#[cfg(feature = "aws-sdk")]
 pub mod aws;
 pub mod azure;
 /// Backblaze B2 low-cost storage provider.
@@ -93,6 +100,8 @@ pub mod storage_provider;
 pub mod task_queue;
 /// Cloud-native video thumbnail generation.
 pub mod thumbnail;
+/// Process-wide Pure-Rust rustls `CryptoProvider` bootstrap.
+pub mod tls_provider;
 pub mod transcoding;
 pub mod transcoding_pipeline;
 pub mod transfer;
@@ -106,10 +115,12 @@ pub use types::{
 };
 
 // Re-export commonly used types
+#[cfg(feature = "aws-sdk")]
 pub use aws::{AwsMediaServices, S3Storage};
 pub use azure::{AzureBlobStorage, AzureMediaServices};
 pub use cost::{CostEstimator, StorageTier};
 pub use gcp::{GcpMediaServices, GcsStorage};
 pub use generic::GenericStorage;
 pub use security::{Credentials, EncryptionConfig, KmsConfig};
+pub use tls_provider::install_default_crypto_provider;
 pub use transfer::{TransferConfig, TransferManager};

@@ -845,7 +845,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore]
     fn test_is_codestream_signature() {
         assert!(JxlDecoder::is_codestream(&[0xFF, 0x0A, 0x00]));
         assert!(!JxlDecoder::is_codestream(&[0xFF, 0x0B, 0x00]));
@@ -854,7 +853,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_is_container_signature() {
         let mut container = vec![0u8; 16];
         container[..12].copy_from_slice(&JXL_CONTAINER_SIGNATURE);
@@ -863,7 +861,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_is_jxl() {
         assert!(JxlDecoder::is_jxl(&[0xFF, 0x0A]));
         let mut container = vec![0u8; 16];
@@ -873,7 +870,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_extract_codestream_bare() {
         let decoder = JxlDecoder::new();
         let data = [0xFF, 0x0A, 0x01, 0x02];
@@ -882,14 +878,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_extract_codestream_invalid() {
         let decoder = JxlDecoder::new();
         assert!(decoder.extract_codestream(&[0x00, 0x00]).is_err());
     }
 
     #[test]
-    #[ignore]
     fn test_parse_size_header_small() {
         // small=1, height_div8=3 (24px), width_div8=0 (use height -> 24px)
         let decoder = JxlDecoder::new();
@@ -906,14 +900,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_read_header_invalid_data() {
         let decoder = JxlDecoder::new();
         assert!(decoder.read_header(&[0x00]).is_err());
     }
 
     #[test]
-    #[ignore]
     fn test_decoded_image_metrics() {
         let img = DecodedImage {
             width: 10,
@@ -928,7 +920,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_decoded_image_16bit() {
         let img = DecodedImage {
             width: 10,

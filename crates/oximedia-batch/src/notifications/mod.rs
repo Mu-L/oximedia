@@ -1,6 +1,11 @@
 //! Notification system for job events
 
-use crate::error::{BatchError, Result};
+// `BatchError` is only constructed inside the HTTP-based `send_*` methods
+// below (webhook/Slack/Discord/Teams), which are gated out on `wasm32`
+// (no blocking-friendly HTTP client there); `Result` is used throughout.
+#[cfg(not(target_arch = "wasm32"))]
+use crate::error::BatchError;
+use crate::error::Result;
 use crate::types::JobId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -366,6 +371,10 @@ impl NotificationService {
         Ok(())
     }
 
+    // These formatters are only called from the HTTP-based `send_slack`/
+    // `send_discord`/`send_teams` methods above, which are gated out on
+    // `wasm32` (no blocking-friendly HTTP client there).
+    #[cfg(not(target_arch = "wasm32"))]
     fn format_slack_message(event: &NotificationEvent) -> String {
         match &event.event_type {
             EventType::JobSubmitted => {
@@ -389,10 +398,12 @@ impl NotificationService {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn format_discord_message(event: &NotificationEvent) -> String {
         Self::format_slack_message(event)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn format_teams_message(event: &NotificationEvent) -> String {
         Self::format_slack_message(event)
     }
@@ -526,6 +537,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_arch = "wasm32"))]
     fn test_format_slack_message() {
         let _service = NotificationService::new();
         let event = NotificationEvent {

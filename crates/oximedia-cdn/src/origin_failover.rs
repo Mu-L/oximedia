@@ -1324,3 +1324,131 @@ mod tests {
         assert!(server.is_healthy());
     }
 }
+
+// ─── ConnectionPool ───────────────────────────────────────────────────────────
+
+/// A keep-alive connection returned from / returned to [`ConnectionPool`].
+pub struct PooledConn {
+    /// Origin server identifier this connection belongs to.
+    pub origin_id: String,
+    /// Instant the connection was originally created.
+    pub created_at: std::time::Instant,
+}
+
+impl PooledConn {
+    fn new(origin_id: impl Into<String>) -> Self {
+        Self {
+            origin_id: origin_id.into(),
+            created_at: std::time::Instant::now(),
+        }
+    }
+}
+
+/// Simulated keep-alive connection pool with idle-slot reuse.
+///
+/// Tracks how many connections were reused from the idle pool ([`reused`])
+/// versus freshly created ([`created`]).
+///
+/// [`reused`]: ConnectionPool::reused
+/// [`created`]: ConnectionPool::created
+pub struct ConnectionPool {
+    idle: Vec<PooledConn>,
+    max_idle: usize,
+    /// Number of connections reused from the idle pool.
+    pub reused: u64,
+    /// Number of new connections created (no idle slot matched).
+    pub created: u64,
+}
+
+impl ConnectionPool {
+    /// Create a new pool that retains at most `max_idle` idle connections.
+    pub fn new(max_idle: usize) -> Self {
+        Self {
+            idle: Vec::new(),
+            max_idle,
+            reused: 0,
+            created: 0,
+        }
+    }
+
+    /// Acquire a connection for `origin_id`.
+    ///
+    /// If a matching idle connection exists it is popped (last-in, first-out)
+    /// and `reused` is incremented.  Otherwise a new connection is created and
+    /// `created` is incremented.
+    pub fn acquire(&mut self, origin_id: &str) -> PooledConn {
+        // Search from the back for efficiency (pop is O(1)).
+        if let Some(pos) = self.idle.iter().rposition(|c| c.origin_id == origin_id) {
+            let conn = self.idle.remove(pos);
+            self.reused += 1;
+            conn
+        } else {
+            self.created += 1;
+            PooledConn::new(origin_id)
+        }
+    }
+
+    /// Return a connection to the idle pool.
+    ///
+    /// If the pool is already at `max_idle` capacity the connection is dropped.
+    pub fn release(&mut self, conn: PooledConn) {
+        if self.idle.len() < self.max_idle {
+            self.idle.push(conn);
+        }
+        // Exceeding capacity: conn is silently dropped (keep-alive close).
+    }
+
+    /// Number of connections currently in the idle pool.
+    pub fn idle_len(&self) -> usize {
+        self.idle.len()
+    }
+}
+
+// ─── ConnectionPool tests ─────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod pool_tests {
+    use super::*;
+
+    // 5. acquire → release → acquire reuses the idle connection
+    #[test]
+    fn pool_reuses_idle_conn() {
+        let mut pool = ConnectionPool::new(4);
+        let conn = pool.acquire("origin-a");
+        assert_eq!(pool.created, 1);
+        assert_eq!(pool.reused, 0);
+
+        pool.release(conn);
+
+        let _conn2 = pool.acquire("origin-a");
+        assert_eq!(pool.reused, 1, "second acquire should reuse idle conn");
+        assert_eq!(pool.created, 1, "created should still be 1");
+    }
+
+    // 6. max_idle is respected — excess released connections are dropped
+    #[test]
+    fn pool_respects_max_idle() {
+        let mut pool = ConnectionPool::new(1);
+        let c1 = pool.acquire("origin-b");
+        let c2 = pool.acquire("origin-b");
+
+        pool.release(c1);
+        pool.release(c2); // pool already full — should be dropped
+
+        assert_eq!(pool.idle_len(), 1, "only 1 idle slot allowed");
+    }
+
+    // 7. released conn's origin_id matches what is acquired next
+    #[test]
+    fn pool_acquire_after_release_same_origin() {
+        let mut pool = ConnectionPool::new(4);
+        let conn = pool.acquire("origin-c");
+        pool.release(conn);
+
+        let reused = pool.acquire("origin-c");
+        assert_eq!(
+            reused.origin_id, "origin-c",
+            "reused conn should have the same origin_id"
+        );
+    }
+}

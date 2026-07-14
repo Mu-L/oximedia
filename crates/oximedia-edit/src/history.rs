@@ -280,6 +280,10 @@ pub struct HistoryNode<T> {
 /// h.undo();
 /// let n2b = h.push(20, "alternate step 2");
 ///
+/// // Undo again to land back on the fork point (state 1), where both
+/// // branches are visible as children.
+/// h.undo();
+///
 /// // The old branch (n2 = 2) and the new branch (n2b = 20) both exist.
 /// assert_eq!(h.available_branches().len(), 2);
 /// ```

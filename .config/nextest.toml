@@ -72,3 +72,14 @@ test-group = "serial-latency"
 # share the same temp-file namespace.
 filter = "test(mmap_scan_file_larger_than_threshold) | test(mmap_falls_back_for_small_file)"
 test-group = "serial-latency"
+
+[[profile.default.overrides]]
+# oximedia-transcode EBU R128 conformance tests run multi-second 48 kHz stereo
+# tone signals (up to ~1M samples) through the sample-by-sample BS.1770-4
+# K-weighting IIR filter several times per test, then re-normalize and re-meter.
+# In an unoptimized debug build a single test can take 60–80 s of pure CPU.
+# Give them a generous slow-timeout (no premature termination) and run them
+# serially so they neither time out nor contend with the rest of the suite.
+filter = "package(oximedia-transcode) and test(ebu_r128_conformance)"
+test-group = "serial-latency"
+slow-timeout = { period = "120s", terminate-after = 4 }

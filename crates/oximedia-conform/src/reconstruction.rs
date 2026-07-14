@@ -90,15 +90,22 @@ impl TimelineReconstructor {
     /// Build video tracks from clips.
     fn build_video_tracks(&self, clips: &[TimelineClip]) -> ConformResult<Vec<Track>> {
         let mut tracks = Vec::new();
-        let mut sorted_clips = clips.to_vec();
-        sorted_clips.sort_by_key(|c| c.timeline_in.to_frames(c.fps));
+
+        // Precompute sort keys once (1× to_frames per clip instead of O(log n) per comparison).
+        let keys: Vec<u64> = clips
+            .iter()
+            .map(|c| c.timeline_in.to_frames(c.fps))
+            .collect();
+        // Sort indices by precomputed key (stable, preserving relative order for equal keys).
+        let mut order: Vec<usize> = (0..clips.len()).collect();
+        order.sort_by_key(|&i| keys[i]);
 
         // For now, create a single video track
         let mut track = Track::new("V1".to_string(), TrackKind::Video);
         track.name = Some("Video 1".to_string());
 
-        for clip in sorted_clips {
-            track.add_clip(clip);
+        for i in order {
+            track.add_clip(clips[i].clone());
         }
 
         // Add transitions if needed
@@ -111,15 +118,22 @@ impl TimelineReconstructor {
     /// Build audio tracks from clips.
     fn build_audio_tracks(&self, clips: &[TimelineClip]) -> ConformResult<Vec<Track>> {
         let mut tracks = Vec::new();
-        let mut sorted_clips = clips.to_vec();
-        sorted_clips.sort_by_key(|c| c.timeline_in.to_frames(c.fps));
+
+        // Precompute sort keys once (1× to_frames per clip instead of O(log n) per comparison).
+        let keys: Vec<u64> = clips
+            .iter()
+            .map(|c| c.timeline_in.to_frames(c.fps))
+            .collect();
+        // Sort indices by precomputed key (stable, preserving relative order for equal keys).
+        let mut order: Vec<usize> = (0..clips.len()).collect();
+        order.sort_by_key(|&i| keys[i]);
 
         // For now, create a single audio track
         let mut track = Track::new("A1".to_string(), TrackKind::Audio);
         track.name = Some("Audio 1".to_string());
 
-        for clip in sorted_clips {
-            track.add_clip(clip);
+        for i in order {
+            track.add_clip(clips[i].clone());
         }
 
         tracks.push(track);
@@ -528,5 +542,204 @@ mod tests {
             .expect("test expectation failed");
 
         assert!(reconstructor.validate_timeline(&timeline).is_ok());
+    }
+
+    /// Build a `TimelineClip` directly from raw fields without going through `ClipMatch`.
+    fn make_clip(id: &str, h: u8, m: u8, s: u8, f: u8) -> TimelineClip {
+        use std::path::PathBuf;
+        TimelineClip {
+            id: id.to_string(),
+            source_path: PathBuf::from(format!("/test/{id}.mov")),
+            source_in: Timecode::new(0, 0, 0, 0),
+            source_out: Timecode::new(0, 0, 1, 0),
+            timeline_in: Timecode::new(h, m, s, f),
+            timeline_out: Timecode::new(h, m, s + 1, f),
+            fps: FrameRate::Fps25,
+            name: Some(id.to_string()),
+            match_score: 1.0,
+        }
+    }
+
+    #[test]
+    fn test_reconstruction_sorts_1000_clips_correctly() {
+        use crate::config::ConformConfig;
+
+        // Build 1000 clips with pseudo-random timeline_in values by cycling through
+        // different second/frame values in a non-monotone order.
+        let fps = FrameRate::Fps25;
+        let reconstructor = TimelineReconstructor::new(fps, ConformConfig::default());
+
+        let n: u32 = 1000;
+        // Create clips whose frame index (when sorted) should be 0..n.
+        // We map index i to a shuffled position via a simple bit-reversal permutation so
+        // the input order is far from sorted.
+        let clips: Vec<TimelineClip> = (0..n)
+            .map(|i| {
+                // bit-reversal of i among 10-bit integers for pseudo-random ordering
+                let shuffled = {
+                    let mut v: u32 = 0;
+                    let mut x = i;
+                    for _ in 0..10 {
+                        v = (v << 1) | (x & 1);
+                        x >>= 1;
+                    }
+                    v
+                };
+                // Convert frame index `shuffled` to HH:MM:SS:FF at 25 fps
+                let total_frames = shuffled;
+                let frame_f = (total_frames % 25) as u8;
+                let total_sec = total_frames / 25;
+                let sec_s = (total_sec % 60) as u8;
+                let total_min = total_sec / 60;
+                let min_m = (total_min % 60) as u8;
+                let hour_h = (total_min / 60) as u8;
+                make_clip(&format!("clip{i}"), hour_h, min_m, sec_s, frame_f)
+            })
+            .collect();
+
+        let video_tracks = reconstructor
+            .build_video_tracks(&clips)
+            .expect("build_video_tracks should succeed");
+
+        assert_eq!(video_tracks.len(), 1);
+        let track = &video_tracks[0];
+        assert_eq!(track.clips.len(), n as usize);
+
+        // Verify ascending order of timeline_in
+        for window in track.clips.windows(2) {
+            let a = window[0].timeline_in.to_frames(fps);
+            let b = window[1].timeline_in.to_frames(fps);
+            assert!(
+                a <= b,
+                "clips out of order: frame {a} followed by frame {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_reconstruction_sorted_output_matches_reference() {
+        use crate::config::ConformConfig;
+
+        let fps = FrameRate::Fps25;
+        let reconstructor = TimelineReconstructor::new(fps, ConformConfig::default());
+
+        // 10 clips in a non-sorted order (seconds: 9,0,5,3,7,1,8,4,6,2)
+        let order = [9u8, 0, 5, 3, 7, 1, 8, 4, 6, 2];
+        let clips: Vec<TimelineClip> = order
+            .iter()
+            .map(|&s| make_clip(&format!("clip{s}"), 0, 0, s, 0))
+            .collect();
+
+        let video_tracks = reconstructor
+            .build_video_tracks(&clips)
+            .expect("build_video_tracks should succeed");
+
+        // Build reference by sorting with sort_by_key (the old approach)
+        let mut reference = clips.clone();
+        reference.sort_by_key(|c| c.timeline_in.to_frames(c.fps));
+
+        let result_clips = &video_tracks[0].clips;
+        assert_eq!(result_clips.len(), reference.len());
+
+        for (got, expected) in result_clips.iter().zip(reference.iter()) {
+            assert_eq!(
+                got.timeline_in.to_frames(fps),
+                expected.timeline_in.to_frames(fps),
+                "timeline_in mismatch: got {}, expected {}",
+                got.timeline_in,
+                expected.timeline_in,
+            );
+            assert_eq!(
+                got.id, expected.id,
+                "clip id mismatch: got {}, expected {}",
+                got.id, expected.id,
+            );
+        }
+    }
+
+    #[test]
+    fn test_reconstruction_stable_sort_duplicate_timestamps() {
+        use crate::config::ConformConfig;
+
+        let fps = FrameRate::Fps25;
+        let reconstructor = TimelineReconstructor::new(fps, ConformConfig::default());
+
+        // Build clips where clips 0..4 share timeline_in = 0s and clips 5..9 share timeline_in = 1s.
+        // The stable sort must preserve the original relative order within each group.
+        let clips: Vec<TimelineClip> = (0..10usize)
+            .map(|i| {
+                let s = if i < 5 { 0u8 } else { 1u8 };
+                make_clip(&format!("clip{i}"), 0, 0, s, 0)
+            })
+            .collect();
+
+        let video_tracks = reconstructor
+            .build_video_tracks(&clips)
+            .expect("build_video_tracks should succeed");
+
+        let result_clips = &video_tracks[0].clips;
+        assert_eq!(result_clips.len(), 10);
+
+        // First 5 should be clip0..clip4 in that order (same key → stable order)
+        for (pos, expected_id) in ["clip0", "clip1", "clip2", "clip3", "clip4"]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(
+                result_clips[pos].id, *expected_id,
+                "stable sort violated at position {pos}: got {}, expected {expected_id}",
+                result_clips[pos].id,
+            );
+        }
+        // Next 5 should be clip5..clip9 in that order
+        for (pos, expected_id) in ["clip5", "clip6", "clip7", "clip8", "clip9"]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(
+                result_clips[5 + pos].id,
+                *expected_id,
+                "stable sort violated at position {}: got {}, expected {expected_id}",
+                5 + pos,
+                result_clips[5 + pos].id,
+            );
+        }
+    }
+
+    #[test]
+    fn test_reconstruction_1000_clips_fast() {
+        use crate::config::ConformConfig;
+        use std::time::Instant;
+
+        let fps = FrameRate::Fps25;
+        let reconstructor = TimelineReconstructor::new(fps, ConformConfig::default());
+
+        let clips: Vec<TimelineClip> = (0u32..1000)
+            .rev() // worst-case reverse order
+            .map(|i| {
+                let total_sec = i;
+                let sec_s = (total_sec % 60) as u8;
+                let total_min = total_sec / 60;
+                let min_m = (total_min % 60) as u8;
+                let hour_h = (total_min / 60) as u8;
+                make_clip(&format!("clip{i}"), hour_h, min_m, sec_s, 0)
+            })
+            .collect();
+
+        let start = Instant::now();
+        let video_tracks = reconstructor
+            .build_video_tracks(&clips)
+            .expect("build_video_tracks should succeed");
+        let elapsed = start.elapsed();
+
+        // Sanity: correct output
+        assert_eq!(video_tracks[0].clips.len(), 1000);
+
+        // Performance bound: well under 100 ms even on slow CI
+        assert!(
+            elapsed.as_millis() < 100,
+            "build_video_tracks for 1000 clips took {}ms, expected < 100ms",
+            elapsed.as_millis()
+        );
     }
 }

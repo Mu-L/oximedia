@@ -44,6 +44,12 @@ pub struct TranscodeOptions {
     pub overwrite: bool,
     #[allow(dead_code)]
     pub resume: bool,
+    /// Apply EBU R128 loudness normalization to the audio track during
+    /// transcode (`--normalize-audio`). When `true`, `transcode_single_pass`
+    /// and `transcode_two_pass` attach an `oximedia_transcode::NormalizationConfig`
+    /// targeting the EBU R128 standard to the `TranscodePipelineBuilder`,
+    /// matching the working pattern in `normalize_cmd::cmd_process`.
+    pub normalize_audio: bool,
     /// Progress output format for this transcode operation.
     #[allow(dead_code)]
     pub progress_format: ProgressFormat,
@@ -515,6 +521,15 @@ async fn transcode_single_pass(
         builder = builder.audio_codec(ac.name().to_lowercase());
     }
 
+    // Apply EBU R128 loudness normalization when requested via
+    // `--normalize-audio`. Mirrors the working pattern in
+    // `normalize_cmd::cmd_process`: a bare `NormalizationConfig::new(..)`
+    // targeting the EBU R128 standard (-23 LUFS / -1 dBTP).
+    if options.normalize_audio {
+        use oximedia_transcode::{LoudnessStandard, NormalizationConfig};
+        builder = builder.normalization(NormalizationConfig::new(LoudnessStandard::EbuR128));
+    }
+
     // Apply quality / CRF config if specified.
     if let Some(crf) = options.crf {
         use oximedia_transcode::{QualityConfig, QualityPreset, RateControlMode};
@@ -603,6 +618,14 @@ async fn transcode_two_pass(
     if let Some(ac) = audio_codec {
         builder = builder.audio_codec(ac.name().to_lowercase());
     }
+
+    // Apply EBU R128 loudness normalization when requested via
+    // `--normalize-audio` (same pattern as the single-pass path above).
+    if options.normalize_audio {
+        use oximedia_transcode::{LoudnessStandard, NormalizationConfig};
+        builder = builder.normalization(NormalizationConfig::new(LoudnessStandard::EbuR128));
+    }
+
     if let Some(bitrate) = video_bitrate {
         use oximedia_transcode::{QualityConfig, QualityPreset, RateControlMode};
         let qconfig = QualityConfig {

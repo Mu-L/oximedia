@@ -553,8 +553,19 @@ mod tests {
     use std::io::Cursor;
 
     fn write_tmp_file(content: &[u8]) -> PathBuf {
+        // Each call must yield a unique path: the test binary runs these tests
+        // in parallel within a single process, so keying solely on the PID would
+        // make every file-based test share one file and clobber each other's
+        // content (a race that flips which test observes the wrong bytes).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut path = std::env::temp_dir();
-        path.push(format!("oximedia_zcs_test_{}.ts", std::process::id()));
+        path.push(format!(
+            "oximedia_zcs_test_{}_{}.ts",
+            std::process::id(),
+            unique
+        ));
         let mut f = std::fs::File::create(&path).expect("create tmp");
         f.write_all(content).expect("write tmp");
         path

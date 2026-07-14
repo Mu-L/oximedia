@@ -1,8 +1,8 @@
 //! LUT processing chain with algebraic operations and baking.
 //!
-//! [`LutChainOps`] chains [`LutOperation`] steps (gamma, lift, gain,
+//! [`LutChainOps`](crate::lut_chain_ops::LutChainOps) chains [`LutOperation`](crate::lut_chain_ops::LutOperation) steps (gamma, lift, gain,
 //! saturation, exposure, or an embedded 3-D LUT) and can *bake* them into a
-//! single 33³ [`super::hald_clut::Lut3DData`] for fast batch processing.
+//! single 33³ [`Lut3DData`](crate::hald_clut::Lut3DData) for fast batch processing.
 
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_possible_truncation)]

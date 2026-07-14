@@ -5,7 +5,7 @@
 //! and threading `prev`/`next` indices through them.  Eviction, insertion, and
 //! lookup are all O(1) amortised.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 use std::time::{Duration, Instant};
 
 /// Sentinel index meaning "no node".

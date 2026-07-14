@@ -871,7 +871,7 @@ mod tests {
             data.extend_from_slice(b"FRAME\n");
             // Fill frame with a repeating byte pattern for verification
             let fill_byte = (i & 0xFF) as u8;
-            data.extend(std::iter::repeat(fill_byte).take(frame_size));
+            data.extend(std::iter::repeat_n(fill_byte, frame_size));
         }
         data
     }

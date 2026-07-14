@@ -55,7 +55,7 @@ fn system_metrics_no_disk_config(dir: &tempfile::TempDir) -> MonitorConfig {
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_monitor_lifecycle() {
     let dir = tempdir().expect("dir should be valid");
     let monitor = OximediaMonitor::new(fast_config(&dir))
@@ -70,7 +70,7 @@ async fn test_monitor_lifecycle() {
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_system_metrics_collection() {
     let dir = tempdir().expect("dir should be valid");
     let monitor = OximediaMonitor::new(system_metrics_no_disk_config(&dir))
@@ -88,7 +88,7 @@ async fn test_system_metrics_collection() {
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_application_metrics_initial_state() {
     let dir = tempdir().expect("dir should be valid");
     let monitor = OximediaMonitor::new(fast_config(&dir))
@@ -100,7 +100,7 @@ async fn test_application_metrics_initial_state() {
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_quality_metrics_initial_state() {
     let dir = tempdir().expect("dir should be valid");
     let monitor = OximediaMonitor::new(fast_config(&dir))
@@ -112,7 +112,7 @@ async fn test_quality_metrics_initial_state() {
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_encoding_metrics_tracking() {
     let dir = tempdir().expect("dir should be valid");
     let monitor = OximediaMonitor::new(fast_config(&dir))
@@ -129,7 +129,7 @@ async fn test_encoding_metrics_tracking() {
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_quality_metrics_tracking() {
     let dir = tempdir().expect("dir should be valid");
     let monitor = OximediaMonitor::new(fast_config(&dir))
@@ -147,7 +147,7 @@ async fn test_quality_metrics_tracking() {
 }
 
 #[cfg(feature = "sqlite")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_alert_manager_present() {
     let dir = tempdir().expect("dir should be valid");
     let monitor = OximediaMonitor::new(fast_config(&dir))

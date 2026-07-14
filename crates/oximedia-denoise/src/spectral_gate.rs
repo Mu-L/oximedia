@@ -327,4 +327,98 @@ mod tests {
         let stats = SpectralGateStats::from_gate(&gate);
         assert!(stats.avg_reduction() >= 0.0);
     }
+
+    // ----- Known-noise spectral gate tests -----
+
+    #[test]
+    fn test_spectral_gate_learns_noise_floor() {
+        // Uniform low-level noise learned as the noise floor.
+        let cfg = SpectralGateConfig {
+            n_bins: 512,
+            threshold_ratio: 1.5,
+            ..Default::default()
+        };
+        let mut gate = SpectralGate::new(cfg);
+        let noise_mags = vec![0.1f32; 512];
+        gate.learn_noise_floor(&noise_mags);
+
+        // Process the same noise-only input — all bins are at or below the noise floor,
+        // so the gate should attenuate and report a positive reduction.
+        let mut out = vec![0.0f32; 512];
+        gate.process_frame(&noise_mags, &mut out);
+
+        assert!(
+            gate.reduction_db() > 0.0,
+            "gate should report positive reduction after processing noise-level input, got {}",
+            gate.reduction_db()
+        );
+    }
+
+    #[test]
+    fn test_spectral_gate_signal_bins_survive() {
+        // Learn a low noise floor, then inject strong signal at three bins.
+        let cfg = SpectralGateConfig {
+            n_bins: 512,
+            threshold_ratio: 1.5,
+            ..Default::default()
+        };
+        let mut gate = SpectralGate::new(cfg);
+        let noise_floor = vec![0.1f32; 512];
+        gate.learn_noise_floor(&noise_floor);
+
+        // Build mixed spectrum: mostly noise-level, with 3 strong signal bins.
+        let mut mixed = vec![0.1f32; 512];
+        mixed[100] = 10.0;
+        mixed[200] = 10.0;
+        mixed[300] = 10.0;
+
+        let mut out = vec![0.0f32; 512];
+        gate.process_frame(&mixed, &mut out);
+
+        // Signal bins must survive (output ≥ 50% of input).
+        assert!(
+            out[100] > mixed[100] * 0.5,
+            "bin 100 (signal) should largely pass through: got {} from {}",
+            out[100],
+            mixed[100]
+        );
+        assert!(
+            out[200] > mixed[200] * 0.5,
+            "bin 200 (signal) should largely pass through: got {} from {}",
+            out[200],
+            mixed[200]
+        );
+        assert!(
+            out[300] > mixed[300] * 0.5,
+            "bin 300 (signal) should largely pass through: got {} from {}",
+            out[300],
+            mixed[300]
+        );
+    }
+
+    #[test]
+    fn test_spectral_gate_reduction_db_positive() {
+        // After learning the noise floor and processing the same noise-only spectrum,
+        // reduction_db() must be positive (gate is suppressing).
+        let cfg = SpectralGateConfig {
+            n_bins: 512,
+            threshold_ratio: 1.5,
+            ..Default::default()
+        };
+        let mut gate = SpectralGate::new(cfg);
+        let noise_mags = vec![0.1f32; 512];
+        gate.learn_noise_floor(&noise_mags);
+
+        let mut out = vec![0.0f32; 512];
+        // Process multiple frames so smoothed gain settles into attenuation.
+        for _ in 0..5 {
+            gate.process_frame(&noise_mags, &mut out);
+        }
+
+        assert!(
+            gate.reduction_db() > 0.0,
+            "reduction_db() should be > 0.0 after gating noise-only signal; got {}",
+            gate.reduction_db()
+        );
+    }
 }

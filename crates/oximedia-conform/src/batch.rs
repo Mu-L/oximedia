@@ -5,7 +5,6 @@ use crate::error::ConformResult;
 use crate::exporters::report::MatchReport;
 use crate::session::ConformSession;
 use parking_lot::RwLock;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -134,36 +133,58 @@ impl BatchProcessor {
     /// Process jobs sequentially.
     async fn process_sequential(&mut self) -> ConformResult<()> {
         for job in &self.jobs {
-            let result = self.process_job(job).await;
+            let result = Self::process_job(job.clone()).await;
             self.results.write().push(result);
         }
         Ok(())
     }
 
     /// Process jobs in parallel.
+    ///
+    /// Prior to the oxisql 0.3.1 sync migration the sqlite layer was async,
+    /// requiring a fresh `tokio::runtime::Runtime` per rayon thread so that
+    /// `block_on` could drive the per-job future.  `SqliteConnectionBlocking`
+    /// is fully synchronous, so we now use `tokio::task::JoinSet` — jobs run
+    /// concurrently on the tokio thread pool with no manual runtime
+    /// construction and no `block_on`.
     #[cfg(not(target_arch = "wasm32"))]
     async fn process_parallel(&mut self) -> ConformResult<()> {
-        // Process jobs in parallel using rayon
-        let results: Vec<BatchResult> = self
-            .jobs
-            .par_iter()
-            .map(|job| {
-                let rt = tokio::runtime::Runtime::new()
-                    .expect("failed to create tokio runtime for parallel batch job");
-                rt.block_on(self.process_job(job))
-            })
-            .collect();
+        let capacity = self.jobs.len();
+        let mut join_set = tokio::task::JoinSet::new();
+        for job in &self.jobs {
+            let job = job.clone();
+            join_set.spawn(async move { Self::process_job(job).await });
+        }
 
+        let mut results = Vec::with_capacity(capacity);
+        while let Some(outcome) = join_set.join_next().await {
+            match outcome {
+                Ok(result) => results.push(result),
+                Err(join_err) => {
+                    error!("parallel batch job task panicked: {join_err}");
+                    results.push(BatchResult {
+                        job_name: String::new(),
+                        success: false,
+                        report: None,
+                        error: Some(format!("task panicked: {join_err}")),
+                        duration_seconds: 0.0,
+                    });
+                }
+            }
+        }
         *self.results.write() = results;
         Ok(())
     }
 
-    /// Process a single job.
-    async fn process_job(&self, job: &BatchJob) -> BatchResult {
+    /// Execute a single conform job end-to-end.
+    ///
+    /// Takes an owned `BatchJob` so it can be moved into a
+    /// `tokio::task::JoinSet`-spawned future (`Send + 'static`).
+    async fn process_job(job: BatchJob) -> BatchResult {
         info!("Processing job: {}", job.name);
         let start_time = std::time::Instant::now();
 
-        let result = match ConformSession::new(
+        match ConformSession::new(
             job.name.clone(),
             &job.timeline_path,
             job.source_paths.clone(),
@@ -174,7 +195,7 @@ impl BatchProcessor {
                 Ok(report) => {
                     info!("Job {} completed successfully", job.name);
                     BatchResult {
-                        job_name: job.name.clone(),
+                        job_name: job.name,
                         success: true,
                         report: Some(report),
                         error: None,
@@ -184,7 +205,7 @@ impl BatchProcessor {
                 Err(e) => {
                     error!("Job {} failed: {}", job.name, e);
                     BatchResult {
-                        job_name: job.name.clone(),
+                        job_name: job.name,
                         success: false,
                         report: None,
                         error: Some(e.to_string()),
@@ -195,16 +216,14 @@ impl BatchProcessor {
             Err(e) => {
                 error!("Failed to create session for job {}: {}", job.name, e);
                 BatchResult {
-                    job_name: job.name.clone(),
+                    job_name: job.name,
                     success: false,
                     report: None,
                     error: Some(e.to_string()),
                     duration_seconds: start_time.elapsed().as_secs_f64(),
                 }
             }
-        };
-
-        result
+        }
     }
 
     /// Compute statistics from results.

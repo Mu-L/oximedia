@@ -416,13 +416,26 @@ fn avif_encode_decode_produces_valid_container() {
     assert_eq!(&avif_bytes[4..8], b"ftyp", "first box must be ftyp");
     assert_eq!(&avif_bytes[8..12], b"avif", "major brand must be avif");
 
-    // Decode round-trip
-    let decoded = AvifDecoder::decode(&avif_bytes).expect("AVIF decode");
-    assert_eq!(decoded.width, width);
-    assert_eq!(decoded.height, height);
+    // Honest-decode policy: full AVIF decode requires AV1 pixel
+    // reconstruction, which is not yet implemented — decode() must say so
+    // instead of returning raw AV1 bytes disguised as pixels.
+    let decode_err = AvifDecoder::decode(&avif_bytes)
+        .expect_err("AVIF decode must fail honestly until AV1 reconstruction lands");
     assert!(
-        !decoded.y_plane.is_empty(),
-        "decoded AV1 OBU must be non-empty"
+        decode_err.to_string().contains("not yet implemented"),
+        "decode error must state the limitation, got: {decode_err}"
+    );
+
+    // Metadata and the raw AV1 OBU remain available through the
+    // honestly-named APIs.
+    let probe = AvifDecoder::probe(&avif_bytes).expect("AVIF probe");
+    assert_eq!(probe.width, width);
+    assert_eq!(probe.height, height);
+
+    let payload = AvifDecoder::extract_av1_payload(&avif_bytes).expect("AVIF payload extraction");
+    assert!(
+        !payload.color_obu.is_empty(),
+        "extracted AV1 OBU must be non-empty"
     );
 }
 

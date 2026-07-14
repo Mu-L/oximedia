@@ -2,7 +2,7 @@
 //!
 //! # Overview
 //!
-//! [`SimilarityIndex`] stores a collection of audio fingerprints (u32 hash sequences
+//! [`SimilarityIndex`](crate::similarity_search::SimilarityIndex) stores a collection of audio fingerprints (u32 hash sequences
 //! produced by [`crate::fingerprint::AcoustidEncoder`]) and answers approximate
 //! nearest-neighbour queries in sub-linear time.
 //!

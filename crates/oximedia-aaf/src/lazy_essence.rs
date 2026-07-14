@@ -41,6 +41,10 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+/// Files at least this large use `mmap` for loading; smaller files use
+/// a standard `read_exact` to avoid the overhead of mapping a tiny region.
+const MMAP_THRESHOLD: u64 = 65_536;
+
 // ─── LazyEssence ─────────────────────────────────────────────────────────────
 
 /// A single essence stream that is loaded from disk only on first access.
@@ -153,10 +157,59 @@ impl LazyEssence {
 
     /// Internal: read `self.length` bytes from `self.source_path` starting at
     /// `self.offset`.
+    ///
+    /// For large blocks (≥ `MMAP_THRESHOLD` bytes) the file is memory-mapped
+    /// so that the OS can page in only the required region without allocating a
+    /// full user-space copy up front.  For small blocks a regular `read_exact`
+    /// is used to avoid the fixed overhead of setting up an `mmap`.
     fn load_from_disk(&self) -> std::io::Result<Vec<u8>> {
-        let mut file = std::fs::File::open(&self.source_path)?;
-        file.seek(SeekFrom::Start(self.offset))?;
-        let mut buf = vec![0u8; self.length as usize];
+        if self.length >= MMAP_THRESHOLD {
+            Self::load_via_mmap(&self.source_path, self.offset, self.length)
+        } else {
+            Self::load_via_read(&self.source_path, self.offset, self.length)
+        }
+    }
+
+    /// Read `length` bytes at `offset` using a memory-mapped view of the file.
+    ///
+    /// # Safety
+    ///
+    /// `memmap2::Mmap::map` requires that the underlying file is not
+    /// concurrently truncated while the mapping is live.  For read-only AAF
+    /// source files (the only callers of this function) that invariant holds.
+    #[allow(unsafe_code)]
+    fn load_via_mmap(path: &std::path::Path, offset: u64, length: u64) -> std::io::Result<Vec<u8>> {
+        let file = std::fs::File::open(path)?;
+        // SAFETY: The file is opened read-only and we hold a shared reference
+        // through the map's lifetime; no other code truncates it.
+        let mmap = unsafe {
+            memmap2::Mmap::map(&file)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+        };
+        let start = offset as usize;
+        let end = offset.checked_add(length).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "offset + length overflows",
+            )
+        })? as usize;
+        let slice = mmap.get(start..end).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!(
+                    "mmap slice {start}..{end} out of bounds (file size {})",
+                    mmap.len()
+                ),
+            )
+        })?;
+        Ok(slice.to_vec())
+    }
+
+    /// Read `length` bytes at `offset` using `seek` + `read_exact`.
+    fn load_via_read(path: &std::path::Path, offset: u64, length: u64) -> std::io::Result<Vec<u8>> {
+        let mut file = std::fs::File::open(path)?;
+        file.seek(SeekFrom::Start(offset))?;
+        let mut buf = vec![0u8; length as usize];
         file.read_exact(&mut buf)?;
         Ok(buf)
     }
@@ -616,5 +669,61 @@ mod tests {
         let mut c = EssenceCollection::new();
         c.add(LazyEssence::new(PathBuf::from("/a"), 0, 1, "A".to_string()));
         assert_eq!(c.as_slice().len(), 1);
+    }
+
+    // ── mmap vs read consistency ─────────────────────────────────────────────
+
+    /// Write a 128 KiB temp file (above MMAP_THRESHOLD), load it twice via
+    /// `data()` and assert both calls return byte-for-byte identical content.
+    /// The first call triggers the real mmap-backed load; the second hits the
+    /// cache — both must agree.
+    #[test]
+    fn test_lazy_essence_mmap_vs_read_consistency() {
+        // Build deterministic 128 KiB payload.
+        let size: usize = 131_072; // 128 KiB  (> MMAP_THRESHOLD = 64 KiB)
+        let payload: Vec<u8> = (0u8..=255).cycle().take(size).collect();
+
+        let path = make_temp_file(&payload);
+
+        let e = LazyEssence::new(path.clone(), 0, size as u64, "Picture".to_string());
+
+        // First call: triggers mmap load.
+        let first = e.data().expect("first load via mmap");
+        assert_eq!(first.len(), size, "first load length mismatch");
+        assert_eq!(&first[..], &payload[..], "first load content mismatch");
+
+        // Remove the file from disk to prove the second call uses the cache.
+        let _ = std::fs::remove_file(&path);
+
+        // Second call: must return the cached Arc — no further I/O.
+        let second = e.data().expect("second load must use cache");
+        assert_eq!(
+            &first[..],
+            &second[..],
+            "cached data does not match original"
+        );
+
+        // Verify it was indeed cached (not re-read).
+        assert!(
+            e.is_loaded(),
+            "essence must still be loaded after file deletion"
+        );
+    }
+
+    /// Load from a file smaller than MMAP_THRESHOLD to verify the regular
+    /// `read_exact` path is also correct.
+    #[test]
+    fn test_lazy_essence_small_file_load_via_read() {
+        // 1 KiB — well below MMAP_THRESHOLD.
+        let size: usize = 1024;
+        let payload: Vec<u8> = (0u8..=255).cycle().take(size).collect();
+        let path = make_temp_file(&payload);
+
+        let e = LazyEssence::new(path.clone(), 0, size as u64, "Sound".to_string());
+        let data = e.data().expect("small file load");
+        assert_eq!(data.len(), size);
+        assert_eq!(&data[..], &payload[..]);
+
+        let _ = std::fs::remove_file(&path);
     }
 }

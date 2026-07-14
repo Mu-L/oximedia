@@ -27,16 +27,16 @@
 
 ## Performance
 - [ ] Reduce profiling overhead by using thread-local storage for sampling counters
-- [ ] Implement zero-allocation event recording in `event_trace` with pre-allocated ring buffer
+- [x] Implement zero-allocation event recording in `event_trace` with pre-allocated ring buffer (2026-06-22: fixed-capacity `EventRingBuffer<TraceEvent, 4096>` const-array backing store; `emit` hot path is alloc-free — `Copy` `TraceEvent` with inline `[u8;64]` message + interned `u32` component id; added `EventTrace::capacity()`/`drain()`/`drain_into()` + `EventRingBuffer::drain_into()`; 9 new tests incl. capacity-invariance-across-burst (no growth) + drain order/wrap; cargo test + clippy -D warnings green)
 - [ ] Use lock-free data structures in `allocation_tracker` to minimize measurement perturbation
 - [ ] Add configurable buffer sizes in `flamegraph` generation to handle deep call stacks efficiently
 
 ## Testing
-- [ ] Add profiling overhead measurement tests (verify < 1% overhead in Sampling mode)
-- [ ] Test `regression` detection with synthetic benchmark data containing known regressions
-- [ ] Add tests for `flame` and `flamegraph` SVG output correctness with known call trees
-- [ ] Test `hotspot` detection accuracy with synthetic workloads having known hot functions
-- [ ] Verify `memory_profiler` tracks allocations correctly under concurrent allocation patterns
+- [x] Add profiling overhead measurement tests (verify < 1% overhead in Sampling mode) (2026-06-06: tests/profiler_guarantees.rs:53 overhead_accounting_below_one_percent_deterministic — deterministic count-based accounting + adaptive controller; :103 adaptive_controller_keeps_overhead_under_target; :153 self_timed_overhead_accounting_is_coherent — profiler self-timed via tls_counters, loose always-on bound; :223 self_timed_overhead_below_one_percent_tight — #[ignore]-gated tight wall-clock <1% to avoid CI flakiness)
+- [x] Test `regression` detection with synthetic benchmark data containing known regressions (2026-06-06: tests/profiler_guarantees.rs:271 profile_comparator_flags_injected_1_5x_regression; :299 profile_comparator_no_false_positive_within_noise; :320 regression_detector_flags_injected_and_ignores_noise — both ProfileComparator and benchmark RegressionDetector, injected ×1.5 detected + ±3% noise not flagged)
+- [x] Add tests for `flame` and `flamegraph` SVG output correctness with known call trees (2026-06-06: tests/profiler_guarantees.rs:506 flamegraph_known_tree_surfaces_hot_path — known call tree → folded-format + tree-structure correctness (hot path `main;render;encode` on top, node count). SVG *rendering* output not asserted here; flamegraph::svg already has unit tests (test_svg_generation, test_svg_renderer))
+- [x] Test `hotspot` detection accuracy with synthetic workloads having known hot functions (2026-06-06: tests/profiler_guarantees.rs:557 hotspot_detector_ranks_known_hot_function — 70% function ranks first, sub-threshold function filtered)
+- [x] Verify `memory_profiler` tracks allocations correctly under concurrent allocation patterns (2026-06-06: tests/profiler_guarantees.rs:358 concurrent_allocation_total_is_exact — N-thread lock-free AllocationTracker exact byte+record total; :409 thread_local_counters_aggregate_to_exact_global_total; :451 concurrent_sampling_and_allocation_consistent)
 
 ## Documentation
 - [ ] Add profiling quickstart guide with common workflow patterns

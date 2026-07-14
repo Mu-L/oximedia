@@ -1,7 +1,7 @@
 //! Hiss removal using spectral gating.
 
 use crate::error::RestoreResult;
-use crate::utils::spectral::{apply_window, FftProcessor, WindowFunction};
+use crate::utils::spectral::{window_coefficients, FftProcessor, WindowFunction};
 
 /// Hiss remover configuration.
 #[derive(Debug, Clone)]
@@ -51,8 +51,17 @@ impl HissRemover {
 
         let fft = FftProcessor::new(self.fft_size);
 
+        // Precompute the analysis/synthesis window once.  The same Hann window
+        // is applied on analysis and synthesis, so the per-sample contribution
+        // for a pass-through bin is `w[i]²·x`.  Weighted overlap-add (WOLA)
+        // reconstruction therefore normalises by the accumulated `Σ w[i]²`
+        // (the window-overlap-squared sum), NOT by the raw frame count — the
+        // latter leaves a position-dependent gain error and amplitude
+        // modulation.
+        let window = window_coefficients(self.fft_size, WindowFunction::Hann);
+
         let mut output = vec![0.0; samples.len()];
-        let mut overlap_count = vec![0.0; samples.len()];
+        let mut window_sum = vec![0.0f32; samples.len()];
 
         #[allow(clippy::cast_precision_loss)]
         let bin_width = sample_rate as f32 / self.fft_size as f32;
@@ -61,34 +70,45 @@ impl HissRemover {
         let mut pos = 0;
         while pos + self.fft_size <= samples.len() {
             let mut frame = samples[pos..pos + self.fft_size].to_vec();
-            apply_window(&mut frame, WindowFunction::Hann);
+            for (s, &w) in frame.iter_mut().zip(window.iter()) {
+                *s *= w;
+            }
 
             let spectrum = fft.forward(&frame)?;
             let mut magnitude = fft.magnitude(&spectrum);
             let phase = fft.phase(&spectrum);
 
-            // Apply spectral gating only to high frequencies
-            for i in highpass_bin..magnitude.len() {
-                magnitude[i] *= db_to_linear(self.config.reduction_db);
+            // Apply spectral gating only to high frequencies.
+            //
+            // The signal is real → the spectrum is Hermitian (`X[N-k] ==
+            // conj(X[k])`).  We must attenuate a high-frequency bin `k` AND its
+            // conjugate partner `N-k` by the same factor, otherwise the
+            // reconstructed real signal loses half its amplitude at the
+            // untouched frequencies.  Operate on the unique half `[0, N/2]` and
+            // mirror each change onto `N-k`.
+            let reduction = db_to_linear(self.config.reduction_db);
+            let half = self.fft_size / 2;
+            for i in highpass_bin..=half {
+                magnitude[i] *= reduction;
+                if i > 0 && i < half {
+                    magnitude[self.fft_size - i] *= reduction;
+                }
             }
 
             let processed_spectrum = FftProcessor::from_polar(&magnitude, &phase)?;
             let processed_frame = fft.inverse(&processed_spectrum)?;
 
-            let mut windowed = processed_frame;
-            apply_window(&mut windowed, WindowFunction::Hann);
-
-            for (i, &sample) in windowed.iter().enumerate() {
-                output[pos + i] += sample;
-                overlap_count[pos + i] += 1.0;
+            for (i, (&sample, &w)) in processed_frame.iter().zip(window.iter()).enumerate() {
+                output[pos + i] += sample * w;
+                window_sum[pos + i] += w * w;
             }
 
             pos += self.hop_size;
         }
 
-        for (i, &count) in overlap_count.iter().enumerate() {
-            if count > 0.0 {
-                output[i] /= count;
+        for (i, &wsum) in window_sum.iter().enumerate() {
+            if wsum > f32::EPSILON {
+                output[i] /= wsum;
             }
         }
 

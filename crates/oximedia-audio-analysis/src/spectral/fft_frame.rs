@@ -357,7 +357,7 @@ impl SpectralConfig {
 /// Spectral analyzer that processes audio frames.
 ///
 /// Pre-allocates a complex scratch buffer at construction time so that each
-/// call to [`process`] avoids heap allocation in the hot path.
+/// call to [`Self::process`] avoids heap allocation in the hot path.
 pub struct FftSpectralAnalyzer {
     config: SpectralConfig,
     /// Ring buffer accumulating incoming samples.

@@ -265,7 +265,7 @@ pub struct CachedLayer {
     pub version: Version,
     /// Frame number this layer was rendered for.
     pub frame: i64,
-    /// Pixel data (simplified as a Vec<u8> for RGBA).
+    /// Pixel data (simplified as a `Vec<u8>` for RGBA).
     pub data: Vec<u8>,
     /// Width of the rendered layer.
     pub width: u32,

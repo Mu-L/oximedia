@@ -669,7 +669,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore]
     fn test_rct_roundtrip() {
         let test_values = [
             (0, 0, 0),
@@ -694,7 +693,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_rct_negative_values() {
         let (y, co, cg) = forward_rct(-10, 20, -30);
         let (r, g, b) = inverse_rct(y, co, cg);
@@ -702,7 +700,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_signed_unsigned_roundtrip() {
         for v in -100..=100 {
             let u = signed_to_unsigned(v);
@@ -712,7 +709,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_zigzag_ordering() {
         assert_eq!(signed_to_unsigned(0), 0);
         assert_eq!(signed_to_unsigned(-1), 1);
@@ -722,7 +718,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_residual_encode_decode_roundtrip() {
         let test_values = [0, 1, -1, 127, -128, 1000, -1000, 65535, -65536, 0];
         let mut encoded = Vec::new();
@@ -742,7 +737,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_gradient_predictor() {
         let predictions = compute_predictions(100, 100, 100, 100, 100, 100);
         assert_eq!(predictions[Predictor::Gradient as usize], 100);
@@ -751,7 +745,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_gradient_predictor_edge() {
         let predictions = compute_predictions(10, 0, 0, 0, 0, 0);
         assert_eq!(predictions[Predictor::Gradient as usize], 10);
@@ -761,7 +754,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_prediction_context() {
         let mut ctx = PredictionContext::new();
         assert_eq!(ctx.best_predictor(), Predictor::Zero);
@@ -773,7 +765,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_get_neighbors_corner() {
         let channel = vec![1, 2, 3, 4, 5, 6, 7, 8, 9];
         let (w, n, nw, ne, nn, ww) = get_neighbors(&channel, 3, 0, 0);
@@ -787,7 +778,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_modular_encode_decode_flat() {
         let width = 4u32;
         let height = 4u32;
@@ -809,7 +799,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_modular_encode_decode_gradient() {
         let width = 8u32;
         let height = 4u32;
@@ -835,7 +824,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_modular_encode_decode_with_rct() {
         let width = 4u32;
         let height = 4u32;
@@ -873,7 +861,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_modular_zero_dimensions_error() {
         let mut encoder = ModularEncoder::new();
         assert!(encoder.encode_image(&[vec![0i32]], 0, 1, 8).is_err());
@@ -881,14 +868,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_modular_empty_channels_error() {
         let mut encoder = ModularEncoder::new();
         assert!(encoder.encode_image(&[], 1, 1, 8).is_err());
     }
 
     #[test]
-    #[ignore]
     fn test_modular_multichannel() {
         let width = 4u32;
         let height = 4u32;
@@ -912,7 +897,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_modular_large_values() {
         // Test with 16-bit range values
         let width = 4u32;

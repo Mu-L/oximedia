@@ -130,12 +130,23 @@ pub struct WebhookNotifier {
 
 impl WebhookNotifier {
     /// Creates a new webhook notifier.
-    #[must_use]
-    pub fn new(config: WebhookConfig) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying `reqwest::Client` cannot be
+    /// constructed (e.g. if the platform's TLS backend fails to
+    /// initialize).
+    pub fn new(config: WebhookConfig) -> ServerResult<Self> {
+        // Ensure the process-wide Pure-Rust `rustls-rustcrypto` provider is
+        // installed before building the TLS-capable `reqwest::Client` below
+        // (idempotent; safe even if another entry point already installed
+        // one).
+        oximedia_net::install_default_crypto_provider();
+
         let client = reqwest::Client::builder()
             .timeout(config.timeout)
             .build()
-            .expect("Failed to create HTTP client");
+            .map_err(|e| ServerError::Internal(format!("Failed to create HTTP client: {e}")))?;
 
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
 
@@ -156,11 +167,11 @@ impl WebhookNotifier {
             }
         });
 
-        Self {
+        Ok(Self {
             config,
             client,
             event_tx,
-        }
+        })
     }
 
     /// Sends a webhook event.

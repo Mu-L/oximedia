@@ -39,7 +39,9 @@ use std::arch::aarch64::*;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
-use crate::ipt_pq::{ipt_pq_to_rgb_bt2020, pq_eotf, pq_oetf, rgb_bt2020_to_ipt_pq};
+use crate::ipt_pq::{ipt_pq_to_rgb_bt2020, rgb_bt2020_to_ipt_pq};
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use crate::ipt_pq::{pq_eotf, pq_oetf};
 
 // (No standalone PQ constants needed here — we delegate to crate::ipt_pq for
 //  the scalar PQ OETF/EOTF, which keeps the polynomial constants in one place.)
@@ -154,17 +156,28 @@ pub fn ipt_pq_batch_scalar(input: &[f32], output: &mut [f32], direction: IptPqDi
 
 // ── PQ OETF/EOTF: scalar helpers (used inside SIMD tail loops) ───────────────
 
+// These scalar PQ helpers are only called from the x86_64 (AVX2/SSE4.1) and
+// aarch64 (NEON) SIMD lane loops below; on other targets (e.g. wasm32) no
+// SIMD path exists, so gate them alongside their only consumers.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[inline]
 fn pq_oetf_scalar(x: f32) -> f32 {
     pq_oetf(x)
 }
 
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[inline]
 fn pq_eotf_scalar(x: f32) -> f32 {
     pq_eotf(x)
 }
 
+// The following colour-matrix constants (and their per-row aliases below)
+// are consumed exclusively by the x86_64 AVX2/SSE4.1 and aarch64 NEON SIMD
+// kernels. On targets without those SIMD paths (e.g. wasm32) they are
+// gated out alongside their consumers to avoid dead-code warnings.
+
 // BT.2020 RGB → LMS matrix coefficients
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const RGB_TO_LMS: [[f32; 3]; 3] = [
     [0.412_109, 0.523_926, 0.063_964_8],
     [0.166_748, 0.720_459, 0.112_793],
@@ -172,6 +185,7 @@ const RGB_TO_LMS: [[f32; 3]; 3] = [
 ];
 
 // LMS → BT.2020 RGB inverse matrix
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const LMS_TO_RGB: [[f32; 3]; 3] = [
     [3.436_605_4, -2.506_452_4, 0.069_847_7],
     [-0.791_314_3, 1.983_589_9, -0.192_276_0],
@@ -179,6 +193,7 @@ const LMS_TO_RGB: [[f32; 3]; 3] = [
 ];
 
 // LMS-PQ → IPT matrix
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const LMS_TO_IPT: [[f32; 3]; 3] = [
     [0.4000, 0.4000, 0.2000],
     [4.4550, -4.8510, 0.3960],
@@ -186,6 +201,7 @@ const LMS_TO_IPT: [[f32; 3]; 3] = [
 ];
 
 // IPT → LMS-PQ inverse matrix
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const IPT_TO_LMS: [[f32; 3]; 3] = [
     [1.000_000, 0.097_569, 0.205_226],
     [1.000_000, -0.113_876, 0.133_218],
@@ -341,56 +357,67 @@ unsafe fn inverse_avx2_fma(i: __m256, p: __m256, t: __m256) -> (__m256, __m256, 
 }
 
 // Row-alias constants so each mat-mul call references a 1×3 row.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const RGB_TO_LMS_ROW1: [[f32; 3]; 3] = [
     [RGB_TO_LMS[1][0], RGB_TO_LMS[1][1], RGB_TO_LMS[1][2]],
     [0.0, 0.0, 0.0],
     [0.0, 0.0, 0.0],
 ];
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const RGB_TO_LMS_ROW2: [[f32; 3]; 3] = [
     [RGB_TO_LMS[2][0], RGB_TO_LMS[2][1], RGB_TO_LMS[2][2]],
     [0.0, 0.0, 0.0],
     [0.0, 0.0, 0.0],
 ];
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const LMS_TO_IPT_ROW0: [[f32; 3]; 3] = [
     [LMS_TO_IPT[0][0], LMS_TO_IPT[0][1], LMS_TO_IPT[0][2]],
     [0.0, 0.0, 0.0],
     [0.0, 0.0, 0.0],
 ];
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const LMS_TO_IPT_ROW1: [[f32; 3]; 3] = [
     [LMS_TO_IPT[1][0], LMS_TO_IPT[1][1], LMS_TO_IPT[1][2]],
     [0.0, 0.0, 0.0],
     [0.0, 0.0, 0.0],
 ];
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const LMS_TO_IPT_ROW2: [[f32; 3]; 3] = [
     [LMS_TO_IPT[2][0], LMS_TO_IPT[2][1], LMS_TO_IPT[2][2]],
     [0.0, 0.0, 0.0],
     [0.0, 0.0, 0.0],
 ];
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const IPT_TO_LMS_ROW0: [[f32; 3]; 3] = [
     [IPT_TO_LMS[0][0], IPT_TO_LMS[0][1], IPT_TO_LMS[0][2]],
     [0.0, 0.0, 0.0],
     [0.0, 0.0, 0.0],
 ];
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const IPT_TO_LMS_ROW1: [[f32; 3]; 3] = [
     [IPT_TO_LMS[1][0], IPT_TO_LMS[1][1], IPT_TO_LMS[1][2]],
     [0.0, 0.0, 0.0],
     [0.0, 0.0, 0.0],
 ];
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const IPT_TO_LMS_ROW2: [[f32; 3]; 3] = [
     [IPT_TO_LMS[2][0], IPT_TO_LMS[2][1], IPT_TO_LMS[2][2]],
     [0.0, 0.0, 0.0],
     [0.0, 0.0, 0.0],
 ];
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const LMS_TO_RGB_ROW0: [[f32; 3]; 3] = [
     [LMS_TO_RGB[0][0], LMS_TO_RGB[0][1], LMS_TO_RGB[0][2]],
     [0.0, 0.0, 0.0],
     [0.0, 0.0, 0.0],
 ];
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const LMS_TO_RGB_ROW1: [[f32; 3]; 3] = [
     [LMS_TO_RGB[1][0], LMS_TO_RGB[1][1], LMS_TO_RGB[1][2]],
     [0.0, 0.0, 0.0],
     [0.0, 0.0, 0.0],
 ];
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const LMS_TO_RGB_ROW2: [[f32; 3]; 3] = [
     [LMS_TO_RGB[2][0], LMS_TO_RGB[2][1], LMS_TO_RGB[2][2]],
     [0.0, 0.0, 0.0],

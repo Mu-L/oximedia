@@ -1,6 +1,6 @@
 //! VTT-compatible sprite sheet / thumbnail strip generator.
 //!
-//! A [`ThumbnailStrip`] divides a video's timeline into equally-spaced frames,
+//! A [`crate::thumbnail_strip::ThumbnailStrip`] divides a video's timeline into equally-spaced frames,
 //! computes the grid position of each frame within a single sprite-sheet image,
 //! and can emit a WebVTT cue file pointing into that image with `#xywh` media
 //! fragment identifiers.

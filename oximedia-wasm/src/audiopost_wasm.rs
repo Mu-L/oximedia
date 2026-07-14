@@ -261,7 +261,7 @@ pub fn wasm_mix_audio(
     channels: &[f32],
     num_channels: u32,
     samples_per_channel: u32,
-    levels_db: &[f64],
+    levels_db: &[f32],
 ) -> Result<Vec<f32>, JsValue> {
     let nc = num_channels as usize;
     let spc = samples_per_channel as usize;
@@ -286,7 +286,7 @@ pub fn wasm_mix_audio(
 
     for ch in 0..nc {
         let gain = if ch < levels_db.len() {
-            db_to_linear(levels_db[ch]) as f32
+            db_to_linear(f64::from(levels_db[ch])) as f32
         } else {
             1.0_f32
         };

@@ -40,22 +40,21 @@ parking_lot = { workspace = true }
 dashmap = { workspace = true }
 
 # Database
-rusqlite = { workspace = true, features = ["bundled", "chrono"] }
-r2d2 = { workspace = true }
-r2d2_sqlite = { workspace = true }
+oxisql-core = { workspace = true }
+oxisql-sqlite-compat = { workspace = true }
 
 # Additional dependencies
-regex = "1.12"
+regex.workspace = true
 glob = "0.3"
-walkdir = "2.5"
+walkdir.workspace = true
 sha2 = { workspace = true }
 md5 = "0.8"
-hex = "0.4"
+hex.workspace = true
 xxhash-rust = { workspace = true }
 strsim = "0.11"
 quick-xml = { workspace = true }
 tracing = { workspace = true }
-num_cpus = "1.17"
+num_cpus = { workspace = true }
 pathdiff = "0.2"
 
 [dev-dependencies]
@@ -64,6 +63,11 @@ criterion = { workspace = true }
 
 [features]
 default = []
+# Enable `SqliteConnectionBlocking`-backed catalog and session storage.
+# The oxisql-core and oxisql-sqlite-compat deps are unconditional here
+# (always compiled in); this feature flag exists so callers can opt-in
+# consistently with the rest of the OxiMedia workspace.
+sqlite = []
 
 [lib]
 name = "oximedia_conform"

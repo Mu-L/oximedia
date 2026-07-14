@@ -30,11 +30,11 @@ chrono.workspace = true
 crc = "3"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["full"] }
 # For shared memory IPC
 memmap2.workspace = true
 # For OS clock adjustment
 libc.workspace = true
 
 [dev-dependencies]
-tokio-test = "0.4"
+tokio-test.workspace = true

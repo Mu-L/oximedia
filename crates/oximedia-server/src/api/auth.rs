@@ -8,7 +8,6 @@ use crate::{
 };
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 use std::sync::Arc;
 
 /// Register request.
@@ -84,12 +83,13 @@ pub async fn register(
     }
 
     // Check if username or email already exists
-    let exists =
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE username = ? OR email = ?")
-            .bind(&req.username)
-            .bind(&req.email)
-            .fetch_one(state.db.pool())
-            .await?;
+    let exists = crate::db::query_scalar::<i64, _>(
+        "SELECT COUNT(*) FROM users WHERE username = ? OR email = ?",
+    )
+    .bind(&req.username)
+    .bind(&req.email)
+    .fetch_one(state.db.pool())
+    .await?;
 
     if exists > 0 {
         return Err(ServerError::Conflict(
@@ -104,7 +104,7 @@ pub async fn register(
     let user = User::new(req.username, req.email, password_hash);
 
     // Save to database
-    sqlx::query(
+    crate::db::query(
         r"
         INSERT INTO users (id, username, email, password_hash, role, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -143,7 +143,7 @@ pub async fn login(
     Json(req): Json<LoginRequest>,
 ) -> ServerResult<impl IntoResponse> {
     // Find user by username or email
-    let row = sqlx::query(
+    let row = crate::db::query(
         r"
         SELECT id, username, email, password_hash, role
         FROM users
@@ -171,7 +171,7 @@ pub async fn login(
     }
 
     // Update last login
-    sqlx::query("UPDATE users SET last_login = ? WHERE id = ?")
+    crate::db::query("UPDATE users SET last_login = ? WHERE id = ?")
         .bind(chrono::Utc::now().timestamp())
         .bind(&user_id)
         .execute(state.db.pool())

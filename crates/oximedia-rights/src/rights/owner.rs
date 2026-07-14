@@ -5,8 +5,6 @@ use crate::database::RightsDatabase;
 use crate::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-#[cfg(not(target_arch = "wasm32"))]
-use sqlx::Row;
 use uuid::Uuid;
 
 /// Rights owner (person or organization)
@@ -44,25 +42,47 @@ impl RightsOwner {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Decode a `rights_owners` row into a [`RightsOwner`].
+    fn from_row(r: &oxisql_core::Row) -> Result<Self> {
+        let created_at_s: String = r.try_get("created_at")?;
+        let created_at = DateTime::parse_from_rfc3339(&created_at_s)
+            .map_err(|e| crate::RightsError::InvalidLicense(format!("Invalid created_at: {e}")))?
+            .with_timezone(&Utc);
+        let updated_at_s: String = r.try_get("updated_at")?;
+        let updated_at = DateTime::parse_from_rfc3339(&updated_at_s)
+            .map_err(|e| crate::RightsError::InvalidLicense(format!("Invalid updated_at: {e}")))?
+            .with_timezone(&Utc);
+        Ok(RightsOwner {
+            id: r.try_get("id")?,
+            name: r.try_get("name")?,
+            contact_info: r.try_get("contact_info")?,
+            created_at,
+            updated_at,
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     /// Save owner to database
     pub async fn save(&self, db: &RightsDatabase) -> Result<()> {
-        sqlx::query(
-            r"
+        db.pool()
+            .execute(
+                r"
             INSERT INTO rights_owners (id, name, contact_info, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 contact_info = excluded.contact_info,
                 updated_at = excluded.updated_at
             ",
-        )
-        .bind(&self.id)
-        .bind(&self.name)
-        .bind(&self.contact_info)
-        .bind(self.created_at.to_rfc3339())
-        .bind(self.updated_at.to_rfc3339())
-        .execute(db.pool())
-        .await?;
+                &[
+                    &self.id,
+                    &self.name,
+                    &self.contact_info,
+                    &self.created_at.to_rfc3339(),
+                    &self.updated_at.to_rfc3339(),
+                ],
+            )
+            .await?;
 
         Ok(())
     }
@@ -70,80 +90,43 @@ impl RightsOwner {
     #[cfg(not(target_arch = "wasm32"))]
     /// Load owner from database by ID
     pub async fn load(db: &RightsDatabase, id: &str) -> Result<Option<Self>> {
-        let row = sqlx::query(
-            r"
+        let row = db
+            .pool()
+            .query_optional(
+                r"
             SELECT id, name, contact_info, created_at, updated_at
-            FROM rights_owners WHERE id = ?
+            FROM rights_owners WHERE id = $1
             ",
-        )
-        .bind(id)
-        .fetch_optional(db.pool())
-        .await?;
+                &[&id],
+            )
+            .await?;
 
-        row.map(|r| {
-            let created_at = DateTime::parse_from_rfc3339(r.get("created_at"))
-                .map_err(|e| {
-                    crate::RightsError::InvalidLicense(format!("Invalid created_at: {e}"))
-                })?
-                .with_timezone(&Utc);
-            let updated_at = DateTime::parse_from_rfc3339(r.get("updated_at"))
-                .map_err(|e| {
-                    crate::RightsError::InvalidLicense(format!("Invalid updated_at: {e}"))
-                })?
-                .with_timezone(&Utc);
-            Ok(RightsOwner {
-                id: r.get("id"),
-                name: r.get("name"),
-                contact_info: r.get("contact_info"),
-                created_at,
-                updated_at,
-            })
-        })
-        .transpose()
+        row.map(|r| Self::from_row(&r)).transpose()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     /// List all owners
     pub async fn list(db: &RightsDatabase) -> Result<Vec<Self>> {
-        let rows = sqlx::query(
-            r"
+        let rows = db
+            .pool()
+            .query(
+                r"
             SELECT id, name, contact_info, created_at, updated_at
             FROM rights_owners
             ORDER BY name ASC
             ",
-        )
-        .fetch_all(db.pool())
-        .await?;
+                &[],
+            )
+            .await?;
 
-        rows.into_iter()
-            .map(|r| {
-                let created_at = DateTime::parse_from_rfc3339(r.get("created_at"))
-                    .map_err(|e| {
-                        crate::RightsError::InvalidLicense(format!("Invalid created_at: {e}"))
-                    })?
-                    .with_timezone(&Utc);
-                let updated_at = DateTime::parse_from_rfc3339(r.get("updated_at"))
-                    .map_err(|e| {
-                        crate::RightsError::InvalidLicense(format!("Invalid updated_at: {e}"))
-                    })?
-                    .with_timezone(&Utc);
-                Ok(RightsOwner {
-                    id: r.get("id"),
-                    name: r.get("name"),
-                    contact_info: r.get("contact_info"),
-                    created_at,
-                    updated_at,
-                })
-            })
-            .collect()
+        rows.iter().map(Self::from_row).collect()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     /// Delete owner from database
     pub async fn delete(db: &RightsDatabase, id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM rights_owners WHERE id = ?")
-            .bind(id)
-            .execute(db.pool())
+        db.pool()
+            .execute("DELETE FROM rights_owners WHERE id = $1", &[&id])
             .await?;
         Ok(())
     }

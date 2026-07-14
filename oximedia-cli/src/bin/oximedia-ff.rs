@@ -26,6 +26,11 @@ use tracing::warn;
 
 #[tokio::main]
 async fn main() {
+    // Install the Pure-Rust `rustls-rustcrypto` crypto provider as the
+    // process-wide default before any TLS connection can be opened. See
+    // `oximedia_net::tls_provider` for details. Idempotent.
+    oximedia_net::install_default_crypto_provider();
+
     // Initialise a minimal tracing subscriber so warn!/info! calls are visible.
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::WARN)
@@ -275,6 +280,15 @@ async fn execute_job(job: &TranscodeJob) -> anyhow::Result<()> {
         .map(|n| n.get())
         .unwrap_or(4);
 
+    // See `ffcompat_cmd::execute_job` for the rationale: a `-af loudnorm=...`
+    // filter is FFmpeg's classic EBU R128 normalization request, so map it
+    // onto `--normalize-audio`'s real pipeline wiring instead of leaving it
+    // a no-op.
+    let normalize_audio = job
+        .audio_filters
+        .iter()
+        .any(|f| matches!(f, ParsedFilter::LoudNorm { .. }));
+
     let options = TranscodeOptions {
         input: PathBuf::from(&job.input_path),
         output: PathBuf::from(&job.output_path),
@@ -295,6 +309,7 @@ async fn execute_job(job: &TranscodeJob) -> anyhow::Result<()> {
         threads,
         overwrite: job.overwrite,
         resume: false,
+        normalize_audio,
         progress_format: ProgressFormat::Plain,
     };
 

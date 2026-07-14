@@ -7,7 +7,7 @@
 //!
 //! # Design
 //!
-//! - [`HealthProbe`] is a user-supplied callback that returns a [`ProbeOutcome`].
+//! - `HealthProbe` is a user-supplied callback that returns a [`ProbeOutcome`].
 //! - [`HealthRecord`] stores the last N probe results for a plugin.
 //! - [`PluginHealthMonitor`] manages all registered probes and exposes
 //!   `run_due_probes` to execute any probes whose next scheduled time has passed.

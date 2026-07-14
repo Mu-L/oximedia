@@ -741,12 +741,12 @@ impl LiveServer {
                             if let Err(e) =
                                 http1::Builder::new().serve_connection(io, service).await
                             {
-                                eprintln!("Error serving connection: {e}");
+                                tracing::warn!(error = %e, "error serving live HTTP connection");
                             }
                         });
                     }
                     Err(e) => {
-                        eprintln!("Accept error: {e}");
+                        tracing::error!(error = %e, "live server accept error");
                     }
                 }
             }

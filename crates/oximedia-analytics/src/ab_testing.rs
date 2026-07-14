@@ -51,7 +51,7 @@ pub enum AssignmentMethod {
 }
 
 /// FNV-1a 32-bit hash of a byte slice.
-fn fnv1a_32(data: &[u8]) -> u32 {
+pub(crate) fn fnv1a_32(data: &[u8]) -> u32 {
     const FNV_OFFSET: u32 = 2_166_136_261;
     const FNV_PRIME: u32 = 16_777_619;
     let mut hash = FNV_OFFSET;
@@ -1106,5 +1106,66 @@ mod tests {
             .expect("bayesian winner should succeed");
         assert!(res.prob_b_beats_a > 0.95);
         assert!((res.posterior_mean_b - 0.25).abs() < 0.05);
+    }
+
+    // ── FNV-1a hash pin ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_fnv1a_exact_hash_pin() {
+        // Pin the exact FNV-1a 32-bit hash of b"user_42" by computing it in
+        // the test using the same constants as the production function.
+        const FNV_OFFSET: u32 = 2_166_136_261;
+        const FNV_PRIME: u32 = 16_777_619;
+        let input = b"user_42";
+        let mut expected = FNV_OFFSET;
+        for &b in input.iter() {
+            expected ^= u32::from(b);
+            expected = expected.wrapping_mul(FNV_PRIME);
+        }
+        // Call the pub(crate) function directly and compare.
+        let actual = fnv1a_32(b"user_42");
+        assert_eq!(
+            actual, expected,
+            "FNV-1a hash of \"user_42\" must be deterministic: got {actual}, want {expected}"
+        );
+    }
+
+    #[test]
+    fn test_assign_variant_exact_bucket() {
+        // Three equal-weight variants.  The same user must always land in the
+        // same variant regardless of how many times assign_variant is called.
+        let exp = Experiment {
+            id: "bucket_pin".to_string(),
+            name: "Bucket Pin Test".to_string(),
+            variants: vec![
+                Variant {
+                    id: "alpha".to_string(),
+                    name: "Alpha".to_string(),
+                    allocation_weight: 1.0,
+                },
+                Variant {
+                    id: "beta".to_string(),
+                    name: "Beta".to_string(),
+                    allocation_weight: 1.0,
+                },
+                Variant {
+                    id: "gamma".to_string(),
+                    name: "Gamma".to_string(),
+                    allocation_weight: 1.0,
+                },
+            ],
+            start_ms: 0,
+            end_ms: None,
+            min_sample_size: 10,
+        };
+        let user = "test_determinism_user";
+        let v1 = assign_variant(&exp, user, AssignmentMethod::Deterministic)
+            .expect("first assignment should succeed");
+        let v2 = assign_variant(&exp, user, AssignmentMethod::Deterministic)
+            .expect("second assignment should succeed");
+        let v3 = assign_variant(&exp, user, AssignmentMethod::Deterministic)
+            .expect("third assignment should succeed");
+        assert_eq!(v1.id, v2.id, "assignment must be deterministic (1 vs 2)");
+        assert_eq!(v2.id, v3.id, "assignment must be deterministic (2 vs 3)");
     }
 }

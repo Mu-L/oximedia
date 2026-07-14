@@ -164,7 +164,7 @@ struct SegmentPosting {
 pub struct TranscriptIndex {
     /// Configuration.
     config: TranscriptIndexConfig,
-    /// Per-asset segments: asset_id -> Vec<TranscriptSegment>
+    /// Per-asset segments: asset_id -> `Vec<TranscriptSegment>`
     segments: HashMap<Uuid, Vec<TranscriptSegment>>,
     /// Inverted index: token -> list of (asset_id, segment_index, tf)
     postings: HashMap<String, Vec<SegmentPosting>>,

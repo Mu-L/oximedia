@@ -15,15 +15,15 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-tokio = { workspace = true }
-yrs = "0.26"
+tokio = { workspace = true, features = ["full"] }
+yrs = "0.27"
 serde = { workspace = true }
 serde_json = { workspace = true }
 oxicode = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 async-trait = { workspace = true }
-futures = "0.3"
+futures.workspace = true
 tokio-tungstenite = "0.29"
 bytes = { workspace = true }
 chrono = { workspace = true }
@@ -31,10 +31,9 @@ dashmap = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 oxiarc-deflate = { workspace = true }
-lz4_flex = { workspace = true }
 
 [dev-dependencies]
-tokio-test = "0.4"
+tokio-test.workspace = true
 proptest = { workspace = true }
 
 [lib]

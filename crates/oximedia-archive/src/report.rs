@@ -9,8 +9,8 @@
 
 use crate::{ArchiveError, ArchiveResult};
 use chrono::{DateTime, Utc};
+use oxisql_core::Connection;
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tracing::info;
@@ -26,7 +26,7 @@ pub enum ReportFormat {
 
 /// Generate verification report
 pub async fn generate_report(
-    pool: &sqlx::SqlitePool,
+    pool: &oxisql_sqlite_compat::SqliteConnection,
     format: ReportFormat,
     output_path: &Path,
 ) -> ArchiveResult<()> {
@@ -190,7 +190,9 @@ pub enum FileStatus {
 }
 
 /// Collect report data from database
-async fn collect_report_data(pool: &sqlx::SqlitePool) -> ArchiveResult<VerificationReport> {
+async fn collect_report_data(
+    pool: &oxisql_sqlite_compat::SqliteConnection,
+) -> ArchiveResult<VerificationReport> {
     let summary = collect_summary(pool).await?;
     let checksum_stats = collect_checksum_stats(pool).await?;
     let fixity_stats = collect_fixity_stats(pool).await?;
@@ -213,68 +215,106 @@ async fn collect_report_data(pool: &sqlx::SqlitePool) -> ArchiveResult<Verificat
     })
 }
 
+/// Extract an aggregate `i64` column, treating SQL `NULL` (e.g. `SUM(...)` over
+/// zero matching rows) as `0` rather than an error.
+fn agg_i64(row: &oxisql_core::Row, col: &str) -> ArchiveResult<i64> {
+    Ok(row.try_get::<Option<i64>>(col)?.unwrap_or(0))
+}
+
 /// Collect summary statistics
-async fn collect_summary(pool: &sqlx::SqlitePool) -> ArchiveResult<ReportSummary> {
-    let row = sqlx::query(
-        r"
+async fn collect_summary(
+    pool: &oxisql_sqlite_compat::SqliteConnection,
+) -> ArchiveResult<ReportSummary> {
+    // NOTE: `last_check_date` is computed via a NULL-filtering subquery rather
+    // than a bare `MAX(last_verified_at)` in the outer aggregate. The
+    // Pure-Rust `oxisqlite` engine (`oxisql-sqlite-compat` 0.3.x) panics
+    // (`unreachable!()` in `vdbe/execute/aggregate.rs`) when the *first* row
+    // an aggregate steps over has a `NULL` value in a `MAX`/`MIN` target
+    // column — which `last_verified_at` frequently does for freshly-created
+    // checksum records. Restricting the subquery to `WHERE last_verified_at
+    // IS NOT NULL` means the engine never observes a `NULL` while stepping,
+    // sidestepping the crash while preserving standard SQL MAX-ignores-NULL
+    // semantics. `created_at` (used by `collect_checksum_stats` below) is
+    // `NOT NULL` in the schema so is not affected.
+    let rows = pool
+        .query(
+            r"
         SELECT
             COUNT(*) as total_files,
             SUM(file_size) as total_size,
-            MAX(last_verified_at) as last_check_date
+            (SELECT MAX(last_verified_at) FROM checksums WHERE last_verified_at IS NOT NULL) as last_check_date
         FROM checksums
         ",
-    )
-    .fetch_one(pool)
-    .await?;
+            &[],
+        )
+        .await?;
+    let row = rows
+        .first()
+        .ok_or_else(|| ArchiveError::Validation("summary query returned no row".to_string()))?;
 
-    let total_files: i64 = row.get("total_files");
-    let total_size: Option<i64> = row.get("total_size");
-    let last_check_str: Option<String> = row.get("last_check_date");
+    let total_files = agg_i64(row, "total_files")?;
+    let total_size = agg_i64(row, "total_size")?;
+    let last_check_str: Option<String> = row.try_get("last_check_date")?;
 
     let last_check_date = last_check_str
         .map(|s| DateTime::parse_from_rfc3339(&s).map(|dt| dt.with_timezone(&Utc)))
         .transpose()
-        .map_err(|e| ArchiveError::Database(sqlx::Error::Decode(Box::new(e))))?;
+        .map_err(|e| ArchiveError::Validation(format!("last_check_date decode: {e}")))?;
 
     // Count verified files
-    let verified_row = sqlx::query(
-        r"
+    let verified_rows = pool
+        .query(
+            r"
         SELECT COUNT(*) as verified
         FROM fixity_checks
         WHERE status = 'pass'
         ",
-    )
-    .fetch_one(pool)
-    .await?;
-    let verified_files: i64 = verified_row.get("verified");
+            &[],
+        )
+        .await?;
+    let verified_files = verified_rows
+        .first()
+        .map(|r| agg_i64(r, "verified"))
+        .transpose()?
+        .unwrap_or(0);
 
     // Count failed files
-    let failed_row = sqlx::query(
-        r"
+    let failed_rows = pool
+        .query(
+            r"
         SELECT COUNT(DISTINCT file_path) as failed
         FROM fixity_checks
         WHERE status = 'fail'
         ",
-    )
-    .fetch_one(pool)
-    .await?;
-    let failed_files: i64 = failed_row.get("failed");
+            &[],
+        )
+        .await?;
+    let failed_files = failed_rows
+        .first()
+        .map(|r| agg_i64(r, "failed"))
+        .transpose()?
+        .unwrap_or(0);
 
     // Count quarantined files
-    let quarantine_row = sqlx::query(
-        r"
+    let quarantine_rows = pool
+        .query(
+            r"
         SELECT COUNT(*) as quarantined
         FROM quarantine_records
         WHERE restored = 0
         ",
-    )
-    .fetch_one(pool)
-    .await?;
-    let quarantined_files: i64 = quarantine_row.get("quarantined");
+            &[],
+        )
+        .await?;
+    let quarantined_files = quarantine_rows
+        .first()
+        .map(|r| agg_i64(r, "quarantined"))
+        .transpose()?
+        .unwrap_or(0);
 
     Ok(ReportSummary {
         total_files: total_files as usize,
-        total_size: total_size.unwrap_or(0) as u64,
+        total_size: total_size as u64,
         verified_files: verified_files as usize,
         failed_files: failed_files as usize,
         quarantined_files: quarantined_files as usize,
@@ -283,9 +323,12 @@ async fn collect_summary(pool: &sqlx::SqlitePool) -> ArchiveResult<ReportSummary
 }
 
 /// Collect checksum statistics
-async fn collect_checksum_stats(pool: &sqlx::SqlitePool) -> ArchiveResult<ChecksumStatistics> {
-    let row = sqlx::query(
-        r"
+async fn collect_checksum_stats(
+    pool: &oxisql_sqlite_compat::SqliteConnection,
+) -> ArchiveResult<ChecksumStatistics> {
+    let rows = pool
+        .query(
+            r"
         SELECT
             COUNT(*) as total,
             SUM(CASE WHEN blake3 IS NOT NULL THEN 1 ELSE 0 END) as blake3_count,
@@ -296,27 +339,30 @@ async fn collect_checksum_stats(pool: &sqlx::SqlitePool) -> ArchiveResult<Checks
             MAX(created_at) as newest
         FROM checksums
         ",
-    )
-    .fetch_one(pool)
-    .await?;
+            &[],
+        )
+        .await?;
+    let row = rows.first().ok_or_else(|| {
+        ArchiveError::Validation("checksum stats query returned no row".to_string())
+    })?;
 
-    let total: i64 = row.get("total");
-    let blake3_count: i64 = row.get("blake3_count");
-    let md5_count: i64 = row.get("md5_count");
-    let sha256_count: i64 = row.get("sha256_count");
-    let crc32_count: i64 = row.get("crc32_count");
-    let oldest_str: Option<String> = row.get("oldest");
-    let newest_str: Option<String> = row.get("newest");
+    let total = agg_i64(row, "total")?;
+    let blake3_count = agg_i64(row, "blake3_count")?;
+    let md5_count = agg_i64(row, "md5_count")?;
+    let sha256_count = agg_i64(row, "sha256_count")?;
+    let crc32_count = agg_i64(row, "crc32_count")?;
+    let oldest_str: Option<String> = row.try_get("oldest")?;
+    let newest_str: Option<String> = row.try_get("newest")?;
 
     let oldest_checksum = oldest_str
         .map(|s| DateTime::parse_from_rfc3339(&s).map(|dt| dt.with_timezone(&Utc)))
         .transpose()
-        .map_err(|e| ArchiveError::Database(sqlx::Error::Decode(Box::new(e))))?;
+        .map_err(|e| ArchiveError::Validation(format!("oldest checksum decode: {e}")))?;
 
     let newest_checksum = newest_str
         .map(|s| DateTime::parse_from_rfc3339(&s).map(|dt| dt.with_timezone(&Utc)))
         .transpose()
-        .map_err(|e| ArchiveError::Database(sqlx::Error::Decode(Box::new(e))))?;
+        .map_err(|e| ArchiveError::Validation(format!("newest checksum decode: {e}")))?;
 
     Ok(ChecksumStatistics {
         total_checksums: total as usize,
@@ -330,22 +376,28 @@ async fn collect_checksum_stats(pool: &sqlx::SqlitePool) -> ArchiveResult<Checks
 }
 
 /// Collect fixity statistics
-async fn collect_fixity_stats(pool: &sqlx::SqlitePool) -> ArchiveResult<FixityStatistics> {
-    let row = sqlx::query(
-        r"
+async fn collect_fixity_stats(
+    pool: &oxisql_sqlite_compat::SqliteConnection,
+) -> ArchiveResult<FixityStatistics> {
+    let rows = pool
+        .query(
+            r"
         SELECT
             COUNT(*) as total,
             SUM(CASE WHEN status = 'pass' THEN 1 ELSE 0 END) as passed,
             SUM(CASE WHEN status = 'fail' THEN 1 ELSE 0 END) as failed
         FROM fixity_checks
         ",
-    )
-    .fetch_one(pool)
-    .await?;
+            &[],
+        )
+        .await?;
+    let row = rows.first().ok_or_else(|| {
+        ArchiveError::Validation("fixity stats query returned no row".to_string())
+    })?;
 
-    let total: i64 = row.get("total");
-    let passed: i64 = row.get("passed");
-    let failed: i64 = row.get("failed");
+    let total = agg_i64(row, "total")?;
+    let passed = agg_i64(row, "passed")?;
+    let failed = agg_i64(row, "failed")?;
 
     let success_rate = if total > 0 {
         (passed as f64) / (total as f64)
@@ -370,9 +422,12 @@ async fn collect_fixity_stats(pool: &sqlx::SqlitePool) -> ArchiveResult<FixitySt
 }
 
 /// Collect quarantine statistics
-async fn collect_quarantine_stats(pool: &sqlx::SqlitePool) -> ArchiveResult<QuarantineStatistics> {
-    let row = sqlx::query(
-        r"
+async fn collect_quarantine_stats(
+    pool: &oxisql_sqlite_compat::SqliteConnection,
+) -> ArchiveResult<QuarantineStatistics> {
+    let rows = pool
+        .query(
+            r"
         SELECT
             COUNT(*) as total,
             SUM(CASE WHEN restored = 0 THEN 1 ELSE 0 END) as active,
@@ -381,15 +436,18 @@ async fn collect_quarantine_stats(pool: &sqlx::SqlitePool) -> ArchiveResult<Quar
             SUM(CASE WHEN auto_quarantine = 0 THEN 1 ELSE 0 END) as manual_q
         FROM quarantine_records
         ",
-    )
-    .fetch_one(pool)
-    .await?;
+            &[],
+        )
+        .await?;
+    let row = rows.first().ok_or_else(|| {
+        ArchiveError::Validation("quarantine stats query returned no row".to_string())
+    })?;
 
-    let total: i64 = row.get("total");
-    let active: i64 = row.get("active");
-    let restored: i64 = row.get("restored");
-    let auto_q: i64 = row.get("auto_q");
-    let manual_q: i64 = row.get("manual_q");
+    let total = agg_i64(row, "total")?;
+    let active = agg_i64(row, "active")?;
+    let restored = agg_i64(row, "restored")?;
+    let auto_q = agg_i64(row, "auto_q")?;
+    let manual_q = agg_i64(row, "manual_q")?;
 
     Ok(QuarantineStatistics {
         total_quarantined: total as usize,
@@ -401,31 +459,34 @@ async fn collect_quarantine_stats(pool: &sqlx::SqlitePool) -> ArchiveResult<Quar
 }
 
 /// Collect recent events
-async fn collect_recent_events(pool: &sqlx::SqlitePool) -> ArchiveResult<Vec<RecentEvent>> {
-    let rows = sqlx::query(
-        r"
+async fn collect_recent_events(
+    pool: &oxisql_sqlite_compat::SqliteConnection,
+) -> ArchiveResult<Vec<RecentEvent>> {
+    let rows = pool
+        .query(
+            r"
         SELECT event_type, event_date_time, linking_object_id, event_outcome, event_detail
         FROM premis_events
         ORDER BY event_date_time DESC
         LIMIT 50
         ",
-    )
-    .fetch_all(pool)
-    .await?;
+            &[],
+        )
+        .await?;
 
     let mut events = Vec::new();
     for row in rows {
-        let event_date_str: String = row.get("event_date_time");
+        let event_date_str: String = row.try_get("event_date_time")?;
         let event_date = DateTime::parse_from_rfc3339(&event_date_str)
-            .map_err(|e| ArchiveError::Database(sqlx::Error::Decode(Box::new(e))))?
+            .map_err(|e| ArchiveError::Validation(format!("event_date_time decode: {e}")))?
             .with_timezone(&Utc);
 
         events.push(RecentEvent {
-            event_type: row.get("event_type"),
+            event_type: row.try_get("event_type")?,
             event_date,
-            file_path: row.get("linking_object_id"),
-            outcome: row.get("event_outcome"),
-            details: row.get("event_detail"),
+            file_path: row.try_get("linking_object_id")?,
+            outcome: row.try_get("event_outcome")?,
+            details: row.try_get("event_detail")?,
         });
     }
 
@@ -433,12 +494,15 @@ async fn collect_recent_events(pool: &sqlx::SqlitePool) -> ArchiveResult<Vec<Rec
 }
 
 /// Generate alerts based on database state
-async fn generate_alerts(pool: &sqlx::SqlitePool) -> ArchiveResult<Vec<Alert>> {
+async fn generate_alerts(
+    pool: &oxisql_sqlite_compat::SqliteConnection,
+) -> ArchiveResult<Vec<Alert>> {
     let mut alerts = Vec::new();
 
     // Alert for failed fixity checks
-    let failed_checks = sqlx::query(
-        r"
+    let failed_checks = pool
+        .query(
+            r"
         SELECT file_path
         FROM fixity_checks
         WHERE status = 'fail'
@@ -447,12 +511,12 @@ async fn generate_alerts(pool: &sqlx::SqlitePool) -> ArchiveResult<Vec<Alert>> {
         ORDER BY MAX(check_time) DESC
         LIMIT 10
         ",
-    )
-    .fetch_all(pool)
-    .await?;
+            &[],
+        )
+        .await?;
 
     for row in failed_checks {
-        let file_path: String = row.get("file_path");
+        let file_path: String = row.try_get("file_path")?;
         alerts.push(Alert {
             alert_type: AlertType::FixityCheckFailed,
             severity: AlertSeverity::Error,
@@ -463,19 +527,20 @@ async fn generate_alerts(pool: &sqlx::SqlitePool) -> ArchiveResult<Vec<Alert>> {
     }
 
     // Alert for quarantined files
-    let quarantined = sqlx::query(
-        r"
+    let quarantined = pool
+        .query(
+            r"
         SELECT original_path
         FROM quarantine_records
         WHERE restored = 0
         LIMIT 10
         ",
-    )
-    .fetch_all(pool)
-    .await?;
+            &[],
+        )
+        .await?;
 
     for row in quarantined {
-        let file_path: String = row.get("original_path");
+        let file_path: String = row.try_get("original_path")?;
         alerts.push(Alert {
             alert_type: AlertType::FileQuarantined,
             severity: AlertSeverity::Warning,
@@ -527,9 +592,12 @@ fn calculate_integrity_metrics(
 }
 
 /// Collect file details
-async fn collect_file_details(pool: &sqlx::SqlitePool) -> ArchiveResult<Vec<FileDetail>> {
-    let rows = sqlx::query(
-        r"
+async fn collect_file_details(
+    pool: &oxisql_sqlite_compat::SqliteConnection,
+) -> ArchiveResult<Vec<FileDetail>> {
+    let rows = pool
+        .query(
+            r"
         SELECT
             c.file_path,
             c.file_size,
@@ -542,22 +610,22 @@ async fn collect_file_details(pool: &sqlx::SqlitePool) -> ArchiveResult<Vec<File
         ORDER BY c.last_verified_at DESC
         LIMIT 100
         ",
-    )
-    .fetch_all(pool)
-    .await?;
+            &[],
+        )
+        .await?;
 
     let mut details = Vec::new();
     for row in rows {
-        let file_path: String = row.get("file_path");
-        let file_size: i64 = row.get("file_size");
-        let last_verified_str: Option<String> = row.get("last_verified_at");
-        let verification_count: i64 = row.get("verification_count");
-        let failure_count: i64 = row.get("failure_count");
+        let file_path: String = row.try_get("file_path")?;
+        let file_size: i64 = row.try_get("file_size")?;
+        let last_verified_str: Option<String> = row.try_get("last_verified_at")?;
+        let verification_count = agg_i64(&row, "verification_count")?;
+        let failure_count = agg_i64(&row, "failure_count")?;
 
         let last_verified = if let Some(s) = last_verified_str {
             Some(
                 DateTime::parse_from_rfc3339(&s)
-                    .map_err(|e| ArchiveError::Database(sqlx::Error::Decode(Box::new(e))))?
+                    .map_err(|e| ArchiveError::Validation(format!("last_verified decode: {e}")))?
                     .with_timezone(&Utc),
             )
         } else {
@@ -874,7 +942,7 @@ pub struct AccessCompliance {
 /// Generate OAIS compliance report
 #[allow(dead_code)]
 pub async fn generate_oais_report(
-    _pool: &sqlx::SqlitePool,
+    _pool: &oxisql_sqlite_compat::SqliteConnection,
     output_path: &PathBuf,
 ) -> ArchiveResult<()> {
     let report = OaisComplianceReport {

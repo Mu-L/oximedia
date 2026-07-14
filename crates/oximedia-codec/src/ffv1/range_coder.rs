@@ -101,25 +101,41 @@ impl SimpleRangeEncoder {
     }
 
     /// Emit a byte to the output, handling carry propagation.
+    ///
+    /// Implements the classic carry-counting scheme: the most recent byte is
+    /// kept pending (`first_byte`) so a later carry can still increment it,
+    /// and maximal runs of 0xFF bytes are counted (`outstanding`) rather than
+    /// written, because a carry turns them into 0x00.
     fn shift_low(&mut self) {
-        // If low < 0xFF00 or there's a carry (bit 16 set), flush
-        if (self.low >> 8) >= 0xFF {
-            // Potential carry situation: defer
-            self.outstanding += 1;
-        } else {
-            // No carry risk: flush deferred bytes
-            let carry = (self.low >> 16) as u8; // 0 or 1
-            if self.defer_first {
-                self.first_byte = ((self.low >> 8) as u8).wrapping_add(carry);
-                self.defer_first = false;
-            } else {
-                self.buf.push(self.first_byte);
-                for _ in 0..self.outstanding {
-                    self.buf.push(0xFFu8.wrapping_add(carry));
-                }
-                self.first_byte = (self.low >> 8) as u8;
+        if self.defer_first {
+            // Very first byte of the stream. Here `low` is always below
+            // 0xFF00: the interval starts as [0, 0xFF00) and `low + range`
+            // never grows within a renormalization period, so neither a
+            // carry nor an ambiguous 0xFF is possible yet.
+            self.first_byte = (self.low >> 8) as u8;
+            self.defer_first = false;
+        } else if self.low <= 0xFF00 {
+            // No carry can reach the pending byte anymore: flush it along
+            // with any counted 0xFF run.
+            self.buf.push(self.first_byte);
+            for _ in 0..self.outstanding {
+                self.buf.push(0xFF);
             }
             self.outstanding = 0;
+            self.first_byte = (self.low >> 8) as u8;
+        } else if self.low >= 0x1_0000 {
+            // Carry (bit 16 set): propagate +1 into the pending byte; the
+            // counted run of 0xFF bytes wraps to 0x00.
+            self.buf.push(self.first_byte.wrapping_add(1));
+            for _ in 0..self.outstanding {
+                self.buf.push(0x00);
+            }
+            self.outstanding = 0;
+            self.first_byte = (self.low >> 8) as u8;
+        } else {
+            // Ambiguous zone (0xFF00 < low < 0x10000): the byte would be
+            // 0xFF, but a later carry could still turn it into 0x00 — defer.
+            self.outstanding += 1;
         }
         self.low = (self.low & 0xFF) << 8;
     }
@@ -330,7 +346,11 @@ impl SimpleRangeDecoder {
         let sign = self.get_bit(&mut states[si])?;
 
         if sign {
-            Ok(-(value as i32))
+            // Negate with wrapping semantics: a magnitude of exactly 2^31
+            // (e == 31, all-zero suffix) is i32::MIN, whose two's-complement
+            // negation would overflow — wrapping_neg yields i32::MIN, which
+            // is the correct decoded value.
+            Ok((value as i32).wrapping_neg())
         } else {
             Ok(value as i32)
         }
@@ -348,7 +368,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore]
     fn test_state_tables_identity_at_128() {
         // At state 128, both transitions should move toward their respective side
         assert!(ONE_STATE[128] >= 128);
@@ -356,7 +375,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_state_tables_monotone() {
         // ONE_STATE should be non-decreasing
         for i in 0..255 {
@@ -369,7 +387,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_simple_range_coder_single_bit_roundtrip() {
         let bits = [true, false, true, true, false, false, true];
 
@@ -389,9 +406,24 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_simple_range_coder_symbol_roundtrip() {
-        let test_values = [0, 1, -1, 2, -2, 10, -10, 127, -128, 255, -255, 1000, -1000];
+        let test_values = [
+            0,
+            1,
+            -1,
+            2,
+            -2,
+            10,
+            -10,
+            127,
+            -128,
+            255,
+            -255,
+            1000,
+            -1000,
+            i32::MAX,
+            i32::MIN,
+        ];
 
         for &val in &test_values {
             let mut enc = SimpleRangeEncoder::new();
@@ -410,7 +442,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_simple_range_coder_multi_symbol_roundtrip() {
         let values = [0, 5, -3, 100, -200, 0, 1, -1, 42];
 
@@ -430,7 +461,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_simple_range_coder_many_zeros() {
         let mut enc = SimpleRangeEncoder::new();
         let mut states = vec![128u8; 32];
@@ -448,14 +478,65 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_decoder_too_short() {
         assert!(SimpleRangeDecoder::new(&[]).is_err());
         assert!(SimpleRangeDecoder::new(&[0]).is_err());
     }
 
     #[test]
-    #[ignore]
+    fn test_long_stream_carry_propagation_roundtrip() {
+        // A long pseudo-random bit stream over several adaptive contexts.
+        // This reliably exercises the encoder's carry-propagation path
+        // (low >= 0x10000 in shift_low), which short round-trips rarely hit.
+        let mut rng_state = 0x2545_F491_u32;
+        let mut next_bit = || {
+            // xorshift32 — deterministic, no external deps
+            rng_state ^= rng_state << 13;
+            rng_state ^= rng_state >> 17;
+            rng_state ^= rng_state << 5;
+            rng_state & 1 == 1
+        };
+
+        let bits: Vec<bool> = (0..10_000).map(|_| next_bit()).collect();
+
+        let mut enc = SimpleRangeEncoder::new();
+        let mut enc_states = [128u8; 8];
+        for (i, &b) in bits.iter().enumerate() {
+            enc.put_bit(&mut enc_states[i % 8], b);
+        }
+        let encoded = enc.finish();
+
+        let mut dec = SimpleRangeDecoder::new(&encoded).expect("valid data");
+        let mut dec_states = [128u8; 8];
+        for (i, &expected) in bits.iter().enumerate() {
+            let got = dec.get_bit(&mut dec_states[i % 8]).expect("decode ok");
+            assert_eq!(expected, got, "bit mismatch at index {i}");
+        }
+    }
+
+    #[test]
+    fn test_long_stream_symbol_carry_roundtrip() {
+        // Mixed-magnitude symbol stream long enough to force byte carries.
+        let values: Vec<i32> = (0..2_000)
+            .map(|i: i32| (i.wrapping_mul(2_654_435_761_u32 as i32)) >> 16)
+            .collect();
+
+        let mut enc = SimpleRangeEncoder::new();
+        let mut enc_states = vec![128u8; 32];
+        for &v in &values {
+            enc.put_symbol(&mut enc_states, v);
+        }
+        let encoded = enc.finish();
+
+        let mut dec = SimpleRangeDecoder::new(&encoded).expect("valid data");
+        let mut dec_states = vec![128u8; 32];
+        for (i, &expected) in values.iter().enumerate() {
+            let got = dec.get_symbol(&mut dec_states).expect("decode ok");
+            assert_eq!(expected, got, "symbol mismatch at index {i}");
+        }
+    }
+
+    #[test]
     fn test_range_coder_adaptive_state_changes() {
         let mut enc = SimpleRangeEncoder::new();
         let mut state = 128u8;

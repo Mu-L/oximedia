@@ -3,6 +3,15 @@
 //! Provides color-space conversion, tone mapping, gamut checking, delta-E
 //! calculations, and a chainable color pipeline -- all operating in-memory
 //! without file-system access.
+//!
+//! ## Data plane
+//!
+//! Buffer-crossing APIs use `Float32Array` (`&[f32]` / `Vec<f32>`) for
+//! HDR/linear-light data, and `Uint8Array` (`&[u8]` / `Vec<u8>`) companions
+//! (suffixed `_u8`) for 8-bit SDR data -- never `Float64Array`. Internally,
+//! `oximedia-colormgmt`'s `ColorPipeline` operates on `f64` for numerical
+//! precision; conversion to/from `f32`/`u8` happens only at this wasm
+//! boundary.
 
 use wasm_bindgen::prelude::*;
 
@@ -25,18 +34,21 @@ fn js_err(msg: impl std::fmt::Display) -> JsValue {
 // Standalone functions
 // ---------------------------------------------------------------------------
 
-/// Convert an image buffer between color spaces.
+/// Convert an HDR/linear image buffer between color spaces.
 ///
-/// `data` is a flat `[r,g,b, r,g,b, ...]` array with values in [0, 1].
-/// Returns the converted buffer.
+/// `data` is a flat `[r,g,b, r,g,b, ...]` `Float32Array` with values in
+/// [0, 1] (or beyond, for scene-linear HDR data). Returns the converted
+/// buffer as a `Float32Array`.
+///
+/// For 8-bit SDR imagery, use [`wasm_convert_colorspace_u8`] instead.
 #[wasm_bindgen]
 pub fn wasm_convert_colorspace(
-    data: &[f64],
+    data: &[f32],
     width: u32,
     height: u32,
     from_space: &str,
     to_space: &str,
-) -> Result<Vec<f64>, JsValue> {
+) -> Result<Vec<f32>, JsValue> {
     let expected = (width as usize) * (height as usize) * 3;
     if data.len() != expected {
         return Err(js_err(format!(
@@ -53,24 +65,66 @@ pub fn wasm_convert_colorspace(
     let mut pipeline = ColorPipeline::new();
     pipeline.add_transform(ColorTransform::ColorSpaceConversion { from: src, to: dst });
 
-    let mut buf = data.to_vec();
+    let mut buf: Vec<f64> = data.iter().map(|&v| f64::from(v)).collect();
     pipeline.transform_image(&mut buf);
-    Ok(buf)
+    Ok(buf.into_iter().map(|v| v as f32).collect())
+}
+
+/// Convert an 8-bit SDR image buffer between color spaces.
+///
+/// `data` is a flat `[r,g,b, r,g,b, ...]` `Uint8Array` with values in
+/// [0, 255]. Returns the converted buffer as a `Uint8Array` with the same
+/// layout.
+#[wasm_bindgen]
+pub fn wasm_convert_colorspace_u8(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    from_space: &str,
+    to_space: &str,
+) -> Result<Vec<u8>, JsValue> {
+    let expected = (width as usize) * (height as usize) * 3;
+    if data.len() != expected {
+        return Err(js_err(format!(
+            "Data length {} != {}x{}x3 = {}",
+            data.len(),
+            width,
+            height,
+            expected,
+        )));
+    }
+    let src = resolve_cs(from_space)?;
+    let dst = resolve_cs(to_space)?;
+
+    let mut pipeline = ColorPipeline::new();
+    pipeline.add_transform(ColorTransform::ColorSpaceConversion { from: src, to: dst });
+
+    let mut buf: Vec<f64> = data.iter().map(|&b| f64::from(b) / 255.0).collect();
+    pipeline.transform_image(&mut buf);
+    Ok(buf
+        .into_iter()
+        .map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+        .collect())
 }
 
 /// Apply tone mapping to an HDR image buffer.
 ///
-/// `data` is flat `[r,g,b,...]` in linear HDR space.
+/// `data` is a flat `[r,g,b,...]` `Float32Array` in linear HDR space.
 /// `operator`: `reinhard`, `reinhard_extended`, `hable`, `aces`, `linear`.
 /// `peak_luminance`: input peak luminance in nits.
+///
+/// Tone mapping is inherently an HDR/linear-light operation (input values
+/// routinely exceed 1.0), so there is no `_u8` companion here -- convert the
+/// tone-mapped SDR result to 8-bit downstream once it has been clamped to
+/// display range.
 #[wasm_bindgen]
 pub fn wasm_apply_tone_map(
-    data: &[f64],
+    data: &[f32],
     width: u32,
     height: u32,
     operator: &str,
-    peak_luminance: f64,
-) -> Result<Vec<f64>, JsValue> {
+    peak_luminance: f32,
+) -> Result<Vec<f32>, JsValue> {
     let expected = (width as usize) * (height as usize) * 3;
     if data.len() != expected {
         return Err(js_err(format!(
@@ -82,13 +136,13 @@ pub fn wasm_apply_tone_map(
         )));
     }
     let op = parse_tone_op(operator)?;
-    let mapper = ToneMapper::new(op, peak_luminance, 100.0);
+    let mapper = ToneMapper::new(op, f64::from(peak_luminance), 100.0);
 
-    let out: Vec<f64> = data
+    let out: Vec<f32> = data
         .chunks_exact(3)
         .flat_map(|px| {
-            let mapped = mapper.apply([px[0], px[1], px[2]]);
-            mapped.into_iter()
+            let mapped = mapper.apply([f64::from(px[0]), f64::from(px[1]), f64::from(px[2])]);
+            mapped.into_iter().map(|v| v as f32)
         })
         .collect();
     Ok(out)
@@ -228,19 +282,23 @@ impl WasmColorPipeline {
         Ok(())
     }
 
-    /// Transform a single pixel, returning `[r, g, b]`.
-    pub fn transform_pixel(&self, r: f64, g: f64, b: f64) -> Result<Vec<f64>, JsValue> {
-        let out = self.inner.transform_pixel([r, g, b]);
-        Ok(vec![out[0], out[1], out[2]])
+    /// Transform a single HDR/linear pixel, returning `[r, g, b]`.
+    pub fn transform_pixel(&self, r: f32, g: f32, b: f32) -> Result<Vec<f32>, JsValue> {
+        let out = self
+            .inner
+            .transform_pixel([f64::from(r), f64::from(g), f64::from(b)]);
+        Ok(vec![out[0] as f32, out[1] as f32, out[2] as f32])
     }
 
-    /// Transform an image buffer (`[r,g,b, r,g,b, ...]`).
+    /// Transform an HDR/linear image buffer (`[r,g,b, r,g,b, ...]` `Float32Array`).
+    ///
+    /// For 8-bit SDR imagery, use [`WasmColorPipeline::transform_image_u8`].
     pub fn transform_image(
         &self,
-        data: &[f64],
+        data: &[f32],
         width: u32,
         height: u32,
-    ) -> Result<Vec<f64>, JsValue> {
+    ) -> Result<Vec<f32>, JsValue> {
         let expected = (width as usize) * (height as usize) * 3;
         if data.len() != expected {
             return Err(js_err(format!(
@@ -251,9 +309,35 @@ impl WasmColorPipeline {
                 expected,
             )));
         }
-        let mut buf = data.to_vec();
+        let mut buf: Vec<f64> = data.iter().map(|&v| f64::from(v)).collect();
         self.inner.transform_image(&mut buf);
-        Ok(buf)
+        Ok(buf.into_iter().map(|v| v as f32).collect())
+    }
+
+    /// Transform an 8-bit SDR image buffer (`[r,g,b, r,g,b, ...]` `Uint8Array`,
+    /// values in [0, 255]).
+    pub fn transform_image_u8(
+        &self,
+        data: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>, JsValue> {
+        let expected = (width as usize) * (height as usize) * 3;
+        if data.len() != expected {
+            return Err(js_err(format!(
+                "Data length {} != {}x{}x3 = {}",
+                data.len(),
+                width,
+                height,
+                expected,
+            )));
+        }
+        let mut buf: Vec<f64> = data.iter().map(|&b| f64::from(b) / 255.0).collect();
+        self.inner.transform_image(&mut buf);
+        Ok(buf
+            .into_iter()
+            .map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+            .collect())
     }
 
     /// Number of transform steps.
@@ -383,11 +467,68 @@ mod tests {
     #[test]
     fn test_convert_colorspace_identity() {
         // srgb -> srgb should be roughly identity
-        let data = vec![0.5, 0.3, 0.7];
+        let data: Vec<f32> = vec![0.5, 0.3, 0.7];
         let out = wasm_convert_colorspace(&data, 1, 1, "srgb", "srgb").expect("ok");
         assert!((out[0] - 0.5).abs() < 0.01);
         assert!((out[1] - 0.3).abs() < 0.01);
         assert!((out[2] - 0.7).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_convert_colorspace_u8_identity() {
+        // srgb -> srgb should be roughly identity in 8-bit space too.
+        let data: Vec<u8> = vec![128, 76, 179];
+        let out = wasm_convert_colorspace_u8(&data, 1, 1, "srgb", "srgb").expect("ok");
+        assert_eq!(out.len(), 3);
+        for (a, b) in data.iter().zip(out.iter()) {
+            assert!(
+                (i16::from(*a) - i16::from(*b)).abs() <= 2,
+                "expected near-identity: {a} vs {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_convert_colorspace_u8_wrong_length() {
+        let data: Vec<u8> = vec![128, 76]; // not a multiple of 3
+        assert!(wasm_convert_colorspace_u8(&data, 1, 1, "srgb", "srgb").is_err());
+    }
+
+    #[test]
+    fn test_pipeline_transform_pixel_f32() {
+        let p = WasmColorPipeline::new();
+        let out = p.transform_pixel(0.5, 0.3, 0.7).expect("ok");
+        assert_eq!(out.len(), 3);
+        // No transforms added, so this should be identity.
+        assert!((out[0] - 0.5).abs() < 1e-5);
+        assert!((out[1] - 0.3).abs() < 1e-5);
+        assert!((out[2] - 0.7).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_pipeline_transform_image_u8_roundtrip() {
+        let p = WasmColorPipeline::new();
+        let data: Vec<u8> = vec![10, 20, 30, 200, 210, 220];
+        let out = p.transform_image_u8(&data, 2, 1).expect("ok");
+        assert_eq!(out.len(), data.len());
+        for (a, b) in data.iter().zip(out.iter()) {
+            assert!((i16::from(*a) - i16::from(*b)).abs() <= 2);
+        }
+    }
+
+    #[test]
+    fn test_apply_tone_map_f32_buffer() {
+        let data: Vec<f32> = vec![0.0, 0.0, 0.0, 2.0, 2.0, 2.0];
+        let out = wasm_apply_tone_map(&data, 2, 1, "reinhard", 1000.0).expect("ok");
+        assert_eq!(out.len(), data.len());
+        // Pure black should stay (near) black.
+        assert!(out[0].abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_apply_tone_map_wrong_length() {
+        let data: Vec<f32> = vec![0.5, 0.3]; // not a multiple of 3
+        assert!(wasm_apply_tone_map(&data, 1, 1, "reinhard", 1000.0).is_err());
     }
 
     #[test]

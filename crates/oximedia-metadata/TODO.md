@@ -22,6 +22,7 @@
 - [x] Add `matroska.rs` support for nested Matroska tag elements (Targets/SimpleTags hierarchy) (verified 2026-05-16; src/matroska.rs:127 MatroskaTargets, SimpleTags nested:173)
 - [x] Implement `metadata_sanitize.rs` with configurable sanitization rules (strip GPS, strip personal data)
 - [x] Extend `metadata_diff.rs` with three-way merge for resolving concurrent metadata edits
+- [x] Decode XML character entities in `xmp.rs` element text (predefined `&amp;`/`&lt;`/`&gt;`/`&quot;`/`&apos;` + decimal/hex numeric refs) so values like `Rock &amp; Roll` are no longer truncated at `&`; quick_xml splits text around `Event::GeneralRef`, so fragments are accumulated per element via `TextBuf` (zero-copy borrow fast-path preserved) and trimmed/committed on element End (src/xmp.rs:46 append_entity, :88 TextBuf, :332 GeneralRef handling, :368 End commit; test_xmp_escaped_entity_roundtrip:902)
 
 ## New Features
 - [x] Add an `opus_tags.rs` module for Opus-specific metadata (R128 gain, output gain) per RFC 7845
@@ -36,10 +37,10 @@
 
 ## Performance
 - [x] Add lazy parsing in `id3v2.rs` (parse frame headers only, defer body parsing until accessed) (verified: id3v2.rs:586:LazyId3v2, :606:struct LazyId3v2, :615:impl LazyId3v2)
-- [ ] Implement zero-copy XMP parsing in `xmp.rs` using borrowed strings from the input buffer
+- [x] Implement zero-copy XMP parsing in `xmp.rs` using borrowed strings from the input buffer (2026-06-24; new `parse_borrowed() -> XmpView<'a>` with `&'a str` keys + `XmpValue::{Text,TextList}(Cow<'a,str>)` borrowing the input — `Cow::Owned` only when entity-unescaping/fragment-reassembly is needed; QName slices re-anchored to the input lifetime via safe offset+`str::get` since quick_xml `name()` is `&self`-bound; owned `parse()` now delegates to it and `.into_owned_metadata()`s; src/xmp.rs:261 XmpValue, :326 XmpView, :408 anchor_name, :492 parse_borrowed; 13 new tests incl. pointer-range borrow proof, entity→Owned, trimmed-still-borrowed, multibyte UTF-8, last-wins, malformed/invalid-UTF-8 clean errors)
 - [x] Add parallel metadata extraction in `media_metadata.rs` for multi-format probing (verified: media_metadata.rs:799:ParallelMetadataExtractor, :808:par_iter, extract_all)
-- [ ] Cache encoding_rs decoders in `id3v2.rs` to avoid re-initialization per text frame
-- [ ] Optimize `tag_normalize.rs` with pre-compiled regex patterns for common tag normalization rules
+- [x] Cache encoding_rs decoders in `id3v2.rs` to avoid re-initialization per text frame (Wave 24; id3v2.rs:44 decode_static reuses one Decoder + pre-sizes the String via max_utf8_buffer_length, zero Cow alloc; routes Latin-1/UTF-8/UTF-16BE and BOM-stripped UTF-16 bodies through it while preserving Encoding::decode BOM semantics)
+- [x] Optimize `tag_normalize.rs` with pre-compiled regex patterns for common tag normalization rules (Wave 24; tag_normalize.rs:21 static DEFAULT_MAPPINGS: OnceLock + :24 default_mappings() build the ~63 default mappings once; :167 with_defaults() clones the shared tables instead of rebuilding every call — no regex needed, lookups are exact hash-map hits)
 - [x] Add batch metadata write in `bulk_update.rs` to reduce I/O operations for multi-file updates (Wave 14, bulk_update.rs — write_batch, BulkWriteMode)
 
 ## Testing

@@ -412,4 +412,94 @@ mod tests {
         let result = tiled_nlmeans_filter(&frame, 0.3, 64);
         assert!(result.is_ok());
     }
+
+    // ----- Edge-preservation metric tests for NLM -----
+
+    /// Compute variance of a subslice of a pixel buffer.
+    fn compute_variance_nlm(buf: &[u8], start: usize, len: usize) -> f64 {
+        let slice = &buf[start..start + len];
+        let mean = slice.iter().map(|&v| v as f64).sum::<f64>() / len as f64;
+        slice
+            .iter()
+            .map(|&v| (v as f64 - mean).powi(2))
+            .sum::<f64>()
+            / len as f64
+    }
+
+    /// Build a 32×32 VideoFrame with a hard vertical edge at x=16.
+    /// Left half luma = 50, right half luma = 200, with deterministic noise.
+    fn build_nlm_edge_frame() -> VideoFrame {
+        let w = 32u32;
+        let h = 32u32;
+        let mut frame = VideoFrame::new(PixelFormat::Yuv420p, w, h);
+        frame.allocate();
+        let stride = frame.planes[0].stride;
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let idx = y * stride + x;
+                let base: u8 = if x < 16 { 50 } else { 200 };
+                // Deterministic noise
+                frame.planes[0].data[idx] = if idx % 7 < 3 {
+                    base.saturating_add(10)
+                } else {
+                    base
+                };
+            }
+        }
+        frame
+    }
+
+    #[test]
+    fn test_nlmeans_preserves_edge() {
+        let noisy_frame = build_nlm_edge_frame();
+        let result = nlmeans_filter(&noisy_frame, 0.5).expect("nlmeans_filter should succeed");
+
+        let stride = result.planes[0].stride;
+        let h = 32usize;
+        let w = 32usize;
+
+        // Check edge at x=15→16: contrast should be significant for ≥50% of rows.
+        let mut preserved = 0usize;
+        for y in 0..h {
+            let left_px = result.planes[0].data[y * stride + 15] as i32;
+            let right_px = result.planes[0].data[y * stride + 16] as i32;
+            let contrast = (right_px - left_px).unsigned_abs();
+            if contrast > 80 {
+                preserved += 1;
+            }
+        }
+        assert!(
+            preserved * 2 >= h,
+            "NLM edge contrast > 80 for only {preserved}/{h} rows; should preserve edge for ≥50% of rows"
+        );
+        let _ = w; // used implicitly via stride
+    }
+
+    #[test]
+    fn test_nlmeans_reduces_flat_noise() {
+        let noisy_frame = build_nlm_edge_frame();
+        let stride = noisy_frame.planes[0].stride;
+
+        // Extract the flat left-half luma data (first 16 rows × 16 columns).
+        let noisy_flat: Vec<u8> = (0..16usize)
+            .flat_map(|y| (0..16usize).map(move |x| (y, x)))
+            .map(|(y, x)| noisy_frame.planes[0].data[y * stride + x])
+            .collect();
+
+        let result = nlmeans_filter(&noisy_frame, 0.5).expect("nlmeans_filter should succeed");
+        let out_stride = result.planes[0].stride;
+
+        let output_flat: Vec<u8> = (0..16usize)
+            .flat_map(|y| (0..16usize).map(move |x| (y, x)))
+            .map(|(y, x)| result.planes[0].data[y * out_stride + x])
+            .collect();
+
+        let noisy_var = compute_variance_nlm(&noisy_flat, 0, noisy_flat.len());
+        let output_var = compute_variance_nlm(&output_flat, 0, output_flat.len());
+
+        assert!(
+            output_var < noisy_var,
+            "NLM should reduce variance in flat region: noisy={noisy_var:.4} output={output_var:.4}"
+        );
+    }
 }

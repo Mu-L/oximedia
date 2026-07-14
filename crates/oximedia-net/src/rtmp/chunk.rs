@@ -1346,4 +1346,102 @@ mod tests {
         // 9 bytes for number + (1+2+4) = 7 bytes for string = 16 total
         assert_eq!(buf.len(), 9 + 7);
     }
+
+    // --- Byte-level header layout reference tests ---
+
+    #[test]
+    fn test_chunk_type0_header_byte_layout() {
+        // timestamp=0x001234, length=100=0x64, type=20=0x14, stream_id=1
+        let msg = MessageHeader::new(0x001234, 0x000064, 0x14, 0x00000001);
+        // CSID=3 fits in 1-byte basic header
+        let header = ChunkHeader::new(ChunkHeaderType::Full, 3, msg);
+
+        let mut buf = BytesMut::new();
+        header.encode(&mut buf);
+        let encoded = buf.freeze();
+
+        // Byte 0: basic header = (fmt=0 << 6) | csid=3 = 0x03
+        assert_eq!(
+            encoded[0], 0x03,
+            "basic header byte must be (0<<6)|3 = 0x03"
+        );
+
+        // Bytes 1..4: timestamp big-endian 3 bytes = 0x001234 → [0x00, 0x12, 0x34]
+        assert_eq!(
+            &encoded[1..4],
+            &[0x00, 0x12, 0x34],
+            "timestamp must be big-endian 0x001234"
+        );
+
+        // Bytes 4..7: message_length big-endian 3 bytes = 100 = 0x000064 → [0x00, 0x00, 0x64]
+        assert_eq!(
+            &encoded[4..7],
+            &[0x00, 0x00, 0x64],
+            "message_length must be big-endian 100"
+        );
+
+        // Byte 7: message_type = 20 = 0x14
+        assert_eq!(encoded[7], 0x14, "message_type must be 0x14 (20)");
+
+        // Bytes 8..12: message_stream_id little-endian = 1 → [0x01, 0x00, 0x00, 0x00]
+        assert_eq!(
+            &encoded[8..12],
+            &[0x01, 0x00, 0x00, 0x00],
+            "stream_id must be little-endian 1"
+        );
+    }
+
+    #[test]
+    fn test_chunk_type1_header_byte_layout() {
+        let csid = 4u32;
+        let mut encoder = ChunkEncoder::with_chunk_size(512);
+
+        // First message: Full (type 0) header establishes stream state
+        let msg1 = MessageHeader::new(0, 10, 8, 1);
+        let payload1 = vec![0u8; 10];
+        let _ = encoder.encode(csid, &msg1, &payload1);
+
+        // Second message: same stream_id=1, different length=20 → SameStream (type 1) header
+        let msg2 = MessageHeader::new(100, 20, 8, 1);
+        let payload2 = vec![0u8; 20];
+        let encoded2 = encoder.encode(csid, &msg2, &payload2);
+
+        // Basic header byte 0 for SameStream (fmt=1) with csid=4 in 1-byte form:
+        // (1 << 6) | 4 = 0x44
+        let expected_basic = (1u8 << 6) | (csid as u8);
+        assert_eq!(
+            encoded2[0], expected_basic,
+            "SameStream basic header must have fmt=1 in top 2 bits"
+        );
+        assert_eq!(encoded2[0], 0x44, "basic header byte must be 0x44");
+    }
+
+    #[test]
+    fn test_chunk_full_encode_decode_reference() {
+        // Build a 20-byte alternating payload (reference byte vector)
+        let payload: Vec<u8> = (0..20)
+            .map(|i| if i % 2 == 0 { 0xDE } else { 0xAD })
+            .collect();
+
+        let mut encoder = ChunkEncoder::with_chunk_size(128);
+        let msg = MessageHeader::new(0, 20, 20, 1);
+        let encoded = encoder.encode(3, &msg, &payload);
+
+        let mut decoder = ChunkDecoder::new();
+        let messages = decoder
+            .decode(&encoded)
+            .expect("decode must succeed on valid chunk data");
+
+        assert_eq!(messages.len(), 1, "must decode exactly one message");
+        assert_eq!(
+            messages[0].payload.len(),
+            payload.len(),
+            "decoded payload length must match original"
+        );
+        assert_eq!(
+            &messages[0].payload[..],
+            &payload[..],
+            "decoded payload must be byte-exact match to original"
+        );
+    }
 }

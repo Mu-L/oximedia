@@ -5,7 +5,7 @@
 //!
 //! The primary types are:
 //! - [`AutomationPoint`]: a `(time_secs, value, curve)` triplet.
-//! - [`AutomationLane`]: a named sequence of points for a single parameter.
+//! - [`AutomationLane`](crate::automation_playback::AutomationLane): a named sequence of points for a single parameter.
 //! - [`AutomationPlayer`]: advances a clock and emits parameter updates.
 
 use std::collections::HashMap;

@@ -4,14 +4,14 @@
 //! outgoing programme feed continuously and retain those recordings for a
 //! minimum period (often 28 or 60 days).  This module provides:
 //!
-//! * [`ComplianceRecorder`] — a stateful recorder that tracks the current
+//! * [`ComplianceRecorder`](crate::compliance_recorder::ComplianceRecorder) — a stateful recorder that tracks the current
 //!   programme segment being captured and manages the recording lifecycle.
-//! * [`RecordingSchedule`] — a daily recording schedule specifying which hours
+//! * [`RecordingSchedule`](crate::compliance_recorder::RecordingSchedule) — a daily recording schedule specifying which hours
 //!   require compliance capture.
-//! * [`RetentionManager`] — enforces configurable retention windows, marking
+//! * [`RetentionManager`](crate::compliance_recorder::RetentionManager) — enforces configurable retention windows, marking
 //!   expired recordings for deletion without actually touching the filesystem
 //!   (deletion is left to the operator so this module remains pure-logic).
-//! * [`ComplianceReport`] — a summary report of the current compliance state.
+//! * [`ComplianceReport`](crate::compliance_recorder::ComplianceReport) — a summary report of the current compliance state.
 //!
 //! # Architecture
 //!
@@ -279,7 +279,7 @@ impl RetentionManager {
         transitions
     }
 
-    /// Apply a set of transitions returned by [`enforce`] to the segment list.
+    /// Apply a set of transitions returned by [`Self::enforce`] to the segment list.
     pub fn apply_transitions(
         segments: &mut Vec<RecordingSegment>,
         transitions: &[(String, SegmentStatus)],

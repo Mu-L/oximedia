@@ -19,8 +19,9 @@ workspace = true
 default = ["json", "xml", "pdf"]
 json = ["dep:serde", "dep:serde_json"]
 xml = ["dep:quick-xml", "dep:serde"]
-database = ["dep:rusqlite"]
+database = ["dep:oxisql-core", "dep:oxisql-sqlite-compat"]
 pdf = []
+sqlite = []
 
 [dependencies]
 oximedia-core.workspace = true
@@ -42,7 +43,8 @@ serde_json = { workspace = true, optional = true }
 quick-xml = { workspace = true, features = ["serialize"], optional = true }
 
 # Database support
-rusqlite = { workspace = true, optional = true }
+oxisql-core = { workspace = true, optional = true }
+oxisql-sqlite-compat = { workspace = true, optional = true }
 
 # Math and statistics
-num-traits = "0.2"
+num-traits = { workspace = true }

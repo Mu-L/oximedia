@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use url::Url;
 
+#[cfg(feature = "aws-sdk")]
 use crate::aws::S3Storage;
 use crate::azure::AzureBlobStorage;
 use crate::error::{CloudError, Result};
@@ -127,10 +128,19 @@ pub async fn create_storage(provider: CloudProvider) -> Result<Arc<dyn CloudStor
     provider.validate()?;
 
     match provider {
+        #[cfg(feature = "aws-sdk")]
         CloudProvider::S3 { bucket, region } => {
             let storage = S3Storage::new(bucket, region).await?;
             Ok(Arc::new(storage))
         }
+        #[cfg(not(feature = "aws-sdk"))]
+        CloudProvider::S3 { .. } => Err(CloudError::ServiceUnavailable(
+            "the AWS S3 backend requires the non-default `aws-sdk` cargo feature \
+             (the AWS smithy TLS stack compiles C code and is excluded from the \
+             Pure-Rust default build); use CloudProvider::Generic for \
+             S3-compatible endpoints instead"
+                .to_string(),
+        )),
         CloudProvider::Azure { container, account } => {
             let storage = AzureBlobStorage::new(account, container).await?;
             Ok(Arc::new(storage))

@@ -1,6 +1,54 @@
 //! Tone mapping and color conversion functions.
 //!
 //! Implements PQ, HLG, and other transfer functions for Dolby Vision.
+//!
+//! # Tone mapping pipeline: RPU metadata to display output
+//!
+//! This module is the low-level engine that the crate's higher-level tone
+//! mapping helpers ([`crate::tone_mapping`] curve modeling and
+//! [`crate::tone_map_preview`] preview rendering) sit on top of. The
+//! end-to-end flow for converting a decoded HDR frame plus its parsed RPU
+//! into pixels for a specific display is:
+//!
+//! 1. **Extract display-management parameters from the RPU**
+//!    ([`TonemapParams::from_rpu`]): source characteristics come from
+//!    `rpu.vdr_dm_data` (`source_max_pq`/`source_min_pq` converted to nits
+//!    via [`pq_to_nits`], and `signal_eotf` decoded to an [`crate::Eotf`]);
+//!    target characteristics come from the RPU's L8 target-display metadata
+//!    (`rpu.level8`: `target_max_pq`/`target_min_pq` in nits, `target_eotf`).
+//!    Any field absent from the RPU falls back to [`TonemapParams::default`].
+//! 2. **Decode signal to linear light** ([`apply_eotf`]): each RGB component
+//!    (still in normalized `[0, 1]` signal domain) is passed through the
+//!    source [`crate::Eotf`] — [`pq_to_linear`] for PQ, [`hlg_to_linear`] for
+//!    HLG, [`bt1886_to_linear`] for traditional gamma, or the identity for
+//!    already-linear input — yielding scene/display-referred linear light.
+//! 3. **Scale to absolute luminance**: linear values are multiplied by
+//!    `params.source_peak_nits` to obtain absolute nits, matching the
+//!    mastering display's photometric range recorded in the RPU.
+//! 4. **Tone-map from source range to target range**: the absolute-nit
+//!    signal is compressed from `[source_min_nits, source_peak_nits]` down
+//!    to `[target_min_nits, target_peak_nits]`. [`apply_dolbyvision_tonemap`]
+//!    performs this inline; [`tonemap_reinhard`] offers the classic
+//!    Reinhard operator (`L_out = L_in / (1 + L_in / L_white)`) as a
+//!    reusable building block, and the higher-level
+//!    [`crate::tone_map_preview::ToneMapper`] implements a saturation- and
+//!    shadow-roll-off-aware variant of the same idea for interactive
+//!    preview, while [`crate::tone_mapping::ToneCurve`] models the mapping
+//!    as an explicit, evaluable piecewise curve for reuse and inspection.
+//!    Perceptually uniform color-volume remapping across this stage can be
+//!    accelerated with a precomputed 3-D LUT ([`ColorVolumeLut`], trilinear
+//!    interpolation) or spatially-aware local tone mapping via
+//!    [`BilateralGrid`]; reshaping curves decoded from RPU pivots are
+//!    evaluated through [`ReshapingLut`].
+//! 5. **Normalize and re-encode for the target display**: the tone-mapped
+//!    nits are divided by `params.target_peak_nits` back to `[0, 1]`, then
+//!    passed through [`apply_inverse_eotf`] with the target
+//!    [`crate::Eotf`] ([`linear_to_pq`], [`linear_to_hlg`], or
+//!    [`linear_to_bt1886`]) to produce the final signal-domain samples ready
+//!    for display output.
+//!
+//! [`apply_dolbyvision_tonemap`] drives steps 1-5 end to end for a full RGB
+//! pixel buffer given only the parsed [`crate::DolbyVisionRpu`].
 
 use crate::{DolbyVisionError, DolbyVisionRpu, Eotf, Result};
 

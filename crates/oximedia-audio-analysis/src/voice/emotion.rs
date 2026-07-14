@@ -173,4 +173,92 @@ mod tests {
         assert!(score > 0.0);
         assert_ne!(dominant, Emotion::Unknown);
     }
+
+    // ── Wave 27: ordinal / monotonic synthetic-signal pins ──────────────────────
+
+    /// High-arousal prosody (high F0, high jitter/shimmer) must rank higher in the
+    /// arousal-linked emotions (angry, happy) and lower in the calm emotions (sad,
+    /// neutral) than a low-arousal voice — a robustness check that does NOT pin
+    /// exact heuristic magnitudes, only their ORDER.
+    ///
+    /// The directions below were verified against the scoring math in
+    /// `detect_emotion_scores`:
+    /// - `angry`/`happy` rise with `f0_normalized` (and shimmer/jitter), so the
+    ///   aroused voice scores higher.
+    /// - `sad` rises with `-f0_normalized` and `(1 - jitter_normalized)`, so the
+    ///   calm voice scores higher.
+    /// - `neutral` is `1 - (|jitter_norm| + |shimmer_norm|)/2`, so low variability
+    ///   (calm) scores higher.
+    #[test]
+    fn test_emotion_scores_high_arousal_vs_calm_ordinal() {
+        let aroused = detect_emotion_scores(260.0, 0.025, 0.14, &[700.0, 1800.0]);
+        let calm = detect_emotion_scores(95.0, 0.004, 0.02, &[480.0, 1500.0]);
+
+        // Arousal-linked emotions: aroused > calm.
+        assert!(
+            aroused.angry > calm.angry,
+            "aroused.angry ({}) should exceed calm.angry ({})",
+            aroused.angry,
+            calm.angry
+        );
+        assert!(
+            aroused.happy > calm.happy,
+            "aroused.happy ({}) should exceed calm.happy ({})",
+            aroused.happy,
+            calm.happy
+        );
+
+        // Calm-linked emotions: calm > aroused.
+        assert!(
+            calm.sad > aroused.sad,
+            "calm.sad ({}) should exceed aroused.sad ({})",
+            calm.sad,
+            aroused.sad
+        );
+        assert!(
+            calm.neutral > aroused.neutral,
+            "calm.neutral ({}) should exceed aroused.neutral ({})",
+            calm.neutral,
+            aroused.neutral
+        );
+
+        // Dominant emotion direction (robust to the angry/happy tie — both are
+        // arousal-linked, so either is acceptable for the aroused case).
+        assert!(
+            matches!(aroused.dominant().0, Emotion::Angry | Emotion::Happy),
+            "aroused dominant should be Angry or Happy, got {:?}",
+            aroused.dominant().0
+        );
+        assert!(
+            matches!(calm.dominant().0, Emotion::Sad | Emotion::Neutral),
+            "calm dominant should be Sad or Neutral, got {:?}",
+            calm.dominant().0
+        );
+    }
+
+    /// As F0 rises (holding jitter/shimmer/formants fixed) the `angry` score must
+    /// be non-decreasing and the `sad` score non-increasing — the monotonic
+    /// signature of the arousal/valence heuristic.
+    #[test]
+    fn test_emotion_scores_monotone_in_f0() {
+        let jitter = 0.02_f32;
+        let shimmer = 0.12_f32;
+        let formants = [700.0_f32, 1800.0_f32];
+
+        let scores: Vec<EmotionScores> = [100.0_f32, 150.0, 200.0, 260.0]
+            .iter()
+            .map(|&f0| detect_emotion_scores(f0, jitter, shimmer, &formants))
+            .collect();
+
+        assert!(
+            scores.windows(2).all(|w| w[1].angry >= w[0].angry - 1e-6),
+            "angry score should be non-decreasing in F0: {:?}",
+            scores.iter().map(|s| s.angry).collect::<Vec<_>>()
+        );
+        assert!(
+            scores.windows(2).all(|w| w[1].sad <= w[0].sad + 1e-6),
+            "sad score should be non-increasing in F0: {:?}",
+            scores.iter().map(|s| s.sad).collect::<Vec<_>>()
+        );
+    }
 }

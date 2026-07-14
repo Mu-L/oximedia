@@ -117,10 +117,10 @@ pub fn write_png_grayscale(width: u32, height: u32, data: &[u8]) -> Vec<u8> {
             raw.extend_from_slice(&data[start..avail]);
             // Zero-pad if row extends past available data
             if avail < end {
-                raw.extend(std::iter::repeat(0u8).take(end - avail));
+                raw.extend(std::iter::repeat_n(0u8, end - avail));
             }
         } else {
-            raw.extend(std::iter::repeat(0u8).take(row_bytes));
+            raw.extend(std::iter::repeat_n(0u8, row_bytes));
         }
     }
 

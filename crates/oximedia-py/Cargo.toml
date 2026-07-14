@@ -77,7 +77,7 @@ oximedia-ml = { workspace = true, optional = true, features = ["all-pipelines"] 
 chrono.workspace = true
 bytes.workspace = true
 oxiarc-deflate.workspace = true
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync"] }
+tokio = { workspace = true, features = ["full"] }
 pyo3-async-runtimes = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true

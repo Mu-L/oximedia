@@ -28,7 +28,9 @@
 
 #![allow(dead_code)]
 
-use std::io::{self, Read};
+use std::io;
+#[cfg(not(target_arch = "wasm32"))]
+use std::io::Read;
 
 /// Result type for [`BufferedAsyncReader`] operations.
 pub type AsyncReaderResult<T> = Result<T, io::Error>;
@@ -73,7 +75,7 @@ impl BufferedAsyncReader {
 
     /// WASM stub — always returns an unsupported error.
     #[cfg(target_arch = "wasm32")]
-    pub fn new(_path: &str, buf_size: usize) -> AsyncReaderResult<Self> {
+    pub fn new(_path: &str, _buf_size: usize) -> AsyncReaderResult<Self> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "BufferedAsyncReader: filesystem not available on wasm32",

@@ -3,7 +3,7 @@
 //! This module provides high-level abstractions for managing compute pipelines,
 //! including pipeline creation, caching, and execution.
 
-use crate::{GpuDevice, Result};
+use crate::{GpuDevice, Result, Shared};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -51,7 +51,7 @@ impl ComputePipelineHandle {
 
 /// Compute pipeline manager with caching
 pub struct ComputePipelineManager {
-    device: Arc<wgpu::Device>,
+    device: Shared<wgpu::Device>,
     pipelines: RwLock<HashMap<String, Arc<ComputePipelineHandle>>>,
 }
 
@@ -60,7 +60,7 @@ impl ComputePipelineManager {
     #[must_use]
     pub fn new(device: &GpuDevice) -> Self {
         Self {
-            device: Arc::clone(device.device()),
+            device: device.device().clone(),
             pipelines: RwLock::new(HashMap::new()),
         }
     }

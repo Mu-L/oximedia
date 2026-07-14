@@ -544,7 +544,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore]
     fn test_lossless_roundtrip_rgb8() {
         let width = 8u32;
         let height = 8u32;
@@ -578,7 +577,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_lossless_roundtrip_grayscale() {
         let width = 16u32;
         let height = 16u32;
@@ -608,7 +606,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_lossless_roundtrip_16bit() {
         let width = 4u32;
         let height = 4u32;
@@ -641,7 +638,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_lossless_roundtrip_rgba() {
         let width = 4u32;
         let height = 4u32;
@@ -671,7 +667,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_lossless_roundtrip_flat_image() {
         // All-zero image (worst case for some compressors)
         let width = 32u32;
@@ -694,7 +689,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_encode_invalid_buffer() {
         let encoder = JxlEncoder::lossless();
         let result = encoder.encode(&[0u8; 10], 100, 100, 3, 8);
@@ -702,7 +696,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_encode_zero_dimensions() {
         let encoder = JxlEncoder::lossless();
         assert!(encoder.encode(&[], 0, 100, 3, 8).is_err());
@@ -710,7 +703,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_signature_written() {
         let encoder = JxlEncoder::lossless();
         let data = vec![0u8; 64 * 64 * 3];
@@ -720,7 +712,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_size_header_small() {
         // 64x64 is divisible by 8 and fits in small encoding
         let encoder = JxlEncoder::new(JxlConfig::new_lossless());
@@ -733,7 +724,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_size_header_large() {
         // Non-power-of-8 dimensions require full encoding
         let encoder = JxlEncoder::new(JxlConfig::new_lossless());
@@ -746,7 +736,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_effort_levels() {
         let e1 = JxlEncoder::lossless_with_effort(1);
         let e9 = JxlEncoder::lossless_with_effort(9);
@@ -755,7 +744,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_deinterleave_rgb() {
         let encoder = JxlEncoder::lossless();
         let data = [10u8, 20, 30, 40, 50, 60];
@@ -767,7 +755,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_deinterleave_16bit() {
         let encoder = JxlEncoder::lossless();
         // Two 16-bit grayscale pixels: 0x0100 (256) and 0x0200 (512)

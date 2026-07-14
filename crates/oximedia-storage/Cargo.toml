@@ -15,18 +15,18 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 bytes = { workspace = true }
-futures = "0.3"
+futures.workspace = true
 tracing = { workspace = true }
-url = "2.5"
+url = { workspace = true }
 chrono = { workspace = true }
 sha2 = { workspace = true }
-hex = "0.4"
+hex.workspace = true
 lru = { workspace = true }
 oxiarc-lz4 = { workspace = true }
 oxiarc-zstd = { workspace = true }
@@ -36,10 +36,15 @@ memmap2 = { workspace = true, optional = true }
 aws-sdk-s3 = { workspace = true, optional = true }
 aws-config = { workspace = true, optional = true }
 
-# Azure Blob Storage
-azure_storage = { workspace = true, optional = true }
-azure_storage_blobs = { workspace = true, optional = true }
-azure_core = { workspace = true, optional = true }
+# Azure Blob Storage — Pure-Rust REST client (Shared Key / HMAC-SHA256 auth),
+# mirroring oximedia-cloud's src/azure/ module. The generated `azure_storage_blob`
+# 1.0 SDK crate is intentionally NOT used: it only supports Microsoft Entra ID
+# (OAuth2 token-credential) authentication, not the account-name/account-key
+# shared-key model this crate's `UnifiedConfig` exposes. See src/azure.rs.
+reqwest = { workspace = true, optional = true, features = ["stream"] }
+hmac = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+rustls-rustcrypto = { workspace = true, optional = true }
 
 # Google Cloud Storage
 google-cloud-storage = { workspace = true, optional = true }
@@ -52,7 +57,7 @@ tempfile.workspace = true
 [features]
 default = []
 s3 = ["aws-sdk-s3", "aws-config"]
-azure = ["azure_storage", "azure_storage_blobs", "azure_core"]
+azure = ["dep:reqwest", "dep:hmac", "dep:base64", "dep:rustls-rustcrypto"]
 gcs = ["google-cloud-storage", "google-cloud-wkt", "google-cloud-auth"]
 minio = ["s3"]
 mmap = ["memmap2"]

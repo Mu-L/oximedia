@@ -3,6 +3,14 @@
 //! Provides 3-D LUT application, identity LUT generation, photographic presets,
 //! simple .cube parsing, and pixel-level colour grading — all operating in-memory
 //! without file-system access, for browser-based colour grading workflows.
+//!
+//! All buffer-crossing APIs already use `Float32Array` (`&[f32]` / `Vec<f32>`),
+//! consistent with the crate-wide no-`Float64Array` data-plane rule.
+//!
+//! Note: for new browser-facing colour work, prefer the standalone
+//! `@cooljapan/oximedia-web` package (`web/crates/oximedia-web-color`) --
+//! it is the actively maintained, size-budgeted path for WebCodecs-based
+//! pipelines. This module remains for the monolith `oximedia-wasm` surface.
 
 use wasm_bindgen::prelude::*;
 
@@ -75,10 +83,7 @@ pub fn wasm_apply_lut_preset_pixel(
 /// # Errors
 /// Returns an error for unrecognised preset names or non-multiple-of-3 lengths.
 #[wasm_bindgen]
-pub fn wasm_apply_lut_preset_frame(
-    data: &[f32],
-    preset_name: &str,
-) -> Result<Vec<f32>, JsValue> {
+pub fn wasm_apply_lut_preset_frame(data: &[f32], preset_name: &str) -> Result<Vec<f32>, JsValue> {
     if data.len() % 3 != 0 {
         return Err(js_err(format!(
             "data length {} is not divisible by 3",
@@ -115,7 +120,11 @@ pub fn wasm_lut_identity(size: u32) -> Result<String, JsValue> {
         .flat_map(|r| {
             (0..s).flat_map(move |g| {
                 (0..s).map(move |b| {
-                    let rgb = [r as f64 / (s - 1) as f64, g as f64 / (s - 1) as f64, b as f64 / (s - 1) as f64];
+                    let rgb = [
+                        r as f64 / (s - 1) as f64,
+                        g as f64 / (s - 1) as f64,
+                        b as f64 / (s - 1) as f64,
+                    ];
                     serde_json::json!([rgb[0], rgb[1], rgb[2]])
                 })
             })
@@ -333,7 +342,10 @@ fn parse_cube(cube_text: &str) -> Result<Lut3DData, JsValue> {
             entries.len()
         )));
     }
-    Ok(Lut3DData { size: s, data: entries })
+    Ok(Lut3DData {
+        size: s,
+        data: entries,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -387,7 +399,10 @@ mod tests {
         let json = wasm_lut_identity(17).expect("ok");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         assert_eq!(parsed["size"].as_u64().expect("size"), 17);
-        assert_eq!(parsed["total_entries"].as_u64().expect("entries"), 17 * 17 * 17);
+        assert_eq!(
+            parsed["total_entries"].as_u64().expect("entries"),
+            17 * 17 * 17
+        );
     }
 
     #[test]

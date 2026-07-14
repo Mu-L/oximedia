@@ -548,7 +548,7 @@ mod tests {
     fn test_bicubic_gradient_continuity() {
         // Create a horizontal gradient 0..255
         let src: Vec<u8> = (0..16u8)
-            .flat_map(|x| std::iter::repeat(x * 16).take(16))
+            .flat_map(|x| std::iter::repeat_n(x * 16, 16))
             .collect();
         let config = SuperResolutionConfig::default()
             .with_scale(ScaleFactor::X2)

@@ -1,7 +1,7 @@
 //! Real-time streaming watermark embedder with frame-by-frame processing and
 //! full state persistence.
 //!
-//! This module provides [`RealtimeEmbedder`], which is designed for live/streaming
+//! This module provides [`crate::realtime_embedder::RealtimeEmbedder`], which is designed for live/streaming
 //! audio pipelines where the input arrives in small, variable-size chunks.  The
 //! embedder maintains per-frame state so that a watermark can be spread across
 //! an unbounded stream without buffering the entire signal.
@@ -15,7 +15,7 @@
 //!            └── EmbedState (bit_index, PN sequence, overlap buffer)
 //! ```
 //!
-//! Each call to [`RealtimeEmbedder::process_chunk`] appends input to an
+//! Each call to [`crate::realtime_embedder::RealtimeEmbedder::process_chunk`] appends input to an
 //! internal ring buffer.  When a complete frame accumulates, the embedder
 //! consumes it and forwards the watermarked samples downstream.  Any leftover
 //! samples stay in the buffer for the next call.
@@ -23,7 +23,7 @@
 //! ## Persistence
 //!
 //! The full embedder state — including buffer contents, bit cursor, and payload
-//! — can be serialised to and restored from a [`SnapshotState`].  This enables
+//! — can be serialised to and restored from a [`crate::realtime_embedder::SnapshotState`].  This enables
 //! crash recovery and hand-off between process boundaries.
 //!
 //! # Example

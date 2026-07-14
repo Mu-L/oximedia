@@ -1,6 +1,6 @@
 //! Cached chromagram computation shared between chord recognition and key detection.
 //!
-//! [`ChromaCache`] computes a chromagram once and stores it so that
+//! [`ChromaCache`](crate::chroma_cache::ChromaCache) computes a chromagram once and stores it so that
 //! multiple consumers (key detection, chord recognition, similarity, etc.)
 //! can reuse the result without redundant FFT computation.
 //!

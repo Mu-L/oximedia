@@ -5,8 +5,15 @@
 //! they have not been corrupted or tampered with during transfer, storage,
 //! or editing workflows.
 
+use crate::ProxyError;
 use std::collections::HashMap;
 use std::fmt;
+use std::path::Path;
+
+/// Files at or above this size (in bytes) are hashed via a read-only memory
+/// map instead of a full heap read, so fingerprinting never copies the whole
+/// file into a `Vec`. Smaller files use `std::fs::read` to avoid mmap overhead.
+pub const MMAP_THRESHOLD: u64 = 64 * 1024; // 64 KiB
 
 /// Hash algorithm used for fingerprinting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -202,6 +209,64 @@ impl FingerprintEngine {
         }
     }
 
+    /// Compute a fingerprint for a file on disk without loading the whole
+    /// file into a heap `Vec`.
+    ///
+    /// Files at or above [`MMAP_THRESHOLD`] bytes are mapped read-only into the
+    /// process address space and the resulting byte slice is fed directly to
+    /// [`compute`](Self::compute) — no intermediate allocation.  Smaller files
+    /// (and any file for which mapping fails) fall back to a single
+    /// `std::fs::read`.  Both paths route through the *same* in-memory
+    /// [`compute`](Self::compute), so the produced [`Fingerprint`] is
+    /// byte-identical regardless of which path is taken.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProxyError::IoError`] if the file cannot be opened, its
+    /// metadata cannot be read, the memory map cannot be created, or (on the
+    /// small-file path) the file cannot be read.
+    pub fn hash_file(&self, path: &Path) -> std::result::Result<Fingerprint, ProxyError> {
+        let file = std::fs::File::open(path)?;
+        let file_size = file.metadata()?.len();
+
+        // Empty files have nothing to map; hash the empty slice directly.
+        if file_size == 0 {
+            return Ok(self.compute(&[]));
+        }
+
+        if file_size >= MMAP_THRESHOLD {
+            // Zero-copy path: hash directly from the mmap region.
+            return self.hash_via_mmap(&file);
+        }
+
+        // Small-file fallback — single read, no mmap overhead.
+        let bytes = std::fs::read(path)?;
+        Ok(self.compute(&bytes))
+    }
+
+    /// Map `file` read-only and compute its fingerprint directly from the
+    /// mapped bytes.
+    ///
+    /// The `Mmap` is kept alive until [`compute`](Self::compute) has consumed
+    /// every byte, then dropped before returning, so the borrow of the mapped
+    /// region never outlives the mapping.
+    #[allow(unsafe_code)]
+    fn hash_via_mmap(&self, file: &std::fs::File) -> std::result::Result<Fingerprint, ProxyError> {
+        // SAFETY: the file is mapped read-only and the resulting `Mmap` is
+        // dropped at the end of this function, after `compute` has finished
+        // reading every byte. We never expose the mapping or its borrow to the
+        // caller, so the exposure window is bounded to this call.
+        let mmap = unsafe { memmap2::Mmap::map(file) }.map_err(|e| {
+            ProxyError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("mmap fingerprint failed: {e}"),
+            ))
+        })?;
+        let fingerprint = self.compute(&mmap[..]);
+        // `mmap` dropped here — the slice borrow above has already ended.
+        Ok(fingerprint)
+    }
+
     /// Compute and cache a fingerprint for a named proxy.
     pub fn compute_and_cache(&mut self, name: &str, data: &[u8]) -> Fingerprint {
         let fp = self.compute(data);
@@ -370,6 +435,139 @@ mod tests {
         // CRC32 of empty data should be deterministic
         let fp2 = engine.compute(b"");
         assert_eq!(fp.hash, fp2.hash);
+    }
+
+    // --- hash_file: mmap vs std::fs::read path correctness ---
+
+    use std::io::Write;
+
+    /// Write `content` to a uniquely-named file in the system temp dir and
+    /// return its path. The caller is responsible for removal.
+    fn write_unique_temp(tag: &str, content: &[u8]) -> std::path::PathBuf {
+        // Combine a per-process nonce with the tag for uniqueness across the
+        // parallel test runner.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!(
+            "oximedia_proxy_fp_{tag}_{}_{nonce}.bin",
+            std::process::id()
+        ));
+        let mut f = std::fs::File::create(&path).expect("create temp file");
+        f.write_all(content).expect("write temp file");
+        f.flush().expect("flush temp file");
+        path
+    }
+
+    /// A file at/above MMAP_THRESHOLD must hash identically through `hash_file`
+    /// (mmap path) and the in-memory `compute()` on the same bytes.
+    #[test]
+    fn test_hash_file_large_matches_compute() {
+        // 128 KiB — well above the 64 KiB mmap threshold.
+        let content: Vec<u8> = (0u8..=255).cycle().take(128 * 1024).collect();
+        assert!(content.len() as u64 >= MMAP_THRESHOLD);
+        let path = write_unique_temp("large", &content);
+
+        let engine = FingerprintEngine::new(FingerprintAlgorithm::Crc32);
+        let from_file = engine.hash_file(&path).expect("hash_file large");
+        let in_memory = engine.compute(&content);
+
+        assert_eq!(
+            from_file, in_memory,
+            "mmap path must equal in-memory compute"
+        );
+        assert_eq!(from_file.file_size, content.len() as u64);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The large-file path must agree across every algorithm variant.
+    #[test]
+    fn test_hash_file_large_matches_compute_all_algorithms() {
+        let content: Vec<u8> = (0u8..=255).cycle().take(96 * 1024).collect();
+        assert!(content.len() as u64 >= MMAP_THRESHOLD);
+        let path = write_unique_temp("large_all", &content);
+
+        for algo in [
+            FingerprintAlgorithm::Crc32,
+            FingerprintAlgorithm::Adler32,
+            FingerprintAlgorithm::XorHash,
+            FingerprintAlgorithm::BlockHash,
+        ] {
+            let engine = FingerprintEngine::new(algo).with_block_size(4096);
+            let from_file = engine.hash_file(&path).expect("hash_file large all");
+            let in_memory = engine.compute(&content);
+            assert_eq!(from_file, in_memory, "mismatch for algorithm {algo:?}");
+        }
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A file below MMAP_THRESHOLD must hash identically through `hash_file`
+    /// (std::fs::read path) and the in-memory `compute()`.
+    #[test]
+    fn test_hash_file_small_matches_compute() {
+        let content = b"small proxy fingerprint payload under the mmap threshold";
+        assert!((content.len() as u64) < MMAP_THRESHOLD);
+        let path = write_unique_temp("small", content);
+
+        let engine = FingerprintEngine::new(FingerprintAlgorithm::Adler32);
+        let from_file = engine.hash_file(&path).expect("hash_file small");
+        let in_memory = engine.compute(content);
+
+        assert_eq!(
+            from_file, in_memory,
+            "std path must equal in-memory compute"
+        );
+        assert_eq!(from_file.file_size, content.len() as u64);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A file exactly at the threshold uses the mmap path and must still match.
+    #[test]
+    fn test_hash_file_threshold_boundary_matches_compute() {
+        let content: Vec<u8> = (0u8..=255).cycle().take(MMAP_THRESHOLD as usize).collect();
+        let path = write_unique_temp("boundary", &content);
+
+        let engine = FingerprintEngine::new(FingerprintAlgorithm::Crc32);
+        let from_file = engine.hash_file(&path).expect("hash_file boundary");
+        let in_memory = engine.compute(&content);
+
+        assert_eq!(from_file, in_memory, "threshold-boundary file must match");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A missing path returns an error without panicking.
+    #[test]
+    fn test_hash_file_missing_path_errors() {
+        let engine = FingerprintEngine::new(FingerprintAlgorithm::Crc32);
+        let missing = std::env::temp_dir().join(format!(
+            "oximedia_proxy_fp_definitely_missing_{}.bin",
+            std::process::id()
+        ));
+        // Ensure it really does not exist.
+        std::fs::remove_file(&missing).ok();
+        let result = engine.hash_file(&missing);
+        assert!(result.is_err(), "missing path should yield Err");
+    }
+
+    /// An empty (0-byte) file is handled gracefully and yields the same
+    /// fingerprint as `compute(&[])`.
+    #[test]
+    fn test_hash_file_empty_matches_compute_empty() {
+        let path = write_unique_temp("empty", b"");
+
+        let engine = FingerprintEngine::new(FingerprintAlgorithm::Crc32);
+        let from_file = engine.hash_file(&path).expect("hash_file empty");
+        let in_memory = engine.compute(&[]);
+
+        assert_eq!(from_file, in_memory, "empty file must match compute(&[])");
+        assert_eq!(from_file.file_size, 0);
+
+        std::fs::remove_file(&path).ok();
     }
 }
 

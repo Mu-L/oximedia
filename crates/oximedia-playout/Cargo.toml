@@ -18,7 +18,7 @@ workspace = true
 chrono = { workspace = true, features = ["serde"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -28,8 +28,8 @@ dashmap = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-tokio-test = "0.4"
-tracing-subscriber = "0.3"
+tokio-test.workspace = true
+tracing-subscriber = { workspace = true }
 
 [lib]
 name = "oximedia_playout"

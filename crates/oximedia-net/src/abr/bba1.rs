@@ -369,4 +369,44 @@ mod tests {
         };
         assert_eq!(select_variant(Duration::from_secs(5), &p, &variants_3()), 2);
     }
+
+    // ── Named ABR smooth-transition tests (plan items 10–11) ─────────────────
+
+    /// Buffer at reservoir level must select index 0 (lowest quality).
+    /// Uses a buffer equal to the reservoir boundary (10s with default params).
+    #[test]
+    fn test_bba1_reservoir_returns_lowest() {
+        let p = params(); // reservoir=10s
+                          // Exactly at the reservoir boundary → still in reservoir zone (≤ r).
+        assert_eq!(
+            select_variant(Duration::from_secs(10), &p, &variants_3()),
+            0,
+            "buffer at reservoir boundary must select lowest variant"
+        );
+        // Also verify a value strictly inside the reservoir zone.
+        assert_eq!(
+            select_variant(Duration::from_secs(3), &p, &variants_3()),
+            0,
+            "buffer inside reservoir zone must select lowest variant"
+        );
+    }
+
+    /// Buffer at or above cushion_upper (reservoir + cushion = 30s with default
+    /// params) must select the highest variant index.
+    #[test]
+    fn test_bba1_cushion_upper_returns_highest() {
+        let p = params(); // cushion_upper = 30s
+        let max_idx = variants_3().len() - 1;
+        assert_eq!(
+            select_variant(p.cushion_upper(), &p, &variants_3()),
+            max_idx,
+            "buffer exactly at cushion_upper must select highest variant"
+        );
+        // Beyond cushion_upper also maps to highest.
+        assert_eq!(
+            select_variant(Duration::from_secs(60), &p, &variants_3()),
+            max_idx,
+            "buffer well above cushion_upper must select highest variant"
+        );
+    }
 }

@@ -108,7 +108,10 @@ pub use camera_metadata::{CameraMetadata, CameraMetadataExt, CameraMetadataStore
 pub use clip::{Clip, ClipId, ClipMetadata, SubClip};
 pub use clip_waveform::{ClipWaveformGenerator, WaveformData, WaveformThumbnail};
 pub use error::{ClipError, ClipResult};
-pub use group::{Bin, BinId, Collection, CollectionId, Folder, FolderId, SmartCollection};
+pub use group::{
+    Bin, BinId, ClipField, Collection, CollectionId, Comparison, Folder, FolderId, MatchMode,
+    SmartCollection, SmartRule,
+};
 pub use logging::{Favorite, Keyword, Rating};
 #[cfg(not(target_arch = "wasm32"))]
 pub use manager::ClipManager;

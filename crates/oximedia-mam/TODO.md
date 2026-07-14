@@ -55,9 +55,9 @@
 
 ## Performance
 - [x] Add Tantivy index warming on startup in `search_index.rs` for faster first-query response (verified 2026-06-01; src/search_index.rs TantivySearchIndex::warm + src/search.rs SearchEngine::warm called from new())
-- [ ] Implement connection pool tuning in `database.rs` based on concurrent request load
+- [x] Implement connection pool tuning in `database.rs` based on concurrent request load (completed 2026-06-24; src/pool_tuning.rs: PoolMetrics/LoadSampler/PoolTuner/TuningStrategy {Conservative,Balanced,Aggressive}; src/database.rs: Database::new_with_config accepts PoolConfig; 4 async tokio multi-thread tests added to pool_tuning.rs)
 - [ ] Add Redis-based caching layer for frequently accessed assets and search results
-- [ ] Optimize `folder_hierarchy.rs` tree queries with materialized path or nested set model
+- [x] Optimize `folder_hierarchy.rs` tree queries with materialized path or nested set model
 - [x] Add batch database operations in `asset.rs` for bulk metadata updates (reduce round-trips) (verified 2026-06-01; src/asset.rs:590 batch_update_metadata, :721 batch_set_status, :771 batch_upsert_custom_fields)
 - [x] Implement incremental search index updates in `search_index.rs` instead of full reindex (verified 2026-06-01; src/search_index.rs TantivySearchIndex::add_document, update_document, delete_document)
 
@@ -68,12 +68,12 @@
   - `tests/folder_sync.rs` — 4 tests: new file upload + AssetIngested event, idempotent second call, empty directory, multiple files
 - [x] Add event_bus integration tests for MamEventBus fan-out pub/sub (completed 2026-05-05)
   - `tests/event_bus.rs` — 5 tests: 3-subscriber fan-out, no-receiver error, receiver_count, sender clone, multiple events in order
-- [ ] Add integration tests for the full ingest pipeline (file upload -> metadata extraction -> indexing -> proxy gen)
-- [ ] Test `permissions.rs` RBAC with complex role hierarchies and permission inheritance
-- [ ] Add `workflow_trigger.rs` tests with concurrent asset events firing multiple triggers
-- [ ] Test `smart_search.rs` BM25 scoring accuracy with known relevance judgments
-- [ ] Add `version_control.rs` tests for branching and merging asset versions
-- [ ] Test `transfer_manager.rs` with simulated network failures and partial transfers
+- [ ] Add integration tests for the full ingest pipeline (file upload -> metadata extraction -> indexing -> proxy gen) — DEFERRED: requires PostgreSQL + Tantivy file index + proxy transcode infra; not pure/in-memory
+- [x] Test `permissions.rs` RBAC with complex role hierarchies and permission inheritance — pure surface covered: role-hierarchy inheritance (`SystemRole::default_permissions` superset chain Admin⊇Editor⊇Viewer⊇Guest) + deny-overrides precedence via `AbacEngine` priority ordering (tests/mam_pure_logic.rs:47 rbac_role_hierarchy_inherits_lower_role_permissions, tests/mam_pure_logic.rs:107 abac_explicit_deny_overrides_inherited_allow). NOTE: the DB-backed `PermissionManager` RBAC (asset/collection grants over PostgreSQL) remains DB-gated and is not exercised here.
+- [x] Add `workflow_trigger.rs` tests with concurrent asset events firing multiple triggers (tests/mam_pure_logic.rs:348 trigger_registry_concurrent_fire_no_loss — 64 threads, no firing lost/duplicated; tests/mam_pure_logic.rs:413 trigger_registry_repeat_fire_appends_and_preserves_order — append-only repeat semantics + ordering)
+- [x] Test `smart_search.rs` BM25 scoring accuracy with known relevance judgments (completed 2026-06-24; 9 new unit tests in src/smart_search.rs: IDF-rare-term, TF-frequency-ranking, title/tag/description field-weight ordering, multi-term, precision@3 known-relevance corpus, nDCG-style ranking, matched-fields correctness, score-monotonicity with corpus expansion)
+- [x] Add `version_control.rs` tests for branching and merging asset versions — branch/merge logic lives in `asset_versioning::VersionTree` (the `version_control::VersionHistory` module is flat/linear with no branch/merge); covered: clean branch+merge with lineage and cross-asset merge-conflict detection (tests/mam_pure_logic.rs:171 version_tree_branch_and_merge_clean_with_lineage, tests/mam_pure_logic.rs:254 version_tree_merge_conflict_detected_and_no_silent_loss)
+- [x] Test `transfer_manager.rs` with simulated network failures and partial transfers (completed 2026-06-24; 9 new unit tests in src/transfer_manager.rs: partial-then-failure, retry-preserves-bytes, max-retries-exhaustion, transient-failure-then-success, multiple-independent-failures, fail-idempotent, cancel-paused-partial, priority-unaffected-by-failed, zero-byte-progress)
 
 ## Documentation
 - [ ] Add an entity-relationship diagram for the database schema

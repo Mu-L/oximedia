@@ -27,8 +27,10 @@ uuid = { workspace = true }
 serde_json = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { workspace = true, features = ["fs", "sync"] }
-sqlx = { workspace = true, features = ["migrate"] }
+tokio = { workspace = true, features = ["full"] }
+# Pure-Rust SQLite (COOLJAPAN OxiSQL) — replaces sqlx/libsqlite3-sys (C).
+oxisql-core = { workspace = true }
+oxisql-sqlite-compat = { workspace = true }
 oximedia-audio = { workspace = true }
 oximedia-container = { workspace = true, optional = true }
 oximedia-io = { workspace = true, optional = true }

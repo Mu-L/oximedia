@@ -6,7 +6,7 @@ Professional broadcast automation and control system for 24/7 operation with Lua
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.8 — 2026-05-29 — 688 tests
+Version: 0.1.9 — 2026-07-08 — extensively tested
 
 ## Overview
 
@@ -59,12 +59,15 @@ Version: 0.1.8 — 2026-05-29 — 688 tests
 - WebSocket for real-time bidirectional communication
 - Secure authentication and multi-client support
 
-### Scripting
-- Embedded Lua 5.4 scripting engine (mlua, vendored)
+### Scripting (opt-in, C-backed — `lua-scripting` feature, off by default)
+- Embedded Lua 5.4 scripting engine (mlua, vendored) — **not** part of the default,
+  Pure Rust build; enable with `features = ["lua-scripting"]`
 - Sandbox limits: 1 M instructions, 32 MiB memory, 5 s max duration
 - FIFO script cache of 64 entries
 - Comprehensive automation API exposed to scripts
 - Custom workflows and event handlers
+- Without the feature, `ScriptEngine` still exists with the same API but every
+  Lua-dependent method returns a clear `Err` instead of executing anything
 
 ## Usage
 
@@ -72,7 +75,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-automation = "0.1.8"
+oximedia-automation = "0.1.9"
 ```
 
 ### Basic Example
@@ -141,6 +144,9 @@ master.handle_alert(alert).await?;
 
 ### Lua Scripting
 
+Requires the opt-in `lua-scripting` feature (`features = ["lua-scripting"]`);
+without it, `ScriptEngine::execute` returns `Err` instead of running the script.
+
 ```rust
 use oximedia_automation::script::ScriptEngine;
 
@@ -170,7 +176,7 @@ Master Control
         ├── Logging (BatchedAsRunLogger, Event Logger)
         ├── Monitoring (SystemMonitor, Metrics Collector, HttpSessionPool)
         ├── Remote Control (REST API via axum, WebSocket)
-        └── Script Engine (Lua 5.4 via mlua, sandboxed)
+        └── Script Engine (Lua 5.4 via mlua, sandboxed; opt-in `lua-scripting` feature)
 ```
 
 ## Safety

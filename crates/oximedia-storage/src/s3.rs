@@ -988,10 +988,16 @@ impl CloudStorage for S3Storage {
 /// Object version information
 #[derive(Debug, Clone)]
 pub struct ObjectVersion {
+    /// The version identifier assigned by S3 when bucket versioning is enabled
+    /// (`"null"` if the object predates versioning being turned on).
     pub version_id: String,
+    /// Whether this is the current (most recent) version of the object.
     pub is_latest: bool,
+    /// Timestamp of when this version was last modified.
     pub last_modified: Option<DateTime<Utc>>,
+    /// Size of this version's object data, in bytes.
     pub size: u64,
+    /// ETag (content checksum) of this version, if returned by S3.
     pub etag: Option<String>,
 }
 

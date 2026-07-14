@@ -28,8 +28,8 @@
 - [x] Add `-vf` / `-af` shorthand filter chain parsing alongside `-filter_complex` (verified 2026-05-16; Wave 4 Slice E)
 - [x] Implement batch mode translation for converting multiple files in one invocation — `translate_batch_command` + `BatchJob` + `BatchInputSpec` + `BatchOutputSpec` added to batch_mode.rs (2026-05-31)
 - [x] Add `-movflags +faststart` and similar muxer option translation in `translator.rs` — `MuxerAction::FastStart` implemented; rw_25 test passes (verified 2026-05-31)
-- [ ] Implement `-hwaccel` option translation to OxiMedia GPU pipeline flags (verified-open 2026-05-16: hwaccel_compat.rs present, translate_hwaccel implemented)
-- [ ] Add support for concat protocol (`concat:file1|file2`) and concat demuxer syntax (concat_compat.rs exists)
+- [x] Implement `-hwaccel` option translation to OxiMedia GPU pipeline flags (verified 2026-06-06: `translate_hwaccel` implemented in hwaccel_compat.rs:297)
+- [x] Add support for concat protocol (`concat:file1|file2`) and concat demuxer syntax (verified 2026-06-06: `parse_concat_protocol` concat_compat.rs:252 + `parse_concat_demuxer` :298)
 - [x] Implement two-pass encoding translation (`-pass 1` / `-pass 2`) in `translator.rs` (verified 2026-05-16; Wave 4 Slice E two-pass implementation)
 - [x] Add `-metadata` tag translation for title, artist, comment fields — `translate_metadata_args(&[&str]) -> Vec<(String, String)>` added to metadata_compat.rs (2026-05-31)
 

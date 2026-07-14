@@ -45,6 +45,14 @@ pub struct ConversionJob {
     pub error: Option<String>,
     /// Progress percentage (0-100)
     pub progress: f64,
+    /// Total number of source frames, when known from a media probe.
+    ///
+    /// `None` until probed. Used for accurate checkpoint/resume bookkeeping so
+    /// `frames_processed` reflects the real frame count rather than a guess.
+    /// `#[serde(default)]` keeps queues persisted before this field was added
+    /// loadable (missing → `None`).
+    #[serde(default)]
+    pub total_frames: Option<u64>,
 }
 
 /// Job priority level.
@@ -105,7 +113,24 @@ impl ConversionJob {
             completed_at: None,
             error: None,
             progress: 0.0,
+            total_frames: None,
         }
+    }
+
+    /// Record the total number of source frames (typically from a media probe).
+    ///
+    /// This feeds accurate `frames_processed` / `total_frames` values into
+    /// checkpoints so an interrupted conversion can resume precisely instead of
+    /// relying on a placeholder frame count.
+    pub fn set_total_frames(&mut self, total_frames: u64) {
+        self.total_frames = Some(total_frames);
+    }
+
+    /// Builder-style variant of [`set_total_frames`](Self::set_total_frames).
+    #[must_use]
+    pub fn with_total_frames(mut self, total_frames: u64) -> Self {
+        self.total_frames = Some(total_frames);
+        self
     }
 
     /// Mark job as started.
@@ -150,12 +175,21 @@ impl ConversionJob {
         let checkpoint_dir = dir.join("oximedia-checkpoints");
         std::fs::create_dir_all(&checkpoint_dir).map_err(ConversionError::Io)?;
 
+        // Derive the frame counts from the probed total when available. A
+        // `total_frames` of 0 honestly signals "unknown" rather than inventing
+        // a placeholder count.
+        let total_frames = self.total_frames.unwrap_or(0);
+        let frames_processed = if total_frames > 0 {
+            (self.progress / 100.0 * total_frames as f64).round() as u64
+        } else {
+            0
+        };
         let checkpoint = ConversionCheckpoint {
             job_id: self.id.clone(),
             input_path: self.input.clone(),
             output_path: self.output.clone(),
-            frames_processed: (self.progress / 100.0 * 1000.0) as u64, // approximate from progress %
-            total_frames: 1_000, // placeholder — real value injected via resume
+            frames_processed,
+            total_frames,
             byte_offset: 0,
             created_at: SystemTime::now(),
         };
@@ -214,6 +248,9 @@ impl ConversionJob {
             completed_at: None,
             error: None,
             progress,
+            // Restore the probed frame total when the checkpoint recorded one;
+            // 0 honestly means it was unknown at checkpoint time.
+            total_frames: (checkpoint.total_frames > 0).then_some(checkpoint.total_frames),
         }
     }
 }
@@ -368,6 +405,42 @@ mod tests {
         assert_eq!(checkpoint.job_id, job.id);
         assert_eq!(checkpoint.input_path, PathBuf::from("/tmp/input.mkv"));
         assert_eq!(checkpoint.output_path, PathBuf::from("/tmp/output.mkv"));
+        // No probe was performed → total_frames is honestly reported as unknown
+        // (0), and frames_processed is 0 rather than a fabricated fraction.
+        assert_eq!(checkpoint.total_frames, 0);
+        assert_eq!(checkpoint.frames_processed, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_checkpoint_uses_probed_total_frames() {
+        let dir = std::env::temp_dir().join("oximedia_checkpoint_test_total_frames");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let mut job = ConversionJob::new(
+            PathBuf::from("/tmp/input.mkv"),
+            PathBuf::from("/tmp/output.mkv"),
+            ContainerFormat::Matroska,
+            None,
+            None,
+            None,
+            HashMap::new(),
+            JobPriority::Normal,
+        )
+        .with_total_frames(2_500);
+        job.update_progress(40.0);
+
+        job.save_checkpoint(&dir)
+            .expect("save_checkpoint should succeed");
+        let checkpoint = ConversionJob::load_checkpoint(&dir, &job.id)
+            .expect("load_checkpoint should succeed")
+            .expect("checkpoint should be found");
+
+        // total_frames reflects the probed value; frames_processed is derived
+        // from real progress (40% of 2500 = 1000), not a placeholder.
+        assert_eq!(checkpoint.total_frames, 2_500);
+        assert_eq!(checkpoint.frames_processed, 1_000);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

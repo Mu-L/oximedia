@@ -35,16 +35,16 @@
 ## Performance
 - [x] Add response caching layer with content-addressable storage keyed on transform params hash — `src/response_cache.rs`: `ResponseCache` (FIFO eviction, LRU hit-count, content-address key via `DefaultHasher`); 15 unit tests
 - [x] Implement streaming transform pipeline to avoid loading entire source image into memory — `src/processor/streaming.rs`: `StreamingProcessor` + `StreamingConfig` (tile_rows/overlap_rows); bilinear scale per tile strip; 10 unit tests
-- [ ] Add early termination in `processor.rs` when output dimensions are smaller than a threshold
+- [x] Add early termination in `processor.rs` when output dimensions are smaller than a threshold
 - [x] Implement parallel transform execution for batch requests — `batch_transform.rs` `process_batch` now uses `rayon::par_iter`
 
 ## Testing
 - [x] Add parser fuzz tests for malformed `/cdn-cgi/image/` URLs (empty params, invalid values, injection attempts) — `tests/parser_fuzz.rs`: 40 tests covering empty/blank, missing values, integer overflow, shell injection, path traversal, unicode, extreme lengths, boundary values
 - [ ] Test `negotiation.rs` with all common browser Accept header combinations
-- [ ] Add round-trip tests: parse transform string -> serialize -> parse again -> compare
-- [ ] Test `security.rs` with path traversal attempts, oversized dimensions, and resource exhaustion vectors
+- [x] Add round-trip tests: parse transform string -> serialize -> parse again -> compare — Wave 30, 2026-06-08: canonical `TransformParams::serialize()` (fixed field order, defaults omitted, true parser inverse; comma-free `x` geometry form so 4-side trim/border/pad survive the top-level comma split) + parse↔serialize idempotency suite in `tests/roundtrip_transform.rs`; parser extended with `progressive`/`output_quality` keys and `split_sides` helper; 30 tests
+- [x] Test `security.rs` with path traversal attempts, oversized dimensions, and resource exhaustion vectors
 - [ ] Add integration tests with actual image data through the full parse -> process pipeline
-- [ ] Test edge cases: zero width, negative quality, unknown format strings
+- [x] Test edge cases: zero width, negative quality, unknown format strings — Wave 30, 2026-06-08: edge-case suite in `tests/roundtrip_transform.rs` asserts defined behaviour without panic (zero width parses then fails `validate()`; negative/over-u8 quality → parse `Err`; in-range-but-invalid quality → validation `Err`; unknown format → parse `Err`; non-numeric dims, empty/bare/trailing-comma tokens, out-of-range focal point)
 
 ## Documentation
 - [ ] Document all supported transform parameters with examples and default values

@@ -27,6 +27,8 @@
 //! assert_eq!(req.source_path, "photo.jpg");
 //! ```
 
+#![warn(missing_docs)]
+
 pub mod animation;
 pub mod batch_transform;
 pub mod blur_region;

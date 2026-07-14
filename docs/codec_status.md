@@ -1,14 +1,96 @@
-# Codec Status — OxiMedia 0.1.7
+# Codec Status — OxiMedia 0.1.9
 
 This document is the single source of truth for the honest status of every
-codec decoder in the `oximedia-codec` and `oximedia-audio` crates. It was
-produced by a static-analysis audit of the 0.1.5 source tree and is
-referenced from the top-level `README.md`, from `crates/oximedia-codec/README.md`,
+codec decoder in the `oximedia-codec` and `oximedia-audio` crates, and (as of
+0.1.9) for the cryptographic honesty of the networking (`oximedia-net`) and
+DRM (`oximedia-drm`) crates. It was originally produced by a static-analysis
+audit of the 0.1.5 source tree (0.1.7 stamp), and has now been **re-audited
+directly against the 0.1.9 source tree on 2026-07-08** — every codec entry
+below was re-verified by reading the current module rather than trusting the
+prior text (see "0.1.9 re-audit summary" below for what changed). It is
+referenced from the top-level `README.md`, from
+`crates/oximedia-codec/README.md`, from `SECURITY.md` (crypto status table),
 and from `TODO.md`.
 
 The goal is that downstream users, packagers, and integrators can tell at a
 glance whether a given codec can be used for playback, or only for
-container/bitstream work, without having to read the source.
+container/bitstream work, and whether a given transport or DRM path provides
+real cryptographic confidentiality, without having to read the source.
+
+## 0.1.9 re-audit summary
+
+- **AV1 / VP9 / VP8 pixel-reconstruction decode — re-confirmed unchanged.**
+  `crates/oximedia-codec/src/reconstruct/pipeline.rs`'s `stage_parse` /
+  `stage_entropy` / `stage_predict` / `stage_transform` are still literal
+  no-ops (each pushes a `StageResult` and returns `Ok(())` without touching
+  pixel data); `av1/decoder.rs` still contains the dead
+  `"Tile group data would be processed here"` branch; `vp9/decoder.rs`
+  defines a real `decode_superblock` method but it is never called from the
+  `decode_frame` path actually used for output (which instead routes through
+  the same no-op `DecoderPipeline::process_frame`, then zero-fills the output
+  via `buffer_pool.acquire()`); `vp8/decoder.rs` still fills Y/U/V planes
+  with the constant `128` next to the comment `"In a full implementation, we
+  would decode the actual pixel data here."`. `git log -- crates/oximedia-codec/src`
+  shows no commits between the 0.1.8 release and this audit other than two
+  small "CUDA"-labelled commits (an AV1 parallel-tile SIMD tweak, and the
+  SILK addition described next) — so this three-codec gap is confirmed still
+  open and unchanged, per `TODO.md` and issue #9.
+- **Opus / SILK — status corrected upward; the 0.1.7 text was stale.** The
+  previous entry read "SILK and hybrid modes are explicit stubs
+  (`src/silk.rs:873` emits a comfort-noise indicator byte)". That line number
+  no longer corresponds to any stub in the tree. Since the 0.1.7 audit, a
+  normative SILK decoder was added
+  (`crates/oximedia-codec/src/opus/silk_decoder.rs`, RFC 6716 §4.2: LSF
+  stage-1/2 decode, NLSF stabilisation + NLSF→LPC conversion, LCG-seeded
+  shell-pulse excitation decode, LTP + LPC synthesis) and is genuinely wired
+  into the production path: `opus/silk.rs::SilkDecoder::decode_into` calls
+  `decode_silk_frame` directly, and `OpusDecoder::decode_mode` dispatches
+  `OpusMode::Silk` packets to it. Hybrid mode (`opus/hybrid.rs`) is likewise
+  real — it decodes SILK (low band) and CELT (high band) from the *same*
+  range-coded bitstream per RFC 6716 §4.5, replacing an earlier "split the
+  packet at its midpoint" heuristic that does not exist in the spec. This was
+  only caught by reading `opus/silk_decoder.rs` and `opus/silk.rs` directly;
+  the document being audited had never been updated to reflect it. See the
+  revised Opus entry below.
+- **All other codec entries** (Theora, WebP, MJPEG, FFV1, JPEG-XL, H.263,
+  APV, PNG/APNG, GIF, JPEG 2000, JPEG XS, JPEG-LS, ProRes, VC-3/DNxHD,
+  MPEG-2, Vorbis, FLAC, ALAC, PCM, MP3) were re-checked against their current
+  module directories and source comments; their status labels below are
+  unchanged from 0.1.7 (source in these areas has not moved since the
+  respective wave that produced each entry).
+- **New:** a "Network & DRM crypto status" section has been added, extending
+  this document's honesty taxonomy to WebRTC/SRT transport security and
+  FairPlay/Widevine/PlayReady/Clear Key DRM.
+- **New:** a "Browser (`oximedia-wasm` npm) surface note" has been added
+  below, documenting that the WASM/npm decoder surface (as opposed to the
+  native crates this document otherwise describes) shrank in 0.1.9.
+
+### Browser (`oximedia-wasm` npm) surface note — 0.1.9
+
+The status table below describes the **native** `oximedia-codec` /
+`oximedia-audio` crates only. As of 0.1.9, the separate `oximedia-wasm`
+crate (published to npm as `@cooljapan/oximedia`; see
+[`oximedia-wasm/README.md`](../oximedia-wasm/README.md)) exports a
+**narrower** decoder surface than the native crates support:
+
+- The standalone `WasmVp8Decoder`, `WasmAv1Decoder`, and `WasmVorbisDecoder`
+  classes were **removed** from the WASM bindings — each wrapped a decoder
+  that returned an error, unpopulated buffers, or output that only
+  round-tripped a synthetic test format, respectively (never real pixel/PCM
+  output), so shipping them was strictly worse than not shipping them.
+- AV1 decode remains reachable in the browser only via `WasmMediaPlayer`
+  (no standalone `WasmAv1Decoder` class). VP8 and Vorbis decode are not
+  exposed anywhere in `oximedia-wasm` today.
+- This is a **WASM-surface-only** change. The native VP8/AV1/Vorbis status
+  in this document (Bitstream-parsing for AV1/VP8/VP9, Bitstream-parsing for
+  Vorbis — see below) is unchanged and unaffected; `oximedia-wasm` simply no
+  longer advertises decode capability that the native crates never actually
+  had either (VP8/AV1 pixel reconstruction and Vorbis sample production are
+  still stubbed — see their entries below).
+- The separate, independently-versioned `@cooljapan/oximedia-web` package
+  (`web/`, unpublished as of 0.1.9 — see [`web/README.md`](../web/README.md))
+  does not touch codec decode at all; it consumes already-decoded
+  `VideoFrame`s from the browser's own `VideoDecoder`.
 
 ## Taxonomy
 
@@ -48,7 +130,8 @@ OxiMedia classifies each decoder with one of four honesty labels.
   back into the output buffer, reference-frame management wired to the
   pipeline.
 - **Effort:** specialist.
-- **Target:** 0.2.0+. Tracked by GitHub issue #9.
+- **Target:** 0.2.0+. Tracked by GitHub issue #9. *(Re-verified against 0.1.9
+  source on 2026-07-08: unchanged — see "0.1.9 re-audit summary" above.)*
 
 ### VP9 — Bitstream-parsing
 
@@ -61,7 +144,8 @@ OxiMedia classifies each decoder with one of four honesty labels.
   routines to actually write into the returned `VideoFrame`; filling in the
   pipeline stages; reference-frame management.
 - **Effort:** large.
-- **Target:** 0.2.0+.
+- **Target:** 0.2.0+. *(Re-verified against 0.1.9 source on 2026-07-08:
+  `decode_superblock` exists but has zero callers — unchanged.)*
 
 ### VP8 — Bitstream-parsing
 
@@ -73,7 +157,9 @@ OxiMedia classifies each decoder with one of four honesty labels.
 - **What is missing:** intra/inter decode, DCT/WHT inverse transform, loop
   filter, actual Y/U/V output.
 - **Effort:** large.
-- **Target:** 0.2.0+.
+- **Target:** 0.2.0+. *(Re-verified against 0.1.9 source on 2026-07-08: the
+  constant-128 fill and "would decode the actual pixel data here" comment
+  are unchanged.)*
 
 ### Theora — Functional
 
@@ -436,16 +522,48 @@ OxiMedia classifies each decoder with one of four honesty labels.
 - **Effort:** specialist.
 - **Target:** 0.2.0+.
 
-### Opus — Functional (CELT only)
+### Opus — Functional (CELT + SILK + Hybrid)
 
 - **Module:** `crates/oximedia-codec/src/opus/`
-- **Current state:** CELT decoder (MDCT, pitch, bands) is real. SILK and
-  hybrid modes are explicit stubs (`src/silk.rs:873` emits a comfort-noise
-  indicator byte). CELT-only streams produce real PCM.
-- **What is missing:** real SILK LP analysis/synthesis (LTP, LSF, LPC),
-  hybrid-mode band splitting.
-- **Effort:** specialist.
-- **Target:** 0.1.6 / 0.2.0+.
+- **Current state (status corrected upward on the 0.1.9 re-audit — the prior
+  "CELT only" text was stale):** all three Opus layers now have real, wired
+  decode paths.
+  - **CELT** (`opus/celt.rs`): real MDCT / pitch / band decode, unchanged
+    since 0.1.7.
+  - **SILK** (`opus/silk_decoder.rs` + `opus/silk.rs` + `opus/silk_ltp.rs` +
+    `opus/silk_lpc.rs` + `opus/silk_excitation.rs`): a normative RFC 6716
+    §4.2 decoder — LSF stage-1/2 decode, NLSF stabilisation and NLSF→LPC
+    conversion, LCG-seeded shell-pulse excitation decode (LSB + sign rounds),
+    LTP + LPC synthesis, resampled to the caller's output rate.
+    `opus/silk.rs::SilkDecoder::decode_into` — the public path `OpusDecoder`
+    actually calls — invokes `decode_silk_frame` directly; this is not a
+    test-only helper. Heavily annotated against the libopus reference
+    (`silk_NLSF2A`, `silk_NLSF_unpack`, `silk_LPC_inverse_pred_gain_c`,
+    `A_LIMIT = 0.99975`, etc.) and clamps output to finite/bounded
+    (`clamp(-4.0, 4.0)`) values. ~82 unit/integration tests across the SILK
+    modules (70 in `silk.rs`, 12 in `silk_decoder.rs`, plus
+    `tests/silk_ltp_roundtrip.rs`), including a same-input
+    high-level-API-vs-direct-call regression test
+    (`test_silk_decode_high_level_vs_direct`).
+  - **Hybrid** (`opus/hybrid.rs`): decodes SILK (low band, ≤ 8 kHz) and CELT
+    (high band) from the *same* range-coded bitstream per RFC 6716 §4.5 (SILK
+    decodes first; CELT continues from the bytes SILK did not consume) and
+    sums the two bands through per-channel crossover biquad filters. The
+    previous "split the packet at its midpoint" heuristic — which RFC 6716
+    does not define — has been removed.
+  - The prior stub citation (`src/silk.rs:873` "emits a comfort-noise
+    indicator byte") no longer corresponds to any code in the tree; DTX /
+    comfort-noise suppression on the *encoder* side (`opus/encoder.rs`,
+    `dtx_silence_frames`) is real and separately wired, and is not part of
+    decode.
+- **What is missing for Verified:** no bit-exact conformance test exists yet
+  against real libopus-encoded `.opus` fixtures or RFC 6716 test vectors —
+  current coverage is internal round-trip / self-consistency only, the same
+  caveat carried by the other Functional-tier codecs below.
+- **Effort to promote to Verified:** medium (libopus / opus-tools reference
+  fixture corpus; official RFC 6716 test vectors).
+- **Target:** SILK/Hybrid decode already shipped (pre-0.1.9); conformance
+  fixtures 0.2.0+.
 
 ### FLAC — Functional / Verified
 
@@ -506,6 +624,48 @@ OxiMedia classifies each decoder with one of four honesty labels.
   red-list (Fraunhofer). MP3 decoding patents expired in 2017.
 - **Effort to promote to Verified:** medium.
 
+## Network & DRM crypto status
+
+New in the 0.1.9 re-audit: the same honesty discipline applied to codecs
+above is extended here to the cryptographic paths in `oximedia-net` (WebRTC,
+SRT) and `oximedia-drm` (segment packaging + license systems). This section
+was produced by reading the modules listed below directly on 2026-07-08.
+`SECURITY.md` should reference this table rather than re-describing crypto
+status inline, so the two documents cannot drift out of sync.
+
+### Crypto honesty taxonomy
+
+| Label | Meaning |
+|-------|---------|
+| **Real** | An actual cryptographic primitive from a vetted implementation (RustCrypto `aes`/`ctr`, the `aes-gcm` crate, `rustls` certificates) operating on real key material; interoperates with the standard it claims to implement. |
+| **Non-interoperable placeholder** | The message formats / API surface for a licensed or proprietary DRM system are present, but the real license-server protocol, key derivation, or hardware trust anchor is not implemented — cannot interoperate with actual Apple / Google / Microsoft infrastructure. In-source comments self-describe these as "partial implementation for educational purposes." |
+| **Experimental (do not use for confidential media)** | Explicitly documented in-source as insecure, simulated, or unimplemented. Where possible the code fails closed (returns an error) rather than fabricating protection. |
+
+### Status table
+
+| Component | Module | Status | Notes |
+|-----------|--------|--------|-------|
+| SRT payload encryption | `oximedia-net/src/srt/crypto.rs` | **Real** | AES-128/192/256-**CTR** (NIST SP 800-38A) via RustCrypto `aes`+`ctr`, variant selected by key length; a NIST known-answer-vector test pins the CTR keystream output. |
+| SRT authenticated encryption (extension) | `oximedia-net/src/srt_aes256gcm.rs` | **Real** | AES-256-**GCM** AEAD via the `aes-gcm` crate; PBKDF2-SHA256 key derivation from a passphrase + salt, 12-byte nonce (4-byte stream-ID⊕sequence prefix ‖ 8-byte random base), configurable key-rotation policy. |
+| SRT key-exchange (KEK) wrap | `oximedia-net/src/srt/key_exchange.rs` | **Experimental** | `wrap`/`unwrap` are explicitly documented as an "XOR-based key wrapping (simulation only; production uses RFC 3394 AES-WRAP)" — do not rely on this path for real key wrapping. |
+| WebRTC DTLS handshake | `oximedia-net/src/webrtc/dtls.rs` | **Experimental — NOT implemented** | Module doc: "⚠️ Experimental — DTLS-SRTP handshake is NOT implemented." Generates a real self-signed Ed25519 certificate + SDP fingerprint for signaling, but implements no DTLS 1.2 record layer / handshake / RFC 5764 `use_srtp` key export. `DtlsEndpoint::handshake` fails closed (returns an error) instead of fabricating all-zero SRTP keys — but WebRTC media transport must not be used for confidential media until this lands. |
+| WebRTC SRTP/SRTCP packet protection | `oximedia-net/src/webrtc/srtp.rs` | **Experimental — simulated** | Module doc: "a simulated SRTP/SRTCP implementation for WebRTC... we simulate with an XOR-based scheme and a checksum auth tag." No real AES-CM / AES-GCM is applied to RTP payloads on this path. |
+| DRM CENC/CMAF segment encryption | `oximedia-drm/src/cmaf_encrypt.rs`, `aes_ctr.rs`, `aes_cbc.rs` | **Real** | AES-128-CTR (`cenc`), AES-128-CBC + PKCS#7 (`cbc1`), and partial-block CBC (`cbcs`) per ISO/IEC 23001-7, delegating to real block-cipher modules. |
+| DRM W3C Clear Key | `oximedia-drm/src/clearkey.rs` | **Real (by design; dev/test-grade)** | Implements the W3C Clear Key spec, which is itself an unencrypted key-exchange scheme intended for testing / open platforms — not suitable for production content protection, but that is what the spec defines, not a shortfall in this implementation. |
+| DRM FairPlay Streaming | `oximedia-drm/src/fairplay.rs`, `fairplay_rpc.rs` | **Non-interoperable placeholder** | Module doc: "partial implementation for educational purposes. Full FairPlay integration requires Apple developer credentials and FPS SDK." SPC/CKC message shapes exist; there is no real Apple FPS key exchange. |
+| DRM Widevine | `oximedia-drm/src/widevine.rs`, `widevine_rpc.rs` | **Non-interoperable placeholder** | Module doc: "partial implementation for educational purposes. Full Widevine integration requires licensed CDM libraries." |
+| DRM PlayReady | `oximedia-drm/src/playready.rs`, `playready_rpc.rs` | **Non-interoperable placeholder** | Module doc: "partial implementation for educational purposes." |
+
+**Headline takeaway:** real, interoperable content-key cryptography exists
+for **SRT transport** (AES-CTR and AES-256-GCM) and for **CENC/CMAF segment
+packaging + Clear Key licensing** — these are safe to build on today.
+**WebRTC media transport security is not implemented** (no DTLS handshake,
+simulated SRTP) and must not carry confidential media yet. **FairPlay /
+Widevine / PlayReady** provide message-format and workflow scaffolding only —
+they do not interoperate with real Apple / Google / Microsoft license
+infrastructure and must not be represented as "supports FairPlay / Widevine /
+PlayReady DRM" in customer-facing material without this caveat.
+
 ## Historical note
 
 Prior to 0.1.5, the README advertised AV1 / VP9 / VP8 / Theora / Vorbis /
@@ -519,3 +679,12 @@ integration test.
 
 The AV1 gap specifically is tracked by GitHub issue #9; the Theora copy bug
 is tracked separately as a small bug-fix ticket.
+
+**0.1.9 addendum:** this document itself had gone stale in the opposite
+direction for one codec — the 0.1.7 text under-claimed Opus, still labelling
+SILK/hybrid as stubs after a real normative SILK decoder had shipped (see
+"0.1.9 re-audit summary" and the revised Opus entry above). The lesson
+generalises: a status document is only honest for as long as it is
+re-verified against source, in both directions — demotions and promotions
+alike — every time it is touched, not merely re-stamped with a new version
+number.

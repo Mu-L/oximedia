@@ -197,7 +197,6 @@ pub mod texture_atlas;
 pub mod texture_cache;
 pub mod tone_curve;
 
-use std::sync::Arc;
 use thiserror::Error;
 
 // Accelerator exports
@@ -324,12 +323,37 @@ pub enum GpuError {
 
 pub type Result<T> = std::result::Result<T, GpuError>;
 
+/// Reference-counted pointer used internally for shared GPU resource handles
+/// (the `wgpu` device/queue and the `GpuDevice`/allocator wrappers built on
+/// top of them).
+///
+/// - **Native targets**: an alias for [`std::sync::Arc`]. `wgpu`'s `Device`
+///   and `Queue` handles are `Send + Sync` on native backends, so these
+///   resources may legitimately be shared across threads (worker pools,
+///   `tokio::spawn`, etc.), and atomic ref-counting is the correct choice.
+/// - **`wasm32` targets**: an alias for [`std::rc::Rc`]. In the browser,
+///   `wgpu`'s handles are backed by `JsValue`-based objects that are neither
+///   `Send` nor `Sync` (there is also no cross-thread sharing without the
+///   unstable `atomics` target feature — `wasm32-unknown-unknown` is
+///   single-threaded), so a plain, non-atomic reference count is both
+///   correct and avoids paying for atomic overhead that can never be used.
+///
+/// Using one alias keeps the *sharing* semantics (single owner tree, cheap
+/// clone, no deep copy) identical on every target while letting each target
+/// use the smart pointer that actually matches its threading model, which is
+/// also what `clippy::arc_with_non_send_sync` recommends.
+#[cfg(not(target_arch = "wasm32"))]
+pub type Shared<T> = std::sync::Arc<T>;
+/// See the non-`wasm32` documentation on [`Shared`] above.
+#[cfg(target_arch = "wasm32")]
+pub type Shared<T> = std::rc::Rc<T>;
+
 /// GPU context for compute operations
 ///
 /// This is the main entry point for GPU-accelerated operations.
 /// It manages device selection, resource allocation, and command submission.
 pub struct GpuContext {
-    device: Arc<GpuDevice>,
+    device: Shared<GpuDevice>,
 }
 
 impl GpuContext {
@@ -345,7 +369,7 @@ impl GpuContext {
     pub fn new() -> Result<Self> {
         let device = GpuDevice::new(None)?;
         Ok(Self {
-            device: Arc::new(device),
+            device: Shared::new(device),
         })
     }
 
@@ -362,7 +386,7 @@ impl GpuContext {
     pub fn with_device(device_index: usize) -> Result<Self> {
         let device = GpuDevice::new(Some(device_index))?;
         Ok(Self {
-            device: Arc::new(device),
+            device: Shared::new(device),
         })
     }
 

@@ -210,7 +210,7 @@ impl AdmissionFilter {
 
     /// Return `true` when `key` should be promoted to the hot tier.
     ///
-    /// Equivalent to calling [`admit`] and checking whether the decision is
+    /// Equivalent to calling [`Self::admit`] and checking whether the decision is
     /// [`AdmissionDecision::Admit`].
     #[must_use]
     pub fn should_admit(&self, key: &str) -> bool {

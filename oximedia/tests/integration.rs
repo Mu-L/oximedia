@@ -1222,3 +1222,299 @@ mod combined_tests {
         );
     }
 }
+
+// ── Combined: transcode + normalize + qc ────────────────────────────────────
+
+#[cfg(all(test, feature = "transcode", feature = "normalize", feature = "qc"))]
+mod combined_transcode_normalize_qc_tests {
+    use oximedia::metering::Standard;
+    use oximedia::normalize::{Normalizer, NormalizerConfig};
+    use oximedia::qc::qc_profile::{QcProfile, QcProfileType, QcTolerance};
+    use oximedia::transcode::TranscodeConfig;
+
+    /// A transcode configuration, a two-pass loudness normalizer, and a QC
+    /// delivery profile can all be constructed and driven in the same
+    /// compilation unit — verifying that enabling `transcode` + `normalize` +
+    /// `qc` simultaneously does not introduce conflicting dependencies or
+    /// type collisions between the three subsystems.
+    #[test]
+    fn test_transcode_normalize_qc_pipeline_types_coexist() {
+        // Transcode side: an audio-normalizing transcode configuration.
+        let config = TranscodeConfig {
+            video_codec: Some("av1".to_string()),
+            audio_codec: Some("opus".to_string()),
+            normalize_audio: true,
+            ..TranscodeConfig::default()
+        };
+        assert!(config.normalize_audio, "normalize_audio flag must be set");
+        assert_eq!(
+            config.video_codec.as_deref(),
+            Some("av1"),
+            "Video codec must be preserved"
+        );
+
+        // Normalize side: analyze a second of stereo silence at EBU R128.
+        let normalizer_config = NormalizerConfig::new(Standard::EbuR128, 48_000.0, 2);
+        let mut normalizer = Normalizer::new(normalizer_config)
+            .expect("Normalizer::new with a valid EBU R128 config must succeed");
+
+        let silence = vec![0.0_f32; 48_000 * 2];
+        normalizer.analyze_f32(&silence);
+        let analysis = normalizer.get_analysis();
+        assert!(
+            !analysis.integrated_lufs.is_nan(),
+            "Integrated LUFS must not be NaN after analysis"
+        );
+
+        // QC side: a broadcast delivery profile with a loudness tolerance.
+        let mut profile = QcProfile::new(QcProfileType::Broadcast, "broadcast_default");
+        profile.set_tolerance("loudness", QcTolerance::new(1.0, true));
+        assert_eq!(
+            profile.strictness_level(),
+            3,
+            "Broadcast profile strictness must be 3"
+        );
+        assert!(
+            profile.tolerance_for("loudness").is_some(),
+            "Loudness tolerance must be retrievable after being set"
+        );
+    }
+}
+
+// ── Combined: playlist + playout + automation ───────────────────────────────
+
+#[cfg(all(
+    test,
+    feature = "playlist",
+    feature = "playout",
+    feature = "automation"
+))]
+mod combined_playlist_playout_automation_tests {
+    use oximedia::automation::config::AutomationConfig;
+    use oximedia::playlist::{Playlist, PlaylistItem, PlaylistType};
+    use oximedia::playout::PlayoutConfig;
+
+    /// A broadcast playlist, a playout server configuration, and an
+    /// automation system configuration can all be constructed together —
+    /// verifying that `playlist` + `playout` + `automation` compose without
+    /// conflicting dependencies (all three sit on the same broadcast
+    /// automation stack).
+    #[test]
+    fn test_playlist_playout_automation_types_coexist() {
+        // Playlist side: a linear playlist with one item.
+        let mut playlist = Playlist::new("prime_time", PlaylistType::Linear);
+        playlist.add_item(PlaylistItem::new("content/show_001.mxf"));
+        assert_eq!(playlist.items.len(), 1, "Playlist must hold one item");
+        assert_eq!(
+            playlist.name, "prime_time",
+            "Playlist name must be preserved"
+        );
+
+        // Playout side: default frame-accurate playout configuration.
+        let playout_config = PlayoutConfig::default();
+        assert!(
+            playout_config.buffer_size > 0,
+            "Default playout buffer size must be positive"
+        );
+
+        // Automation side: default automation configuration.
+        let automation_config = AutomationConfig::new();
+        assert!(
+            automation_config.channels.is_empty(),
+            "A fresh automation config must start with no channels"
+        );
+        assert_eq!(
+            automation_config.global.system_name, "OxiMedia Automation",
+            "Default global system name must match"
+        );
+    }
+}
+
+// ── Combined: routing + videoip + ndi ───────────────────────────────────────
+
+#[cfg(all(test, feature = "routing", feature = "videoip", feature = "ndi"))]
+mod combined_routing_videoip_ndi_tests {
+    use oximedia::ndi::metadata::{PtzMetadata, TallyMetadata};
+    use oximedia::routing::matrix::CrosspointMatrix;
+    use oximedia::videoip::metadata::{MetadataPacket, MetadataType, Timecode as VideoIpTimecode};
+
+    /// A signal-routing crosspoint matrix, a video-over-IP metadata packet,
+    /// and NDI tally/PTZ metadata can all be constructed together —
+    /// verifying that `routing` + `videoip` + `ndi` (the three broadcast
+    /// signal-transport subsystems) compose without type collisions.
+    #[test]
+    fn test_routing_videoip_ndi_types_coexist() {
+        // Routing side: connect one crosspoint in a small any-to-any matrix.
+        let mut matrix = CrosspointMatrix::new(4, 4);
+        matrix
+            .connect(0, 1, Some(-3.0))
+            .expect("Connecting a valid crosspoint must succeed");
+        assert_eq!(matrix.input_count(), 4, "Input count must be preserved");
+        assert_eq!(matrix.output_count(), 4, "Output count must be preserved");
+
+        // Video-over-IP side: a timecode metadata packet.
+        let tc = VideoIpTimecode::new(1, 2, 3, 4, false);
+        let packet = MetadataPacket::timecode(tc);
+        assert_eq!(
+            packet.metadata_type,
+            MetadataType::Timecode,
+            "Packet must be tagged as timecode metadata"
+        );
+        assert!(
+            !packet.payload.is_empty(),
+            "Timecode payload must be non-empty"
+        );
+
+        // NDI side: tally light and PTZ metadata construction.
+        let tally = TallyMetadata::new(true, false);
+        assert!(tally.program, "Program tally must be set");
+        assert!(!tally.preview, "Preview tally must not be set");
+
+        let ptz = PtzMetadata::new(10.0, -5.0, 2.0);
+        assert_eq!(ptz.zoom, 2.0, "Zoom level must be preserved");
+    }
+}
+
+// ── Prelude smoke test (full surface) ───────────────────────────────────────
+
+/// Imports one concrete symbol per `prelude.rs` section under the `full`
+/// meta-feature. If any child crate renames or removes a re-exported symbol,
+/// this module fails to compile, catching the break at the facade boundary
+/// instead of downstream in a consumer's build.
+#[cfg(all(test, feature = "full"))]
+mod prelude_smoke {
+    #[allow(unused_imports)]
+    use oximedia::prelude::{
+        adaptive_pipeline as _,
+        ambisonics as _,
+        // Core (always-on) + computer vision.
+        cv as _,
+        // The seven glob-re-exported sections (`crate::<module>::*` in
+        // `prelude.rs`) — one symbol pulled from each underlying crate.
+        deinterlace as _,
+        lru_cache as _,
+        AafError as _,
+        AccelError as _,
+        AccessError as _,
+        AlignError as _,
+        AnalysisError as _,
+        AnalyticsError as _,
+        ApvError as _,
+        ArchiveError as _,
+        ArchiveProError as _,
+        AudioAnalysisError as _,
+        // Per-feature domain modules, one symbol each, matching the
+        // section order in `src/prelude.rs`.
+        AudioError as _,
+        AudioPostError as _,
+        AutoError as _,
+        AutomationError as _,
+        BatchError as _,
+        CalibrationError as _,
+        CaptionError as _,
+        CaptionGenError as _,
+        CdnError as _,
+        ClipError as _,
+        CloudError as _,
+        CodecError as _,
+        CodecId as _,
+        CollabError as _,
+        ColorError as _,
+        ComplexityAnalysis as _,
+        ConformError as _,
+        ConversionError as _,
+        CrosspointMatrix as _,
+        DedupError as _,
+        DenoiseError as _,
+        DistributedError as _,
+        DolbyVisionError as _,
+        DrmError as _,
+        EditError as _,
+        EdlError as _,
+        EffectError as _,
+        FarmError as _,
+        FfmpegDiagnostic as _,
+        ForensicsError as _,
+        FrameRate as _,
+        GamingError as _,
+        GpuError as _,
+        GraphError as _,
+        GraphicsResult as _,
+        HdrError as _,
+        ImageError as _,
+        ImfError as _,
+        LutError as _,
+        MamError as _,
+        MetadataFormat as _,
+        MeteringError as _,
+        MirError as _,
+        MixerError as _,
+        MjpegError as _,
+        MlError as _,
+        MonitorError as _,
+        MultiCamError as _,
+        NdiError as _,
+        NetError as _,
+        NeuralError as _,
+        NormalizeError as _,
+        OptimizationLevel as _,
+        OxiError as _,
+        PackagerError as _,
+        // Pipeline DSL, sovereign ML, and the two always-tacked-on codecs.
+        PipelineError as _,
+        PlaylistError as _,
+        PlayoutError as _,
+        PluginError as _,
+        PresetError as _,
+        ProfilerError as _,
+        ProxyError as _,
+        QualityScore as _,
+        QueueError as _,
+        RecommendError as _,
+        RenderFarmError as _,
+        RepairError as _,
+        RestoreError as _,
+        ReviewError as _,
+        RightsError as _,
+        ScalingMode as _,
+        SceneError as _,
+        ScopeType as _,
+        SearchError as _,
+        ServerError as _,
+        Severity as _,
+        ShotError as _,
+        SimdError as _,
+        StabilizeError as _,
+        StorageError as _,
+        SubtitleError as _,
+        SwitcherError as _,
+        TimeSyncError as _,
+        TimelineError as _,
+        TranscodeConfig,
+        TranscodeError as _,
+        VfxError as _,
+        VideoIpError as _,
+        VirtualProductionError as _,
+        VrPixelFormat as _,
+        WatermarkError as _,
+        WorkflowError as _,
+    };
+
+    /// The `use` list above is the real assertion: it only compiles if every
+    /// listed symbol still exists at its documented `prelude.rs` path. This
+    /// test additionally exercises one concrete, no-I/O-required type to
+    /// prove the glob chain resolves to genuinely usable values, not just
+    /// type-checkable paths.
+    #[test]
+    fn test_prelude_full_surface_has_expected_symbols() {
+        let config = TranscodeConfig::default();
+        assert!(
+            config.hw_accel,
+            "TranscodeConfig::default() must enable hardware acceleration"
+        );
+        assert!(
+            config.preserve_metadata,
+            "TranscodeConfig::default() must preserve metadata by default"
+        );
+    }
+}

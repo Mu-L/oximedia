@@ -22,7 +22,58 @@
 //! - **APIC**: Attached picture
 
 use crate::{Error, Metadata, MetadataFormat, MetadataValue, Picture, PictureType};
-use encoding_rs::{Encoding, UTF_16BE, UTF_16LE, UTF_8, WINDOWS_1252};
+use encoding_rs::{CoderResult, Encoding, UTF_16BE, UTF_16LE, UTF_8, WINDOWS_1252};
+
+/// Decode `bytes` with a single reused `Decoder` and no intermediate `Cow`,
+/// preserving the exact BOM semantics of [`Encoding::decode`].
+///
+/// `Encoding`'s convenience [`Encoding::decode`] both (a) constructs a fresh
+/// `Decoder` and (b) returns a `Cow<str>` that, for any non-borrowable input,
+/// heap-allocates. For ID3v2 text frames — which are decoded per frame — that
+/// is wasteful. This helper instead pre-sizes a single `String` to the exact
+/// worst-case UTF-8 length and decodes directly into it in one shot.
+///
+/// # BOM handling (identical to `Encoding::decode`)
+///
+/// Like the convenience method, this first calls [`Encoding::for_bom`]: if the
+/// input starts with a UTF-8 / UTF-16LE / UTF-16BE BOM, that encoding is
+/// selected and the BOM stripped; otherwise the supplied `enc` is used. The
+/// body is then decoded with BOM handling already resolved, so the per-frame
+/// reused decoder is a faithful, allocation-light replacement — for *every*
+/// `TextEncoding` case, including BOM-bearing UTF-16 frames.
+fn decode_static(enc: &'static Encoding, bytes: &[u8]) -> String {
+    // Mirror `Encoding::decode`: a leading BOM overrides `enc` and is stripped.
+    let (encoding, without_bom) = match Encoding::for_bom(bytes) {
+        Some((bom_encoding, bom_length)) => (bom_encoding, &bytes[bom_length..]),
+        None => (enc, bytes),
+    };
+
+    let mut decoder = encoding.new_decoder_without_bom_handling();
+    // `max_utf8_buffer_length` returns `None` only on `usize` overflow, which
+    // cannot happen for an in-memory `&[u8]` slice (its length already fits in
+    // `usize`). Fall back to the convenience decode if it ever did, so we never
+    // panic and never under-allocate.
+    let capacity = match decoder.max_utf8_buffer_length(without_bom.len()) {
+        Some(cap) => cap,
+        None => {
+            let (decoded, _had_errors) = encoding.decode_without_bom_handling(without_bom);
+            return decoded.into_owned();
+        }
+    };
+    let mut out = String::with_capacity(capacity);
+    // With a worst-case-sized buffer and `last = true`, a single call drains the
+    // whole input (`CoderResult::InputEmpty`). The buffer is sized so no output
+    // overflow (`OutputFull`) is possible; if the impl ever reported otherwise,
+    // fall back rather than silently truncate.
+    let (result, _read, _replaced) = decoder.decode_to_string(without_bom, &mut out, true);
+    match result {
+        CoderResult::InputEmpty => out,
+        CoderResult::OutputFull => {
+            let (decoded, _had_errors) = encoding.decode_without_bom_handling(without_bom);
+            decoded.into_owned()
+        }
+    }
+}
 
 /// ID3v2 header size (10 bytes)
 const ID3V2_HEADER_SIZE: usize = 10;
@@ -124,12 +175,17 @@ impl TextEncoding {
     /// Decode bytes to string.
     fn decode(self, bytes: &[u8]) -> Result<String, Error> {
         match self {
-            Self::Latin1 => {
-                let (decoded, _, _) = WINDOWS_1252.decode(bytes);
-                Ok(decoded.into_owned())
-            }
+            // Latin-1 / UTF-8 / explicit UTF-16BE are all fixed encodings, so the
+            // decoder-reuse path applies directly (no BOM to interpret).
+            Self::Latin1 => Ok(decode_static(WINDOWS_1252, bytes)),
+            Self::Utf8 => Ok(decode_static(UTF_8, bytes)),
+            Self::Utf16Be => Ok(decode_static(UTF_16BE, bytes)),
             Self::Utf16 => {
-                // Check BOM and skip it
+                // Inspect the BOM to choose endianness, then decode the *remaining*
+                // (BOM-stripped) bytes with the now-fixed encoding. This preserves
+                // the original BOM semantics exactly: the BOM selects LE vs BE and
+                // is then skipped, so it is safe to use the without-BOM-handling
+                // decoder for the body.
                 if bytes.len() >= 2 {
                     let (encoding, start_pos) = if bytes[0] == 0xFF && bytes[1] == 0xFE {
                         (UTF_16LE, 2)
@@ -138,19 +194,10 @@ impl TextEncoding {
                     } else {
                         (UTF_16LE, 0)
                     };
-                    let (decoded, _, _) = encoding.decode(&bytes[start_pos..]);
-                    Ok(decoded.into_owned())
+                    Ok(decode_static(encoding, &bytes[start_pos..]))
                 } else {
                     Ok(String::new())
                 }
-            }
-            Self::Utf16Be => {
-                let (decoded, _, _) = UTF_16BE.decode(bytes);
-                Ok(decoded.into_owned())
-            }
-            Self::Utf8 => {
-                let (decoded, _, _) = UTF_8.decode(bytes);
-                Ok(decoded.into_owned())
             }
         }
     }
@@ -833,6 +880,74 @@ mod tests {
                 .expect("should succeed in test"),
             text
         );
+    }
+
+    #[test]
+    fn test_decode_static_latin1_idempotent() {
+        // Decoding the same Latin-1 bytes twice must yield identical Strings
+        // (guards the reused-decoder path against state leaking between calls).
+        let bytes = b"Hello World";
+        let first = decode_static(WINDOWS_1252, bytes);
+        let second = decode_static(WINDOWS_1252, bytes);
+        assert_eq!(first, second);
+        assert_eq!(first, "Hello World");
+    }
+
+    #[test]
+    fn test_decode_static_latin1_golden() {
+        // Windows-1252 (ID3v2 "Latin-1"): 0xE9 -> 'é', 0xC0 -> 'À'.
+        // Fixed golden mapping for a known byte sequence.
+        let bytes = [0x43, 0x61, 0x66, 0xE9, 0x20, 0xC0]; // "Café À"
+        let decoded = decode_static(WINDOWS_1252, &bytes);
+        assert_eq!(decoded, "Caf\u{00E9} \u{00C0}");
+    }
+
+    #[test]
+    fn test_decode_static_utf8_golden() {
+        let text = "Stra\u{00DF}e \u{1F3B5}"; // "Straße 🎵"
+        let decoded = decode_static(UTF_8, text.as_bytes());
+        assert_eq!(decoded, text);
+    }
+
+    #[test]
+    fn test_decode_static_matches_convenience_latin1() {
+        // The reused-decoder helper must agree byte-for-byte with the previous
+        // convenience `Encoding::decode` path for a full Latin-1 range sweep.
+        let bytes: Vec<u8> = (0u8..=255).collect();
+        let via_helper = decode_static(WINDOWS_1252, &bytes);
+        let (via_convenience, _, _) = WINDOWS_1252.decode(&bytes);
+        assert_eq!(via_helper, via_convenience.into_owned());
+    }
+
+    #[test]
+    fn test_parse_text_frame_utf16_with_bom_le() {
+        // UTF-16LE BOM (FF FE) + "Hi" -> H=0x48 i=0x69, both as LE code units.
+        let mut data = vec![1u8]; // encoding byte 1 = UTF-16 (BOM-dependent)
+        data.extend_from_slice(&[0xFF, 0xFE]); // LE BOM
+        data.extend_from_slice(&[0x48, 0x00, 0x69, 0x00]); // "Hi"
+        let value = parse_text_frame(&data).expect("decode should succeed");
+        assert_eq!(value.as_text(), Some("Hi"));
+    }
+
+    #[test]
+    fn test_parse_text_frame_utf16_with_bom_be() {
+        // UTF-16BE BOM (FE FF) + "Hi" as BE code units; guards BOM-endianness
+        // selection survives the reused-decoder rewrite.
+        let mut data = vec![1u8]; // encoding byte 1 = UTF-16 (BOM-dependent)
+        data.extend_from_slice(&[0xFE, 0xFF]); // BE BOM
+        data.extend_from_slice(&[0x00, 0x48, 0x00, 0x69]); // "Hi"
+        let value = parse_text_frame(&data).expect("decode should succeed");
+        assert_eq!(value.as_text(), Some("Hi"));
+    }
+
+    #[test]
+    fn test_parse_text_frame_utf16_bom_roundtrip_unicode() {
+        // Write a UTF-16 (BOM) frame then parse it back; the BOM-aware path must
+        // reproduce the original non-ASCII text exactly.
+        let text = "M\u{00FC}sic \u{2122}"; // "Müsic ™"
+        let frame_body = write_text_frame(text, TextEncoding::Utf16);
+        let value = parse_text_frame(&frame_body).expect("decode should succeed");
+        assert_eq!(value.as_text(), Some(text));
     }
 
     #[test]

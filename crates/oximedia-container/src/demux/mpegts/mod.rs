@@ -424,9 +424,10 @@ impl<S: MediaSource> Demuxer for MpegTsDemuxer<S> {
                 has_payload,
             ) {
                 // Discontinuity detected - log but continue
-                eprintln!(
-                    "Continuity error on PID 0x{:04X}, CC={}",
-                    ts_packet.pid, ts_packet.continuity_counter
+                tracing::warn!(
+                    "MPEG-TS continuity error on PID 0x{:04X}, CC={}",
+                    ts_packet.pid,
+                    ts_packet.continuity_counter
                 );
             }
 

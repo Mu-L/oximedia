@@ -296,7 +296,7 @@ impl SmartPlaylist {
         result
     }
 
-    /// Like [`generate`] but clones the items so the result is owned.
+    /// Like [`Self::generate`] but clones the items so the result is owned.
     #[must_use]
     pub fn generate_owned(&self, library: &[LibraryItem]) -> Vec<LibraryItem> {
         self.generate(library).into_iter().cloned().collect()

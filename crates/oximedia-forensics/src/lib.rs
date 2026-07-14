@@ -9,6 +9,47 @@
 //! - Copy-move detection
 //! - Illumination inconsistency detection
 //! - Comprehensive forensic reporting
+//!
+//! # Confidence score interpretation guide (for end users)
+//!
+//! Every [`ForensicTest`] and every [`TamperingReport`] carries a
+//! `confidence` / `overall_confidence` score in `[0.0, 1.0]`. This is a
+//! **heuristic likelihood signal aggregated across independent forensic
+//! cues, not a probability of guilt** — treat it as evidence to weigh
+//! alongside context (chain of custody, source metadata, corroborating
+//! testimony), not as a verdict on its own. A practical reading:
+//!
+//! | Score range | [`ConfidenceLevel`] | Suggested interpretation |
+//! |-------------|---------------------|--------------------------|
+//! | 0.0 – 0.2   | `VeryLow`  | No meaningful evidence of tampering found. |
+//! | 0.2 – 0.4   | `Low`      | Minor anomalies; consistent with normal camera/encoder variation. |
+//! | 0.4 – 0.6   | `Medium`   | Notable anomalies; warrants a closer manual look, not yet conclusive. |
+//! | 0.6 – 0.8   | `High`     | Multiple corroborating signals; tampering is likely. |
+//! | 0.8 – 1.0   | `VeryHigh` | Strong, multi-test corroboration; tampering is very likely. |
+//!
+//! [`TamperingReport::calculate_overall_confidence`] does **not** average
+//! every test's confidence equally. It applies a [reliability weight per
+//! test category](test_reliability_weight) (overridable per-caller via
+//! [`TestWeight`]) — e.g. a positive copy-move (`Copy-Move Detection`)
+//! result is weighted 1.5×, versus 0.7× for a metadata-only signal, because
+//! empirically copy-move detections are far less prone to false positives
+//! than "metadata looks odd" observations. Detections (as opposed to clean
+//! results) additionally receive a further **1.2× boost** to their
+//! effective weight in that average, reflecting the standard forensic
+//! asymmetry that a *positive* finding from a reliable test is more
+//! informative than a negative one (absence of evidence is not evidence of
+//! absence). The resulting weighted mean is what `overall_confidence`
+//! reports, and `tampering_detected` is simply `overall_confidence > 0.5`.
+//! Callers that want the older, unweighted behaviour (equal treatment of
+//! every test) can call
+//! [`TamperingReport::calculate_overall_confidence_unweighted`] instead.
+//!
+//! For programmatic thresholds, prefer `overall_confidence` (a continuous
+//! `f64`) over the coarser [`ConfidenceLevel`] bucket, and always inspect
+//! `TamperingReport::tests` to see *which* individual tests fired — a
+//! `VeryHigh` score driven by five weak-but-correlated tests reads very
+//! differently from the same score driven by one very strong copy-move
+//! detection.
 
 #![deny(unsafe_code)]
 #![allow(dead_code)]
@@ -58,6 +99,8 @@ pub mod tampering;
 pub mod time_forensics;
 pub mod video_forensics;
 pub mod watermark_detect;
+
+pub use hash_registry::{HashAlgorithm, HashRegistry, MediaHash};
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};

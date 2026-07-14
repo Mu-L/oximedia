@@ -36,6 +36,50 @@ pub(super) fn apply_resize(
         (w, h) => (w, h),
     };
 
+    // Early-termination fast-path: when the *target* area is below 4096 pixels
+    // (64×64), bilinear is perceptually indistinguishable from Lanczos and
+    // dramatically cheaper.  This short-circuit applies for all fit modes that
+    // eventually call bilinear_resize for at least one of their resize passes.
+    const CHEAP_THRESHOLD_PX: u32 = 64 * 64; // 4096 pixels
+    if tw.saturating_mul(th) < CHEAP_THRESHOLD_PX {
+        // Dispatch the fit-mode logic but force bilinear for all scale steps.
+        return match fit {
+            FitMode::ScaleDown => {
+                if buffer.width <= tw && buffer.height <= th {
+                    return Ok(buffer);
+                }
+                let (fw, fh) = fit_contain_dims(buffer.width, buffer.height, tw, th);
+                Ok(bilinear_resize(&buffer, fw, fh))
+            }
+            FitMode::Contain => {
+                let (fw, fh) = fit_contain_dims(buffer.width, buffer.height, tw, th);
+                Ok(bilinear_resize(&buffer, fw, fh))
+            }
+            FitMode::Cover => {
+                let (fw, fh) = fit_cover_dims(buffer.width, buffer.height, tw, th);
+                let resized = bilinear_resize(&buffer, fw, fh);
+                let (cx, cy, cw, ch) = calculate_crop_rect(fw, fh, tw, th, gravity);
+                crop_region(&resized, cx, cy, cw, ch)
+            }
+            FitMode::Crop => {
+                let (cx, cy, cw, ch) = calculate_crop_rect(
+                    buffer.width,
+                    buffer.height,
+                    tw.min(buffer.width),
+                    th.min(buffer.height),
+                    gravity,
+                );
+                crop_region(&buffer, cx, cy, cw, ch)
+            }
+            FitMode::Pad => {
+                let (fw, fh) = fit_contain_dims(buffer.width, buffer.height, tw, th);
+                let resized = bilinear_resize(&buffer, fw, fh);
+                pad_to_exact_size(resized, tw, th, Color::black())
+            }
+            FitMode::Fill => Ok(bilinear_resize(&buffer, tw, th)),
+        };
+    }
+
     match fit {
         FitMode::ScaleDown => {
             if buffer.width <= tw && buffer.height <= th {

@@ -416,7 +416,7 @@ mod tests {
         std::fs::remove_file(&cfg).ok();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_submit_valid_json() {
         let dir = std::env::temp_dir();
         let cfg = dir.join("oximedia_batch_submit_ok.json");
@@ -429,7 +429,7 @@ mod tests {
         std::fs::remove_file(&db).ok();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_list_empty_db() {
         let db = std::env::temp_dir().join("oximedia_batch_list_empty.db");
         let result = cmd_list("all", &db, true).await;
@@ -437,7 +437,7 @@ mod tests {
         std::fs::remove_file(&db).ok();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_report_empty_db_json() {
         let db = std::env::temp_dir().join("oximedia_batch_report_json.db");
         let result = cmd_report(&db, "json").await;
@@ -445,7 +445,7 @@ mod tests {
         std::fs::remove_file(&db).ok();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_report_empty_db_text() {
         let db = std::env::temp_dir().join("oximedia_batch_report_text.db");
         let result = cmd_report(&db, "text").await;

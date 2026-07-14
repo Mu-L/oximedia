@@ -617,7 +617,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_decoder_creation() {
         let dec = Ffv1Decoder::new();
         assert!(dec.config.is_none());
@@ -625,7 +624,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_decoder_with_extradata() {
         let config_data = make_config_bytes_420_8(320, 240);
         let dec = Ffv1Decoder::with_extradata(&config_data).expect("valid config");
@@ -635,7 +633,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_decoder_invalid_config() {
         // Too short
         assert!(Ffv1Decoder::with_extradata(&[0; 5]).is_err());
@@ -646,14 +643,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_decoder_not_configured() {
         let mut dec = Ffv1Decoder::new();
         assert!(dec.send_packet(&[0; 100], 0).is_err());
     }
 
     #[test]
-    #[ignore]
     fn test_decoder_reset() {
         let config_data = make_config_bytes_420_8(16, 16);
         let mut dec = Ffv1Decoder::with_extradata(&config_data).expect("valid");
@@ -665,7 +660,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_decoder_flush() {
         let config_data = make_config_bytes_420_8(16, 16);
         let mut dec = Ffv1Decoder::with_extradata(&config_data).expect("valid");

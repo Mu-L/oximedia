@@ -5,9 +5,9 @@
 //! pure-Rust layered I/O strategy that:
 //!
 //! - Uses large read-ahead buffers to amortise syscall cost.
-//! - Supports random-access reads (seek + read) via [`LargeFileReader`].
-//! - Provides a sliding-window view ([`FileWindow`]) over a sub-region.
-//! - Tracks read statistics for profiling ([`ReadStats`]).
+//! - Supports random-access reads (seek + read) via [`crate::mmap_io::LargeFileReader`].
+//! - Provides a sliding-window view ([`crate::mmap_io::FileWindow`]) over a sub-region.
+//! - Tracks read statistics for profiling ([`crate::mmap_io::ReadStats`]).
 //!
 //! The interface deliberately mirrors what a real `mmap`-backed reader would
 //! expose so that callers can swap implementations without changing their code.

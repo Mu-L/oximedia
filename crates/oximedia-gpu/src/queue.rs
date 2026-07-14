@@ -3,8 +3,7 @@
 //! This module provides abstractions for managing command queues,
 //! including command buffer submission, synchronization, and queue families.
 
-use crate::GpuDevice;
-use std::sync::Arc;
+use crate::{GpuDevice, Shared};
 use wgpu::{CommandBuffer, CommandEncoder, Queue, SubmissionIndex};
 
 /// Queue type for different workload categories
@@ -20,8 +19,8 @@ pub enum QueueType {
 
 /// Command queue wrapper with additional functionality
 pub struct CommandQueue {
-    queue: Arc<Queue>,
-    device: Arc<wgpu::Device>,
+    queue: Shared<Queue>,
+    device: Shared<wgpu::Device>,
     queue_type: QueueType,
 }
 
@@ -30,8 +29,8 @@ impl CommandQueue {
     #[must_use]
     pub fn new(device: &GpuDevice, queue_type: QueueType) -> Self {
         Self {
-            queue: Arc::clone(device.queue()),
-            device: Arc::clone(device.device()),
+            queue: device.queue().clone(),
+            device: device.device().clone(),
             queue_type,
         }
     }
@@ -105,7 +104,7 @@ impl CommandQueue {
 
     /// Get the underlying WGPU queue
     #[must_use]
-    pub fn queue(&self) -> &Arc<Queue> {
+    pub fn queue(&self) -> &Shared<Queue> {
         &self.queue
     }
 }
@@ -216,13 +215,13 @@ impl CommandBufferBuilder {
 /// Async command submission handle
 pub struct AsyncSubmission {
     submission_index: SubmissionIndex,
-    device: Arc<wgpu::Device>,
+    device: Shared<wgpu::Device>,
 }
 
 impl AsyncSubmission {
     /// Create a new async submission handle
     #[must_use]
-    pub fn new(submission_index: SubmissionIndex, device: Arc<wgpu::Device>) -> Self {
+    pub fn new(submission_index: SubmissionIndex, device: Shared<wgpu::Device>) -> Self {
         Self {
             submission_index,
             device,

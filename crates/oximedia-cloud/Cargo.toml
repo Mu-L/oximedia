@@ -16,13 +16,32 @@ readme = "README.md"
 # OCI Object Storage backend (reqwest, rsa, base64 are unconditional deps;
 # this feature flag exists for conditional compilation guards and future dep-gating)
 oci = []
+# AWS SDK backend (`S3Storage`, `AwsMediaServices`) via the official aws-sdk-*
+# crates. NON-DEFAULT and NOT Pure Rust: the smithy TLS stack only ships
+# C-based crypto providers (ring / aws-lc / s2n), so enabling this feature
+# compiles `ring` (C + assembly). The default build stays 100% Pure Rust;
+# S3-compatible endpoints remain available by default through
+# `GenericStorage` (reqwest + rustls-rustcrypto).
+aws-sdk = [
+    "dep:aws-config",
+    "dep:aws-sdk-s3",
+    "dep:aws-sdk-mediaconvert",
+    "dep:aws-sdk-medialive",
+    "dep:aws-sdk-mediapackage",
+    "dep:aws-sdk-cloudwatch",
+    "dep:aws-sdk-sts",
+    "dep:aws-sdk-kms",
+    "dep:aws-smithy-types",
+    "dep:aws-smithy-runtime",
+    "dep:aws-smithy-runtime-api",
+]
 
 [lints]
 workspace = true
 
 [dependencies]
 # Workspace dependencies
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 thiserror = { workspace = true }
 bytes = { workspace = true }
 async-trait = { workspace = true }
@@ -31,46 +50,54 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 
-# AWS SDK (ring-based TLS to avoid aws-lc-sys C dependency)
-aws-config = { workspace = true }
-aws-sdk-s3 = { workspace = true }
-aws-sdk-mediaconvert = { workspace = true }
-aws-sdk-medialive = { workspace = true }
-aws-sdk-mediapackage = { workspace = true }
-aws-sdk-cloudwatch = { workspace = true }
-aws-sdk-sts = { workspace = true }
-aws-sdk-kms = { workspace = true }
-aws-smithy-types = "1.4"
-aws-smithy-runtime = { version = "1", features = ["tls-rustls", "client"] }
-aws-smithy-runtime-api = { workspace = true }
+# AWS SDK backend — OPT-IN ONLY (non-default feature "aws-sdk").
+# The smithy TLS stack has no Pure-Rust crypto provider (its options are
+# ring / aws-lc / s2n — all C/assembly), so these dependencies must stay
+# out of the default (Pure Rust) build.
+aws-config = { workspace = true, optional = true }
+aws-sdk-s3 = { workspace = true, optional = true }
+aws-sdk-mediaconvert = { workspace = true, optional = true }
+aws-sdk-medialive = { workspace = true, optional = true }
+aws-sdk-mediapackage = { workspace = true, optional = true }
+aws-sdk-cloudwatch = { workspace = true, optional = true }
+aws-sdk-sts = { workspace = true, optional = true }
+aws-sdk-kms = { workspace = true, optional = true }
+aws-smithy-types = { version = "1.6", optional = true }
+aws-smithy-runtime = { version = "1", features = ["tls-rustls", "client"], optional = true }
+aws-smithy-runtime-api = { workspace = true, optional = true }
 
-# Azure SDK
-azure_core = { workspace = true }
-azure_storage = { workspace = true }
-azure_storage_blobs = { workspace = true }
-azure_identity = "1.0"
+# NOTE: the Azure Blob Storage backend (src/azure/) is implemented directly
+# against the Azure REST API (Shared Key / SAS auth via reqwest + hmac +
+# sha2) and is 100% Pure Rust. The azure-sdk crates (azure_core,
+# azure_identity, azure_storage_blob) are intentionally NOT dependencies:
+# their default reqwest/rustls wiring pulls in aws-lc-sys (C + assembly).
+
+# Pure-Rust rustls CryptoProvider. The workspace builds reqwest/rustls with
+# "rustls-no-provider", so a provider must be installed at runtime before any
+# TLS connection is opened (see src/tls_provider.rs).
+rustls-rustcrypto = { workspace = true }
 
 # GCP (using reqwest for REST API)
 reqwest = { workspace = true, features = ["stream"] }
 base64 = { workspace = true }
-url = "2.5"
+url = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
 rsa = { workspace = true }
-md-5 = "0.11"
-hex = "0.4"
+md-5.workspace = true
+hex.workspace = true
 
 # Additional utilities
-futures = "0.3"
-pin-project = "1.1"
+futures.workspace = true
+pin-project = { workspace = true }
 parking_lot = { workspace = true }
 dashmap = { workspace = true }
 urlencoding = "2.1"
 rayon = { workspace = true }
 
 [dev-dependencies]
-tokio-test = "0.4"
-mockito = "1.7"
+tokio-test.workspace = true
+mockito = { workspace = true }
 tempfile.workspace = true
 wiremock = "0.6"
 test-case = "3.3"

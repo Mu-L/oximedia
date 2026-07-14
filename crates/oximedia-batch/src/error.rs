@@ -18,12 +18,6 @@ pub enum BatchError {
 
     /// Database error
     #[error("Database error: {0}")]
-    #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
-    DatabaseError(#[from] rusqlite::Error),
-
-    /// Database error (non-sqlite or wasm32 variant)
-    #[error("Database error: {0}")]
-    #[cfg(any(target_arch = "wasm32", not(feature = "sqlite")))]
     DatabaseError(String),
 
     /// I/O error
@@ -126,13 +120,6 @@ impl From<regex::Error> for BatchError {
 impl From<glob::PatternError> for BatchError {
     fn from(err: glob::PatternError) -> Self {
         Self::PatternError(err.to_string())
-    }
-}
-
-#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
-impl From<r2d2::Error> for BatchError {
-    fn from(err: r2d2::Error) -> Self {
-        Self::FileOperationError(format!("Connection pool error: {err}"))
     }
 }
 

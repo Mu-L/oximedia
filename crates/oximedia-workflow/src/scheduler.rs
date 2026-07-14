@@ -12,6 +12,27 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
+/// Source of the current wall-clock time used by the scheduler.
+///
+/// Production code uses [`SystemClock`] (the default), which reads
+/// [`chrono::Utc::now`]. Tests can inject a deterministic clock to drive cron
+/// evaluation at logical times without sleeping, by passing a custom
+/// implementation to [`WorkflowScheduler::with_clock`].
+pub trait Clock: Send + Sync {
+    /// Return the current time as a UTC timestamp.
+    fn now(&self) -> chrono::DateTime<chrono::Utc>;
+}
+
+/// Default [`Clock`] implementation backed by the system wall clock.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now()
+    }
+}
+
 /// Trigger type for workflow execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -122,19 +143,36 @@ impl ScheduledWorkflow {
 
     /// Update next execution time after execution.
     pub fn update_next_execution(&mut self) {
-        self.last_execution = Some(Utc::now());
+        self.update_next_execution_at(Utc::now());
+    }
+
+    /// Update next execution time after an execution that occurred at `now`.
+    ///
+    /// This is the clock-injectable variant of [`Self::update_next_execution`];
+    /// the latter is a thin wrapper that supplies [`Utc::now`].
+    pub(crate) fn update_next_execution_at(&mut self, now: DateTime<Utc>) {
+        self.last_execution = Some(now);
         self.next_execution = Self::calculate_next_execution(&self.trigger, self.last_execution);
     }
 
     /// Check if workflow should execute now.
     #[must_use]
     pub fn should_execute(&self) -> bool {
+        self.should_execute_at(Utc::now())
+    }
+
+    /// Check if the workflow should execute at the supplied `now`.
+    ///
+    /// This is the clock-injectable variant of [`Self::should_execute`]; the
+    /// latter is a thin wrapper that supplies [`Utc::now`].
+    #[must_use]
+    pub(crate) fn should_execute_at(&self, now: DateTime<Utc>) -> bool {
         if !self.enabled {
             return false;
         }
 
         match self.next_execution {
-            Some(next) => Utc::now() >= next,
+            Some(next) => now >= next,
             None => false,
         }
     }
@@ -146,15 +184,28 @@ pub struct WorkflowScheduler {
     schedules: Arc<RwLock<HashMap<WorkflowId, ScheduledWorkflow>>>,
     /// Whether scheduler is running.
     running: Arc<RwLock<bool>>,
+    /// Clock used to read the current time when evaluating schedules.
+    clock: Arc<dyn Clock>,
 }
 
 impl WorkflowScheduler {
-    /// Create a new scheduler.
+    /// Create a new scheduler backed by the system wall clock.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_clock(Arc::new(SystemClock))
+    }
+
+    /// Create a new scheduler that reads time from the supplied [`Clock`].
+    ///
+    /// Production callers should use [`Self::new`] (which uses [`SystemClock`]);
+    /// this constructor exists so tests can inject a deterministic clock and
+    /// drive cron evaluation at logical times without sleeping.
+    #[must_use]
+    pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
         Self {
             schedules: Arc::new(RwLock::new(HashMap::new())),
             running: Arc::new(RwLock::new(false)),
+            clock,
         }
     }
 
@@ -232,13 +283,17 @@ impl WorkflowScheduler {
         }
         drop(running);
 
+        // Read the clock exactly once so every schedule is evaluated against a
+        // single consistent timestamp within this check pass.
+        let now = self.clock.now();
+
         let mut schedules = self.schedules.write().await;
         let mut ready_workflows = Vec::new();
 
         for (_, schedule) in schedules.iter_mut() {
-            if schedule.should_execute() {
+            if schedule.should_execute_at(now) {
                 ready_workflows.push(schedule.workflow.clone());
-                schedule.update_next_execution();
+                schedule.update_next_execution_at(now);
                 debug!(
                     "Workflow {} ready for execution. Next: {:?}",
                     schedule.workflow.id, schedule.next_execution

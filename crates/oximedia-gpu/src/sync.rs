@@ -3,7 +3,7 @@
 //! This module provides abstractions for synchronizing GPU operations,
 //! including fences, barriers, and event synchronization.
 
-use crate::GpuDevice;
+use crate::{GpuDevice, Shared};
 use parking_lot::{Condvar, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 ///
 /// A fence allows the CPU to wait for GPU operations to complete.
 pub struct Fence {
-    device: Arc<wgpu::Device>,
+    device: Shared<wgpu::Device>,
     signaled: Arc<AtomicBool>,
     timestamp: Arc<AtomicU64>,
 }
@@ -23,7 +23,7 @@ impl Fence {
     #[must_use]
     pub fn new(device: &GpuDevice) -> Self {
         Self {
-            device: Arc::clone(device.device()),
+            device: device.device().clone(),
             signaled: Arc::new(AtomicBool::new(false)),
             timestamp: Arc::new(AtomicU64::new(0)),
         }
@@ -97,7 +97,7 @@ impl Fence {
 impl Clone for Fence {
     fn clone(&self) -> Self {
         Self {
-            device: Arc::clone(&self.device),
+            device: self.device.clone(),
             signaled: Arc::clone(&self.signaled),
             timestamp: Arc::clone(&self.timestamp),
         }

@@ -1,15 +1,39 @@
 //! Audio resampling utilities.
 //!
-//! This module provides high-quality audio resampling using the `rubato` library.
-//! It supports both synchronous (fixed ratio) and asynchronous (variable ratio) resampling.
+//! This module provides high-quality, 100% Pure-Rust audio resampling built
+//! on a band-limited windowed-sinc polyphase interpolator. No C, C++, or
+//! Fortran code is compiled, and no third-party FFT backend is required.
+//!
+//! # Algorithm
+//!
+//! The resampler precomputes an oversampled prototype low-pass filter: a
+//! sinc kernel shaped by a 4-term Blackman-Harris window (≈ −92 dB stopband),
+//! sampled at `oversampling + 1` fractional phases of `taps` coefficients
+//! each. Every phase row is normalized to unit DC gain, which removes
+//! passband amplitude ripple at 0 Hz and keeps round-trips level-accurate.
+//!
+//! For each output sample the continuous input position is tracked with an
+//! *exact rational accumulator* (no floating-point drift over arbitrarily
+//! long streams). The two phase rows bracketing the fractional position are
+//! linearly interpolated to synthesize the exact fractional-delay filter,
+//! which is then applied to all channels.
+//!
+//! When downsampling, the kernel cutoff is scaled by the rate ratio so the
+//! same filter performs anti-alias filtering and interpolation in one pass.
+//!
+//! Output sample `n` corresponds to input time `n / target_rate` — the
+//! filter's group delay is compensated internally, so the output is
+//! time-aligned with the input (streaming latency of `taps / 2` input
+//! samples, but no leading silence and no phase shift).
 //!
 //! # Features
 //!
-//! - Multiple quality presets (Low, Medium, High, Best)
+//! - Multiple quality presets (Low, Medium, High, Best + Draft/Good aliases)
 //! - Support for all sample formats (U8, S16, S32, F32, F64, and planar variants)
 //! - Multi-channel audio support
-//! - Streaming resampling with state management
-//! - Zero-copy optimizations where possible
+//! - Streaming resampling with state management and `flush()` for stream tails
+//! - Chunk-size invariant: splitting the input into arbitrary chunks produces
+//!   bit-identical output to one-shot processing
 //!
 //! # Examples
 //!
@@ -18,17 +42,15 @@
 //!
 //! let mut resampler = Resampler::new(44100, 48000, 2, ResamplerQuality::High)?;
 //! // Process audio frames...
+//! let out = resampler.resample(&frame)?;
+//! // ... at end of stream:
+//! let tail = resampler.flush()?;
 //! ```
 
 use crate::{AudioBuffer, AudioError, AudioFrame, AudioResult, ChannelLayout};
-use audioadapter::Adapter;
-use audioadapter_buffers::direct::SequentialSliceOfVecs;
 use bytes::Bytes;
 use oximedia_core::SampleFormat;
-use rubato::{
-    Async as RubatoAsync, Fft as RubatoFft, FixedAsync, FixedSync, Resampler as RubatoResampler,
-    ResamplerConstructionError, SincInterpolationParameters, SincInterpolationType, WindowFunction,
-};
+use std::f64::consts::PI;
 
 /// Resampling quality preset.
 ///
@@ -42,32 +64,32 @@ use rubato::{
 /// | Alias | Maps to | Description |
 /// |-------|---------|-------------|
 /// | [`Draft`](ResamplerQuality::Draft) | `Low` | Fastest; real-time non-critical use |
-/// | [`Good`](ResamplerQuality::Good)  | `High` | Sinc with cubic interpolation |
-/// | [`Best`](ResamplerQuality::Best)  | `Best` | Sinc with large filter (highest quality) |
+/// | [`Good`](ResamplerQuality::Good)  | `High` | Long windowed-sinc filter |
+/// | [`Best`](ResamplerQuality::Best)  | `Best` | Longest filter (highest quality) |
 ///
 /// `Low`, `Medium`, `High`, and `Best` remain available for backward
 /// compatibility and for when you need the intermediate `Medium` level.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ResamplerQuality {
     /// Low quality — fastest, suitable for real-time where quality is not critical.
-    /// Uses FFT with small chunk size.
+    /// Uses a short (64-tap) windowed-sinc filter.
     ///
     /// Equivalent to [`Draft`](ResamplerQuality::Draft).
     Low,
 
     /// Medium quality — balanced speed and quality.
-    /// Uses FFT with medium chunk size.
+    /// Uses a 128-tap windowed-sinc filter.
     #[default]
     Medium,
 
     /// High quality — good quality for most applications.
-    /// Uses Sinc interpolation with cubic interpolation.
+    /// Uses a 192-tap windowed-sinc filter with fine phase resolution.
     ///
     /// Equivalent to [`Good`](ResamplerQuality::Good).
     High,
 
     /// Best quality — highest quality, most CPU intensive.
-    /// Uses Sinc interpolation with linear interpolation and a large filter.
+    /// Uses a 256-tap windowed-sinc filter with fine phase resolution.
     Best,
 
     // ── Named aliases ────────────────────────────────────────────────────────
@@ -78,7 +100,7 @@ pub enum ResamplerQuality {
 
     /// Good quality — alias for [`High`](ResamplerQuality::High).
     ///
-    /// Sinc interpolation with cubic interpolation; a solid all-round choice.
+    /// Long windowed-sinc filter; a solid all-round choice.
     Good,
 }
 
@@ -96,63 +118,44 @@ impl ResamplerQuality {
         }
     }
 
-    /// Get the chunk size for FFT-based resamplers.
+    /// Get windowed-sinc interpolation parameters for this quality level.
     #[must_use]
-    fn fft_chunk_size(&self) -> usize {
+    fn sinc_params(&self) -> SincParams {
         match self.canonical() {
-            Self::Low => 256,
-            Self::Medium => 1024,
-            Self::High | Self::Best => 2048,
-            // aliases resolved above; unreachable
-            _ => 1024,
+            Self::Low => SincParams {
+                taps: 64,
+                oversampling: 128,
+                f_cutoff: 0.90,
+            },
+            Self::Medium => SincParams {
+                taps: 128,
+                oversampling: 192,
+                f_cutoff: 0.925,
+            },
+            Self::High => SincParams {
+                taps: 192,
+                oversampling: 256,
+                f_cutoff: 0.945,
+            },
+            // `Best` and (already-canonicalized) aliases.
+            _ => SincParams {
+                taps: 256,
+                oversampling: 256,
+                f_cutoff: 0.95,
+            },
         }
     }
+}
 
-    /// Get the sub-chunks value for FFT resamplers.
-    #[must_use]
-    fn fft_sub_chunks(&self) -> usize {
-        match self.canonical() {
-            Self::Low => 1,
-            Self::Medium => 2,
-            Self::High | Self::Best => 4,
-            _ => 2,
-        }
-    }
-
-    /// Get Sinc interpolation parameters.
-    #[must_use]
-    fn sinc_params(&self) -> SincInterpolationParameters {
-        match self.canonical() {
-            Self::Low | Self::Medium => SincInterpolationParameters {
-                sinc_len: 64,
-                f_cutoff: 0.95,
-                interpolation: SincInterpolationType::Cubic,
-                oversampling_factor: 128,
-                window: WindowFunction::BlackmanHarris2,
-            },
-            Self::High => SincInterpolationParameters {
-                sinc_len: 128,
-                f_cutoff: 0.95,
-                interpolation: SincInterpolationType::Cubic,
-                oversampling_factor: 256,
-                window: WindowFunction::BlackmanHarris2,
-            },
-            Self::Best => SincInterpolationParameters {
-                sinc_len: 256,
-                f_cutoff: 0.95,
-                interpolation: SincInterpolationType::Linear,
-                oversampling_factor: 256,
-                window: WindowFunction::BlackmanHarris2,
-            },
-            _ => SincInterpolationParameters {
-                sinc_len: 128,
-                f_cutoff: 0.95,
-                interpolation: SincInterpolationType::Cubic,
-                oversampling_factor: 256,
-                window: WindowFunction::BlackmanHarris2,
-            },
-        }
-    }
+/// Windowed-sinc filter design parameters.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SincParams {
+    /// Filter length in input samples (even).
+    taps: usize,
+    /// Number of precomputed fractional phases (table has `oversampling + 1` rows).
+    oversampling: usize,
+    /// Relative cutoff frequency as a fraction of the lower Nyquist frequency.
+    f_cutoff: f64,
 }
 
 /// Resampling strategy.
@@ -160,18 +163,284 @@ impl ResamplerQuality {
 enum ResamplerStrategy {
     /// Passthrough (no resampling needed).
     Passthrough,
-    /// Fixed input size, fixed output size.
-    FixedInOut,
-    /// Fixed input size, variable output size.
-    FixedIn,
-    /// Variable input size, fixed output size.
-    FixedOut,
+    /// Streaming windowed-sinc polyphase resampling.
+    SincPolyphase,
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sinc polyphase engine
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Normalized sinc function: `sin(πx) / (πx)`.
+fn sinc(x: f64) -> f64 {
+    if x.abs() < 1e-12 {
+        1.0
+    } else {
+        let px = PI * x;
+        px.sin() / px
+    }
+}
+
+/// 4-term Blackman-Harris window on `u ∈ [-1, 1]` (0 outside).
+///
+/// Provides ≈ −92 dB peak sidelobe level.
+fn blackman_harris(u: f64) -> f64 {
+    if u.abs() >= 1.0 {
+        return 0.0;
+    }
+    const A0: f64 = 0.35875;
+    const A1: f64 = 0.48829;
+    const A2: f64 = 0.14128;
+    const A3: f64 = 0.01168;
+    A0 + A1 * (PI * u).cos() + A2 * (2.0 * PI * u).cos() + A3 * (3.0 * PI * u).cos()
+}
+
+/// Streaming windowed-sinc polyphase resampler engine (single instance
+/// handles all channels so the interpolated coefficient row is shared).
+struct SincEngine {
+    /// Filter length in input samples (even).
+    taps: usize,
+    /// Half the filter length.
+    half: i64,
+    /// Number of fractional phases (table rows = `oversampling + 1`).
+    oversampling: usize,
+    /// Flattened coefficient table: `(oversampling + 1) × taps`, phase-major.
+    table: Vec<f64>,
+    /// Rational position step numerator: `source_rate / gcd`.
+    step_num: u64,
+    /// Rational position denominator: `target_rate / gcd`.
+    denom: u64,
+    /// Current fractional position numerator (`0..denom`).
+    frac_num: u64,
+    /// Integer input index of the next output sample's position.
+    next_idx: i64,
+    /// Per-channel input buffer (history + pending samples).
+    buf: Vec<Vec<f32>>,
+    /// Absolute input index of `buf[ch][0]`.
+    buf_start: i64,
+    /// Total number of real input samples pushed so far.
+    pushed: i64,
+    /// Channel count.
+    channels: usize,
+    /// Scratch row for the interpolated fractional-delay filter.
+    scratch: Vec<f64>,
+    /// Set once `flush()` has been called; further input is rejected.
+    finished: bool,
+}
+
+impl SincEngine {
+    /// Create a new engine for the given rates and filter parameters.
+    fn new(
+        source_rate: u32,
+        target_rate: u32,
+        channels: usize,
+        params: SincParams,
+    ) -> AudioResult<Self> {
+        if params.taps < 4 || params.taps % 2 != 0 {
+            return Err(AudioError::InvalidParameter(
+                "Sinc filter length must be an even number >= 4".into(),
+            ));
+        }
+        if params.oversampling < 2 {
+            return Err(AudioError::InvalidParameter(
+                "Sinc oversampling factor must be >= 2".into(),
+            ));
+        }
+
+        let g = gcd(source_rate, target_rate);
+        let step_num = u64::from(source_rate / g);
+        let denom = u64::from(target_rate / g);
+
+        // Anti-alias cutoff: relative to the input Nyquist frequency, limited
+        // to the output Nyquist when downsampling.
+        let ratio = f64::from(target_rate) / f64::from(source_rate);
+        let cutoff = params.f_cutoff * ratio.min(1.0);
+
+        let table = Self::build_table(params.taps, params.oversampling, cutoff);
+        let half = (params.taps / 2) as i64;
+
+        // Prime the history with `taps` zeros so the first output (centered
+        // at input position 0) has a full window of valid history.
+        let buf = vec![vec![0.0f32; params.taps]; channels];
+
+        Ok(Self {
+            taps: params.taps,
+            half,
+            oversampling: params.oversampling,
+            table,
+            step_num,
+            denom,
+            frac_num: 0,
+            next_idx: 0,
+            buf,
+            buf_start: -(params.taps as i64),
+            pushed: 0,
+            channels,
+            scratch: vec![0.0f64; params.taps],
+            finished: false,
+        })
+    }
+
+    /// Build the oversampled, per-phase DC-normalized windowed-sinc table.
+    fn build_table(taps: usize, oversampling: usize, cutoff: f64) -> Vec<f64> {
+        let half = (taps / 2) as i64;
+        let half_f = half as f64;
+        let mut table = vec![0.0f64; (oversampling + 1) * taps];
+
+        for p in 0..=oversampling {
+            let frac = p as f64 / oversampling as f64;
+            let row = &mut table[p * taps..(p + 1) * taps];
+            let mut sum = 0.0f64;
+            for (k, slot) in row.iter_mut().enumerate() {
+                // Tap `k` reads input index `idx - half + 1 + k`; the kernel
+                // argument is (tap position) − (continuous position `idx + frac`).
+                let x = (k as i64 - half + 1) as f64 - frac;
+                let v = cutoff * sinc(cutoff * x) * blackman_harris(x / half_f);
+                *slot = v;
+                sum += v;
+            }
+            // Normalize each phase row to exactly unit DC gain.
+            if sum.abs() > f64::EPSILON {
+                for slot in row.iter_mut() {
+                    *slot /= sum;
+                }
+            }
+        }
+
+        table
+    }
+
+    /// Synthesize the fractional-delay filter for the current position into
+    /// `self.scratch` by linear interpolation between adjacent phase rows.
+    fn fill_scratch(&mut self) {
+        let frac = self.frac_num as f64 / self.denom as f64;
+        let pf = frac * self.oversampling as f64;
+        let p0 = (pf as usize).min(self.oversampling - 1);
+        let w = pf - p0 as f64;
+
+        let row0 = &self.table[p0 * self.taps..(p0 + 1) * self.taps];
+        let row1 = &self.table[(p0 + 1) * self.taps..(p0 + 2) * self.taps];
+        for ((s, &c0), &c1) in self.scratch.iter_mut().zip(row0).zip(row1) {
+            *s = c0 + w * (c1 - c0);
+        }
+    }
+
+    /// Append input samples to the internal buffer.
+    fn push_input(&mut self, input: &[Vec<f32>]) {
+        let mut added = 0usize;
+        for (buf_ch, in_ch) in self.buf.iter_mut().zip(input.iter()) {
+            buf_ch.extend_from_slice(in_ch);
+            added = in_ch.len();
+        }
+        self.pushed += added as i64;
+    }
+
+    /// Produce all output samples whose filter window lies fully inside the
+    /// currently buffered input, stopping (exclusively) at input position
+    /// `limit` when given.
+    fn produce(&mut self, limit: Option<i64>) -> Vec<Vec<f32>> {
+        let mut out: Vec<Vec<f32>> = vec![Vec::new(); self.channels];
+        let available_end = self.buf_start + self.buf.first().map_or(0, Vec::len) as i64;
+
+        loop {
+            let idx = self.next_idx;
+            if let Some(end) = limit {
+                if idx >= end {
+                    break;
+                }
+            }
+            // The filter reads absolute input indices [idx-half+1, idx+half].
+            if idx + self.half >= available_end {
+                break;
+            }
+
+            self.fill_scratch();
+            let rel0 = (idx - self.half + 1 - self.buf_start) as usize;
+            for (ch, out_ch) in out.iter_mut().enumerate() {
+                let window = &self.buf[ch][rel0..rel0 + self.taps];
+                let mut acc = 0.0f64;
+                for (&s, &c) in window.iter().zip(self.scratch.iter()) {
+                    acc += f64::from(s) * c;
+                }
+                #[allow(clippy::cast_possible_truncation)]
+                out_ch.push(acc as f32);
+            }
+
+            // Advance the exact rational position.
+            self.frac_num += self.step_num;
+            self.next_idx += (self.frac_num / self.denom) as i64;
+            self.frac_num %= self.denom;
+        }
+
+        self.trim_front();
+        out
+    }
+
+    /// Discard buffered samples no longer reachable by future outputs.
+    fn trim_front(&mut self) {
+        let keep_from = self.next_idx - self.half + 1;
+        let len = self.buf.first().map_or(0, Vec::len) as i64;
+        let drain = (keep_from - self.buf_start).clamp(0, len);
+        if drain > 0 {
+            let drain = drain as usize;
+            for ch in &mut self.buf {
+                ch.drain(..drain);
+            }
+            self.buf_start += drain as i64;
+        }
+    }
+
+    /// Process a block of planar input, returning all producible output.
+    fn process(&mut self, input: &[Vec<f32>]) -> AudioResult<Vec<Vec<f32>>> {
+        if self.finished {
+            return Err(AudioError::InvalidParameter(
+                "Resampler already flushed; call reset() before feeding more input".into(),
+            ));
+        }
+        self.push_input(input);
+        Ok(self.produce(None))
+    }
+
+    /// Flush the stream tail: emits every remaining output sample whose
+    /// position lies before the end of the pushed input, padding the filter
+    /// window with zeros. After flushing, `process` returns an error until
+    /// `reset` is called.
+    fn flush(&mut self) -> Vec<Vec<f32>> {
+        if self.finished {
+            return vec![Vec::new(); self.channels];
+        }
+        self.finished = true;
+        let end = self.pushed;
+        // Zero-pad so any window ending before `end + taps` is complete.
+        for ch in &mut self.buf {
+            let padded_len = ch.len() + self.taps;
+            ch.resize(padded_len, 0.0);
+        }
+        self.produce(Some(end))
+    }
+
+    /// Reset to the initial (stream start) state.
+    fn reset(&mut self) {
+        for ch in &mut self.buf {
+            ch.clear();
+            ch.resize(self.taps, 0.0);
+        }
+        self.buf_start = -(self.taps as i64);
+        self.frac_num = 0;
+        self.next_idx = 0;
+        self.pushed = 0;
+        self.finished = false;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public resampler
+// ─────────────────────────────────────────────────────────────────────────────
 
 /// Audio resampler.
 ///
-/// Provides high-quality audio resampling using polyphase filters (Sinc)
-/// or FFT-based methods depending on quality settings.
+/// Provides high-quality audio resampling using a Pure-Rust band-limited
+/// windowed-sinc polyphase interpolator (see the module docs for details).
 pub struct Resampler {
     /// Source sample rate.
     source_rate: u32,
@@ -185,22 +454,10 @@ pub struct Resampler {
     strategy: ResamplerStrategy,
     /// Resampling ratio.
     ratio: f64,
-    /// Internal resampler engine.
-    engine: ResamplerEngine,
-    /// Input buffer for partial frames.
-    input_buffer: Vec<Vec<f32>>,
-    /// Number of samples buffered.
-    buffered_samples: usize,
-}
-
-/// Internal resampler engine variants.
-enum ResamplerEngine {
-    /// Passthrough (no processing).
-    Passthrough,
-    /// FFT-based resampler (synchronous, supports FixedIn/FixedOut/FixedInOut).
-    Fft(Box<RubatoFft<f32>>),
-    /// Sinc-based async resampler (supports FixedIn/FixedOut).
-    SincAsync(Box<RubatoAsync<f32>>),
+    /// Internal streaming engine (`None` for passthrough).
+    engine: Option<SincEngine>,
+    /// Format of the most recently resampled frame (used by `flush`).
+    last_format: Option<(SampleFormat, ChannelLayout)>,
 }
 
 impl Resampler {
@@ -233,18 +490,20 @@ impl Resampler {
     /// * `target_rate` - Output sample rate in Hz
     /// * `channels` - Number of audio channels
     /// * `quality` - Quality preset
-    /// * `max_input_frames` - Maximum input frames to buffer
+    /// * `max_input_frames` - Retained for API compatibility. The streaming
+    ///   engine consumes input eagerly, so internal buffering never exceeds
+    ///   the filter length plus one resampling step; this parameter is
+    ///   currently advisory.
     ///
     /// # Errors
     ///
     /// Returns error if parameters are invalid or resampler construction fails.
-    #[allow(clippy::too_many_arguments)]
     pub fn with_max_buffering(
         source_rate: u32,
         target_rate: u32,
         channels: usize,
         quality: ResamplerQuality,
-        max_input_frames: usize,
+        _max_input_frames: usize,
     ) -> AudioResult<Self> {
         if source_rate == 0 || target_rate == 0 {
             return Err(AudioError::InvalidParameter(
@@ -259,20 +518,13 @@ impl Resampler {
 
         let ratio = f64::from(target_rate) / f64::from(source_rate);
 
-        // Determine strategy and create engine
         let (strategy, engine) = if source_rate == target_rate {
-            (ResamplerStrategy::Passthrough, ResamplerEngine::Passthrough)
+            (ResamplerStrategy::Passthrough, None)
         } else {
-            Self::create_engine(
-                source_rate,
-                target_rate,
-                channels,
-                quality,
-                max_input_frames,
-            )?
+            let engine =
+                SincEngine::new(source_rate, target_rate, channels, quality.sinc_params())?;
+            (ResamplerStrategy::SincPolyphase, Some(engine))
         };
-
-        let input_buffer = vec![Vec::new(); channels];
 
         Ok(Self {
             source_rate,
@@ -282,95 +534,16 @@ impl Resampler {
             strategy,
             ratio,
             engine,
-            input_buffer,
-            buffered_samples: 0,
+            last_format: None,
         })
-    }
-
-    /// Create resampler engine based on quality and rate relationship.
-    fn create_engine(
-        source_rate: u32,
-        target_rate: u32,
-        channels: usize,
-        quality: ResamplerQuality,
-        _max_input_frames: usize,
-    ) -> AudioResult<(ResamplerStrategy, ResamplerEngine)> {
-        let chunk_size = quality.fft_chunk_size();
-
-        // Calculate GCD for rational resampling
-        let gcd = gcd(source_rate, target_rate);
-        let ratio_num = target_rate / gcd;
-        let ratio_den = source_rate / gcd;
-
-        // Use high-quality Sinc for High, Good, and Best quality
-        if matches!(
-            quality.canonical(),
-            ResamplerQuality::High | ResamplerQuality::Best
-        ) {
-            let params = quality.sinc_params();
-
-            // Use Async resampler with sinc interpolation, fixed input
-            let engine = RubatoAsync::<f32>::new_sinc(
-                f64::from(target_rate) / f64::from(source_rate),
-                2.0,
-                &params,
-                chunk_size,
-                channels,
-                FixedAsync::Input,
-            )
-            .map_err(map_rubato_error)?;
-            return Ok((
-                ResamplerStrategy::FixedIn,
-                ResamplerEngine::SincAsync(Box::new(engine)),
-            ));
-        }
-
-        // Use FFT-based resampling for Low and Medium quality
-        let sub_chunks = quality.fft_sub_chunks();
-
-        // Try FixedInOut (Both) if possible with small rational ratios
-        if ratio_num < 100 && ratio_den < 100 {
-            match RubatoFft::<f32>::new(
-                source_rate as usize,
-                target_rate as usize,
-                chunk_size,
-                sub_chunks,
-                channels,
-                FixedSync::Both,
-            ) {
-                Ok(engine) => {
-                    return Ok((
-                        ResamplerStrategy::FixedInOut,
-                        ResamplerEngine::Fft(Box::new(engine)),
-                    ));
-                }
-                Err(_) => {
-                    // Fall through to FixedIn
-                }
-            }
-        }
-
-        // Fall back to FixedIn
-        let engine = RubatoFft::<f32>::new(
-            source_rate as usize,
-            target_rate as usize,
-            chunk_size,
-            sub_chunks,
-            channels,
-            FixedSync::Input,
-        )
-        .map_err(map_rubato_error)?;
-        Ok((
-            ResamplerStrategy::FixedIn,
-            ResamplerEngine::Fft(Box::new(engine)),
-        ))
     }
 
     /// Resample an audio frame.
     ///
     /// This method handles streaming resampling with internal buffering.
     /// It may return fewer or more samples than the input depending on
-    /// the resampling ratio.
+    /// the resampling ratio; call [`flush`](Self::flush) at end of stream to
+    /// drain the final `taps / 2` input samples of latency.
     ///
     /// # Errors
     ///
@@ -390,7 +563,9 @@ impl Resampler {
             )));
         }
 
-        // Convert input to f32 planar format for rubato
+        self.last_format = Some((input.format, input.channels.clone()));
+
+        // Convert input to f32 planar format for the sinc engine
         let input_planar = self.convert_to_f32_planar(input)?;
 
         // Process through resampler
@@ -400,90 +575,44 @@ impl Resampler {
         self.convert_from_f32_planar(&output_planar, input.format, &input.channels)
     }
 
-    /// Process samples through the resampler engine.
-    fn process_samples(&mut self, input: &[Vec<f32>]) -> AudioResult<Vec<Vec<f32>>> {
+    /// Flush the stream tail.
+    ///
+    /// Emits the remaining output samples that could not be produced during
+    /// streaming because their filter window extended past the last pushed
+    /// input sample (the missing samples are treated as silence). After a
+    /// flush, [`reset`](Self::reset) must be called before resampling again.
+    ///
+    /// The returned frame uses the format of the most recently resampled
+    /// frame (F32 interleaved if no frame was ever resampled).
+    ///
+    /// # Errors
+    ///
+    /// Returns error if format conversion fails.
+    pub fn flush(&mut self) -> AudioResult<AudioFrame> {
+        let (format, layout) = self
+            .last_format
+            .clone()
+            .unwrap_or((SampleFormat::F32, ChannelLayout::from_count(self.channels)));
+
         match &mut self.engine {
-            ResamplerEngine::Passthrough => Ok(input.to_vec()),
-            ResamplerEngine::Fft(engine) => Self::process_fixed_in_engine(
-                engine.as_mut(),
-                input,
-                &mut self.input_buffer,
-                &mut self.buffered_samples,
-                self.channels,
-                "FFT",
-            ),
-            ResamplerEngine::SincAsync(engine) => Self::process_fixed_in_engine(
-                engine.as_mut(),
-                input,
-                &mut self.input_buffer,
-                &mut self.buffered_samples,
-                self.channels,
-                "Sinc",
-            ),
+            None => {
+                let mut frame = AudioFrame::new(format, self.target_rate, layout);
+                frame.samples = AudioBuffer::Interleaved(Bytes::new());
+                Ok(frame)
+            }
+            Some(engine) => {
+                let output_planar = engine.flush();
+                self.convert_from_f32_planar(&output_planar, format, &layout)
+            }
         }
     }
 
-    /// Process samples through a fixed-input resampler engine.
-    ///
-    /// Converts planar `Vec<Vec<f32>>` input to the `audioadapter` format,
-    /// processes chunks through the engine, and converts the interleaved
-    /// output back to planar `Vec<Vec<f32>>`.
-    fn process_fixed_in_engine(
-        engine: &mut dyn RubatoResampler<f32>,
-        input: &[Vec<f32>],
-        input_buffer: &mut [Vec<f32>],
-        buffered_samples: &mut usize,
-        channels: usize,
-        label: &str,
-    ) -> AudioResult<Vec<Vec<f32>>> {
-        let mut output: Vec<Vec<f32>> = Vec::new();
-        let mut remaining = input.to_vec();
-
-        while !remaining.is_empty() && !remaining[0].is_empty() {
-            let chunk_size = engine.input_frames_next();
-            if remaining[0].len() >= chunk_size {
-                let chunk: Vec<Vec<f32>> = remaining
-                    .iter()
-                    .map(|ch| ch[..chunk_size].to_vec())
-                    .collect();
-
-                let input_adapter = SequentialSliceOfVecs::new(&chunk, channels, chunk_size)
-                    .map_err(|e| {
-                        AudioError::Internal(format!(
-                            "{label} resampling: input adapter creation failed: {e}"
-                        ))
-                    })?;
-
-                let result = engine
-                    .process(&input_adapter, 0, None)
-                    .map_err(|e| AudioError::Internal(format!("{label} resampling failed: {e}")))?;
-
-                // Convert InterleavedOwned output to Vec<Vec<f32>>
-                let result_planar = interleaved_owned_to_planar(&result, channels);
-
-                if output.is_empty() {
-                    output = result_planar;
-                } else {
-                    for (out_ch, res_ch) in output.iter_mut().zip(result_planar.iter()) {
-                        out_ch.extend_from_slice(res_ch);
-                    }
-                }
-
-                remaining = remaining
-                    .iter()
-                    .map(|ch| ch[chunk_size..].to_vec())
-                    .collect::<Vec<_>>();
-            } else {
-                // Buffer remaining samples for next call
-                for (buf_ch, rem_ch) in input_buffer.iter_mut().zip(remaining.iter()) {
-                    buf_ch.extend_from_slice(rem_ch);
-                }
-                *buffered_samples = remaining[0].len();
-                break;
-            }
+    /// Process samples through the resampler engine.
+    fn process_samples(&mut self, input: &[Vec<f32>]) -> AudioResult<Vec<Vec<f32>>> {
+        match &mut self.engine {
+            None => Ok(input.to_vec()),
+            Some(engine) => engine.process(input),
         }
-
-        Ok(output)
     }
 
     /// Convert audio frame to f32 planar format.
@@ -619,7 +748,7 @@ impl Resampler {
         format: SampleFormat,
         channels: &ChannelLayout,
     ) -> AudioResult<AudioFrame> {
-        if planar.is_empty() {
+        if planar.is_empty() || planar[0].is_empty() {
             let mut frame = AudioFrame::new(format, self.target_rate, channels.clone());
             frame.samples = AudioBuffer::Interleaved(Bytes::new());
             return Ok(frame);
@@ -755,20 +884,8 @@ impl Resampler {
     ///
     /// Clears internal buffers and resets the resampler to its initial state.
     pub fn reset(&mut self) {
-        for ch in &mut self.input_buffer {
-            ch.clear();
-        }
-        self.buffered_samples = 0;
-
-        // Reset engine if possible
-        match &mut self.engine {
-            ResamplerEngine::Fft(engine) => {
-                engine.reset();
-            }
-            ResamplerEngine::SincAsync(engine) => {
-                engine.reset();
-            }
-            ResamplerEngine::Passthrough => {}
+        if let Some(engine) = &mut self.engine {
+            engine.reset();
         }
     }
 
@@ -808,25 +925,9 @@ const fn gcd(mut a: u32, mut b: u32) -> u32 {
     a
 }
 
-/// Map rubato error to audio error.
-fn map_rubato_error(err: ResamplerConstructionError) -> AudioError {
-    AudioError::InvalidParameter(format!("Resampler construction failed: {err}"))
-}
-
-/// Convert an `InterleavedOwned<f32>` (from rubato's `process()`) to planar `Vec<Vec<f32>>`.
-fn interleaved_owned_to_planar(
-    interleaved: &dyn Adapter<'_, f32>,
-    channels: usize,
-) -> Vec<Vec<f32>> {
-    let frames = interleaved.frames();
-    let mut planar = vec![vec![0.0f32; frames]; channels];
-    for ch in 0..channels {
-        interleaved.copy_from_channel_to_slice(ch, 0, &mut planar[ch]);
-    }
-    planar
-}
-
-// ── Tests for ResamplerQuality presets (draft/good/best) ─────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -843,6 +944,101 @@ mod tests {
         frame.samples = AudioBuffer::Interleaved(Bytes::from(bytes));
         frame
     }
+
+    /// Build a mono F32 interleaved frame from a sample slice.
+    fn mono_frame_from(samples: &[f32], sample_rate: u32) -> AudioFrame {
+        let mut bytes = Vec::with_capacity(samples.len() * 4);
+        for &s in samples {
+            bytes.extend_from_slice(&s.to_le_bytes());
+        }
+        let mut frame = AudioFrame::new(SampleFormat::F32, sample_rate, ChannelLayout::Mono);
+        frame.samples = AudioBuffer::Interleaved(Bytes::from(bytes));
+        frame
+    }
+
+    /// Extract mono F32 samples from an interleaved frame.
+    fn mono_samples(frame: &AudioFrame) -> Vec<f32> {
+        match &frame.samples {
+            AudioBuffer::Interleaved(data) => data
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+            AudioBuffer::Planar(planes) => planes[0]
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+        }
+    }
+
+    /// Generate `n` samples of a sine at `freq` Hz sampled at `rate` Hz.
+    fn sine(freq: f64, rate: u32, n: usize) -> Vec<f32> {
+        (0..n)
+            .map(|i| {
+                ((2.0 * std::f64::consts::PI * freq * i as f64 / f64::from(rate)).sin()) as f32
+            })
+            .collect()
+    }
+
+    /// Least-squares fit of `a·sin + b·cos` at a known frequency; returns
+    /// the SNR in dB of the fit over `y[skip..len-skip]`.
+    fn sine_fit_snr_db(y: &[f32], freq: f64, rate: u32, skip: usize) -> f64 {
+        assert!(y.len() > 2 * skip + 16, "signal too short for SNR fit");
+        let seg = &y[skip..y.len() - skip];
+        let w = 2.0 * std::f64::consts::PI * freq / f64::from(rate);
+
+        let (mut s_ss, mut s_cc, mut s_sc) = (0.0f64, 0.0f64, 0.0f64);
+        let (mut r_s, mut r_c) = (0.0f64, 0.0f64);
+        for (i, &yv) in seg.iter().enumerate() {
+            let t = (skip + i) as f64;
+            let s = (w * t).sin();
+            let c = (w * t).cos();
+            let yf = f64::from(yv);
+            s_ss += s * s;
+            s_cc += c * c;
+            s_sc += s * c;
+            r_s += yf * s;
+            r_c += yf * c;
+        }
+        let det = s_ss * s_cc - s_sc * s_sc;
+        assert!(det.abs() > 1e-9, "degenerate sine fit");
+        let a = (r_s * s_cc - r_c * s_sc) / det;
+        let b = (r_c * s_ss - r_s * s_sc) / det;
+
+        let (mut sig_pow, mut noise_pow) = (0.0f64, 0.0f64);
+        for (i, &yv) in seg.iter().enumerate() {
+            let t = (skip + i) as f64;
+            let fit = a * (w * t).sin() + b * (w * t).cos();
+            sig_pow += fit * fit;
+            let e = f64::from(yv) - fit;
+            noise_pow += e * e;
+        }
+        assert!(noise_pow > 0.0, "unexpected exact fit");
+        10.0 * (sig_pow / noise_pow).log10()
+    }
+
+    /// Estimate frequency from positive-going zero crossings (sub-sample
+    /// accurate via linear interpolation).
+    fn zero_crossing_freq(y: &[f32], rate: u32, skip: usize) -> f64 {
+        let seg = &y[skip..y.len() - skip];
+        let mut crossings: Vec<f64> = Vec::new();
+        for (i, pair) in seg.windows(2).enumerate() {
+            if pair[0] < 0.0 && pair[1] >= 0.0 {
+                let denom = f64::from(pair[1]) - f64::from(pair[0]);
+                let frac = if denom.abs() > 1e-12 {
+                    -f64::from(pair[0]) / denom
+                } else {
+                    0.5
+                };
+                crossings.push(i as f64 + frac);
+            }
+        }
+        assert!(crossings.len() >= 2, "not enough zero crossings");
+        let first = crossings[0];
+        let last = crossings[crossings.len() - 1];
+        (crossings.len() - 1) as f64 * f64::from(rate) / (last - first)
+    }
+
+    // ── Quality preset tests ─────────────────────────────────────────────────
 
     #[test]
     fn test_draft_is_alias_for_low() {
@@ -868,44 +1064,36 @@ mod tests {
     }
 
     #[test]
-    fn test_low_fft_chunk_size_smallest() {
-        let low = ResamplerQuality::Low.fft_chunk_size();
-        let medium = ResamplerQuality::Medium.fft_chunk_size();
-        let high = ResamplerQuality::High.fft_chunk_size();
+    fn test_quality_taps_monotonic() {
+        let low = ResamplerQuality::Low.sinc_params().taps;
+        let medium = ResamplerQuality::Medium.sinc_params().taps;
+        let high = ResamplerQuality::High.sinc_params().taps;
+        let best = ResamplerQuality::Best.sinc_params().taps;
         assert!(low <= medium, "Low ({low}) should be <= Medium ({medium})");
         assert!(
             medium <= high,
             "Medium ({medium}) should be <= High ({high})"
         );
+        assert!(high <= best, "High ({high}) should be <= Best ({best})");
     }
 
     #[test]
-    fn test_best_sinc_len_ge_low() {
-        let low_params = ResamplerQuality::Low.sinc_params();
-        let best_params = ResamplerQuality::Best.sinc_params();
-        assert!(
-            best_params.sinc_len >= low_params.sinc_len,
-            "Best sinc_len ({}) should be >= Low ({})",
-            best_params.sinc_len,
-            low_params.sinc_len
-        );
-    }
-
-    #[test]
-    fn test_draft_fft_chunk_same_as_low() {
+    fn test_draft_params_same_as_low() {
         assert_eq!(
-            ResamplerQuality::Draft.fft_chunk_size(),
-            ResamplerQuality::Low.fft_chunk_size(),
+            ResamplerQuality::Draft.sinc_params(),
+            ResamplerQuality::Low.sinc_params(),
         );
     }
 
     #[test]
-    fn test_good_fft_chunk_same_as_high() {
+    fn test_good_params_same_as_high() {
         assert_eq!(
-            ResamplerQuality::Good.fft_chunk_size(),
-            ResamplerQuality::High.fft_chunk_size(),
+            ResamplerQuality::Good.sinc_params(),
+            ResamplerQuality::High.sinc_params(),
         );
     }
+
+    // ── Construction / accessor tests ────────────────────────────────────────
 
     #[test]
     fn test_resampler_passthrough_same_rate() {
@@ -925,33 +1113,22 @@ mod tests {
     }
 
     #[test]
-    fn test_resampler_construction_draft_quality() {
-        let r = Resampler::new(44_100, 48_000, 2, ResamplerQuality::Draft);
-        assert!(
-            r.is_ok(),
-            "Draft resampler construction failed: {:?}",
-            r.err()
-        );
-    }
-
-    #[test]
-    fn test_resampler_construction_good_quality() {
-        let r = Resampler::new(44_100, 48_000, 1, ResamplerQuality::Good);
-        assert!(
-            r.is_ok(),
-            "Good resampler construction failed: {:?}",
-            r.err()
-        );
-    }
-
-    #[test]
-    fn test_resampler_construction_best_quality() {
-        let r = Resampler::new(44_100, 48_000, 1, ResamplerQuality::Best);
-        assert!(
-            r.is_ok(),
-            "Best resampler construction failed: {:?}",
-            r.err()
-        );
+    fn test_resampler_construction_all_qualities() {
+        for q in [
+            ResamplerQuality::Low,
+            ResamplerQuality::Medium,
+            ResamplerQuality::High,
+            ResamplerQuality::Best,
+            ResamplerQuality::Draft,
+            ResamplerQuality::Good,
+        ] {
+            let r = Resampler::new(44_100, 48_000, 2, q);
+            assert!(
+                r.is_ok(),
+                "{q:?} resampler construction failed: {:?}",
+                r.err()
+            );
+        }
     }
 
     #[test]
@@ -999,13 +1176,284 @@ mod tests {
     }
 
     #[test]
-    fn test_low_sub_chunks_le_high() {
-        let low_sc = ResamplerQuality::Low.fft_sub_chunks();
-        let high_sc = ResamplerQuality::High.fft_sub_chunks();
+    fn test_channel_count_mismatch_rejected() {
+        let mut r = Resampler::new(48_000, 44_100, 2, ResamplerQuality::Low).expect("resampler");
+        let frame = mono_f32_frame(256, 0.1, 48_000);
+        assert!(r.resample(&frame).is_err(), "channel mismatch should fail");
+    }
+
+    // ── Kernel sanity tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_kernel_rows_are_dc_normalized() {
+        let taps = 64;
+        let p = 32;
+        let table = SincEngine::build_table(taps, p, 0.9);
+        for row_idx in 0..=p {
+            let row = &table[row_idx * taps..(row_idx + 1) * taps];
+            let sum: f64 = row.iter().sum();
+            assert!(
+                (sum - 1.0).abs() < 1e-12,
+                "phase {row_idx} DC gain {sum} != 1"
+            );
+        }
+    }
+
+    #[test]
+    fn test_kernel_phase_zero_is_near_identity_at_full_cutoff() {
+        // With cutoff near 1 and frac = 0 the kernel approaches a discrete
+        // delta: the center tap dominates.
+        let taps = 64;
+        let table = SincEngine::build_table(taps, 8, 0.999);
+        let row0 = &table[..taps];
+        let center = taps / 2 - 1; // tap index where x = 0 (k - half + 1 = 0)
         assert!(
-            low_sc <= high_sc,
-            "Low sub_chunks ({low_sc}) <= High ({high_sc})"
+            row0[center] > 0.9,
+            "center coefficient {} should dominate",
+            row0[center]
         );
+    }
+
+    // ── DSP correctness tests ────────────────────────────────────────────────
+
+    /// Helper: run a full stream (process + flush) through a fresh resampler.
+    fn run_stream(
+        input: &[f32],
+        source_rate: u32,
+        target_rate: u32,
+        quality: ResamplerQuality,
+    ) -> Vec<f32> {
+        let mut r =
+            Resampler::new(source_rate, target_rate, 1, quality).expect("resampler construction");
+        let frame = mono_frame_from(input, source_rate);
+        let out = r.resample(&frame).expect("resample");
+        let mut samples = mono_samples(&out);
+        let tail = r.flush().expect("flush");
+        samples.extend(mono_samples(&tail));
+        samples
+    }
+
+    #[test]
+    fn test_sine_1khz_48k_to_44k1_frequency_preserved() {
+        let input = sine(1000.0, 48_000, 48_000);
+        let out = run_stream(&input, 48_000, 44_100, ResamplerQuality::High);
+
+        // Output length must match the rational ratio (±1 sample).
+        let expected_len = 48_000.0 * 44_100.0 / 48_000.0;
+        assert!(
+            (out.len() as f64 - expected_len).abs() <= 1.0,
+            "output length {} != expected {expected_len}",
+            out.len()
+        );
+
+        let freq = zero_crossing_freq(&out, 44_100, 2000);
+        assert!(
+            (freq - 1000.0).abs() < 1.0,
+            "frequency {freq} Hz deviates from 1000 Hz"
+        );
+    }
+
+    #[test]
+    fn test_sine_1khz_48k_to_44k1_snr_high_quality() {
+        let input = sine(1000.0, 48_000, 48_000);
+        let out = run_stream(&input, 48_000, 44_100, ResamplerQuality::High);
+        let snr = sine_fit_snr_db(&out, 1000.0, 44_100, 2400);
+        assert!(snr > 70.0, "High quality SNR {snr:.1} dB <= 70 dB");
+    }
+
+    #[test]
+    fn test_sine_1khz_48k_to_44k1_snr_best_quality() {
+        let input = sine(1000.0, 48_000, 48_000);
+        let out = run_stream(&input, 48_000, 44_100, ResamplerQuality::Best);
+        let snr = sine_fit_snr_db(&out, 1000.0, 44_100, 2400);
+        assert!(snr > 75.0, "Best quality SNR {snr:.1} dB <= 75 dB");
+    }
+
+    #[test]
+    fn test_sine_upsample_44k1_to_48k_snr() {
+        let input = sine(1000.0, 44_100, 44_100);
+        let out = run_stream(&input, 44_100, 48_000, ResamplerQuality::High);
+        let snr = sine_fit_snr_db(&out, 1000.0, 48_000, 2400);
+        assert!(snr > 70.0, "upsample SNR {snr:.1} dB <= 70 dB");
+    }
+
+    #[test]
+    fn test_sine_low_quality_still_reasonable() {
+        let input = sine(1000.0, 48_000, 48_000);
+        let out = run_stream(&input, 48_000, 44_100, ResamplerQuality::Low);
+        let snr = sine_fit_snr_db(&out, 1000.0, 44_100, 2400);
+        assert!(snr > 50.0, "Low quality SNR {snr:.1} dB <= 50 dB");
+    }
+
+    #[test]
+    fn test_round_trip_48k_44k1_48k_bounded() {
+        let n = 48_000;
+        let input = sine(1000.0, 48_000, n);
+        let mid = run_stream(&input, 48_000, 44_100, ResamplerQuality::High);
+        let back = run_stream(&mid, 44_100, 48_000, ResamplerQuality::High);
+
+        // The round trip is time-aligned by construction: back[i] ≈ input[i].
+        let usable = back.len().min(input.len());
+        assert!(
+            usable as f64 >= n as f64 * 0.99,
+            "round trip lost too many samples: {usable} of {n}"
+        );
+
+        let skip = 2400;
+        let (mut sig_pow, mut err_pow) = (0.0f64, 0.0f64);
+        let mut max_err = 0.0f64;
+        for i in skip..usable - skip {
+            let s = f64::from(input[i]);
+            let e = f64::from(back[i]) - s;
+            sig_pow += s * s;
+            err_pow += e * e;
+            max_err = max_err.max(e.abs());
+        }
+        assert!(err_pow > 0.0, "unexpected exact round trip");
+        let snr = 10.0 * (sig_pow / err_pow).log10();
+        assert!(snr > 55.0, "round-trip SNR {snr:.1} dB <= 55 dB");
+        assert!(max_err < 0.05, "round-trip max error {max_err} >= 0.05");
+    }
+
+    #[test]
+    fn test_chunked_processing_bit_identical_to_one_shot() {
+        let input = sine(440.0, 48_000, 20_000);
+        let whole = run_stream(&input, 48_000, 44_100, ResamplerQuality::Medium);
+
+        let mut r = Resampler::new(48_000, 44_100, 1, ResamplerQuality::Medium).expect("resampler");
+        let mut chunked: Vec<f32> = Vec::new();
+        let chunk_sizes = [480usize, 313, 1024, 7, 4096, 999];
+        let mut pos = 0usize;
+        let mut cs_idx = 0usize;
+        while pos < input.len() {
+            let len = chunk_sizes[cs_idx % chunk_sizes.len()].min(input.len() - pos);
+            let frame = mono_frame_from(&input[pos..pos + len], 48_000);
+            let out = r.resample(&frame).expect("chunked resample");
+            chunked.extend(mono_samples(&out));
+            pos += len;
+            cs_idx += 1;
+        }
+        let tail = r.flush().expect("flush");
+        chunked.extend(mono_samples(&tail));
+
+        assert_eq!(
+            whole.len(),
+            chunked.len(),
+            "chunked output length differs from one-shot"
+        );
+        for (i, (a, b)) in whole.iter().zip(chunked.iter()).enumerate() {
+            assert!(a.to_bits() == b.to_bits(), "sample {i} differs: {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn test_stereo_channels_resampled_independently() {
+        let n = 24_000;
+        let left = sine(997.0, 48_000, n);
+        let right = sine(1499.0, 48_000, n);
+
+        let mut bytes = Vec::with_capacity(n * 8);
+        for i in 0..n {
+            bytes.extend_from_slice(&left[i].to_le_bytes());
+            bytes.extend_from_slice(&right[i].to_le_bytes());
+        }
+        let mut frame = AudioFrame::new(SampleFormat::F32, 48_000, ChannelLayout::Stereo);
+        frame.samples = AudioBuffer::Interleaved(Bytes::from(bytes));
+
+        let mut r = Resampler::new(48_000, 44_100, 2, ResamplerQuality::High).expect("resampler");
+        let out = r.resample(&frame).expect("stereo resample");
+        let tail = r.flush().expect("flush");
+
+        let extract = |f: &AudioFrame, ch: usize| -> Vec<f32> {
+            match &f.samples {
+                AudioBuffer::Interleaved(data) => data
+                    .chunks_exact(8)
+                    .map(|c| {
+                        let off = ch * 4;
+                        f32::from_le_bytes([c[off], c[off + 1], c[off + 2], c[off + 3]])
+                    })
+                    .collect(),
+                AudioBuffer::Planar(_) => Vec::new(),
+            }
+        };
+        let mut out_l = extract(&out, 0);
+        out_l.extend(extract(&tail, 0));
+        let mut out_r = extract(&out, 1);
+        out_r.extend(extract(&tail, 1));
+
+        let snr_l = sine_fit_snr_db(&out_l, 997.0, 44_100, 2400);
+        let snr_r = sine_fit_snr_db(&out_r, 1499.0, 44_100, 2400);
+        assert!(snr_l > 65.0, "left channel SNR {snr_l:.1} dB <= 65 dB");
+        assert!(snr_r > 65.0, "right channel SNR {snr_r:.1} dB <= 65 dB");
+    }
+
+    #[test]
+    fn test_dc_signal_preserved() {
+        // Per-phase DC normalization must carry a constant through exactly.
+        let input = vec![0.5f32; 20_000];
+        let out = run_stream(&input, 48_000, 44_100, ResamplerQuality::Medium);
+        let skip = 1000;
+        for (i, &s) in out[skip..out.len() - skip].iter().enumerate() {
+            assert!((s - 0.5).abs() < 1e-4, "DC sample {i} drifted: {s} != 0.5");
+        }
+    }
+
+    #[test]
+    fn test_extreme_downsample_produces_output() {
+        let input = sine(500.0, 192_000, 192_000 / 4);
+        let out = run_stream(&input, 192_000, 8_000, ResamplerQuality::Best);
+        let expected = (192_000.0 / 4.0) * 8_000.0 / 192_000.0;
+        assert!(
+            (out.len() as f64 - expected).abs() <= 1.0,
+            "extreme downsample length {} != {expected}",
+            out.len()
+        );
+        let snr = sine_fit_snr_db(&out, 500.0, 8_000, 200);
+        assert!(snr > 40.0, "extreme downsample SNR {snr:.1} dB <= 40 dB");
+    }
+
+    #[test]
+    fn test_process_after_flush_errors_and_reset_recovers() {
+        let mut r = Resampler::new(48_000, 44_100, 1, ResamplerQuality::Low).expect("resampler");
+        let frame = mono_frame_from(&sine(1000.0, 48_000, 4800), 48_000);
+        r.resample(&frame).expect("resample");
+        r.flush().expect("flush");
+        assert!(
+            r.resample(&frame).is_err(),
+            "resample after flush should error"
+        );
+        r.reset();
+        assert!(
+            r.resample(&frame).is_ok(),
+            "resample after reset should succeed"
+        );
+    }
+
+    #[test]
+    fn test_flush_without_input_is_empty() {
+        let mut r = Resampler::new(48_000, 44_100, 1, ResamplerQuality::Low).expect("resampler");
+        let out = r.flush().expect("flush");
+        assert_eq!(out.sample_count(), 0, "flush without input must be empty");
+    }
+
+    #[test]
+    fn test_s16_format_round_trip_smoke() {
+        let n = 9600;
+        let mut bytes = Vec::with_capacity(n * 2);
+        for i in 0..n {
+            let v = (i as f64 * 2.0 * std::f64::consts::PI * 1000.0 / 48_000.0).sin();
+            #[allow(clippy::cast_possible_truncation)]
+            let s = (v * 30_000.0) as i16;
+            bytes.extend_from_slice(&s.to_le_bytes());
+        }
+        let mut frame = AudioFrame::new(SampleFormat::S16, 48_000, ChannelLayout::Mono);
+        frame.samples = AudioBuffer::Interleaved(Bytes::from(bytes));
+
+        let mut r = Resampler::new(48_000, 44_100, 1, ResamplerQuality::Medium).expect("resampler");
+        let out = r.resample(&frame).expect("S16 resample");
+        assert_eq!(out.format, SampleFormat::S16);
+        assert_eq!(out.sample_rate, 44_100);
+        assert!(out.sample_count() > 0, "S16 resample produced no output");
     }
 }
 

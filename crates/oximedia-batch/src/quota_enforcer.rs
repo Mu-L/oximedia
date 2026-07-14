@@ -290,8 +290,8 @@ impl QuotaEnforcer {
     /// Check whether `principal` may submit a new job.
     ///
     /// This validates `concurrent_jobs` and `daily_jobs` limits.  It does NOT
-    /// automatically charge usage — call [`charge_concurrent_job`] and
-    /// [`charge_daily_job`] after a successful check.
+    /// automatically charge usage — call [`Self::charge_concurrent_job`] and
+    /// [`Self::charge_daily_job`] after a successful check.
     ///
     /// # Errors
     ///

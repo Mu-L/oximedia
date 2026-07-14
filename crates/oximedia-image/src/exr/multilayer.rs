@@ -113,7 +113,7 @@ impl ExrLayer {
             if end <= self.data.len() {
                 output.extend_from_slice(&self.data[start..end]);
             } else {
-                output.extend(std::iter::repeat(0u8).take(ch_bytes));
+                output.extend(std::iter::repeat_n(0u8, ch_bytes));
             }
         }
 

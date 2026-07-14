@@ -2,6 +2,46 @@
 //!
 //! This module detects tampering by analyzing lighting, shadows, reflections,
 //! and illumination consistency across an image.
+//!
+//! # Methodology
+//!
+//! Real photographs are, almost always, lit by a small number of physically
+//! consistent light sources, so surface shading gradients and cast-shadow
+//! directions should agree everywhere in the frame. Splicing content from a
+//! different photograph (lit differently) breaks that agreement. This
+//! module estimates a per-region local light direction from intensity
+//! gradients (`estimate_local_light_direction`) and compares it against the
+//! image's dominant estimated light source (`estimate_light_sources`) in
+//! `analyze_illumination_consistency`, flagging regions whose local
+//! shading direction deviates by more than 60° (π/3) as inconsistent.
+//! `analyze_shadows` independently locates dark cast-shadow regions and
+//! estimates their direction (`estimate_shadow_direction`); a full 3D
+//! light-source estimate combining shading and shadow-direction evidence is
+//! produced for [`LightSource`]. `detect_impossible_lighting`
+//! additionally flags frames containing both far-brighter-than-average and
+//! far-darker-than-average regions simultaneously, a coarse heuristic for
+//! physically implausible compositing.
+//!
+//! # References
+//!
+//! - M. K. Johnson, H. Farid, "Exposing Digital Forgeries by Detecting
+//!   Inconsistencies in Lighting", ACM Multimedia and Security Workshop
+//!   (2005) — 2D lighting-direction estimation from occluding contours,
+//!   the basis for `analyze_illumination_consistency`.
+//! - M. K. Johnson, H. Farid, "Exposing Digital Forgeries in Complex
+//!   Lighting Environments", IEEE Transactions on Information Forensics
+//!   and Security, 2(3), 450–461 (2007) — extends lighting-consistency
+//!   analysis to more general (non-single-point-source) illumination, and
+//!   motivates estimating a full 3D [`LightSource`] rather than a single
+//!   2D azimuth.
+//! - E. Kee, H. Farid, "Exposing Digital Forgeries from 3-D Lighting
+//!   Environments", IEEE International Workshop on Information Forensics
+//!   and Security (2010) — 3D light-source estimation from shading, the
+//!   basis for combining `elevation` with `azimuth` in [`LightSource`].
+//! - E. Kee, J. F. O'Brien, H. Farid, "Exposing Photo Manipulation with
+//!   Inconsistent Shadows", ACM Transactions on Graphics, 32(3), Article 28
+//!   (2013) — cast-shadow geometry as an independent consistency cue, the
+//!   basis for `analyze_shadows` / [`ShadowAnalysis`].
 
 use crate::flat_array2::FlatArray2;
 use crate::{ForensicTest, ForensicsResult};

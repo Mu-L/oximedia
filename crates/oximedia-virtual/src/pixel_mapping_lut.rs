@@ -54,7 +54,7 @@ pub enum WarpModel {
 }
 
 impl WarpModel {
-    /// Apply the warp to normalised UV [0,1] and return the warped UV.
+    /// Apply the warp to normalised UV `[0,1]` and return the warped UV.
     #[must_use]
     pub fn apply(&self, u: f32, v: f32) -> Uv {
         match *self {
@@ -98,7 +98,7 @@ pub struct PixelMappingLut {
     pub width: usize,
     /// Panel height in pixels.
     pub height: usize,
-    /// Whether this table is valid (all UVs in [0,1]).
+    /// Whether this table is valid (all UVs in `[0,1]`).
     pub is_valid: bool,
     /// Warp model used to build this table.
     pub warp_model: WarpModel,

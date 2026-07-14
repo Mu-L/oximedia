@@ -5,12 +5,12 @@
 //!
 //! # Concepts
 //!
-//! - [`DashboardPanel`] — an individual visualisation widget (time-series
+//! - [`DashboardPanel`](crate::dashboard_layout::DashboardPanel) — an individual visualisation widget (time-series
 //!   graph, gauge, counter, heatmap, etc.) with a metric query string.
-//! - [`DashboardRow`] — a horizontal group of panels.
-//! - [`DashboardLayout`] — a complete, named dashboard definition composed
+//! - [`DashboardRow`](crate::dashboard_layout::DashboardRow) — a horizontal group of panels.
+//! - [`DashboardLayout`](crate::dashboard_layout::DashboardLayout) — a complete, named dashboard definition composed
 //!   of rows and panels, plus free-form tags.
-//! - [`TemplateLibrary`] — built-in templates for common media-server
+//! - [`TemplateLibrary`](crate::dashboard_layout::TemplateLibrary) — built-in templates for common media-server
 //!   monitoring scenarios.
 //!
 //! # Example

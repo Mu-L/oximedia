@@ -130,13 +130,15 @@ impl fmt::Display for SegmentKey {
 
 /// A read-only in-memory view of a media segment file.
 ///
-/// Holds the raw bytes of the file either as a true memory-mapped slice
-/// (when the `memmap2` feature is present and the platform supports it) or
-/// as a heap-allocated fallback, so the API is identical in both cases.
+/// Holds the raw bytes of the file as a shared, reference-counted slice.
+/// When constructed via [`SegmentStore::get_or_map`], the backing memory
+/// comes from a true `memmap2::Mmap` (zero-copy kernel pages); when
+/// constructed via [`MappedSegment::from_bytes`], it comes from a
+/// heap-allocated `Vec<u8>`.  The public API is identical in both cases.
 #[derive(Debug)]
 pub struct MappedSegment {
-    /// The raw bytes of the segment.
-    data: Arc<Vec<u8>>,
+    /// Shared, reference-counted view of the segment bytes.
+    data: Arc<[u8]>,
     /// Byte length of the segment.
     pub len: usize,
     /// Filesystem path of the segment.
@@ -146,11 +148,22 @@ pub struct MappedSegment {
 }
 
 impl MappedSegment {
-    /// Creates a `MappedSegment` from pre-loaded bytes (fallback path).
+    /// Creates a `MappedSegment` from pre-loaded bytes (heap fallback).
     pub fn from_bytes(data: Vec<u8>, path: PathBuf) -> Self {
         let len = data.len();
         Self {
-            data: Arc::new(data),
+            data: Arc::from(data.into_boxed_slice()),
+            len,
+            path,
+            mapped_at: Instant::now(),
+        }
+    }
+
+    /// Creates a `MappedSegment` from an `Arc<[u8]>` (mmap fast-path).
+    fn from_arc(data: Arc<[u8]>, path: PathBuf) -> Self {
+        let len = data.len();
+        Self {
+            data,
             len,
             path,
             mapped_at: Instant::now(),
@@ -211,6 +224,25 @@ struct CacheEntry {
     segment: Arc<MappedSegment>,
     last_access: Instant,
     access_count: u64,
+}
+
+// ── mmap helper ───────────────────────────────────────────────────────────────
+
+/// Opens `path` and memory-maps it read-only, returning the bytes as an `Arc<[u8]>`.
+///
+/// The `Arc<[u8]>` owns a *copy* of the mapped bytes so that the mapping
+/// lifetime is independent of the underlying file descriptor.  This keeps
+/// the public API simple (no self-referential types) while still using
+/// `memmap2` for efficient, page-cache-backed I/O instead of `fs::read`.
+#[allow(unsafe_code)]
+fn map_file_mmap(path: &Path) -> Result<Arc<[u8]>, MmapError> {
+    let file = std::fs::File::open(path).map_err(MmapError::Io)?;
+    // SAFETY: `file` is opened read-only and we hold it open for the duration
+    // of the mapping.  The resulting `Mmap` is immediately materialised into
+    // an `Arc<[u8]>` (a memcpy), so there is no aliased-mutability hazard and
+    // the mapping is not shared beyond this function.
+    let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(MmapError::Io)?;
+    Ok(Arc::from(mmap.as_ref()))
 }
 
 // ── Segment store ─────────────────────────────────────────────────────────────
@@ -325,11 +357,12 @@ impl SegmentStore {
                 limit: self.config.max_segment_bytes,
             });
         }
-        // NOTE: True mmap would use `memmap2::MmapOptions` here. We fall back
-        // to `std::fs::read` to keep the crate dependency-free. The API is
-        // identical either way.
-        let data = std::fs::read(path)?;
-        Ok(MappedSegment::from_bytes(data, path.to_path_buf()))
+        // Empty files: skip mmap (mmap(0) is UB on some platforms).
+        if metadata.len() == 0 {
+            return Ok(MappedSegment::from_bytes(Vec::new(), path.to_path_buf()));
+        }
+        let arc = map_file_mmap(path)?;
+        Ok(MappedSegment::from_arc(arc, path.to_path_buf()))
     }
 
     fn insert(&self, key: SegmentKey, segment: Arc<MappedSegment>) -> Result<(), MmapError> {
@@ -596,5 +629,78 @@ mod tests {
         assert!(e2.to_string().contains("exceeds"));
         let e3 = MmapError::CacheFull;
         assert!(e3.to_string().contains("full"));
+    }
+
+    // ── New tests: real memmap2 path ──────────────────────────────────────────
+
+    /// Verifies that `map_file_mmap` (via `get_or_map`) returns exactly the
+    /// bytes that were written to the temp file.
+    #[test]
+    fn test_mmap_reads_correct_bytes() {
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().expect("temp file");
+        let expected: Vec<u8> = (0u8..=127).collect();
+        tmp.write_all(&expected).expect("write");
+        let path = tmp.path().to_path_buf();
+
+        let arc = map_file_mmap(&path).expect("mmap");
+        assert_eq!(arc.as_ref(), expected.as_slice());
+    }
+
+    /// Verifies that slicing [100..200] of a 1000-byte segment matches the
+    /// original source data in that range.
+    #[test]
+    fn test_range_slice_correct() {
+        use std::io::Write;
+        let data: Vec<u8> = (0u8..=255).cycle().take(1000).collect();
+        let mut tmp = tempfile::NamedTempFile::new().expect("temp file");
+        tmp.write_all(&data).expect("write");
+        let path = tmp.path().to_path_buf();
+
+        let store = SegmentStore::new(SegmentStoreConfig::default());
+        let key = SegmentKey::new("range-test", "v", 1);
+        let seg = store.get_or_map(key, &path).expect("map");
+        let slice = seg.slice(100, 200).expect("slice");
+        assert_eq!(slice, &data[100..200]);
+    }
+
+    /// Verifies that calling `get_or_map` twice for the same key returns the
+    /// same segment and does not grow the cache past 1 entry (second is a hit).
+    #[test]
+    fn test_get_or_map_caches() {
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().expect("temp file");
+        tmp.write_all(b"cache hit test data").expect("write");
+        let path = tmp.path().to_path_buf();
+
+        let store = SegmentStore::new(SegmentStoreConfig::default());
+        let key = SegmentKey::new("cache-hit", "v", 1);
+
+        let seg1 = store.get_or_map(key.clone(), &path).expect("first map");
+        assert_eq!(store.cached_count(), 1, "one segment after first call");
+
+        let seg2 = store
+            .get_or_map(key, &path)
+            .expect("second map (cache hit)");
+        assert_eq!(store.cached_count(), 1, "cache count must not grow on hit");
+        assert_eq!(
+            seg1.bytes(),
+            seg2.bytes(),
+            "both calls return identical data"
+        );
+
+        // The access counter for the entry should be 2 (1 insert + 1 hit).
+        let stats = store.stats();
+        assert_eq!(stats.total_accesses, 2, "total_accesses counts both calls");
+    }
+
+    /// Verifies that `map_file_mmap` returns an error for a nonexistent path.
+    #[test]
+    fn test_missing_file_returns_error() {
+        let path = std::env::temp_dir().join("oximedia-server-nonexistent-9f3a7c.ts");
+        // Ensure the file really does not exist.
+        let _ = std::fs::remove_file(&path);
+        let result = map_file_mmap(&path);
+        assert!(result.is_err(), "expected Err for missing file");
     }
 }

@@ -140,8 +140,8 @@ pub struct CompositionResult {
 // Analyzer
 // ---------------------------------------------------------------------------
 
-/// Shot composition analyzer.  Stateless per-frame; call [`analyze`] for each
-/// frame independently, or use [`process_batch`] for a sequence.
+/// Shot composition analyzer.  Stateless per-frame; call [`Self::analyze`] for each
+/// frame independently, or use [`Self::process_batch`] for a sequence.
 pub struct CompositionAnalyzer {
     config: CompositionConfig,
 }

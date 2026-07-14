@@ -36,13 +36,101 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use oximedia_net::hls::{MasterPlaylist, MediaPlaylist};
+//! ```no_run
+//! use oximedia_net::hls::MasterPlaylist;
 //! use oximedia_net::error::NetResult;
 //!
-//! async fn fetch_playlist(url: &str) -> NetResult<MasterPlaylist> {
-//!     // Fetch and parse HLS master playlist
-//!     todo!()
+//! fn main() -> NetResult<()> {
+//!     // Parse an HLS master playlist from a string
+//!     let hls_data = concat!(
+//!         "#EXTM3U\n",
+//!         "#EXT-X-VERSION:3\n",
+//!         "#EXT-X-STREAM-INF:BANDWIDTH=1500000,RESOLUTION=1280x720\n",
+//!         "720p.m3u8\n",
+//!     );
+//!     let master = MasterPlaylist::parse(hls_data)?;
+//!     println!("HLS: {} variant stream(s)", master.variants.len());
+//!     Ok(())
+//! }
+//! ```
+//!
+//! # Protocol Support Matrix
+//!
+//! | Protocol | Latency | Reliability | Encryption | ABR | Typical Use |
+//! |---|---|---|---|---|---|
+//! | HLS | 6–30 s | High (TCP/HTTP) | HTTPS, AES-128 | Yes | VOD + live CDN distribution |
+//! | DASH | 3–30 s | High (TCP/HTTP) | HTTPS, ClearKey | Yes | VOD + live CDN (MPEG standard) |
+//! | RTMP | 0.5–3 s | Medium (TCP) | RTMPS (TLS) | No | Ingest / contribution |
+//! | SRT | 0.1–1 s | High (UDP+ARQ) | AES-128/256-GCM | No | Broadcast contribution, WAN |
+//! | WebRTC | < 100 ms | Medium (DTLS/ICE) | DTLS-SRTP (mandatory) | Via REMB | Browser real-time, conferencing |
+//! | SMPTE ST 2110 | < 1 ms | High (PTP-synced) | None native | No | Professional broadcast studio LAN |
+//! | RIST | 0.1–0.5 s | High (UDP+ARQ) | AES-128 | No | Broadcast transport, WAN |
+//! | QUIC | < 50 ms | High (QUIC/HTTP3) | TLS 1.3 (mandatory) | Yes | Next-gen ABR streaming |
+//!
+//! # Protocol Selection Guide
+//!
+//! Choose the right streaming protocol for your use case:
+//!
+//! ## CDN/ABR Distribution — HLS or DASH
+//!
+//! **HLS** is the best choice for Apple devices (iPhone, iPad, Apple TV) and
+//! any CDN-based adaptive bitrate delivery. Its wide CDN support, proven
+//! compatibility, and LL-HLS variant for low latency (2–4 s) make it the
+//! default for OTT and broadcaster VOD.
+//!
+//! **DASH** (MPEG-DASH) is the MPEG standard equivalent — better suited for
+//! Android and Smart TV ecosystems, or when interoperability with DVB/HbbTV
+//! is required. LL-DASH can achieve sub-4-second latency via chunked transfer.
+//!
+//! ## Ultra-Low Latency — SRT, WebRTC, or QUIC
+//!
+//! **SRT** (Secure Reliable Transport) is ideal for professional contribution
+//! links over the public internet: it achieves sub-second latency with ARQ
+//! retransmission and optional AES-256-GCM encryption. Use it for encoder to
+//! production switcher transport, remote sports feeds, and cloud ingest.
+//!
+//! **WebRTC** is browser-native and achieves sub-100 ms latency via UDP with
+//! ICE/STUN/TURN NAT traversal and mandatory DTLS-SRTP encryption. Best for
+//! interactive video (video conferencing, watch parties, WHIP/WHEP ingest).
+//!
+//! **QUIC** (HTTP/3 Datagrams) combines the deployment advantages of HTTP
+//! with near-UDP latency and TLS 1.3. Use for next-generation ABR streaming
+//! where head-of-line blocking in HTTP/2 is a concern.
+//!
+//! ## Broadcast Contribution — SMPTE ST 2110 or RIST
+//!
+//! **SMPTE ST 2110** carries uncompressed video (ST 2110-20), PCM audio
+//! (ST 2110-30), and ancillary data (ST 2110-40) over PTP-synchronized
+//! IP fabric. Sub-millisecond latency on a dedicated LAN; not suitable for
+//! internet transport. Use in broadcast studios and production facilities.
+//!
+//! **RIST** is an SMPTE-standardized protocol that adds ARQ reliability over
+//! UDP, similar to SRT but with broader vendor support. Good for long-haul
+//! broadcast contribution when SRT is unavailable.
+//!
+//! # CDN Configuration
+//!
+//! Configure multi-CDN failover with automatic circuit breaking. The
+//! [`cdn::FailoverManager`] opens a provider's circuit after a configurable
+//! failure threshold and transparently routes to the next provider in the
+//! fallback chain until the primary recovers.
+//!
+//! ```no_run
+//! use oximedia_net::cdn::{CdnManager, CdnProvider, CdnConfig};
+//!
+//! fn main() {
+//!     let config = CdnConfig::default();
+//!     let manager = CdnManager::new(config);
+//!
+//!     // Register Cloudflare as primary (highest priority)
+//!     manager.add_provider(CdnProvider::cloudflare("https://cdn.example.com", 100));
+//!
+//!     // Register Fastly as secondary fallback
+//!     manager.add_provider(CdnProvider::fastly("https://fastly.example.com", 80));
+//!
+//!     // The failover module will automatically open the Cloudflare circuit
+//!     // after 5 consecutive failures and route requests to Fastly until
+//!     // Cloudflare recovers (circuit moves to half-open after 60 s).
 //! }
 //! ```
 
@@ -112,6 +200,7 @@ pub mod srt_group;
 pub mod srt_pacing;
 pub mod stream_health_monitor;
 pub mod stream_mux;
+pub mod tls_provider;
 pub mod webrtc;
 pub mod websocket;
 pub mod whep_client;
@@ -122,6 +211,11 @@ pub mod zixi;
 
 // Re-export commonly used items
 pub use error::{NetError, NetResult};
+
+// Re-export the process-wide Pure-Rust TLS crypto provider bootstrap — call
+// this once, as early as possible, from any binary/library entry point that
+// may open a TLS connection. See [`tls_provider`] for details.
+pub use tls_provider::install_default_crypto_provider;
 
 // Re-export SRT stats and key exchange types
 pub use srt::{DirectionStats, RttStats, SrtStreamStats, StreamQuality};

@@ -39,10 +39,10 @@
 ## Testing
 - [ ] Add conformance tests for CEA-608 decoder with known test streams (FCC captioning test patterns)
 - [x] Test `format_convert` round-trip: SRT -> WebVTT -> SRT and verify timing preservation within 1ms (added test_srt_webvtt_roundtrip_ms_precision + test_srt_webvtt_roundtrip_boundary_timestamps in format_convert.rs, Wave 14 2026-06-01)
-- [ ] Add edge case tests for `parser::srt` with malformed files (missing blank lines, BOM markers, CR/LF variations)
-- [ ] Test `overlap_detect` with intentionally overlapping subtitle tracks and verify all collisions are reported
+- [x] Add edge case tests for `parser::srt` with malformed files (missing blank lines, BOM markers, CR/LF variations) (added test_srt_utf8_bom_is_stripped + test_srt_crlf_equals_lf_field_by_field + test_srt_lone_cr_yields_parse_error + test_srt_missing_blank_line_is_lenient_single_cue in tests/srt_overlap_merge.rs:25-130, Wave 24 2026-06-05; missing-blank-line PINS current lenient behavior — parser absorbs 2nd cue into 1st cue text, see test doc comment)
+- [x] Test `overlap_detect` with intentionally overlapping subtitle tracks and verify all collisions are reported (added test_overlap_partial_pair + test_overlap_chain_report_counts + test_overlap_full_containment in tests/srt_overlap_merge.rs:136-208, Wave 24 2026-06-05; verifies exact pairs {(0,1),(1,2)} + OverlapReport counts + Full/Partial classification)
 - [x] Add bidirectional text rendering test with mixed Arabic/Hebrew and Latin text in `text::TextLayoutEngine` (added test_bidi_mixed_arabic_latin_visual_order + test_bidi_paragraph_direction_ltr_first + test_bidi_pure_rtl_reversal + test_bidi_level_wrapper in text.rs, Wave 14 2026-06-01)
-- [ ] Test `subtitle_merge` with two tracks having partially overlapping time ranges
+- [x] Test `subtitle_merge` with two tracks having partially overlapping time ranges (added test_merge_prefer_first + test_merge_prefer_last + test_merge_keep_all_sorted_and_flagged + test_merge_drop_on_conflict + test_merge_disjoint_no_conflict_all_strategies in tests/srt_overlap_merge.rs:218-336, Wave 24 2026-06-05; all 4 MergeStrategy variants over the conflicting A=[0,2000]/B=[1000,3000] scenario + disjoint zero-conflict control)
 
 ## Documentation
 - [ ] Add format comparison table showing feature support across SRT, WebVTT, ASS, TTML, CEA-608/708

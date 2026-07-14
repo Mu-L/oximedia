@@ -2,7 +2,7 @@
 //!
 //! # Beat matching
 //!
-//! [`BeatMatcher`] computes the pitch-shift / time-stretch factor needed to
+//! [`BeatMatcher`](crate::dj_features::BeatMatcher) computes the pitch-shift / time-stretch factor needed to
 //! align two tracks at the same BPM, supporting integer and half/double
 //! tempo corrections.
 //!
@@ -13,7 +13,7 @@
 //! position code (1A–12A for minor keys, 1B–12B for major keys) such that
 //! adjacent positions are harmonically compatible.
 //!
-//! [`CamelotWheel`] converts between standard key names and Camelot codes,
+//! [`CamelotWheel`](crate::dj_features::CamelotWheel) converts between standard key names and Camelot codes,
 //! and exposes a compatibility matrix for harmonic mixing decisions.
 
 use std::fmt;

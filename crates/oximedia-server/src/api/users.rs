@@ -13,7 +13,6 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 use std::sync::Arc;
 
 /// User profile response.
@@ -70,7 +69,7 @@ pub async fn get_current_user(
     State(state): State<Arc<AppState>>,
     auth_user: AuthUser,
 ) -> ServerResult<impl IntoResponse> {
-    let row = sqlx::query(
+    let row = crate::db::query(
         r"
         SELECT id, username, email, role, created_at
         FROM users
@@ -98,19 +97,20 @@ pub async fn update_current_user(
 ) -> ServerResult<impl IntoResponse> {
     if let Some(email) = &req.email {
         // Check if email is already taken
-        let exists =
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE email = ? AND id != ?")
-                .bind(email)
-                .bind(&auth_user.user_id)
-                .fetch_one(state.db.pool())
-                .await?;
+        let exists = crate::db::query_scalar::<i64, _>(
+            "SELECT COUNT(*) FROM users WHERE email = ? AND id != ?",
+        )
+        .bind(email)
+        .bind(&auth_user.user_id)
+        .fetch_one(state.db.pool())
+        .await?;
 
         if exists > 0 {
             return Err(ServerError::Conflict("Email already in use".to_string()));
         }
 
         // Update email
-        sqlx::query("UPDATE users SET email = ?, updated_at = ? WHERE id = ?")
+        crate::db::query("UPDATE users SET email = ?, updated_at = ? WHERE id = ?")
             .bind(email)
             .bind(chrono::Utc::now().timestamp())
             .bind(&auth_user.user_id)
@@ -135,10 +135,11 @@ pub async fn change_password(
     }
 
     // Get current password hash
-    let password_hash: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = ?")
-        .bind(&auth_user.user_id)
-        .fetch_one(state.db.pool())
-        .await?;
+    let password_hash: String =
+        crate::db::query_scalar("SELECT password_hash FROM users WHERE id = ?")
+            .bind(&auth_user.user_id)
+            .fetch_one(state.db.pool())
+            .await?;
 
     // Verify current password
     let valid = state
@@ -154,7 +155,7 @@ pub async fn change_password(
     let new_hash = state.auth.hash_password(&req.new_password)?;
 
     // Update password
-    sqlx::query("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?")
+    crate::db::query("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?")
         .bind(&new_hash)
         .bind(chrono::Utc::now().timestamp())
         .bind(&auth_user.user_id)
@@ -169,7 +170,7 @@ pub async fn list_api_keys(
     State(state): State<Arc<AppState>>,
     auth_user: AuthUser,
 ) -> ServerResult<impl IntoResponse> {
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         r"
         SELECT id, name, created_at, expires_at, last_used
         FROM api_keys
@@ -185,11 +186,11 @@ pub async fn list_api_keys(
         .iter()
         .map(|row| {
             serde_json::json!({
-                "id": row.get::<String, _>("id"),
-                "name": row.get::<String, _>("name"),
-                "created_at": row.get::<i64, _>("created_at"),
-                "expires_at": row.get::<Option<i64>, _>("expires_at"),
-                "last_used": row.get::<Option<i64>, _>("last_used"),
+                "id": row.get::<String>("id"),
+                "name": row.get::<String>("name"),
+                "created_at": row.get::<i64>("created_at"),
+                "expires_at": row.get::<Option<i64>>("expires_at"),
+                "last_used": row.get::<Option<i64>>("last_used"),
             })
         })
         .collect();
@@ -216,7 +217,7 @@ pub async fn create_api_key(
     let key = ApiKey::new(auth_user.user_id, key_hash, req.name, expires_at);
 
     // Save to database
-    sqlx::query(
+    crate::db::query(
         r"
         INSERT INTO api_keys (id, user_id, key_hash, name, created_at, expires_at)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -247,19 +248,20 @@ pub async fn revoke_api_key(
     Path(key_id): Path<String>,
 ) -> ServerResult<impl IntoResponse> {
     // Verify the key belongs to the user
-    let count =
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM api_keys WHERE id = ? AND user_id = ?")
-            .bind(&key_id)
-            .bind(&auth_user.user_id)
-            .fetch_one(state.db.pool())
-            .await?;
+    let count = crate::db::query_scalar::<i64, _>(
+        "SELECT COUNT(*) FROM api_keys WHERE id = ? AND user_id = ?",
+    )
+    .bind(&key_id)
+    .bind(&auth_user.user_id)
+    .fetch_one(state.db.pool())
+    .await?;
 
     if count == 0 {
         return Err(ServerError::NotFound("API key not found".to_string()));
     }
 
     // Delete the key
-    sqlx::query("DELETE FROM api_keys WHERE id = ?")
+    crate::db::query("DELETE FROM api_keys WHERE id = ?")
         .bind(&key_id)
         .execute(state.db.pool())
         .await?;

@@ -38,6 +38,7 @@ fn test_stinger_decode_fallback() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "vp9")]
 fn test_stinger_decode_real_clip() {
     use oximedia_codec::{SimpleVp9Encoder, Vp9EncConfig, Vp9Profile};
     use oximedia_gaming::scene::transition::StingerPlayer;
@@ -183,6 +184,7 @@ fn test_gpu_scale_rayon_parallel() {
 /// - EBML header
 /// - Segment (with a TrackEntry declaring "V_VP9")
 /// - One Cluster with all packets as SimpleBlocks
+#[cfg(feature = "vp9")]
 fn build_minimal_webm_vp9(packets: &[Vec<u8>]) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::new();
 
@@ -242,6 +244,7 @@ fn build_minimal_webm_vp9(packets: &[Vec<u8>]) -> Vec<u8> {
     out
 }
 
+#[cfg(feature = "vp9")]
 fn build_ebml_header_payload() -> Vec<u8> {
     let mut p: Vec<u8> = Vec::new();
     // EBMLVersion: id=0x4286, value=1
@@ -261,18 +264,21 @@ fn build_ebml_header_payload() -> Vec<u8> {
     p
 }
 
+#[cfg(feature = "vp9")]
 fn write_ebml_element(out: &mut Vec<u8>, id: u32, payload: &[u8]) {
     write_ebml_id_bytes(out, id);
     write_ebml_size(out, payload.len() as u64);
     out.extend_from_slice(payload);
 }
 
+#[cfg(feature = "vp9")]
 fn write_ebml_element_u64(out: &mut Vec<u8>, id: u32, val: u64) {
     // Encode as minimal big-endian integer.
     let bytes = encode_uint_minimal(val);
     write_ebml_element(out, id, &bytes);
 }
 
+#[cfg(feature = "vp9")]
 fn encode_uint_minimal(val: u64) -> Vec<u8> {
     if val == 0 {
         return vec![0u8];
@@ -287,6 +293,7 @@ fn encode_uint_minimal(val: u64) -> Vec<u8> {
     bytes
 }
 
+#[cfg(feature = "vp9")]
 fn write_ebml_id_bytes(out: &mut Vec<u8>, id: u32) {
     // Encode id as raw big-endian, keeping all bytes that contain data.
     // IDs are already encoded with the leading bit set (EBML ID encoding).
@@ -303,6 +310,7 @@ fn write_ebml_id_bytes(out: &mut Vec<u8>, id: u32) {
     }
 }
 
+#[cfg(feature = "vp9")]
 fn write_ebml_size(out: &mut Vec<u8>, size: u64) {
     // EBML vint encoding for size.
     if size < 0x7F {

@@ -140,16 +140,41 @@ impl ResultCache {
     }
 
     /// Generate cache key for a benchmark run.
+    ///
+    /// The key incorporates codec parameters and a content-hash of the sequence
+    /// file (first 64 KiB via XXH3-64) so that modifying a test sequence
+    /// automatically invalidates stale cache entries.  When the file cannot be
+    /// read the sequence name itself is hashed as a stable fallback.
     #[must_use]
     pub fn generate_key(codec_config: &CodecConfig, sequence_name: &str) -> String {
-        format!(
+        let config_str = format!(
             "{:?}_{}_{}_{}_{}",
             codec_config.codec_id,
             codec_config.preset.as_deref().unwrap_or("default"),
             codec_config.bitrate_kbps.unwrap_or(0),
             codec_config.cq_level.unwrap_or(0),
             sequence_name
-        )
+        );
+
+        // Try to read first 64 KiB of the sequence file for a content fingerprint.
+        // Falls back to hashing the sequence name when the file is unavailable.
+        let content_hash = {
+            use std::io::Read;
+            std::path::Path::new(sequence_name)
+                .metadata()
+                .ok()
+                .and_then(|m| {
+                    let cap = (m.len() as usize).min(65536);
+                    let mut buf = vec![0u8; cap];
+                    let mut f = std::fs::File::open(sequence_name).ok()?;
+                    let n = f.read(&mut buf).ok()?;
+                    buf.truncate(n);
+                    Some(xxhash_rust::xxh3::xxh3_64(&buf))
+                })
+                .unwrap_or_else(|| xxhash_rust::xxh3::xxh3_64(sequence_name.as_bytes()))
+        };
+
+        format!("{}_{:016x}", config_str, content_hash)
     }
 }
 
@@ -739,6 +764,132 @@ mod tests {
         let executor = ParallelExecutor::new(4);
         assert_eq!(executor.max_parallel, 4);
     }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Reusable luma scratch buffer — capacity stability + correctness
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// Build a single-luma-plane `VideoFrame` from raw byte data.
+    fn luma_frame(width: u32, height: u32, data: Vec<u8>) -> oximedia_codec::VideoFrame {
+        use oximedia_codec::{Plane, VideoFrame};
+        use oximedia_core::{PixelFormat, Rational, Timestamp};
+        let plane = Plane {
+            stride: width as usize,
+            width,
+            height,
+            data,
+        };
+        VideoFrame {
+            format: PixelFormat::Yuv420p,
+            width,
+            height,
+            planes: vec![plane],
+            timestamp: Timestamp::new(0, Rational::new(1, 1000)),
+            frame_type: oximedia_codec::FrameType::Key,
+            color_info: oximedia_codec::ColorInfo::default(),
+            corrupt: false,
+        }
+    }
+
+    /// `extract_luma_into` reuses the same buffer across successive frames
+    /// without reallocating: capacity stays constant once primed, and the
+    /// extracted values are the byte-widened luma plane.
+    #[test]
+    fn test_extract_luma_into_capacity_stable() {
+        let (w, h) = (8_u32, 4_u32);
+        let n = (w * h) as usize;
+
+        let mut buf: Vec<f64> = Vec::with_capacity(n);
+        let primed_cap = buf.capacity();
+        assert!(primed_cap >= n);
+
+        // Three successive frames with distinct content of identical size.
+        for round in 0u8..3 {
+            let data: Vec<u8> = (0..n).map(|i| (i as u8).wrapping_add(round * 7)).collect();
+            let frame = luma_frame(w, h, data.clone());
+
+            let dims = extract_luma_into(&frame, &mut buf).expect("luma extracted");
+            assert_eq!(dims, (w as usize, h as usize));
+
+            // Values match the byte-widened luma plane exactly.
+            assert_eq!(buf.len(), n);
+            for (got, &raw) in buf.iter().zip(data.iter()) {
+                assert!((*got - f64::from(raw)).abs() < f64::EPSILON);
+            }
+
+            // Capacity must not have grown — buffer is reused, not realloc'd.
+            assert_eq!(
+                buf.capacity(),
+                primed_cap,
+                "capacity changed on round {round}: realloc occurred"
+            );
+        }
+    }
+
+    /// `LumaScratch` ping-pong buffers keep stable capacity across ≥3 frames
+    /// and surface the previous frame's dimensions after `advance`.
+    #[test]
+    fn test_luma_scratch_no_realloc_across_frames() {
+        let (w, h) = (16_u32, 16_u32);
+        let n = (w * h) as usize;
+
+        let mut scratch = LumaScratch::with_capacity(w as usize, h as usize);
+        let curr_cap0 = scratch.curr.capacity();
+        let prev_cap0 = scratch.prev.capacity();
+        assert!(curr_cap0 >= n && prev_cap0 >= n);
+
+        for round in 0u8..4 {
+            let data: Vec<u8> = (0..n).map(|i| (i as u8) ^ (round * 13)).collect();
+            let frame = luma_frame(w, h, data);
+
+            let (fw, fh) = scratch.fill_current(&frame).expect("filled");
+            assert_eq!((fw, fh), (w as usize, h as usize));
+            assert_eq!(scratch.curr.len(), n);
+
+            scratch.advance((fw, fh));
+            assert_eq!(scratch.prev_dims, Some((w as usize, h as usize)));
+            assert_eq!(scratch.prev.len(), n);
+
+            // Neither buffer reallocated across any frame.
+            assert_eq!(
+                scratch.curr.capacity().max(scratch.prev.capacity()),
+                curr_cap0.max(prev_cap0),
+                "scratch reallocated on round {round}"
+            );
+        }
+    }
+
+    /// The in-place extractor and the allocating wrapper produce identical
+    /// numerical output, so routing the hot path through the reused buffer
+    /// keeps results bit-for-bit unchanged.
+    #[test]
+    fn test_extract_luma_into_matches_allocating() {
+        let (w, h) = (5_u32, 3_u32);
+        let n = (w * h) as usize;
+        let data: Vec<u8> = (0..n).map(|i| (i * 9 + 1) as u8).collect();
+        let frame = luma_frame(w, h, data);
+
+        let (alloc_luma, aw, ah) = extract_luma(&frame).expect("alloc path");
+        let mut buf = Vec::new();
+        let (iw, ih) = extract_luma_into(&frame, &mut buf).expect("inplace path");
+
+        assert_eq!((aw, ah), (iw, ih));
+        assert_eq!(alloc_luma, buf);
+    }
+
+    /// `extract_luma_into` rejects frames with no usable luma plane.
+    #[test]
+    fn test_extract_luma_into_rejects_short_plane() {
+        // Declared 8×8 but only 10 bytes of data → too short.
+        let frame = luma_frame(8, 8, vec![0u8; 10]);
+        let mut buf = Vec::new();
+        assert!(extract_luma_into(&frame, &mut buf).is_none());
+
+        // Zero-dimension frame → None.
+        let zero = luma_frame(0, 0, Vec::new());
+        let mut buf2 = Vec::new();
+        assert!(extract_luma_into(&zero, &mut buf2).is_none());
+    }
 }
 
 // ─── ITU-T P.910 spatial / temporal / motion complexity ──────────────────────
@@ -787,7 +938,31 @@ pub enum ComplexityError {
 /// Extract the luma (Y) plane as `f64` values in [0, 255] from a `VideoFrame`.
 ///
 /// Supports planar YUV formats where the luma plane is always the first plane.
+///
+/// This allocates a fresh `Vec<f64>` on every call; the production hot path
+/// uses [`extract_luma_into`] with a reusable scratch buffer instead, so this
+/// allocating wrapper is retained only as a parity reference for tests.
+#[cfg(test)]
 fn extract_luma(frame: &oximedia_codec::VideoFrame) -> Option<(Vec<f64>, usize, usize)> {
+    let mut buf = Vec::new();
+    let (w, h) = extract_luma_into(frame, &mut buf)?;
+    Some((buf, w, h))
+}
+
+/// Extract the luma (Y) plane into a caller-supplied reusable buffer.
+///
+/// The destination is `clear()`ed and refilled in place, so a `Vec<f64>` whose
+/// capacity already covers `width × height` is reused without reallocation
+/// across successive frames of the same resolution.  Returns the `(width,
+/// height)` of the extracted plane, or `None` when the frame has no usable luma
+/// plane (zero dimensions or a too-short first plane).
+///
+/// The numerical output is identical to [`extract_luma`] — each luma byte is
+/// widened to `f64` in the same order.
+fn extract_luma_into(
+    frame: &oximedia_codec::VideoFrame,
+    dst: &mut Vec<f64>,
+) -> Option<(usize, usize)> {
     let w = frame.width as usize;
     let h = frame.height as usize;
     if w == 0 || h == 0 {
@@ -797,12 +972,67 @@ fn extract_luma(frame: &oximedia_codec::VideoFrame) -> Option<(Vec<f64>, usize, 
     // Prefer the first plane (Y for planar YUV, or R for packed RGB).
     let plane = frame.planes.first()?;
     let raw = &plane.data;
-    if raw.len() < w * h {
+    let len = w.checked_mul(h)?;
+    if raw.len() < len {
         return None;
     }
 
-    let luma: Vec<f64> = raw[..w * h].iter().map(|&b| b as f64).collect();
-    Some((luma, w, h))
+    dst.clear();
+    dst.reserve(len);
+    dst.extend(raw[..len].iter().map(|&b| f64::from(b)));
+    Some((w, h))
+}
+
+/// Double-buffered scratch space for ITU-T P.910 sequence analysis.
+///
+/// Holds two `Vec<f64>` luma buffers — one for the current frame and one for
+/// the previous frame — that are reused across the whole sequence.  After the
+/// first two extractions of a fixed-resolution sequence neither buffer
+/// reallocates: each frame `clear()`s and refills the buffer that previously
+/// held the frame-before-last, then swaps the roles.  This eliminates the
+/// per-frame `Vec<f64>` allocation that a naive `collect()`-per-frame loop
+/// incurs.
+struct LumaScratch {
+    /// Buffer receiving the most recently extracted (current) frame.
+    curr: Vec<f64>,
+    /// Buffer holding the previously extracted frame, or empty before the first.
+    prev: Vec<f64>,
+    /// Dimensions of the data currently in `prev` (`None` until the first fill).
+    prev_dims: Option<(usize, usize)>,
+}
+
+impl LumaScratch {
+    /// Create a scratch pair pre-sized for `width × height` luma planes.
+    ///
+    /// Sizing both buffers up front means a sequence of that resolution never
+    /// reallocates during extraction.  A zero capacity is tolerated (the
+    /// buffers simply grow on first use).
+    fn with_capacity(width: usize, height: usize) -> Self {
+        let cap = width.saturating_mul(height);
+        Self {
+            curr: Vec::with_capacity(cap),
+            prev: Vec::with_capacity(cap),
+            prev_dims: None,
+        }
+    }
+
+    /// Extract `frame`'s luma into the `curr` buffer in place.
+    ///
+    /// Returns the `(width, height)` of the extracted plane, or `None` if the
+    /// frame has no usable luma plane.
+    fn fill_current(&mut self, frame: &oximedia_codec::VideoFrame) -> Option<(usize, usize)> {
+        extract_luma_into(frame, &mut self.curr)
+    }
+
+    /// Promote the current buffer to `prev` for the next iteration.
+    ///
+    /// Swaps the `curr`/`prev` buffers (so the old `prev` storage is recycled
+    /// as the next frame's `curr` target) and records the dimensions just
+    /// extracted.  No allocation occurs.
+    fn advance(&mut self, dims: (usize, usize)) {
+        std::mem::swap(&mut self.curr, &mut self.prev);
+        self.prev_dims = Some(dims);
+    }
 }
 
 // ── SI: Spatial Information ────────────────────────────────────────────────────
@@ -971,32 +1201,43 @@ pub fn analyze_sequence(
     let mut ti_values: Vec<f64> = Vec::with_capacity(frames.len().saturating_sub(1));
     let mut sad_values: Vec<f64> = Vec::with_capacity(frames.len().saturating_sub(1));
 
-    let mut prev_luma: Option<(Vec<f64>, usize, usize)> = None;
+    // Pre-size the reusable luma buffers from the first frame's declared
+    // resolution so the per-frame extraction in the loop never reallocates.
+    let (cap_w, cap_h) = frames
+        .first()
+        .map(|f| (f.width as usize, f.height as usize))
+        .unwrap_or((0, 0));
+    let mut scratch = LumaScratch::with_capacity(cap_w, cap_h);
+    let mut have_prev = false;
 
     for frame in frames {
-        let (luma, w, h) = match extract_luma(frame) {
+        // Refill the current buffer in place — no per-frame allocation.
+        let (w, h) = match scratch.fill_current(frame) {
             Some(v) => v,
             None => continue,
         };
 
         // SI for every frame — silently skip frames that are too small for Sobel.
-        if let Ok(si) = compute_si(&luma, w, h) {
+        if let Ok(si) = compute_si(&scratch.curr, w, h) {
             si_values.push(si);
         }
 
-        // TI and motion require a previous frame
-        if let Some((ref prev_l, pw, ph)) = prev_luma {
-            if pw == w && ph == h {
-                if let Ok(ti) = compute_ti(&luma, prev_l, w, h) {
-                    ti_values.push(ti);
-                }
-                if let Ok(sad) = compute_motion_sad(&luma, prev_l, w, h) {
-                    sad_values.push(sad);
+        // TI and motion require a previous frame of matching dimensions.
+        if have_prev {
+            if let Some((pw, ph)) = scratch.prev_dims {
+                if pw == w && ph == h {
+                    if let Ok(ti) = compute_ti(&scratch.curr, &scratch.prev, w, h) {
+                        ti_values.push(ti);
+                    }
+                    if let Ok(sad) = compute_motion_sad(&scratch.curr, &scratch.prev, w, h) {
+                        sad_values.push(sad);
+                    }
                 }
             }
         }
 
-        prev_luma = Some((luma, w, h));
+        scratch.advance((w, h));
+        have_prev = true;
     }
 
     let si = if si_values.is_empty() {

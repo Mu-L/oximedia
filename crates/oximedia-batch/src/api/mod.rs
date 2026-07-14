@@ -146,7 +146,7 @@ mod tests {
     use super::*;
     use tempfile::NamedTempFile;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_create_router() {
         let temp_file = NamedTempFile::new().expect("failed to create temp file");
         let db_path = temp_file
@@ -159,7 +159,7 @@ mod tests {
         assert!(std::mem::size_of_val(&router) > 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_health_check() {
         let response = health_check().await.into_response();
         assert_eq!(response.status(), StatusCode::OK);

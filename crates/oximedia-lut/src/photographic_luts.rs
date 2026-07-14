@@ -1,7 +1,7 @@
 //! Pre-built photographic and cinematic LUT presets.
 //!
-//! Each [`PhotoLutPreset`] variant encodes a signature colour transformation
-//! and can be materialised as a 33³ [`super::hald_clut::Lut3DData`] or applied
+//! Each [`PhotoLutPreset`](crate::photographic_luts::PhotoLutPreset) variant encodes a signature colour transformation
+//! and can be materialised as a 33³ [`Lut3DData`](crate::hald_clut::Lut3DData) or applied
 //! directly to a single pixel.
 
 #![allow(clippy::cast_precision_loss)]

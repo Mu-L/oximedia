@@ -71,34 +71,36 @@ impl MusicClearance {
             "publisher": self.publisher,
         });
 
-        sqlx::query(
-            r"
+        db.pool()
+            .execute(
+                r"
             INSERT INTO clearances
             (id, asset_id, clearance_type, status, requester, approver, requested_date,
              approved_date, expiry_date, notes, metadata_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT(id) DO UPDATE SET
                 status = excluded.status,
                 approved_date = excluded.approved_date,
                 notes = excluded.notes,
                 updated_at = excluded.updated_at
             ",
-        )
-        .bind(&self.id)
-        .bind(&self.asset_id)
-        .bind(ClearanceType::Music.as_str())
-        .bind(self.status.as_str())
-        .bind::<Option<String>>(None)
-        .bind::<Option<String>>(None)
-        .bind(self.requested_date.to_rfc3339())
-        .bind(self.approved_date.map(|d| d.to_rfc3339()))
-        .bind(self.expiry_date.map(|d| d.to_rfc3339()))
-        .bind(&self.notes)
-        .bind(metadata.to_string())
-        .bind(Utc::now().to_rfc3339())
-        .bind(Utc::now().to_rfc3339())
-        .execute(db.pool())
-        .await?;
+                &[
+                    &self.id,
+                    &self.asset_id,
+                    &ClearanceType::Music.as_str(),
+                    &self.status.as_str(),
+                    &None::<String>,
+                    &None::<String>,
+                    &self.requested_date.to_rfc3339(),
+                    &self.approved_date.map(|d| d.to_rfc3339()),
+                    &self.expiry_date.map(|d| d.to_rfc3339()),
+                    &self.notes,
+                    &metadata.to_string(),
+                    &Utc::now().to_rfc3339(),
+                    &Utc::now().to_rfc3339(),
+                ],
+            )
+            .await?;
 
         Ok(())
     }

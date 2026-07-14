@@ -657,14 +657,8 @@ mod tests {
     #[test]
     fn test_histogram_different_images() {
         // Pure red vs pure green: histograms should differ significantly
-        let red_pixels: Vec<u8> = std::iter::repeat([255u8, 0, 0])
-            .take(100)
-            .flatten()
-            .collect();
-        let green_pixels: Vec<u8> = std::iter::repeat([0u8, 255, 0])
-            .take(100)
-            .flatten()
-            .collect();
+        let red_pixels: Vec<u8> = std::iter::repeat_n([255u8, 0, 0], 100).flatten().collect();
+        let green_pixels: Vec<u8> = std::iter::repeat_n([0u8, 255, 0], 100).flatten().collect();
         let h_red = compute_color_histogram(&red_pixels, 32);
         let h_green = compute_color_histogram(&green_pixels, 32);
         let dist = histogram_chi_squared(&h_red, &h_green);

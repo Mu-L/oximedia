@@ -233,6 +233,19 @@ async fn execute_job(job: &TranscodeJob) -> Result<()> {
     // Convert CRF: TranscodeJob uses f64; TranscodeOptions uses u32.
     let crf = job.crf.map(|c| c.round() as u32);
 
+    // FFmpeg's `-af loudnorm=I=...:TP=...:LRA=...` is the classic EBU R128
+    // loudness-normalization request. Now that `--normalize-audio` actually
+    // reaches the transcode pipeline (see `transcode::transcode_single_pass`),
+    // map a `LoudNorm` filter onto it so `oximedia ff -af loudnorm=...` gets
+    // real normalization instead of silently doing nothing. The precise
+    // I/TP/LRA targets from the filter are not threaded through individually
+    // — `normalize_audio` always targets the EBU R128 standard, matching
+    // `TranscodeOptions::normalize_audio`'s bare-boolean contract.
+    let normalize_audio = job
+        .audio_filters
+        .iter()
+        .any(|f| matches!(f, ParsedFilter::LoudNorm { .. }));
+
     let options = TranscodeOptions {
         input: PathBuf::from(&job.input_path),
         output: PathBuf::from(&job.output_path),
@@ -254,6 +267,7 @@ async fn execute_job(job: &TranscodeJob) -> Result<()> {
         threads: num_cpus(),
         overwrite: job.overwrite,
         resume: false,
+        normalize_audio,
         progress_format: ProgressFormat::Plain,
     };
 

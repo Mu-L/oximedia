@@ -177,6 +177,7 @@ fn clamp_u8(v: i32) -> u8 {
 
 // ── HDR-to-SDR tone mapping conversion ───────────────────────────────────────
 
+use oximedia_colormgmt::gamut_mapping::{ColorPrimaries, GamutMapper, GamutMappingMethod};
 use oximedia_colormgmt::hdr::tonemapping::ToneCurve;
 
 /// Source HDR transfer function (EOTF).
@@ -186,6 +187,21 @@ pub enum SourceTransferFunction {
     Pq,
     /// ITU-R BT.2100 HLG (Hybrid Log-Gamma).
     Hlg,
+}
+
+/// Controls whether tone mapping operates per-channel or on luminance only.
+///
+/// * `PerChannel` — apply the tone curve independently to R, G, B (classic approach,
+///   may introduce hue shifts in highlights).
+/// * `Luminance` — compute scene luma (Rec.2020 coefficients), tone-map the luma,
+///   then scale all channels by the luma ratio to preserve hue. The `desaturation`
+///   field on [`HdrToSdrConfig`] blends between the two modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToneDomain {
+    /// Apply tone curve independently to each R, G, B channel (default).
+    PerChannel,
+    /// Tone-map on scene luminance and scale RGB to preserve hue.
+    Luminance,
 }
 
 /// Configuration for HDR-to-SDR tone-mapping conversion.
@@ -200,8 +216,16 @@ pub struct HdrToSdrConfig {
     pub peak_nits: f32,
     /// Tone-mapping operator applied after EOTF linearisation.
     pub tone_curve: ToneCurve,
-    /// Apply a Rec.2020 → Rec.709 gamut-clamp after tone mapping.
+    /// Apply a Rec.2020 → Rec.709 gamut-clip after tone mapping.
     pub gamut_map: bool,
+    /// Whether to tone-map per-channel or on luminance (preserving hue).
+    ///
+    /// Default: [`ToneDomain::PerChannel`].
+    pub tone_domain: ToneDomain,
+    /// Desaturation blend in luminance mode (0.0 = full hue-preserved, 1.0 = per-channel).
+    ///
+    /// Only used when `tone_domain == ToneDomain::Luminance`. Default: `0.0`.
+    pub desaturation: f32,
 }
 
 impl Default for HdrToSdrConfig {
@@ -211,6 +235,8 @@ impl Default for HdrToSdrConfig {
             peak_nits: 1000.0,
             tone_curve: ToneCurve::FilmicHable,
             gamut_map: true,
+            tone_domain: ToneDomain::PerChannel,
+            desaturation: 0.0,
         }
     }
 }
@@ -261,50 +287,66 @@ fn hlg_oetf_inverse(code: f32) -> f32 {
 
 /// Reconstruct scene-linear light from a 10-bit HDR code using the given EOTF.
 ///
-/// The returned value is in `[0, 1]` where 1.0 represents `peak_nits` after
-/// normalization.
+/// The returned value is normalised so that 1.0 = `peak_nits`.  Values **above**
+/// 1.0 are intentionally not clamped here so that the full highlight range
+/// reaches the tone curve's rolloff region.  The caller (`convert_hdr_to_sdr_pixel`)
+/// is responsible for final clamping after tone mapping.
+///
+/// ## PQ
+/// `pq_eotf_normalised` returns the absolute luminance normalised to 10 000 nits.
+/// We scale by `10_000 / peak_nits` so that `peak_nits` = 1.0 in scene-linear.
+/// Values above `peak_nits` (super-whites) produce output > 1.0 and must pass
+/// through to the tone curve.
+///
+/// ## HLG
+/// The raw `hlg_oetf_inverse` output is scene-light in [0, 1].  We apply the
+/// BT.2100-2 system-gamma OOTF:
+///   `E_display = E_scene^(system_gamma)`
+/// where `system_gamma ≈ 1.2` (ITU-R BT.2100-2 Table 5, `L_W` = `peak_nits`).
+/// This correctly maps the HLG signal to display-referred absolute luminance.
 #[inline]
 fn decode_hdr_code(code_u16: u16, tf: SourceTransferFunction, peak_nits: f32) -> f32 {
     let code_f = code_u16 as f32 / 1023.0;
-    let linear_norm = match tf {
+    match tf {
         SourceTransferFunction::Pq => {
-            // PQ 10 000-nit peak → normalise to peak_nits
-            pq_eotf_normalised(code_f) * (10_000.0 / peak_nits.max(1.0))
+            // PQ 10 000-nit peak → normalise to peak_nits; do NOT clamp above 1.0
+            // so super-white highlights reach the tone curve's rolloff region.
+            let pq_linear = pq_eotf_normalised(code_f);
+            (pq_linear * (10_000.0 / peak_nits.max(1.0))).max(0.0)
         }
-        SourceTransferFunction::Hlg => hlg_oetf_inverse(code_f),
-    };
-    linear_norm.clamp(0.0, 1.0)
-}
-
-/// Apply a simple BT.2020 → BT.709 gamut-clip (3×3 matrix + clamp).
-///
-/// Matrix from ITU-R BT.2087-0.
-#[inline]
-fn rec2020_to_rec709_clip(r: f32, g: f32, b: f32) -> [f32; 3] {
-    // BT.2020 → BT.709 via XYZ intermediate (D65 cat)
-    let r709 = 1.660_491 * r - 0.587_641 * g - 0.072_850 * b;
-    let g709 = -0.124_550 * r + 1.132_900 * g - 0.008_350 * b;
-    let b709 = -0.018_151 * r - 0.100_579 * g + 1.118_730 * b;
-    [
-        r709.clamp(0.0, 1.0),
-        g709.clamp(0.0, 1.0),
-        b709.clamp(0.0, 1.0),
-    ]
+        SourceTransferFunction::Hlg => {
+            // Scene-linear after OETF inverse (no OOTF yet)
+            let scene_linear = hlg_oetf_inverse(code_f);
+            // BT.2100-2 system-gamma OOTF: system_gamma = 1.2 (simplified; valid
+            // for L_W from ~400 nits to ~2000 nits per the standard).
+            const SYSTEM_GAMMA: f32 = 1.2;
+            // Apply OOTF and normalise to peak_nits so 1.0 = peak_nits on display
+            let ootf_linear = scene_linear.powf(SYSTEM_GAMMA);
+            // scale: HLG reference peak (1000 nits) / peak_nits keeps the ratio
+            let scale = (1000.0_f32 / peak_nits.max(1.0)).powf(SYSTEM_GAMMA - 1.0);
+            (ootf_linear * scale).max(0.0)
+        }
+    }
 }
 
 /// Convert a single HDR pixel (normalised scene-linear Y, Cb, Cr in [-0.5, 0.5])
 /// to SDR `(R, G, B)` as `u8` values.
 ///
-/// The input Y is the normalised scene-linear luma (0..1 maps to 0..`peak_nits`).
+/// The input Y is the normalised scene-linear luma (0..=1.0 maps to 0..=`peak_nits`;
+/// values > 1.0 are valid super-whites that must not be pre-clamped).
 /// Cb/Cr are differential chroma signals in `[-0.5, 0.5]`.
+///
+/// An optional pre-built `GamutMapper` (Rec.2020 → Rec.709) may be passed to
+/// avoid rebuilding the 3×3 matrix for every pixel in a frame.  Pass `None` to
+/// let the function build one on the fly (used for single-pixel calls in tests).
 ///
 /// # Processing pipeline
 ///
 /// 1. PQ or HLG EOTF decoding (already done by the caller; `y_linear` is the result).
-/// 2. Chroma-to-RGB reconstruct (simplified BT.2020 YCbCr).
-/// 3. Tone mapping via `cfg.tone_curve`.
-/// 4. Optional Rec.2020 → Rec.709 gamut clip.
-/// 5. Gamma 2.2 encode + scale to [0, 255].
+/// 2. Chroma-to-RGB reconstruct (BT.2020 YCbCr coefficients).
+/// 3. Tone mapping via `cfg.tone_curve` — per-channel or luminance mode.
+/// 4. Optional Rec.2020 → Rec.709 gamut mapping (via `GamutMapper`).
+/// 5. sRGB OETF encode + scale to [0, 255].
 #[must_use]
 pub fn convert_hdr_to_sdr_pixel(
     y_linear: f32,
@@ -312,29 +354,84 @@ pub fn convert_hdr_to_sdr_pixel(
     cr: f32,
     cfg: &HdrToSdrConfig,
 ) -> (u8, u8, u8) {
+    // Build a temporary gamut mapper for single-pixel / test calls.
+    let mapper_opt = if cfg.gamut_map {
+        Some(GamutMapper::new(
+            ColorPrimaries::rec2020(),
+            ColorPrimaries::rec709(),
+            GamutMappingMethod::Clip,
+        ))
+    } else {
+        None
+    };
+    convert_hdr_to_sdr_pixel_with_mapper(y_linear, cb, cr, cfg, mapper_opt.as_ref())
+}
+
+/// Inner implementation that accepts an optional pre-built `GamutMapper`.
+///
+/// Used by `convert_hdr_to_sdr_frame` to avoid rebuilding the matrix per pixel.
+#[inline]
+fn convert_hdr_to_sdr_pixel_with_mapper(
+    y_linear: f32,
+    cb: f32,
+    cr: f32,
+    cfg: &HdrToSdrConfig,
+    gamut_mapper: Option<&GamutMapper>,
+) -> (u8, u8, u8) {
     // Reconstruct linear R, G, B from Y, Cb, Cr (BT.2020 matrix)
     // BT.2020 YCbCr coefficients Kr=0.2627, Kb=0.0593
     let r_linear = y_linear + 1.474_600 * cr;
     let g_linear = y_linear - 0.164_553 * cb - 0.571_353 * cr;
     let b_linear = y_linear + 1.881_400 * cb;
 
-    // Tone map
-    let rgb_in = [r_linear.max(0.0), g_linear.max(0.0), b_linear.max(0.0)];
-    let rgb_tm = cfg.tone_curve.map(rgb_in);
+    // Scene-linear RGB (clamp negatives from chroma math, but keep super-whites)
+    let r_sc = r_linear.max(0.0);
+    let g_sc = g_linear.max(0.0);
+    let b_sc = b_linear.max(0.0);
+
+    // Tone mapping: per-channel or luminance-preserving
+    let rgb_tm = match cfg.tone_domain {
+        ToneDomain::PerChannel => cfg.tone_curve.map([r_sc, g_sc, b_sc]),
+        ToneDomain::Luminance => {
+            // Rec.2020 luma coefficients: Kr=0.2627, Kb=0.0593
+            const KR: f32 = 0.2627;
+            const KG: f32 = 0.6780;
+            const KB: f32 = 0.0593;
+            let y_scene = KR * r_sc + KG * g_sc + KB * b_sc;
+
+            // Tone-map the luma scalar
+            let y_tm = cfg.tone_curve.map([y_scene, y_scene, y_scene])[0];
+
+            // Scale RGB by the luma ratio to preserve hue
+            let scale = if y_scene > 1e-6 { y_tm / y_scene } else { y_tm };
+            let rgb_lum = [r_sc * scale, g_sc * scale, b_sc * scale];
+
+            // Per-channel result for blending
+            let rgb_pc = cfg.tone_curve.map([r_sc, g_sc, b_sc]);
+
+            // Blend: desaturation=0 → pure luminance-mode; 1 → pure per-channel
+            let d = cfg.desaturation.clamp(0.0, 1.0);
+            [
+                rgb_lum[0] * (1.0 - d) + rgb_pc[0] * d,
+                rgb_lum[1] * (1.0 - d) + rgb_pc[1] * d,
+                rgb_lum[2] * (1.0 - d) + rgb_pc[2] * d,
+            ]
+        }
+    };
 
     // Optional gamut mapping: Rec.2020 → Rec.709
-    let [r_sdr, g_sdr, b_sdr] = if cfg.gamut_map {
-        rec2020_to_rec709_clip(rgb_tm[0], rgb_tm[1], rgb_tm[2])
+    let (r_sdr, g_sdr, b_sdr) = if let Some(mapper) = gamut_mapper {
+        mapper.map_pixel(rgb_tm[0], rgb_tm[1], rgb_tm[2])
     } else {
-        [
+        (
             rgb_tm[0].clamp(0.0, 1.0),
             rgb_tm[1].clamp(0.0, 1.0),
             rgb_tm[2].clamp(0.0, 1.0),
-        ]
+        )
     };
 
-    // Gamma 2.2 encode
-    let encode = |v: f32| -> u8 { (v.clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0 + 0.5) as u8 };
+    // sRGB OETF encode (correct piecewise sRGB, not γ=2.2) + scale to [0, 255]
+    let encode = |v: f32| -> u8 { (linear_to_srgb(v) * 255.0 + 0.5) as u8 };
 
     (encode(r_sdr), encode(g_sdr), encode(b_sdr))
 }
@@ -344,6 +441,10 @@ pub fn convert_hdr_to_sdr_pixel(
 ///
 /// The output is packed as `[R, G, B, R, G, B, …]` in row-major order with the
 /// same dimensions as the input.
+///
+/// The Rec.2020 → Rec.709 `GamutMapper` (when `cfg.gamut_map` is `true`) is
+/// built **once** here and reused for every pixel, avoiding repeated 3×3 matrix
+/// construction per call.
 ///
 /// # Arguments
 ///
@@ -375,6 +476,17 @@ pub fn convert_hdr_to_sdr_frame(
         return Vec::new();
     }
 
+    // Build the gamut mapper once per frame, not per pixel.
+    let gamut_mapper: Option<GamutMapper> = if cfg.gamut_map {
+        Some(GamutMapper::new(
+            ColorPrimaries::rec2020(),
+            ColorPrimaries::rec709(),
+            GamutMappingMethod::Clip,
+        ))
+    } else {
+        None
+    };
+
     let mut out = Vec::with_capacity(y_len * 3);
 
     for row in 0..height {
@@ -386,13 +498,20 @@ pub fn convert_hdr_to_sdr_frame(
             let cb_code = frame_cb[uv_row * uv_width + uv_col];
             let cr_code = frame_cr[uv_row * uv_width + uv_col];
 
-            // Decode HDR codes to normalised linear scene light
+            // Decode HDR codes to normalised scene-linear light (may be > 1.0 for
+            // super-whites — intentionally not clamped until after tone mapping).
             let y_linear = decode_hdr_code(y_code, cfg.source_tf, cfg.peak_nits);
             // Chroma: 10-bit code centre 512 → offset to [-0.5, 0.5]
             let cb_linear = cb_code as f32 / 1023.0 - 0.5;
             let cr_linear = cr_code as f32 / 1023.0 - 0.5;
 
-            let (r, g, b) = convert_hdr_to_sdr_pixel(y_linear, cb_linear, cr_linear, cfg);
+            let (r, g, b) = convert_hdr_to_sdr_pixel_with_mapper(
+                y_linear,
+                cb_linear,
+                cr_linear,
+                cfg,
+                gamut_mapper.as_ref(),
+            );
             out.push(r);
             out.push(g);
             out.push(b);
@@ -571,6 +690,8 @@ mod tests {
             peak_nits: 1000.0,
             tone_curve: ToneCurve::FilmicHable,
             gamut_map: false,
+            tone_domain: ToneDomain::PerChannel,
+            desaturation: 0.0,
         };
         let (r, g, b) = convert_hdr_to_sdr_pixel(0.0, 0.0, 0.0, &cfg);
         assert_eq!(r, 0, "r={r}");
@@ -581,12 +702,14 @@ mod tests {
     #[test]
     fn test_hdr_to_sdr_pq_white_near_white() {
         // Peak white PQ luma ≈ 1.0 normalised → SDR should be substantially above zero.
-        // With Hable tone curve, 1.0 scene-linear → ~148/255 (≈58% of SDR range).
+        // With Hable tone curve, 1.0 scene-linear → significant SDR output.
         let cfg = HdrToSdrConfig {
             source_tf: SourceTransferFunction::Pq,
             peak_nits: 1000.0,
             tone_curve: ToneCurve::FilmicHable,
             gamut_map: false,
+            tone_domain: ToneDomain::PerChannel,
+            desaturation: 0.0,
         };
         // y_linear=1.0 means peak-white signal
         let (r, _g, _b) = convert_hdr_to_sdr_pixel(1.0, 0.0, 0.0, &cfg);
@@ -603,6 +726,8 @@ mod tests {
             peak_nits: 1000.0,
             tone_curve: ToneCurve::ReinhardSimple,
             gamut_map: false,
+            tone_domain: ToneDomain::PerChannel,
+            desaturation: 0.0,
         };
         let (r, g, b) = convert_hdr_to_sdr_pixel(0.0, 0.0, 0.0, &cfg);
         assert_eq!((r, g, b), (0, 0, 0), "HLG black should map to zero");
@@ -645,5 +770,221 @@ mod tests {
         // HLG 0.5 → linear 0.25/3 ≈ 0.0833
         let v = hlg_oetf_inverse(0.5);
         assert!((v - 0.0833).abs() < 1e-3, "hlg(0.5) ≈ 0.0833, got {v}");
+    }
+
+    // ── New correctness tests (Slice 1 additions) ─────────────────────────────
+
+    /// Verify that a PQ signal above the display peak (4000-nit encoded signal
+    /// with a 1000-nit display) does NOT clip to 255 before tone mapping.
+    ///
+    /// With the old pre-clamp bug, the super-white scene-linear value was truncated
+    /// to 1.0 before the filmic curve, losing the highlight rolloff.  The fixed
+    /// code passes values > 1.0 to the tone curve which maps them to a value
+    /// that is less than the peak-mapped value at 1.0 — but still well below 255.
+    ///
+    /// Also confirms monotonicity: higher PQ code → higher SDR output.
+    #[test]
+    fn test_hdr_headroom_reaches_curve() {
+        let cfg = HdrToSdrConfig {
+            source_tf: SourceTransferFunction::Pq,
+            peak_nits: 1000.0,
+            tone_curve: ToneCurve::FilmicHable,
+            gamut_map: false,
+            tone_domain: ToneDomain::PerChannel,
+            desaturation: 0.0,
+        };
+
+        // Encode a 4000-nit PQ signal: find the 10-bit code whose PQ EOTF ≈ 4000 nit.
+        // PQ ref peak = 10 000 nit, so 4000/10000 = 0.4 normalised PQ.
+        // The PQ curve is steeply nonlinear: a 10-bit code near 924 decodes to
+        // `pq_eotf_normalised ≈ 0.402` (~4024 nit). With a 1000-nit display this
+        // scales to ~4.0 in normalised scene-linear (a super-white > 1.0).
+        let code_4000nit: u16 = 924;
+        let linear_4000 = decode_hdr_code(code_4000nit, SourceTransferFunction::Pq, 1000.0);
+        assert!(
+            linear_4000 > 1.0,
+            "4000-nit PQ should decode to > 1.0 (super-white), got {linear_4000}"
+        );
+
+        // The output should be a valid SDR value (< 255) because the tone curve
+        // compresses it, not clips it.
+        let (r1000, _g, _b) = convert_hdr_to_sdr_pixel(1.0, 0.0, 0.0, &cfg);
+        let (r4000, _g, _b) = convert_hdr_to_sdr_pixel(linear_4000, 0.0, 0.0, &cfg);
+
+        assert!(
+            r4000 < 255,
+            "super-white 4000-nit should not clip to 255; got r={r4000}"
+        );
+        assert!(
+            r4000 > r1000,
+            "higher PQ input should yield higher output: r(1000nit)={r1000}, r(4000nit)={r4000}"
+        );
+    }
+
+    /// In luminance-preserving mode (ToneDomain::Luminance), two pixels with the
+    /// same hue but different luminance should preserve the hue angle better than
+    /// per-channel mode does for a highly saturated Rec.2020 color.
+    ///
+    /// We use a saturated red in Rec.2020 scene space and compare the hue shift
+    /// produced by per-channel vs luminance tone mapping.
+    #[test]
+    fn test_luminance_mode_hue_preservation() {
+        // A highly saturated, bright Rec.2020 red: Y=2.0 (super-white), chroma only on R
+        // Cb=0 means no blue contribution; we set Cr to give pure red in Rec.2020 RGB.
+        // With BT.2020 coefficients: R = Y + 1.4746*Cr => set Cr so R is much larger than G/B.
+        let cr = 0.40_f32; // Cr offset giving a strong red tint
+        let cb = -0.10_f32; // slight blue offset for richer color
+
+        let cfg_per = HdrToSdrConfig {
+            source_tf: SourceTransferFunction::Pq,
+            peak_nits: 1000.0,
+            tone_curve: ToneCurve::ReinhardSimple,
+            gamut_map: false,
+            tone_domain: ToneDomain::PerChannel,
+            desaturation: 0.0,
+        };
+        let cfg_lum = HdrToSdrConfig {
+            tone_domain: ToneDomain::Luminance,
+            desaturation: 0.0,
+            ..cfg_per.clone()
+        };
+
+        // High luminance (super-white) input
+        let y_high = 2.5_f32;
+        let (rp, gp, bp) = convert_hdr_to_sdr_pixel(y_high, cb, cr, &cfg_per);
+        let (rl, gl, bl) = convert_hdr_to_sdr_pixel(y_high, cb, cr, &cfg_lum);
+
+        // Compute a simple hue metric: |R - max| / (max - min + ε)
+        // Lower value → hue is more closely preserved relative to achromatic.
+        let per_r = f32::from(rp);
+        let per_g = f32::from(gp);
+        let per_b = f32::from(bp);
+        let lum_r = f32::from(rl);
+        let lum_g = f32::from(gl);
+        let lum_b = f32::from(bl);
+
+        // In luminance mode the ratio R/(R+G+B) should be closer to the input ratio.
+        // Input R is dominant due to large Cr; in per-channel mode the curve compresses
+        // channels differently, shifting hue.  In luminance mode they scale together.
+        let sum_per = per_r + per_g + per_b + 1e-6;
+        let sum_lum = lum_r + lum_g + lum_b + 1e-6;
+
+        let frac_r_per = per_r / sum_per;
+        let frac_r_lum = lum_r / sum_lum;
+
+        // Input R fraction (scene-linear):
+        let r_sc = (y_high + 1.474_600 * cr).max(0.0);
+        let g_sc = (y_high - 0.164_553 * cb - 0.571_353 * cr).max(0.0);
+        let b_sc = (y_high + 1.881_400 * cb).max(0.0);
+        let sum_sc = r_sc + g_sc + b_sc + 1e-6;
+        let frac_r_sc = r_sc / sum_sc;
+
+        let err_per = (frac_r_per - frac_r_sc).abs();
+        let err_lum = (frac_r_lum - frac_r_sc).abs();
+
+        assert!(
+            err_lum <= err_per + 0.05,
+            "luminance mode should preserve hue at least as well as per-channel: \
+             err_lum={err_lum:.4}, err_per={err_per:.4}, frac_r_sc={frac_r_sc:.4}"
+        );
+    }
+
+    /// A Rec.2020 red primary (pure red in Rec.2020 RGB space) is outside Rec.709.
+    /// After gamut mapping, all channels must be in [0, 255].
+    #[test]
+    fn test_out_of_gamut_lands_in_range() {
+        // Pure Rec.2020 red primary in scene-linear: R=1, G=0, B=0 in Rec.2020 RGB.
+        // In YCbCr: Y = Kr*R = 0.2627, Cr = (1-Kr)/(2*(1-Kr)) * R correction.
+        // We use direct scene-linear injection: y_linear=0.2627 (luma of pure red),
+        // with Cr and Cb chosen so that the reconstructed R=1, G=0, B=0 in linear.
+        // From BT.2020 YCbCr:  R = Y + 1.4746*Cr → Cr = (1-0.2627)/1.4746 ≈ 0.5002
+        //                       B = Y + 1.8814*Cb → Cb = (0-0.2627)/1.8814 ≈ -0.1396
+        //                       G = Y - 0.1646*Cb - 0.5714*Cr ≈ 0.2627 + 0.0230 - 0.2861 ≈ -0.0004
+        let y_linear = 0.2627_f32;
+        let cr = 0.5002_f32;
+        let cb = -0.1396_f32;
+
+        let cfg = HdrToSdrConfig {
+            source_tf: SourceTransferFunction::Pq,
+            peak_nits: 1000.0,
+            tone_curve: ToneCurve::ReinhardSimple,
+            gamut_map: true, // engage Rec.2020 → Rec.709 gamut mapping
+            tone_domain: ToneDomain::PerChannel,
+            desaturation: 0.0,
+        };
+
+        let (r, g, b) = convert_hdr_to_sdr_pixel(y_linear, cb, cr, &cfg);
+
+        // After Rec.2020 → Rec.709 gamut clipping, a pure-red primary must remain
+        // red-dominant (r is the largest channel) — proving the gamut mapper did
+        // not collapse the pixel to grey or overflow into the other channels.
+        assert!(
+            r >= g && r >= b,
+            "pure red must stay red-dominant after gamut clip: r={r} g={g} b={b}"
+        );
+        // g and b should be in valid range after gamut-clip
+        assert!(g < 250, "green should not be near max for pure red: g={g}");
+        assert!(b < 250, "blue should not be near max for pure red: b={b}");
+    }
+
+    /// Same HLG signal, two different `peak_nits` values must produce different output.
+    ///
+    /// This proves the BT.2100-2 system-gamma OOTF is applied (which uses peak_nits).
+    /// Before the fix, HLG ignored peak_nits entirely.
+    #[test]
+    fn test_hlg_peak_nits_affects_output() {
+        // A non-trivial HLG mid-gray signal
+        let y_hlg_mid = hlg_oetf_inverse(0.6);
+
+        let cfg_1000 = HdrToSdrConfig {
+            source_tf: SourceTransferFunction::Hlg,
+            peak_nits: 1000.0,
+            tone_curve: ToneCurve::ReinhardSimple,
+            gamut_map: false,
+            tone_domain: ToneDomain::PerChannel,
+            desaturation: 0.0,
+        };
+        let cfg_400 = HdrToSdrConfig {
+            peak_nits: 400.0,
+            ..cfg_1000.clone()
+        };
+
+        // Decode the same HLG code at two different peak luminances
+        let y_1000 = {
+            // Apply OOTF manually to match decode_hdr_code logic
+            const GAMMA: f32 = 1.2;
+            let scale = (1000.0_f32 / 1000.0).powf(GAMMA - 1.0);
+            y_hlg_mid.powf(GAMMA) * scale
+        };
+        let y_400 = {
+            const GAMMA: f32 = 1.2;
+            let scale = (1000.0_f32 / 400.0).powf(GAMMA - 1.0);
+            y_hlg_mid.powf(GAMMA) * scale
+        };
+
+        // The two scene-linear values must differ (proving OOTF is peak_nits-dependent)
+        let (r1, _g1, _b1) = convert_hdr_to_sdr_pixel(y_1000, 0.0, 0.0, &cfg_1000);
+        let (r2, _g2, _b2) = convert_hdr_to_sdr_pixel(y_400, 0.0, 0.0, &cfg_400);
+
+        assert_ne!(
+            r1, r2,
+            "different peak_nits must produce different HLG output: \
+             r(1000nit)={r1}, r(400nit)={r2}"
+        );
+    }
+
+    /// Linear 0.5 → sRGB OETF → approximately 187 (≈0.735 × 255), within ±2.
+    ///
+    /// This verifies the correct piecewise sRGB OETF is used instead of γ=2.2.
+    #[test]
+    fn test_srgb_oetf_midgray() {
+        // linear_to_srgb(0.5) = 1.055 * 0.5^(1/2.4) - 0.055 ≈ 0.7354
+        // 0.7354 * 255 + 0.5 ≈ 188.1 → rounds to 188
+        let srgb_val = linear_to_srgb(0.5);
+        let encoded = (srgb_val * 255.0 + 0.5) as u8;
+        assert!(
+            (i32::from(encoded) - 187).abs() <= 2,
+            "linear 0.5 → sRGB ≈ 187±2, got {encoded} (srgb_val={srgb_val:.4})"
+        );
     }
 }

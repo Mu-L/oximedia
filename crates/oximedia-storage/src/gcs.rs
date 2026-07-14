@@ -959,17 +959,24 @@ impl CloudStorage for GcsStorage {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct AclEntry {
+    /// The ACL grantee (e.g. a user, group, project team, or `allUsers`/`allAuthenticatedUsers`).
     pub entity: String,
+    /// The access role granted to `entity` (e.g. `READER` or `OWNER`).
     pub role: String,
 }
 
 /// Object generation (version) information
 #[derive(Debug, Clone)]
 pub struct ObjectGeneration {
+    /// GCS generation number identifying this specific revision of the object's data.
     pub generation: i64,
+    /// GCS metageneration number identifying the revision of the object's metadata.
     pub metageneration: i64,
+    /// Timestamp of when this object generation was created.
     pub time_created: Option<DateTime<Utc>>,
+    /// Size of this generation's object data, in bytes.
     pub size: u64,
+    /// ETag (content checksum) of this generation, if present (GCS's empty-string etag is normalized to `None`).
     pub etag: Option<String>,
 }
 

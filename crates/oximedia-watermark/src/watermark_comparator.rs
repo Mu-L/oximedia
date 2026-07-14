@@ -2,10 +2,10 @@
 //! database using fuzzy matching, Hamming distance, and confidence scoring.
 //!
 //! This module provides:
-//! - [`WatermarkComparator`]: main entry point for comparison
-//! - [`FuzzyMatchConfig`]: tolerance parameters for fuzzy comparison
-//! - [`ComparisonResult`]: ranked list of matches with confidence scores
-//! - [`WatermarkPayloadDatabase`]: a lightweight payload-keyed database that
+//! - [`crate::watermark_comparator::WatermarkComparator`]: main entry point for comparison
+//! - [`crate::watermark_comparator::FuzzyMatchConfig`]: tolerance parameters for fuzzy comparison
+//! - [`crate::watermark_comparator::ComparisonResult`]: ranked list of matches with confidence scores
+//! - [`crate::watermark_comparator::WatermarkPayloadDatabase`]: a lightweight payload-keyed database that
 //!   stores raw byte payloads alongside owner/algorithm metadata
 //! - Bit-error-rate and normalised Hamming distance helpers
 

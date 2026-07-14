@@ -723,7 +723,9 @@ impl MotionEstimator {
                 .map_err(|e| GpuError::BufferMapping(e.to_string()))?;
 
             {
-                let data = slice.get_mapped_range();
+                let data = slice
+                    .get_mapped_range()
+                    .map_err(|e| GpuError::BufferMapping(e.to_string()))?;
                 let raw: &[[i32; 4]] = bytemuck::cast_slice(&data);
                 mv_int_result = raw[..l_blocks.min(raw.len())].to_vec();
                 // Update seeds for the next-finer level iteration.
@@ -921,7 +923,9 @@ impl MotionEstimator {
             .map_err(|e| GpuError::BufferMapping(e.to_string()))?;
 
         let subpixel_mvs: Vec<[f32; 2]> = {
-            let data = sp_slice.get_mapped_range();
+            let data = sp_slice
+                .get_mapped_range()
+                .map_err(|e| GpuError::BufferMapping(e.to_string()))?;
             bytemuck::cast_slice::<u8, [f32; 2]>(&data)[..n_blocks].to_vec()
         };
 

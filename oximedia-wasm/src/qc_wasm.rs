@@ -55,11 +55,9 @@ pub fn wasm_qc_check(data: &[u8], rules_json: &str) -> Result<String, JsValue> {
     let preset_name = extract_preset_from_json(rules_json);
     let preset = resolve_preset(&preset_name);
 
-    // Write data to a temp analysis
-    // Since QC expects file path, we write temp then validate
-    let _tmp_path = format!("/tmp/oximedia_qc_wasm_{}.bin", data.len());
-
-    // For WASM, we cannot do file I/O. Instead, create a simple in-memory report.
+    // WASM has no file system access; build a simple in-memory report
+    // directly from the preset's rule count instead of shelling out to
+    // file-path-based QC analysis.
     let qc = oximedia_qc::QualityControl::with_preset(preset);
     let rule_count = qc.rule_count();
 

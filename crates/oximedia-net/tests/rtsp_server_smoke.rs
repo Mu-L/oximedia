@@ -17,8 +17,8 @@ use oximedia_net::rtsp::{
     message::{try_parse_request, Headers, RequestParseStatus, Response},
     rtp::RtpPacketBuilder,
     server::{MountPoint, RtspServer, RtspServerConfig, ServerChallenge},
-    Challenge, ClientConfig, Credentials, Method, RtpPacket, RtspClient, SessionDescription,
-    SetupTransport,
+    Challenge, ClientConfig, Credentials, Method, RtpPacket, RtspClient, ServerEvent,
+    SessionDescription, SetupTransport,
 };
 use tokio::net::TcpListener;
 use tokio::time::timeout;
@@ -440,14 +440,12 @@ async fn server_client_integration_inner() {
     });
 
     // ── 11. Receive the RTP frames on the client ─────────────────────────────
-    // NOTE: Due to the current v1 server architecture (single-task TCP handling),
-    // the server doesn't concurrently push RTP frames while waiting for requests.
-    // The server's PLAY handler subscribes, but the actual forwarding happens
-    // during the next request's read cycle. For the integration test we verify
-    // the full control-plane flow succeeds (OPTIONS→DESCRIBE→SETUP→PLAY→TEARDOWN).
-    //
-    // RTP forwarding in a production deployment requires the split read/write
-    // half architecture (v2 TODO). For now we verify the session state is correct.
+    // The server now forwards RTP concurrently via the split read/write halves,
+    // so the published frames are delivered on the client's event stream without
+    // a follow-up request. This test asserts the full control-plane flow
+    // (OPTIONS→DESCRIBE→SETUP→PLAY→TEARDOWN); the dedicated
+    // `test_rtp_delivered_after_play_without_further_requests` test below proves
+    // the concurrent RTP egress in isolation.
 
     // ── 12. TEARDOWN ─────────────────────────────────────────────────────────
     client.teardown().await.expect("TEARDOWN");
@@ -457,6 +455,112 @@ async fn server_client_integration_inner() {
     );
 
     // Clean up the server task.
+    server_handle.abort();
+}
+
+/// Prove the v2 concurrent RTP egress: after PLAY, a frame published to the
+/// mount point is delivered to the client over the interleaved TCP transport
+/// **without the client issuing any further request**.
+///
+/// Under the old single-task design the frame would only flush on the next
+/// request's read cycle, so this `next_event()` would stall until the 3-second
+/// inner timeout fired. With the split read/write halves the dedicated writer
+/// task pushes the frame as soon as it is published.
+#[tokio::test]
+async fn test_rtp_delivered_after_play_without_further_requests() {
+    timeout(
+        Duration::from_secs(5),
+        rtp_after_play_without_request_inner(),
+    )
+    .await
+    .expect("concurrent-RTP test timed out after 5 seconds");
+}
+
+async fn rtp_after_play_without_request_inner() {
+    let sdp_text =
+        SessionDescription::for_rtsp_stream("127.0.0.1", 96, "H264", 90000, None, None, None, None)
+            .to_string();
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind to loopback:0");
+    let port = listener.local_addr().expect("local_addr").port();
+
+    let config = RtspServerConfig {
+        bind_address: format!("127.0.0.1:{port}"),
+        session_timeout: Duration::from_secs(60),
+        max_connections: 10,
+    };
+    let server = RtspServer::new(config);
+    // Drop the initial receiver so the playing connection is the only subscriber
+    // — this makes the published-frame count assertion below deterministic.
+    let (mp, initial_rx) = MountPoint::new("/stream".into(), sdp_text);
+    drop(initial_rx);
+    let mount = server.registry().register(mp);
+
+    let server_handle = tokio::spawn(async move {
+        let _ = server.run_with_listener(listener).await;
+    });
+    tokio::task::yield_now().await;
+
+    let url = format!("rtsp://127.0.0.1:{port}/stream");
+    let cfg = ClientConfig {
+        io_timeout: Duration::from_secs(4),
+        ..Default::default()
+    };
+    let mut client = RtspClient::connect_with(&url, cfg)
+        .await
+        .expect("client connect");
+
+    // Control plane: OPTIONS → DESCRIBE → SETUP → PLAY.
+    let _ = client.options().await.expect("OPTIONS");
+    let sdp = client.describe().await.expect("DESCRIBE");
+    let video = sdp.video().expect("video track in SDP");
+    let control = video.control.as_deref().unwrap_or("trackID=1");
+    let _ = client
+        .setup(control, &SetupTransport::tcp_interleaved(0))
+        .await
+        .expect("SETUP");
+    client.play().await.expect("PLAY");
+
+    // Publish ONE RTP frame AFTER play() returned. The PLAY response is sent by
+    // the server only after it subscribes, so by now the connection is a live
+    // subscriber — the publish must reach exactly one receiver.
+    let mut builder = RtpPacketBuilder::new(0xCAFE_BABE, 96);
+    builder.timestamp = 90_000;
+    let payload = b"live-frame-after-play" as &[u8];
+    let rtp_bytes = builder.build(payload);
+    let delivered = mount.publish(Arc::new(rtp_bytes));
+    assert_eq!(
+        delivered, 1,
+        "playing connection must be a live broadcast subscriber after PLAY"
+    );
+
+    // Receive it via next_event() WITHOUT issuing another RTSP request. A 3s
+    // guard converts a regression (no concurrent egress) into a clean failure.
+    let event = timeout(Duration::from_secs(3), client.next_event())
+        .await
+        .expect("RTP frame must arrive concurrently, with no follow-up request")
+        .expect("next_event must succeed");
+
+    match event {
+        ServerEvent::Packet(pkt) => {
+            assert_eq!(pkt.channel, 0, "RTP must arrive on interleaved channel 0");
+            let rtp = RtpPacket::parse(&pkt.data).expect("valid RTP packet");
+            assert_eq!(rtp.payload, payload, "RTP payload must round-trip");
+            assert_eq!(rtp.payload_type, 96, "payload type must be preserved");
+            assert_eq!(rtp.ssrc, 0xCAFE_BABE, "SSRC must be preserved");
+        }
+        other => panic!("expected an interleaved RTP packet, got {other:?}"),
+    }
+
+    // TEARDOWN must still succeed (and stop the writer task) after live egress.
+    client.teardown().await.expect("TEARDOWN");
+    assert!(
+        client.session().is_none(),
+        "session must be cleared after TEARDOWN"
+    );
+
     server_handle.abort();
 }
 

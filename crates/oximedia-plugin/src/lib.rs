@@ -61,6 +61,14 @@
 //! - `oximedia_plugin_create() -> *mut dyn CodecPlugin`
 //!
 //! Use the [`declare_plugin!`] macro to generate these exports.
+//!
+//! Loading a shared library executes arbitrary code with no sandboxing,
+//! so `loader::LoadedPlugin::load_with_digest` (and
+//! [`PluginRegistry::load_plugin_with_digest`]) should be preferred over
+//! the unchecked `load`/`load_plugin` entry points whenever the expected
+//! SHA-256 digest of the plugin file is known ahead of time. See the
+//! `loader` module documentation (available with the `dynamic-loading`
+//! feature) for the full trust model.
 
 pub mod capability;
 pub mod config_persist;

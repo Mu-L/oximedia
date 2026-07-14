@@ -127,9 +127,9 @@ pub struct FrequencyAnalysisResult {
 
 /// Stateful frequency analyzer fed one frame at a time.
 ///
-/// Call [`push_frame`] with the Y-plane bytes of each video frame; the
+/// Call [`Self::push_frame`] with the Y-plane bytes of each video frame; the
 /// analyzer maintains a rolling window of per-frame mean luminance values.
-/// Call [`analyze`] at any point to obtain [`FrequencyAnalysisResult`] from
+/// Call [`Self::analyze`] at any point to obtain [`FrequencyAnalysisResult`] from
 /// the current window.
 #[derive(Debug)]
 pub struct FrequencyAnalyzer {

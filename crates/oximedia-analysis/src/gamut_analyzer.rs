@@ -230,7 +230,7 @@ mod tests {
     #[test]
     fn test_analyze_returns_correct_pixel_count() {
         // 4 pure-red pixels (12 bytes total)
-        let frame: Vec<u8> = std::iter::repeat([255u8, 0, 0]).take(4).flatten().collect();
+        let frame: Vec<u8> = std::iter::repeat_n([255u8, 0, 0], 4).flatten().collect();
         let r = GamutAnalyzer::analyze(&frame, 2, 2, &Gamut::rec709());
         assert_eq!(r.total_pixels, 4);
         assert_eq!(r.out_of_gamut_pixels, 4);

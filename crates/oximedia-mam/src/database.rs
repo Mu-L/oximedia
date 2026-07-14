@@ -116,7 +116,10 @@ pub struct AuditLog {
 }
 
 impl Database {
-    /// Create a new database connection
+    /// Create a new database connection with default pool settings (50 max connections).
+    ///
+    /// For production deployments, prefer [`Database::new_with_config`] which accepts
+    /// pool sizing produced by [`crate::pool_tuning::PoolTuner`].
     ///
     /// # Errors
     ///
@@ -124,6 +127,43 @@ impl Database {
     pub async fn new(database_url: &str) -> Result<Self> {
         let pool = PgPoolOptions::new()
             .max_connections(50)
+            .connect(database_url)
+            .await?;
+
+        Ok(Self { pool })
+    }
+
+    /// Create a new database connection using a [`crate::pool_tuning::PoolConfig`].
+    ///
+    /// This integrates the adaptive pool-tuning layer: callers may use a
+    /// [`crate::pool_tuning::PoolTuner`] to derive a `PoolConfig` that reflects
+    /// observed concurrency, then pass it here when (re-)creating the pool.
+    ///
+    /// ```text
+    /// // Conceptual usage — requires a live PostgreSQL server:
+    /// //
+    /// //   let sampler = Arc::new(LoadSampler::new(Duration::from_secs(60)));
+    /// //   let tuner   = PoolTuner::new(sampler, TuningStrategy::Balanced,
+    /// //                                PoolConfig::default(), 2, 200);
+    /// //   let metrics = PoolMetrics::new(active, idle, pending, max, min);
+    /// //   let rec     = tuner.evaluate(&metrics);
+    /// //   tuner.apply(&rec);
+    /// //   let db = Database::new_with_config(DATABASE_URL, tuner.current_config()).await?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database connection fails
+    pub async fn new_with_config(
+        database_url: &str,
+        config: crate::pool_tuning::PoolConfig,
+    ) -> Result<Self> {
+        let pool = PgPoolOptions::new()
+            .min_connections(config.min_connections)
+            .max_connections(config.max_connections)
+            .acquire_timeout(config.acquire_timeout)
+            .idle_timeout(config.idle_timeout)
+            .max_lifetime(config.max_lifetime)
             .connect(database_url)
             .await?;
 

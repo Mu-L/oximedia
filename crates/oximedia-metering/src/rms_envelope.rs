@@ -5,6 +5,19 @@
 //! using configurable attack and release time constants. Useful for level
 //! metering, dynamics visualization, and broadcast loudness monitoring.
 //! Supports both per-channel and downmixed operation modes.
+//!
+//! # Relationship to the main metering pipeline
+//!
+//! This module is independent of the [`crate::ebu_r128_impl::EbuR128Meter`]
+//! filter → LKFS → gating → LRA pipeline (see the crate-level docs, "Pipeline
+//! Architecture") — it shares no state with it and applies no K-weighting.
+//! Where the Momentary (400 ms) and Short-term (3 s) LKFS windows have fixed,
+//! standards-mandated durations, this envelope follower's attack/release times
+//! are freely configurable, making it suited to VU-style ballistics and
+//! dynamics visualisation rather than standards-accurate loudness. Run it
+//! alongside [`crate::LoudnessMeter`] on the same audio buffer. See also
+//! [`crate::clip_counter`] and [`crate::silence_detect`] for the other two
+//! complementary, independently-run QC modules.
 
 /// Configuration for the RMS envelope follower.
 #[derive(Clone, Debug)]

@@ -222,8 +222,7 @@ impl BlockFftShifter {
             // Expected phase advance from last hop (bin's ideal frequency).
             let expected_advance = TAU * bin as f32 * hop_f / fft_f;
             // True phase deviation from expected.
-            let delta = (phase - self.prev_analysis_phase[bin] - expected_advance)
-                .rem_euclid(TAU)
+            let delta = (phase - self.prev_analysis_phase[bin] - expected_advance).rem_euclid(TAU)
                 - std::f32::consts::PI;
             // Instantaneous frequency (bins).
             let inst_freq = bin as f32 + delta * fft_f / (TAU * hop_f);
@@ -353,7 +352,10 @@ mod tests {
     #[test]
     fn test_pitch_ratio_unison() {
         let s = make_shifter(0.0);
-        assert!((s.pitch_ratio() - 1.0).abs() < 1e-5, "0 semitones → ratio 1");
+        assert!(
+            (s.pitch_ratio() - 1.0).abs() < 1e-5,
+            "0 semitones → ratio 1"
+        );
     }
 
     #[test]
@@ -401,11 +403,7 @@ mod tests {
     #[test]
     fn test_latency_equals_fft_size() {
         let s = make_shifter(0.0);
-        assert_eq!(
-            s.latency_samples(),
-            1024,
-            "latency should equal fft_size"
-        );
+        assert_eq!(s.latency_samples(), 1024, "latency should equal fft_size");
     }
 
     // ── wet/dry ──────────────────────────────────────────────────────────────

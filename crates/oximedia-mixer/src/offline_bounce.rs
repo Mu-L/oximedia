@@ -2,7 +2,7 @@
 //!
 //! Unlike real-time processing, an offline bounce can run faster-than-realtime
 //! because it processes an arbitrary number of samples per iteration with no
-//! deadline constraints.  It accepts a user-supplied [`AudioSource`] trait
+//! deadline constraints.  It accepts a user-supplied [`AudioSource`](crate::offline_bounce::AudioSource) trait
 //! object for input and accumulates the rendered output into an interleaved
 //! `f32` buffer.
 //!

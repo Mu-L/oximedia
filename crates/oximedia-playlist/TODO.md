@@ -59,13 +59,13 @@
   - **Tests:** precomputed-vector scoring yields the same top-k ordering as the string-comparison path on a fixture set; feature vectors are stable across multiple calls; `popularity_norm` and `rating_norm` are in [0,1].
   - **Risk:** feature-vector cache must be invalidated if item metadata changes — scope to immutable items or add a version/dirty bit.
 - [x] Use interval trees in `schedule` for O(log n) overlap detection instead of linear scan (implemented 2026-05-31: src/interval_tree.rs — augmented red-black BST (CLRS §14.3), IntervalTree<K,V> with insert/remove/query_overlapping/query_all_overlapping/iter_sorted; ScheduleIntervalIndex domain adapter for DateTime<Utc> via epoch-ms; 23 tests)
-- [ ] Batch database writes in `play_history` for high-throughput playout logging
+- [x] Batch database writes in `play_history` for high-throughput playout logging (implemented 2026-06-06: src/play_history.rs — `PlayHistory::batch_record(&[(u64,u64,bool)])` vectorized logging; seeds running per-track counts in one O(n) pass, appends N events with correct play_count, evicts overflow once at the end; PlayEvent gains PartialEq/Eq; documented equivalence boundary vs N record_play calls; tests: test_batch_record_equals_n_single_writes_unbounded, test_batch_record_eviction_window_matches, test_batch_record_empty_is_noop, test_batch_record_appends_to_existing_events)
 
 ## Testing
-- [ ] Add integration tests for full playlist lifecycle (create, schedule, play, log)
-- [ ] Test `crossfade` module with edge cases (zero-duration items, single-item playlists)
-- [ ] Add stress tests for `multichannel` module with 50+ simultaneous channels
-- [ ] Test `clock` synchronization accuracy under simulated clock drift
+- [x] Add integration tests for full playlist lifecycle (create, schedule, play, log) (implemented 2026-06-22: tests/lifecycle_integration.rs — 4 deterministic end-to-end tests over a fixed simulated clock: full_lifecycle_create_schedule_play_log (Playlist/PlaylistItem CREATE -> ScheduleEngine timeline + active-window SCHEDULE -> PlayoutEngine state machine + Playlist cursor PLAY -> AsRunLog/MetadataTracker LOG), schedule_rejects_overlap_accepts_back_to_back (ScheduleEvent::ConflictDetected + back-to-back accept), live_insert_appears_in_asrun_at_correct_position (LiveInsertManager interrupt spliced into as-run at the right index), play_queue_drains_segments_in_order (PlayQueue FIFO + front-insert); no crate bug found, all assertions pass against real APIs)
+- [x] Test `crossfade` module with edge cases (zero-duration items, single-item playlists) (implemented 2026-06-06: src/crossfade.rs — tests: test_schedule_gapless_single_item, test_schedule_gapless_single_item_with_crossfade_ignored, test_zero_duration_entry_no_nan, test_fade_curves_no_nan_at_boundaries — all 6 FadeCurve variants × t∈{0,0.5,1} finite + endpoint conventions)
+- [x] Add stress tests for `multichannel` module with 50+ simultaneous channels (implemented 2026-06-06: tests/wave27_multichannel_stress.rs — test_50_channels_concurrent_start: Arc<ChannelManager>, 50 concurrent tokio tasks each add_channel+load_playlist+start_channel, asserts channel_count()==50, get_all_channels().len()==50, unique ids, no lock poisoning)
+- [x] Test `clock` synchronization accuracy under simulated clock drift (implemented 2026-06-06: src/clock/offset.rs + src/clock/sync.rs — tests: test_drift_plus_100ms_resync, test_drift_minus_100ms_resync (literal fixed UTC instant, exact ±100ms), test_clocksync_offset_roundtrip (set_offset/get_offset round-trip + synchronize() populates last_sync_time))
 
 ## Documentation
 - [ ] Document SCTE-35 integration workflow with real-world examples

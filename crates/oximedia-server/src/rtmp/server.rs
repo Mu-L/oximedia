@@ -55,7 +55,9 @@ pub struct RtmpIngestConfig {
 impl Default for RtmpIngestConfig {
     fn default() -> Self {
         Self {
-            bind_addr: "0.0.0.0:1935".parse().expect("valid address"),
+            // Built directly from octets/port rather than `str::parse`, so
+            // this is infallible by construction (no `.expect()` needed).
+            bind_addr: SocketAddr::from(([0, 0, 0, 0], 1935)),
             max_streams: 1000,
             enable_auth: true,
             enable_transcoding: true,

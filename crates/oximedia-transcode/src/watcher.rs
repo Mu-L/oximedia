@@ -1,6 +1,6 @@
 //! Watch folder automation for automatic transcoding of new files.
 //!
-//! This module provides [`TranscodeWatcher`] which monitors a directory for
+//! This module provides [`crate::watcher::TranscodeWatcher`] which monitors a directory for
 //! newly-created media files and exposes them for downstream transcoding.
 //! Stable-file detection prevents processing files that are still being written.
 

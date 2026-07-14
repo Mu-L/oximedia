@@ -916,10 +916,13 @@ pub struct MotionVector {
 /// use oximedia_stabilize::motion::tracker::{CachedTracker, TrackerConfig};
 ///
 /// let mut tracker = CachedTracker::new(TrackerConfig::default());
+/// let prev = vec![0u8; 640 * 480];
+/// let curr = vec![0u8; 640 * 480];
+/// let next = vec![0u8; 640 * 480];
 /// // First call always computes descriptors for both frames.
 /// // Subsequent calls reuse prev descriptors from the previous curr.
-/// let _vectors = tracker.track_frame(prev, curr, 640, 480);
-/// let _vectors = tracker.track_frame(curr, next, 640, 480);
+/// let _vectors = tracker.track_frame(&prev, &curr, 640, 480);
+/// let _vectors = tracker.track_frame(&curr, &next, 640, 480);
 /// ```
 #[derive(Debug)]
 pub struct CachedTracker {

@@ -200,7 +200,7 @@ mod tests {
         assert!(config.recursive);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_watch_folder_creation() {
         let temp_dir = TempDir::new().expect("failed to create temp dir");
         let db_path = temp_dir.path().join("test.db");

@@ -1,6 +1,6 @@
 //! Sample-accurate automation playback engine.
 //!
-//! This module provides an [`AutomationEngine`] that reads automation lane data
+//! This module provides an [`AutomationEngine`](crate::automation_engine::AutomationEngine) that reads automation lane data
 //! and applies parameter changes per audio buffer with sample-accurate timing.
 //!
 //! ## Modes
@@ -16,7 +16,7 @@
 //! ## Interpolation
 //!
 //! Linear interpolation is performed between consecutive
-//! [`AutomationBreakpoint`]s.  Values before the first or after the last
+//! [`AutomationBreakpoint`](crate::automation_engine::AutomationBreakpoint)s.  Values before the first or after the last
 //! breakpoint hold the nearest breakpoint value.
 
 use std::collections::HashMap;

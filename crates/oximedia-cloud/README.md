@@ -6,13 +6,13 @@ Multi-cloud storage and media services integration for OxiMedia, supporting AWS,
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.8 — 2026-05-29 — 505 tests
+Version: 0.1.9 — 2026-07-08 — extensively tested
 
 ## Features
 
 - **Multi-cloud Storage Abstraction** — Unified API for AWS S3, Azure Blob, and Google Cloud Storage
-- **AWS Integration** — S3, MediaConvert, MediaLive, MediaPackage, CloudWatch, KMS (aws-sdk-*)
-- **Azure Integration** — Azure Blob Storage and Azure Media Services (azure_storage_blobs, azure_identity)
+- **AWS Integration** — S3, MediaConvert, MediaLive, MediaPackage, CloudWatch, KMS (aws-sdk-*; opt-in `aws-sdk` feature, see below)
+- **Azure Integration** — Azure Blob Storage and Azure Media Services (Pure-Rust REST client with Shared Key / SAS auth via reqwest + hmac)
 - **GCP Integration** — Google Cloud Storage and GCP Media Services (REST API via reqwest)
 - **Transfer Management** — Retry, resume, multipart upload, bandwidth throttling
 - **Cost Optimization** — Storage tier management, cost estimation, egress policy
@@ -30,8 +30,19 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-cloud = "0.1.8"
+oximedia-cloud = "0.1.9"
 ```
+
+## Cargo features
+
+The default build is 100% Pure Rust (no C/C++/assembly compiled in). TLS uses
+`rustls` with the Pure-Rust `rustls-rustcrypto` provider, installed
+automatically by every client constructor.
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `aws-sdk` | no | Official `aws-sdk-*` backend (`S3Storage`, `AwsMediaServices`). **Not Pure Rust**: the AWS smithy TLS stack only ships C-based crypto providers (ring / aws-lc / s2n), so enabling this compiles `ring` (C + assembly). Without it, use `CloudProvider::Generic` / `GenericStorage` for S3-compatible endpoints. |
+| `oci` | no | OCI Object Storage conditional-compilation guards (deps are unconditional; Pure Rust). |
 
 ```rust
 use oximedia_cloud::{CloudProvider, CloudStorage, create_storage};
@@ -61,7 +72,7 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 - `Credentials`, `EncryptionConfig`, `KmsConfig` — Security types
 
 **Backend modules:**
-- `aws` — AWS S3, MediaConvert, MediaLive, MediaPackage, CloudWatch, KMS
+- `aws` — AWS S3, MediaConvert, MediaLive, MediaPackage, CloudWatch, KMS (requires the non-default `aws-sdk` feature)
 - `azure` — Azure Blob Storage and Azure Media Services
 - `gcp` — Google Cloud Storage and GCP Media Services
 - `generic` — Generic storage provider abstraction

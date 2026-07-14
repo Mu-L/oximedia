@@ -8,4 +8,4 @@ pub mod smart;
 pub use self::bin::{Bin, BinId};
 pub use collection::{Collection, CollectionId};
 pub use folder::{Folder, FolderId};
-pub use smart::{SmartCollection, SmartRule};
+pub use smart::{ClipField, Comparison, MatchMode, SmartCollection, SmartRule};

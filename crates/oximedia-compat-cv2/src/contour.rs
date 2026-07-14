@@ -6,7 +6,7 @@
 //! and adapted to use the pure-Rust `Mat`/`Point` types.
 
 use crate::{
-    constants::{DIST_L1, DIST_L2},
+    constants::{DIST_FAIR, DIST_HUBER, DIST_L1, DIST_L2},
     error::{Cv2Error, Cv2Result},
     mat::{Mat, MatType, Point, Point2f, Rect},
 };
@@ -594,8 +594,11 @@ pub fn fit_ellipse(points: &[Point]) -> Cv2Result<RotatedRect> {
 /// Returns `[vx, vy, x0, y0]` where `(x0, y0)` is a point on the line and
 /// `(vx, vy)` is the unit direction vector.
 ///
-/// Supported `dist_type` values: `DIST_L2` (2) — PCA on covariance matrix;
-/// `DIST_L1` (1) — IRLS robust regression.
+/// Supported `dist_type` values:
+/// - `DIST_L2` (2) — PCA on covariance matrix
+/// - `DIST_L1` (1) — IRLS robust regression with L1 weights
+/// - `DIST_HUBER` (7) — IRLS with Huber M-estimator weights (c ≈ 1.345 MAD)
+/// - `DIST_FAIR` (5) — IRLS with Fair M-estimator weights (c ≈ 1.3998 MAD)
 ///
 /// # Errors
 /// Returns `UnsupportedFlag` for unsupported `dist_type` or fewer than 2 points.
@@ -611,6 +614,10 @@ pub fn fit_line(points: &[Point], dist_type: i32) -> Cv2Result<[f32; 4]> {
         Ok(fit_line_l2(points))
     } else if dist_type == DIST_L1 {
         Ok(fit_line_l1(points))
+    } else if dist_type == DIST_HUBER {
+        Ok(fit_line_huber(points))
+    } else if dist_type == DIST_FAIR {
+        Ok(fit_line_fair(points))
     } else {
         Err(Cv2Error::UnsupportedFlag {
             name: "fit_line: unsupported dist_type",
@@ -1136,6 +1143,288 @@ fn irls_line(
     }
 
     [vx as f32, vy as f32, x0 as f32, y0 as f32]
+}
+
+/// Weight function choice for IRLS M-estimators.
+#[derive(Clone, Copy)]
+enum IrlsWeight {
+    /// Huber: w = 1 if r <= c, else c / r.
+    Huber { c: f64 },
+    /// Fair: w = 1 / (1 + r / c).
+    Fair { c: f64 },
+}
+
+/// Compute an IRLS weight for a given residual magnitude using the specified
+/// weight function.
+#[inline]
+fn irls_weight_fn(r: f64, weight: IrlsWeight) -> f64 {
+    match weight {
+        IrlsWeight::Huber { c } => {
+            if r <= c {
+                1.0
+            } else {
+                c / r
+            }
+        }
+        IrlsWeight::Fair { c } => 1.0 / (1.0 + r / c.max(1e-10)),
+    }
+}
+
+/// Median of the values, sorting them in place.  Returns `0.0` for an empty
+/// slice.
+fn median_in_place(values: &mut [f64]) -> f64 {
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = values.len();
+    if n == 0 {
+        0.0
+    } else if n % 2 == 0 {
+        (values[n / 2 - 1] + values[n / 2]) / 2.0
+    } else {
+        values[n / 2]
+    }
+}
+
+/// Absolute perpendicular distance from `p` to the unit-direction line
+/// `[vx, vy, x0, y0]`.
+fn perp_residual(p: Point, line: &[f64; 4]) -> f64 {
+    ((p.x as f64 - line[2]) * line[1] - (p.y as f64 - line[3]) * line[0]).abs()
+}
+
+/// Median absolute perpendicular residual of `points` about `line`.
+fn median_abs_residual(points: &[Point], line: &[f64; 4]) -> f64 {
+    let mut r: Vec<f64> = points.iter().map(|&p| perp_residual(p, line)).collect();
+    median_in_place(&mut r)
+}
+
+/// Median squared perpendicular residual (least-median-of-squares objective).
+fn median_squared_residual(points: &[Point], line: &[f64; 4]) -> f64 {
+    let mut r: Vec<f64> = points
+        .iter()
+        .map(|&p| {
+            let d = perp_residual(p, line);
+            d * d
+        })
+        .collect();
+    median_in_place(&mut r)
+}
+
+/// Upper bound on the number of points sampled for the Theil-Sen seed so the
+/// O(n^2) pair enumeration stays bounded on large inputs.  The final polish
+/// always runs on the full point set.
+const THEIL_SEN_MAX_POINTS: usize = 200;
+
+/// Theil-Sen robust line estimate in one orientation.
+///
+/// When `horizontal` is true the slope is `dy / dx` (line modelled as
+/// `y = m x + b`); otherwise it is `dx / dy` (line modelled as `x = m y + b`),
+/// which is needed to represent near-vertical lines.  Returns `None` when the
+/// independent axis is degenerate (every sampled pair shares the same
+/// coordinate).
+fn theil_sen_line(points: &[Point], horizontal: bool) -> Option<[f64; 4]> {
+    let stride = points.len().div_ceil(THEIL_SEN_MAX_POINTS).max(1);
+    let sample: Vec<Point> = points.iter().copied().step_by(stride).collect();
+    let m = sample.len();
+
+    let mut slopes: Vec<f64> = Vec::new();
+    for i in 0..m {
+        let a = sample[i];
+        for b in sample.iter().skip(i + 1) {
+            let (num, den) = if horizontal {
+                ((b.y - a.y) as f64, (b.x - a.x) as f64)
+            } else {
+                ((b.x - a.x) as f64, (b.y - a.y) as f64)
+            };
+            if den.abs() > 0.0 {
+                slopes.push(num / den);
+            }
+        }
+    }
+    if slopes.is_empty() {
+        return None;
+    }
+    let slope = median_in_place(&mut slopes);
+    let norm = (1.0 + slope * slope).sqrt();
+
+    if horizontal {
+        let mut intercepts: Vec<f64> = sample
+            .iter()
+            .map(|p| p.y as f64 - slope * p.x as f64)
+            .collect();
+        let b = median_in_place(&mut intercepts);
+        let mut xs: Vec<f64> = sample.iter().map(|p| p.x as f64).collect();
+        let cx = median_in_place(&mut xs);
+        Some([1.0 / norm, slope / norm, cx, slope * cx + b])
+    } else {
+        let mut intercepts: Vec<f64> = sample
+            .iter()
+            .map(|p| p.x as f64 - slope * p.y as f64)
+            .collect();
+        let b = median_in_place(&mut intercepts);
+        let mut ys: Vec<f64> = sample.iter().map(|p| p.y as f64).collect();
+        let cy = median_in_place(&mut ys);
+        Some([slope / norm, 1.0 / norm, slope * cy + b, cy])
+    }
+}
+
+/// High-breakdown robust seed line: the better-fitting of the two Theil-Sen
+/// orientations, falling back to the L2 fit when both are degenerate.
+fn robust_line_seed(points: &[Point]) -> [f64; 4] {
+    let horizontal = theil_sen_line(points, true);
+    let vertical = theil_sen_line(points, false);
+    match (horizontal, vertical) {
+        (Some(h), Some(v)) => {
+            if median_abs_residual(points, &h) <= median_abs_residual(points, &v) {
+                h
+            } else {
+                v
+            }
+        }
+        (Some(h), None) => h,
+        (None, Some(v)) => v,
+        (None, None) => {
+            let l2 = fit_line_l2(points);
+            [l2[0] as f64, l2[1] as f64, l2[2] as f64, l2[3] as f64]
+        }
+    }
+}
+
+/// Robust M-estimator polish seeded from a high-breakdown estimate.
+///
+/// Standard Huber / Fair IRLS is not resistant to high-leverage outliers in
+/// the total-least-squares (perpendicular) formulation: their non-redescending
+/// `c / r` tail lets a distant point's leverage `w * r^2 = c * r` grow without
+/// bound, so a naive iteration slowly rotates the fit towards the outliers even
+/// from a perfect start.  Seeding from `robust_line_seed` places the iteration
+/// in the correct basin, and returning the iterate that minimises the
+/// least-median-of-squares objective guarantees the polish never degrades the
+/// robust fit.  The per-iteration scale `c` is re-estimated from the median
+/// absolute residual so the tuning constant is scale-invariant.
+fn robust_polish(
+    points: &[Point],
+    seed: [f64; 4],
+    iters: usize,
+    base_weight: IrlsWeight,
+    tuning: f64,
+) -> [f64; 4] {
+    let [mut vx, mut vy, mut x0, mut y0] = seed;
+    let mut best = seed;
+    let mut best_obj = median_squared_residual(points, &seed);
+
+    for _ in 0..iters {
+        let raw: Vec<f64> = points
+            .iter()
+            .map(|p| ((p.x as f64 - x0) * vy - (p.y as f64 - y0) * vx).abs())
+            .collect();
+
+        let mut scale_sample = raw.clone();
+        let sigma = (median_in_place(&mut scale_sample) / 0.6745).max(1e-6);
+        let c = (tuning * sigma).max(1e-6);
+
+        let effective_weight = match base_weight {
+            IrlsWeight::Huber { .. } => IrlsWeight::Huber { c },
+            IrlsWeight::Fair { .. } => IrlsWeight::Fair { c },
+        };
+
+        let weights: Vec<f64> = raw
+            .iter()
+            .map(|&r| irls_weight_fn(r, effective_weight))
+            .collect();
+
+        let w_sum: f64 = weights.iter().sum();
+        if w_sum < 1e-20 {
+            break;
+        }
+
+        let xc = points
+            .iter()
+            .zip(&weights)
+            .map(|(p, &w)| p.x as f64 * w)
+            .sum::<f64>()
+            / w_sum;
+        let yc = points
+            .iter()
+            .zip(&weights)
+            .map(|(p, &w)| p.y as f64 * w)
+            .sum::<f64>()
+            / w_sum;
+
+        let mut s00 = 0.0_f64;
+        let mut s01 = 0.0_f64;
+        let mut s11 = 0.0_f64;
+        for (p, &w) in points.iter().zip(&weights) {
+            let dx = p.x as f64 - xc;
+            let dy = p.y as f64 - yc;
+            s00 += w * dx * dx;
+            s01 += w * dx * dy;
+            s11 += w * dy * dy;
+        }
+
+        let (nvx, nvy) = pca2x2_direction(s00, s01, s11);
+        // |sin| of the change in unit direction between iterations.
+        let direction_change = (vx * nvy - vy * nvx).abs();
+        vx = nvx;
+        vy = nvy;
+        x0 = xc;
+        y0 = yc;
+
+        let candidate = [vx, vy, x0, y0];
+        let obj = median_squared_residual(points, &candidate);
+        if obj < best_obj {
+            best_obj = obj;
+            best = candidate;
+        }
+        if direction_change < 1e-4 {
+            break;
+        }
+    }
+
+    best
+}
+
+/// Huber M-estimator line fit: high-breakdown Theil-Sen seed refined by a
+/// robust IRLS polish.
+///
+/// Uses the standard Huber tuning constant k = 1.345 (95% efficiency at the
+/// Gaussian distribution).
+fn fit_line_huber(points: &[Point]) -> [f32; 4] {
+    const HUBER_TUNING: f64 = 1.345;
+    let seed = robust_line_seed(points);
+    let line = robust_polish(
+        points,
+        seed,
+        40,
+        IrlsWeight::Huber { c: HUBER_TUNING },
+        HUBER_TUNING,
+    );
+    [
+        line[0] as f32,
+        line[1] as f32,
+        line[2] as f32,
+        line[3] as f32,
+    ]
+}
+
+/// Fair M-estimator line fit: high-breakdown Theil-Sen seed refined by a
+/// robust IRLS polish.
+///
+/// Uses the standard Fair tuning constant c = 1.3998 (95% efficiency at the
+/// Gaussian distribution).
+fn fit_line_fair(points: &[Point]) -> [f32; 4] {
+    const FAIR_TUNING: f64 = 1.3998;
+    let seed = robust_line_seed(points);
+    let line = robust_polish(
+        points,
+        seed,
+        40,
+        IrlsWeight::Fair { c: FAIR_TUNING },
+        FAIR_TUNING,
+    );
+    [
+        line[0] as f32,
+        line[1] as f32,
+        line[2] as f32,
+        line[3] as f32,
+    ]
 }
 
 /// Direction eigenvector of 2×2 symmetric covariance [[s00, s01],[s01, s11]]

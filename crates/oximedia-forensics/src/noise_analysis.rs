@@ -5,6 +5,43 @@
 //! including Photo Response Non-Uniformity (PRNU) extraction,
 //! noise level estimation, and spatial noise consistency checking.
 //! Inconsistent noise patterns are strong indicators of tampering.
+//!
+//! # Methodology
+//!
+//! PRNU is a multiplicative, spatially-fixed pattern imposed on every image
+//! taken by a given sensor by microscopic pixel-to-pixel variations in
+//! photodetector sensitivity. It survives ordinary processing (JPEG
+//! recompression, resizing, mild filtering) and is unique per physical
+//! device, which makes it useful both for source-camera attribution (see
+//! [`PrnuFingerprint`] and [`crate::source_camera`]) and for tamper
+//! localization: a region whose *local* noise residual is statistically
+//! inconsistent with the rest of the frame — because it was spliced in
+//! from a different source, smoothed by retouching, or re-synthesized —
+//! shows up as a [`NoiseType::Prnu`] or general noise-level outlier in
+//! [`RegionNoiseVarianceMap`]. The companion [`crate::noise`] module
+//! implements the corresponding denoise-and-subtract residual extraction
+//! (`extract_prnu_pattern` there) and whole-image inconsistency scoring
+//! that this module's per-region types describe.
+//!
+//! # References
+//!
+//! - J. Lukáš, J. Fridrich, M. Goljan, "Digital Camera Identification from
+//!   Sensor Pattern Noise", IEEE Transactions on Information Forensics and
+//!   Security, 1(2), 205–214 (2006) — the foundational PRNU extraction and
+//!   source-attribution method underlying [`PrnuFingerprint`].
+//! - M. Chen, J. Fridrich, M. Goljan, J. Lukáš, "Determining Image Origin
+//!   and Integrity Using Sensor Noise", IEEE Transactions on Information
+//!   Forensics and Security, 3(1), 74–90 (2008) — extends PRNU analysis to
+//!   forgery/splicing localization via block-wise correlation, which
+//!   motivates the per-region variance mapping in
+//!   [`compute_region_noise_variance`].
+//! - M. K. Mihcak, I. Kozintsev, K. Ramchandran, "Spatially adaptive
+//!   statistical modeling of wavelet image coefficients and its
+//!   application to denoising", IEEE ICASSP (1999) — the wavelet-domain
+//!   denoising approach commonly used (and approximated here via MAD/std
+//!   estimators, see [`estimate_noise_mad`] and [`estimate_noise_std`]) to
+//!   separate the noise residual from scene content prior to
+//!   PRNU/consistency analysis.
 
 use std::collections::HashMap;
 

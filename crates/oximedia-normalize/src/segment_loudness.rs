@@ -13,7 +13,7 @@
 //!    milliseconds, or when a steep energy rise (onset) is detected.
 //! 2. **Per-segment analysis** — each segment is measured with an ITU-R
 //!    BS.1770 compliant gated loudness integrator accumulated in a dedicated
-//!    [`SegmentMeter`].
+//!    `SegmentMeter`.
 //! 3. **Gain scheduling** — a [`GainSchedule`] is emitted containing one
 //!    [`SegmentGain`] per detected segment, together with sample-accurate
 //!    fade ramps so that gain transitions are artefact-free.
@@ -427,8 +427,8 @@ impl SegmentGain {
 
 /// Detects natural segment boundaries and measures per-segment loudness.
 ///
-/// Feed the full interleaved audio buffer to [`analyze_f32`] or
-/// [`analyze_f64`], then call [`build_schedule`] to obtain a gain schedule
+/// Feed the full interleaved audio buffer to [`SegmentLoudnessAnalyzer::analyze_f32`] or
+/// [`SegmentLoudnessAnalyzer::analyze_f64`], then call [`SegmentLoudnessAnalyzer::build_schedule`] to obtain a gain schedule
 /// tuned to the configured target.
 pub struct SegmentLoudnessAnalyzer {
     config: SegmentLoudnessConfig,

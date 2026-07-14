@@ -320,7 +320,7 @@ impl DynamicsPreservingNormalizer {
 
     /// Analyse a block of audio without modifying it.
     ///
-    /// Populates internal loudness statistics for use by [`process`].
+    /// Populates internal loudness statistics for use by [`Self::process`].
     pub fn analyze(&mut self, samples: &[f32]) {
         if samples.is_empty() {
             return;
@@ -424,7 +424,7 @@ impl DynamicsPreservingNormalizer {
 
     /// Process audio in-place and return a detailed result.
     ///
-    /// If [`analyze`] has not been called first the method performs a one-pass
+    /// If [`Self::analyze`] has not been called first the method performs a one-pass
     /// analysis before applying gain (accurate for stationary signals).
     pub fn process(&mut self, samples: &mut [f32]) -> NormalizeResult<DynPreservingResult> {
         if samples.is_empty() {

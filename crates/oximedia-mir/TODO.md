@@ -26,7 +26,7 @@
 - [x] Implement audio thumbnailing -- extract the most representative 15-30s clip using structure analysis (verified 2026-05-16; src/thumbnail.rs:72 AudioThumbnail, ThumbnailConfig:34, ThumbnailResult:17)
 - [x] Add music similarity search using fingerprint module with locality-sensitive hashing (verified 2026-05-16; src/lsh_similarity.rs:90 LshSimilarityIndex, band-based LSH)
 - [x] Implement real-time DJ features: beat-matching suggestions, compatible key detection (Camelot wheel) (verified 2026-05-16; src/dj_features.rs:30 CamelotCode, CamelotWheel:162, BeatMatcher)
-- [x] Add lyrics timing alignment support (given lyrics text, align to audio using vocal_detect + onset_strength) (partial 2026-05-16; src/lyrics_align.rs:88 align_lyrics stub -- comments note production-quality CTC alignment not implemented)
+- [x] Add lyrics timing alignment support (given lyrics text, align to audio using vocal_detect + onset_strength) (completed 2026-06-05; src/lyrics_align.rs: align_lyrics_dtw DTW forced alignment + 5 new tests; greedy align_lyrics preserved)
 - [x] Implement audio watermark detection using spectral analysis (verified 2026-05-16; src/watermark_detect.rs:93 WatermarkDetector, detect fn:103)
 
 ## Performance

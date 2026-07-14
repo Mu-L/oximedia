@@ -344,7 +344,11 @@ impl TokenSessionStore {
         let token = SessionToken::generate(seed);
         let session = TokenSession::new(token, user_id, now_ms);
         self.sessions.push(session);
-        self.sessions.last().expect("just pushed")
+        // Indexing the element we just pushed rather than `.last().expect(..)`
+        // avoids a panicking API while remaining equally infallible: the
+        // vector's length grew by exactly one on the line above.
+        let last_idx = self.sessions.len() - 1;
+        &self.sessions[last_idx]
     }
 
     /// Returns a reference to the session with the given token value.

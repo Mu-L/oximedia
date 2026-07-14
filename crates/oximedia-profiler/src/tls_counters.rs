@@ -6,20 +6,49 @@
 //!
 //! # Design
 //!
-//! Each thread maintains a [`ThreadLocalCounters`] cell.  A
-//! [`TlsCounterRegistry`] provides a global view by aggregating snapshots
-//! that threads voluntarily publish via [`ThreadLocalCounters::flush`] or
-//! that the registry harvests during [`TlsCounterRegistry::harvest`].
+//! Each thread maintains a [`ThreadLocalCounters`] cell via a module-level
+//! `thread_local!`.  A [`TlsCounterRegistry`] provides a global view by
+//! aggregating snapshots that threads voluntarily publish via
+//! [`ThreadLocalCounters::flush_to`] or that the registry harvests during
+//! [`TlsCounterRegistry::harvest`].
+//!
+//! The hot path (`increment` / `add_duration`) uses `&'static str` keys
+//! backed by a `HashMap<&'static str, _>`, eliminating `to_string()` heap
+//! allocations from the sampling critical path.
 //!
 //! This approach achieves near-zero overhead for the hot recording path: a
 //! counter increment is a single non-atomic integer write.
-
-#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+// ---------------------------------------------------------------------------
+// Module-level thread_local!
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// Per-thread counter storage.  Zero-cost to read from the owning thread.
+    static TLS_COUNTERS: std::cell::RefCell<ThreadLocalCounters> =
+        std::cell::RefCell::new(ThreadLocalCounters::new_empty());
+}
+
+/// Access the calling thread's [`ThreadLocalCounters`] inside a closure,
+/// forwarding the closure's return value.
+///
+/// This is the primary entry-point for the hot recording path:
+///
+/// ```rust
+/// use oximedia_profiler::tls_counters::with_tls_counters;
+/// with_tls_counters(|c| c.increment("frames", 1));
+/// ```
+pub fn with_tls_counters<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut ThreadLocalCounters) -> R,
+{
+    TLS_COUNTERS.with(|cell| f(&mut cell.borrow_mut()))
+}
 
 // ---------------------------------------------------------------------------
 // CounterSnapshot
@@ -71,16 +100,33 @@ impl CounterSnapshot {
 /// This struct is *not* `Send` or `Sync` — it is meant to live exclusively on
 /// one thread.  Access from other threads must go through a flushed
 /// [`CounterSnapshot`].
+///
+/// Hot-path methods (`increment`, `add_duration`) accept `&'static str` keys
+/// to avoid heap allocation on the recording path.
 #[derive(Debug, Default)]
 pub struct ThreadLocalCounters {
-    counts: HashMap<String, u64>,
-    durations_ns: HashMap<String, u64>,
+    /// Per-event-name hit counts.  Keys are `&'static str` for zero-allocation
+    /// hot-path increments.
+    counts: HashMap<&'static str, u64>,
+    /// Accumulated durations (nanoseconds) per event name.
+    durations_ns: HashMap<&'static str, u64>,
     /// Monotonic timer recording when the counters were last reset.
     reset_at: Option<Instant>,
 }
 
 impl ThreadLocalCounters {
-    /// Creates new empty counters.
+    /// Creates new empty counters (suitable for use in `thread_local!`
+    /// initialisers where `Instant::now()` is not yet meaningful).
+    #[must_use]
+    pub fn new_empty() -> Self {
+        Self {
+            counts: HashMap::new(),
+            durations_ns: HashMap::new(),
+            reset_at: None,
+        }
+    }
+
+    /// Creates new empty counters, recording the creation instant.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -91,27 +137,44 @@ impl ThreadLocalCounters {
     }
 
     /// Increments the named event counter by `delta`.
+    ///
+    /// `name` must be a `&'static str` so no heap allocation is needed on
+    /// the hot recording path.
     #[inline]
-    pub fn increment(&mut self, name: &str, delta: u64) {
-        *self.counts.entry(name.to_string()).or_insert(0) += delta;
+    pub fn increment(&mut self, name: &'static str, delta: u64) {
+        *self.counts.entry(name).or_insert(0) += delta;
     }
 
     /// Records `duration` against the named timer accumulator.
+    ///
+    /// `name` must be a `&'static str` so no heap allocation is needed on
+    /// the hot recording path.
     #[inline]
-    pub fn add_duration(&mut self, name: &str, duration: Duration) {
-        *self.durations_ns.entry(name.to_string()).or_insert(0) += duration.as_nanos() as u64;
+    pub fn add_duration(&mut self, name: &'static str, duration: Duration) {
+        *self.durations_ns.entry(name).or_insert(0) += duration.as_nanos() as u64;
     }
 
     /// Returns the current count for `name`.
     #[must_use]
     pub fn count(&self, name: &str) -> u64 {
-        self.counts.get(name).copied().unwrap_or(0)
+        // Iterate to support both &'static str and arbitrary &str look-ups.
+        self.counts
+            .iter()
+            .find(|(k, _)| **k == name)
+            .map(|(_, v)| *v)
+            .unwrap_or(0)
     }
 
     /// Returns the accumulated duration for `name`.
     #[must_use]
     pub fn duration(&self, name: &str) -> Duration {
-        Duration::from_nanos(self.durations_ns.get(name).copied().unwrap_or(0))
+        let ns = self
+            .durations_ns
+            .iter()
+            .find(|(k, _)| **k == name)
+            .map(|(_, v)| *v)
+            .unwrap_or(0);
+        Duration::from_nanos(ns)
     }
 
     /// Resets all counters and timers to zero.
@@ -125,12 +188,23 @@ impl ThreadLocalCounters {
     /// another thread (e.g. the registry aggregator).
     #[must_use]
     pub fn snapshot(&self, thread_id: u64, thread_name: Option<String>) -> CounterSnapshot {
+        // Convert &'static str keys → owned String for the serialisable snapshot.
+        let counts = self
+            .counts
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), *v))
+            .collect();
+        let durations_ns = self
+            .durations_ns
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), *v))
+            .collect();
         CounterSnapshot {
             thread_id,
             thread_name,
             timestamp_ns: 0, // wall time not available without syscall
-            counts: self.counts.clone(),
-            durations_ns: self.durations_ns.clone(),
+            counts,
+            durations_ns,
         }
     }
 
@@ -306,63 +380,25 @@ impl Default for TlsCounterRegistry {
 }
 
 // ---------------------------------------------------------------------------
-// ScopedTimer — RAII helper
+// SafeScopedTimer — RAII helper
 // ---------------------------------------------------------------------------
 
 /// RAII guard that records elapsed time into a [`ThreadLocalCounters`] entry
-/// on drop.
-///
-/// Note: This struct is a placeholder; use [`SafeScopedTimer`] in safe code.
-pub struct ScopedTimer {
-    counters: *mut ThreadLocalCounters,
-    name: String,
-    start: Instant,
-}
-
-// SAFETY: ScopedTimer is intentionally non-Send and non-Sync because the raw
-// pointer must not cross thread boundaries.  The pointer is valid for the
-// lifetime of the guard (the ThreadLocalCounters outlives it by construction
-// at all call sites).
-//
-// However, because we have `#![forbid(unsafe_code)]`, we cannot implement
-// this with raw pointer dereference.  Instead we use a safe wrapper that
-// requires a mutable reference (lifetime-bounded).
-
-impl Drop for ScopedTimer {
-    fn drop(&mut self) {
-        // We guarantee the pointer is valid and non-aliased for the lifetime
-        // of this guard because:
-        //   1. The pointer was created from a &mut ThreadLocalCounters.
-        //   2. No safe code can form a second &mut to the same allocation
-        //      while this guard is alive (Rust's aliasing rules).
-        //
-        // Despite `#![forbid(unsafe_code)]`, `Drop` implementations cannot
-        // contain unsafe blocks at the crate level when the crate uses
-        // `#![forbid(unsafe_code)]`.  We therefore take a different approach
-        // and remove the raw-pointer field, replacing it with a ref-counted
-        // interior-mutable container.
-        let _ = self.start; // silence unused warning
-    }
-}
-
-/// Safe RAII scoped timer that accumulates elapsed time into a named key.
-///
-/// Unlike the raw-pointer variant above (which cannot be used under
-/// `#![forbid(unsafe_code)]`), this version holds an `Arc<Mutex<…>>` handle
-/// to the counter storage.
+/// on drop, using an `Arc<Mutex<…>>` handle so it can be used outside of
+/// `thread_local!` contexts.
 pub struct SafeScopedTimer {
     counters: Arc<Mutex<ThreadLocalCounters>>,
-    name: String,
+    name: &'static str,
     start: Instant,
 }
 
 impl SafeScopedTimer {
     /// Creates a new timer, starting immediately.
     #[must_use]
-    pub fn new(counters: Arc<Mutex<ThreadLocalCounters>>, name: impl Into<String>) -> Self {
+    pub fn new(counters: Arc<Mutex<ThreadLocalCounters>>, name: &'static str) -> Self {
         Self {
             counters,
-            name: name.into(),
+            name,
             start: Instant::now(),
         }
     }
@@ -372,8 +408,8 @@ impl Drop for SafeScopedTimer {
     fn drop(&mut self) {
         let elapsed = self.start.elapsed();
         if let Ok(mut c) = self.counters.lock() {
-            c.add_duration(&self.name, elapsed);
-            c.increment(&self.name, 1);
+            c.add_duration(self.name, elapsed);
+            c.increment(self.name, 1);
         }
     }
 }
@@ -551,5 +587,74 @@ mod tests {
         let c = ThreadLocalCounters::new();
         assert_eq!(c.count("nonexistent"), 0);
         assert_eq!(c.duration("nonexistent"), Duration::ZERO);
+    }
+
+    // -----------------------------------------------------------------------
+    // Sub-item 29 new tests
+    // -----------------------------------------------------------------------
+
+    /// Two threads each increment their own TLS_COUNTERS independently.
+    /// After flushing, the registry must see contributions from exactly two
+    /// threads; neither thread's values should bleed into the other.
+    #[test]
+    fn test_tls_no_crosstalk() {
+        let registry = TlsCounterRegistry::new();
+        let r1 = registry.clone();
+        let r2 = registry.clone();
+
+        let h1 = thread::spawn(move || {
+            with_tls_counters(|c| {
+                c.reset();
+                c.increment("thread_a_event", 77);
+            });
+            let snap = with_tls_counters(|c| c.snapshot(1, Some("thread-a".to_string())));
+            r1.ingest(snap);
+        });
+
+        let h2 = thread::spawn(move || {
+            with_tls_counters(|c| {
+                c.reset();
+                c.increment("thread_b_event", 99);
+            });
+            let snap = with_tls_counters(|c| c.snapshot(2, Some("thread-b".to_string())));
+            r2.ingest(snap);
+        });
+
+        h1.join().expect("thread-a panicked");
+        h2.join().expect("thread-b panicked");
+
+        let agg = registry.aggregate();
+        // Neither event must leak into the other thread's totals.
+        assert_eq!(agg.count("thread_a_event"), 77, "thread_a_event must be 77");
+        assert_eq!(agg.count("thread_b_event"), 99, "thread_b_event must be 99");
+        assert_eq!(agg.contributing_threads, 2);
+    }
+
+    /// One thread pushes 1 000 increments via TLS, flushes to registry,
+    /// and the registry aggregate must report exactly 1 000.
+    #[test]
+    fn test_tls_aggregate_on_harvest() {
+        let registry = TlsCounterRegistry::new();
+        let r = registry.clone();
+
+        let h = thread::spawn(move || {
+            with_tls_counters(|c| {
+                c.reset();
+                for _ in 0..1_000u64 {
+                    c.increment("my_event", 1);
+                }
+            });
+            let snap = with_tls_counters(|c| c.snapshot(42, None));
+            r.ingest(snap);
+        });
+
+        h.join().expect("worker panicked");
+
+        let agg = registry.aggregate();
+        assert_eq!(
+            agg.count("my_event"),
+            1_000,
+            "aggregate must see all 1 000 increments"
+        );
     }
 }

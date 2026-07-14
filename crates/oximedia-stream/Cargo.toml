@@ -28,10 +28,10 @@ serde_json = { workspace = true }
 bytes = { workspace = true }
 quick-xml = { workspace = true }
 oximedia-container = { workspace = true }
-tokio = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["full"] }
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 
 [[example]]
 name = "live_streaming_pipeline"

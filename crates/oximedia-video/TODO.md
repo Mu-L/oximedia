@@ -40,6 +40,22 @@
 - [x] Test `pulldown_detect` with synthetic 3:2 pulldown cadence patterns and verify detection accuracy (verified 2026-05-15; tests/it_pulldown_detect.rs:5 tests)
 - [x] Benchmark `motion_compensation` against known motion vectors for standard test sequences (verified 2026-05-15; tests/it_motion_compensation.rs:4 tests)
 - [x] Test `video_fingerprint` collision rate with large synthetic frame datasets (verified 2026-05-15; tests/it_video_fingerprint.rs:6 tests)
+- [x] Add deterministic known-answer tests for `estimate_frame_motion_parallel` (Wave 29; tests/it_known_answer.rs — 48×16 right-shift-8px frame recovers MV (-8,0) on interior blocks; identical-frames all-zero)
+- [x] Add closed-form known-answer tests for `IntegralImage` (Wave 29; tests/it_known_answer.rs — 8×8 gradient rect_sum=2016, rect_sum_sq=85344, rect_variance=341.25=(64²−1)/12, exclusive-upper subrect rect_sum(2,1,5,4)=171, uniform sum=6400/var=0)
+- [x] Add known-answer cadence tests for `detect_cadence` and `CadenceConfidenceScorer` (Wave 29; tests/it_known_answer.rs — [L,L,H,L,H]→Pulldown32, threshold-boundary pin; [H,L,H,L,L]×{5,10,20,40}→Pulldown32 winner p>0.9, posterior sums to 1.0)
+
+## Known latent issue (Wave 29)
+Two real cross-module cadence inconsistencies were confirmed (DOCUMENTED, not fixed — picking a
+canonical phase/threshold is an out-of-scope design decision; see `tests/it_known_answer.rs` `//!` doc):
+- **Bug #1 — divergent 3:2 reference phase.** `pulldown_detect::detect_cadence` matches 3:2 against
+  `[L,L,H,L,H]` (`src/pulldown_detect.rs:205`) while `cadence_confidence::cadence_pattern` uses
+  `[H,L,H,L,L]` for the same `Cadence::Pulldown32` (`src/cadence_confidence.rs:83`). These are
+  different phase rotations of the same cadence; a caller mixing the two modules sees a 2-frame
+  phase offset. Each module is internally self-consistent.
+- **Bug #2 — divergent LOW/High threshold.** `detect_cadence` classifies High as `combing_score > 0.04`
+  (`src/pulldown_detect.rs:195`), but `cadence_confidence` uses nominal `LOW = 0.05`
+  (`src/cadence_confidence.rs:72`). Feeding 0.05 into `detect_cadence` reads as all-High
+  (→ would mis-classify a clean 3:2 sequence as Interlaced). The `detect_cadence` tests keep LOW ≤ 0.04.
 
 ## Documentation
 - [x] Document motion estimation algorithm selection guide (when to use which block size/search range) (verified 2026-05-15; src/motion_compensation.rs module-level doc)

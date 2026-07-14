@@ -2,12 +2,12 @@
 //!
 //! Provides:
 //!
-//! - [`ClipGuard`]: a look-ahead brickwall limiter that prevents digital clipping
+//! - [`ClipGuard`](crate::clip_guard::ClipGuard): a look-ahead brickwall limiter that prevents digital clipping
 //!   by attenuating any signal that would exceed a configurable ceiling.
-//! - [`ClipDetector`]: a lightweight clip detector that counts and timestamps
+//! - [`ClipDetector`](crate::clip_guard::ClipDetector): a lightweight clip detector that counts and timestamps
 //!   clipping events, supporting both hard (> 0 dBFS) and soft (above a user
 //!   threshold) clip detection.
-//! - [`OverloadHistory`]: a fixed-size circular buffer of recent overload events
+//! - [`OverloadHistory`](crate::clip_guard::OverloadHistory): a fixed-size circular buffer of recent overload events
 //!   for display on a mixer console.
 //!
 //! # Design

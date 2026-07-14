@@ -368,7 +368,7 @@ fn pn_sequence(seed: u64, len: usize) -> Vec<f32> {
 
 /// Simple spread-spectrum audio watermarker.
 ///
-/// Each bit is embedded by additively spreading it over [`SPREAD_FACTOR`]
+/// Each bit is embedded by additively spreading it over `SPREAD_FACTOR`
 /// samples using an LCG-derived ±1 PN carrier.  Detection is a simple
 /// correlation of the received block against the same carrier.
 #[derive(Debug, Clone)]
@@ -421,7 +421,7 @@ impl AudioWatermarker {
 
     /// Embed a `u64` payload (64 bits) into `samples` in-place.
     ///
-    /// Requires at least 64 × [`SPREAD_FACTOR`] = 32 768 samples.
+    /// Requires at least 64 × `SPREAD_FACTOR` = 32 768 samples.
     pub fn embed_payload(&self, samples: &mut [f32], payload: u64) {
         let bits: Vec<bool> = (0..64).map(|i| (payload >> i) & 1 == 1).collect();
         self.embed(samples, &bits);

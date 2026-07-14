@@ -1,8 +1,9 @@
 // Copyright 2017 Brian Langenberger
 // Copyright 2024-2026 COOLJAPAN OU (Team Kitasan)
 //
-// Licensed under the Apache License, Version 2.0 or the MIT license,
-// at your option. See the LICENSE-APACHE / LICENSE-MIT files for details.
+// Licensed under the Apache License, Version 2.0
+// <http://www.apache.org/licenses/LICENSE-2.0>. See `lib.rs` for upstream
+// attribution (this crate derives from `bitstream-io` 4.9.0).
 
 //! Numeric and integer traits.
 //!
@@ -507,15 +508,18 @@ macro_rules! define_unsigned_integer {
             fn checked_shr(self, rhs: u32) -> Option<Self> {
                 self.checked_shr(rhs)
             }
-            // TODO - enable these in the future
-            // #[inline(always)]
-            // fn shl_default(self, rhs: u32) -> Self {
-            //     self.unbounded_shl(rhs)
-            // }
-            // #[inline(always)]
-            // fn shr_default(self, rhs: u32) -> Self {
-            //     self.unbounded_shr(rhs)
-            // }
+            // Override the trait default with the primitive intrinsic.
+            // `unbounded_shl`/`unbounded_shr` are stable since Rust 1.87 and
+            // return 0 when rhs >= BITS — identical semantics to the default
+            // `checked_shl(rhs).unwrap_or(ZERO)`, but branchless.
+            #[inline(always)]
+            fn shl_default(self, rhs: u32) -> Self {
+                self.unbounded_shl(rhs)
+            }
+            #[inline(always)]
+            fn shr_default(self, rhs: u32) -> Self {
+                self.unbounded_shr(rhs)
+            }
         }
 
         impl Integer for $t {

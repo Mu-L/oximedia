@@ -5,7 +5,12 @@
 
 use crate::ContainerFormat;
 
-use super::tags::{StandardTag, TagMap, TagValue};
+use super::tags::{StandardTag, TagValue};
+// `TagMap` is only referenced by `MetadataEditor` and its filesystem-based
+// free functions below, all of which require file/async I/O that is not
+// available on `wasm32` and are therefore gated out on that target.
+#[cfg(not(target_arch = "wasm32"))]
+use super::tags::TagMap;
 
 #[cfg(not(target_arch = "wasm32"))]
 use oximedia_core::OxiResult;

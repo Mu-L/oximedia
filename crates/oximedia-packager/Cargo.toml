@@ -30,7 +30,7 @@ oximedia-container.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util"] }
+tokio = { workspace = true, features = ["full"] }
 async-trait.workspace = true
 
 # Serialization
@@ -47,8 +47,13 @@ chrono = { workspace = true }
 aes = { version = "0.9", optional = true }
 cbc = { workspace = true, optional = true }
 block-padding = { workspace = true, optional = true }
-hex = "0.4"
+hex.workspace = true
 base64 = { workspace = true }
+
+# CSPRNG for key/IV generation and PBKDF2 for passphrase-derived keys
+rand = { workspace = true }
+sha2 = { workspace = true }
+pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
 
 # Cloud storage
 aws-sdk-s3 = { workspace = true, optional = true }
@@ -61,5 +66,5 @@ camino = "1"
 rayon.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["full"] }
 tempfile.workspace = true

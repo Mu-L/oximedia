@@ -2,10 +2,10 @@
 //! and degradation level for a watermarked signal.
 //!
 //! This module provides:
-//! - [`WatermarkAnalyzer`]: top-level analysis entry point
-//! - [`AnalysisReport`]: structured report with per-algorithm findings
-//! - [`StrengthEstimate`]: embedding strength estimation via energy ratio
-//! - [`DegradationLevel`]: qualitative degradation assessment
+//! - [`crate::watermark_analyzer::WatermarkAnalyzer`]: top-level analysis entry point
+//! - [`crate::watermark_analyzer::AnalysisReport`]: structured report with per-algorithm findings
+//! - [`crate::watermark_analyzer::StrengthEstimate`]: embedding strength estimation via energy ratio
+//! - [`crate::watermark_analyzer::DegradationLevel`]: qualitative degradation assessment
 
 use crate::metrics::{calculate_metrics, QualityMetrics};
 

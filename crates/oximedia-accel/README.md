@@ -2,19 +2,22 @@
 
 ![Status: Stable](https://img.shields.io/badge/status-stable-green)
 
-Hardware acceleration layer for OxiMedia using Vulkan compute shaders, with automatic CPU fallback for systems without GPU support.
+Hardware acceleration layer for OxiMedia. **Pure Rust by default** (CPU
+fallback, plus an optional `wgpu`-backed WebGPU path), with an **opt-in**
+Vulkan compute backend for systems that want real GPU dispatch via `vulkano`.
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.8 — 2026-05-29 — 409 tests
+Version: 0.1.9 — 409+ tests
 
 ## Features
 
-- Automatic GPU device enumeration and selection via Vulkan
-- Efficient GPU memory allocation and buffer transfer
-- Compute kernels: image scaling, color conversion, motion estimation
-- Automatic CPU fallback when GPU is unavailable
-- Safe Vulkan API access via vulkano
+- Pure-Rust CPU fallback for all operations (always available, default build)
+- Optional `webgpu` feature: real WebGPU compute dispatch via `wgpu`
+- Optional `vulkan-backend` feature: automatic GPU device enumeration/selection,
+  buffer management, and compute kernels (image scaling, color conversion,
+  motion estimation) via Vulkan/`vulkano`
+- Optional `metal-backend` feature: native Metal compute on macOS/iOS
 - Task graph scheduling for concurrent GPU operations
 - Memory arena and pool management
 - Fence timeline for GPU synchronization
@@ -22,15 +25,16 @@ Version: 0.1.8 — 2026-05-29 — 409 tests
 - Profiling and performance statistics
 - Prefetch and cache management
 
-## Build prerequisites
+## Pure Rust default / opt-in Vulkan backend (`vulkan-backend` feature)
 
-`oximedia-accel` depends on [`vulkano-shaders`](https://crates.io/crates/vulkano-shaders),
-which uses the `vulkano_shaders::shader!` proc-macro to compile GLSL compute
-shaders to SPIR-V **at build time**. That macro pulls in `shaderc-sys`, and
-when no pre-built `shaderc` library is found on the host (the typical case
-on a fresh developer machine), `shaderc-sys` builds `shaderc` from source.
-Building `shaderc` from source requires the following native tools to be on
-`PATH`:
+**The default build of this crate compiles zero C/C++ code.** Vulkan support
+is gated behind the non-default `vulkan-backend` Cargo feature because
+[`vulkano-shaders`](https://crates.io/crates/vulkano-shaders) uses the
+`vulkano_shaders::shader!` proc-macro to compile GLSL compute shaders to
+SPIR-V **at build time**, and that macro pulls in `shaderc-sys`. When no
+pre-built `shaderc` library is found on the host (the typical case on a fresh
+developer machine), `shaderc-sys` builds `shaderc` from source, which
+requires the following native tools to be on `PATH`:
 
 | Tool | Purpose | Install |
 |---|---|---|
@@ -39,19 +43,25 @@ Building `shaderc` from source requires the following native tools to be on
 | **C++ compiler** | Compiles `shaderc` / `glslang` / `SPIRV-Tools` | Xcode CLT / `apt install build-essential` / MSVC Build Tools |
 | **Git** | `shaderc-sys` clones `shaderc` sources | `brew install git` / `apt install git` / `winget install Git.Git` |
 
-These prerequisites apply to **every** build of `oximedia-accel` — the
-dependency on `vulkano-shaders` is not feature-gated.
+These prerequisites are only needed when explicitly opting in:
 
-If you do not need Vulkan compute acceleration, you can exclude this crate
-from a workspace build:
-
-```bash
-cargo build --workspace --exclude oximedia-accel
+```toml
+[dependencies]
+oximedia-accel = { version = "0.1.9", features = ["vulkan-backend"] }
 ```
 
-The runtime itself still falls back to the pure-Rust `CpuFallback` backend
-when no Vulkan driver is present, but the GLSL → SPIR-V step at compile
-time is unconditional.
+Without `vulkan-backend` (the default), `vulkano`/`vulkano-shaders` are not
+even dependencies — `cargo tree -p oximedia-accel` shows no trace of them —
+and every Vulkan-only module (`device`, `buffer`, `vulkan`, `kernels`,
+`descriptor_pool`) is entirely absent from the compiled crate.
+[`AccelContext::new`] always selects the Pure-Rust CPU fallback (or `webgpu`,
+when that feature is enabled) directly; it never attempts to load Vulkan. A
+runtime request that specifically requires the Vulkan backend (e.g.
+`compute_backend::VulkanComputeBackend::is_available()`) simply reports
+unavailable rather than panicking.
+
+The related `vulkan-detect` feature (runtime Vulkan availability probing)
+implies `vulkan-backend`, since detection requires the real `vulkano` types.
 
 ## Usage
 
@@ -59,7 +69,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-accel = "0.1.8"
+oximedia-accel = "0.1.9"
 ```
 
 ```rust
@@ -92,13 +102,18 @@ fn example() -> Result<(), Box<dyn std::error::Error>> {
 - `AccelError`, `AccelResult` — Error types
 
 **Backends:**
-- `VulkanAccel` — Vulkan compute backend
-- `CpuFallback` — Pure-CPU fallback implementation
+- `VulkanAccel` — Vulkan compute backend (requires the `vulkan-backend` feature)
+- `CpuFallback` — Pure-CPU fallback implementation (always available)
 
 **Modules (37 source files, 401 public items):**
-- `device`, `device_caps` — GPU device management and capability detection
-- `buffer`, `pool`, `memory_arena`, `memory_bandwidth` — Memory management
-- `kernels`, `shaders` — Compute kernels and SPIR-V shaders
+- `device`, `buffer`, `vulkan`, `kernels`, `descriptor_pool` — GPU device
+  management, buffer transfer, and Vulkan compute kernels (all require the
+  `vulkan-backend` feature; absent from the default Pure-Rust build)
+- `device_caps`, `pool`, `memory_arena`, `memory_bandwidth` — Memory management
+  and capability detection (always available)
+- `shaders` — SPIR-V compute shader sources; the raw GLSL string constants and
+  their structural tests are always available, while the `vulkano_shaders`
+  macro-compiled shader modules require `vulkan-backend`
 - `task_graph`, `task_scheduler`, `dispatch` — Parallel task scheduling
 - `pipeline_accel` — Pipeline-level acceleration
 - `fence_timeline` — GPU synchronization primitives

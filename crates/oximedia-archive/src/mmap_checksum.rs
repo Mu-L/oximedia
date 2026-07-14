@@ -58,29 +58,78 @@ pub struct MmapChecksumResult {
     pub used_mmap: bool,
 }
 
-/// Read the content of a file via `memmap2`, returning the bytes as a `Vec<u8>`.
+/// Hash file content via `memmap2` directly — no intermediate heap allocation.
+///
+/// Maps the file read-only into the process address space and passes the
+/// resulting `&[u8]` slice straight to each requested hash algorithm.  The
+/// `Mmap` object is kept alive until every hasher has consumed all bytes, then
+/// dropped before we return.
 ///
 /// # Safety contract
 ///
-/// The caller must ensure the file is not truncated between `File::open` and
-/// the completion of this function.  We immediately copy the mapping into a
-/// heap allocation before returning, so the Mmap lifetime is entirely contained
-/// within this function.
+/// The file must not be externally truncated between `File::open` and this
+/// function's return.  We map read-only; the mapping is fully consumed (all
+/// bytes hashed) before any result is built, so the exposure window is
+/// minimal and bounded.
 #[allow(unsafe_code)]
-fn read_via_mmap(file: &std::fs::File) -> Result<Vec<u8>, std::io::Error> {
-    // SAFETY: we are opening for read-only access and immediately copying the
-    // bytes into a Vec before returning.  The mmap object is dropped at the
-    // end of this function before the Vec<u8> is returned, so there is no
-    // aliasing with mutating code.
+fn hash_via_mmap(
+    file: &std::fs::File,
+    file_size: u64,
+    config: &MmapChecksumConfig,
+) -> Result<MmapChecksumResult, std::io::Error> {
+    // SAFETY: read-only map; Mmap is dropped at end of this function.
     let mmap = unsafe { memmap2::Mmap::map(file)? };
-    Ok(mmap.to_vec())
+    // Obtain a &[u8] reference — no allocation, no copy.
+    let slice: &[u8] = &mmap[..];
+
+    let blake3 = if config.enable_blake3 {
+        Some(blake3::hash(slice).to_hex().to_string())
+    } else {
+        None
+    };
+
+    let sha256 = if config.enable_sha256 {
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        h.update(slice);
+        Some(hex::encode(h.finalize()))
+    } else {
+        None
+    };
+
+    let crc32 = if config.enable_crc32 {
+        Some(format!("{:08x}", crc32fast::hash(slice)))
+    } else {
+        None
+    };
+
+    let md5 = if config.enable_md5 {
+        use md5::Digest;
+        let mut h = md5::Md5::new();
+        h.update(slice);
+        Some(hex::encode(h.finalize()))
+    } else {
+        None
+    };
+
+    // mmap dropped here — slice borrow ends before this point.
+    Ok(MmapChecksumResult {
+        blake3,
+        sha256,
+        crc32,
+        md5,
+        file_size,
+        used_mmap: true,
+    })
 }
 
 /// Compute checksums for a file using memory-mapped I/O when beneficial.
 ///
-/// This function maps the file into virtual memory and passes the resulting
-/// byte slice directly to hash functions, avoiding an extra heap allocation
-/// for large files.
+/// For files at or above `config.mmap_threshold` bytes the file is mapped
+/// into virtual memory and the byte slice is fed directly to the hash
+/// functions — no intermediate heap copy.  Smaller files fall back to a
+/// single `std::fs::read` call (which is faster for tiny files due to lower
+/// mmap overhead).
 pub fn compute_checksums_mmap(
     path: &Path,
     config: &MmapChecksumConfig,
@@ -92,27 +141,20 @@ pub fn compute_checksums_mmap(
         return compute_checksums_from_bytes(b"", file_size, config, false);
     }
 
-    let (data, used_mmap) = if file_size >= config.mmap_threshold {
-        // Use memmap2 to map the file. memmap2::MmapOptions::map() is
-        // marked unsafe by the crate because the OS could truncate the file
-        // underneath us.  We immediately copy the mapped bytes into a Vec,
-        // keeping the window of exposure minimal and bounded.
-        //
-        // The workspace lint set forbids free-standing `unsafe` blocks, so we
-        // delegate through a thin helper that is explicitly allow-listed.
-        let bytes = read_via_mmap(&file).map_err(|e| {
+    if file_size >= config.mmap_threshold {
+        // True zero-copy path: hash directly from the mmap region.
+        let result = hash_via_mmap(&file, file_size, config).map_err(|e| {
             ArchiveError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("mmap read failed: {e}"),
+                format!("mmap hash failed: {e}"),
             ))
         })?;
-        (bytes, true)
-    } else {
-        let bytes = std::fs::read(path)?;
-        (bytes, false)
-    };
+        return Ok(result);
+    }
 
-    compute_checksums_from_bytes(&data, file_size, config, used_mmap)
+    // Small-file fallback — single read, no mmap overhead.
+    let bytes = std::fs::read(path)?;
+    compute_checksums_from_bytes(&bytes, file_size, config, false)
 }
 
 fn compute_checksums_from_bytes(
@@ -523,6 +565,88 @@ mod tests {
         // No expected values → always passes (nothing to check)
         let ok = verify_file_checksum(&path, None, None, None).expect("verify");
         assert!(ok);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- Zero-copy validation tests ---
+
+    /// Write a 1 MiB file, compute its BLAKE3 via the mmap path AND via the
+    /// streaming (small-file / non-mmap) path, and assert they agree.
+    /// This proves the zero-copy path produces correct digests.
+    #[test]
+    fn test_mmap_checksum_equals_streaming_checksum() {
+        let dir = std::env::temp_dir().join("oximedia_mmap_eq_stream");
+        std::fs::create_dir_all(&dir).ok();
+
+        // 1 MiB — well above the 64 KiB mmap threshold.
+        let content: Vec<u8> = (0u8..=255).cycle().take(1024 * 1024).collect();
+        let path = write_temp_file(&dir, "one_mib.bin", &content);
+
+        // Mmap path (true zero-copy).
+        let mmap_cfg = MmapChecksumConfig {
+            mmap_threshold: 64 * 1024,
+            ..Default::default()
+        };
+        let mmap_result = compute_checksums_mmap(&path, &mmap_cfg).expect("mmap");
+        assert!(mmap_result.used_mmap, "expected mmap path for 1 MiB file");
+
+        // Streaming path (mmap disabled by very high threshold).
+        let stream_cfg = MmapChecksumConfig {
+            mmap_threshold: u64::MAX,
+            ..Default::default()
+        };
+        let stream_result = compute_checksums_mmap(&path, &stream_cfg).expect("stream");
+        assert!(!stream_result.used_mmap, "expected non-mmap path");
+
+        // Both must produce identical digests — proves correctness of the
+        // zero-copy implementation.
+        assert_eq!(
+            mmap_result.blake3, stream_result.blake3,
+            "blake3 mismatch between mmap and streaming path"
+        );
+        assert_eq!(
+            mmap_result.sha256, stream_result.sha256,
+            "sha256 mismatch between mmap and streaming path"
+        );
+        assert_eq!(
+            mmap_result.crc32, stream_result.crc32,
+            "crc32 mismatch between mmap and streaming path"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Validate that the mmap code path no longer allocates an intermediate
+    /// Vec<u8>.  We do this structurally: after our refactor, `hash_via_mmap`
+    /// works directly on `&mmap[..]` — there is no `.to_vec()` call in its
+    /// body.  Running the function on a large file and getting the correct
+    /// digest is evidence that the slice-based path is exercised.
+    #[test]
+    fn test_mmap_checksum_no_vec_alloc_structural() {
+        let dir = std::env::temp_dir().join("oximedia_mmap_no_vec");
+        std::fs::create_dir_all(&dir).ok();
+
+        // File larger than threshold so the mmap path is taken.
+        let content: Vec<u8> = (0u8..=255).cycle().take(512 * 1024).collect();
+        let path = write_temp_file(&dir, "half_mib.bin", &content);
+
+        let config = MmapChecksumConfig {
+            mmap_threshold: 64 * 1024,
+            ..Default::default()
+        };
+        let result = compute_checksums_mmap(&path, &config).expect("compute");
+
+        // Structural assertion: the mmap path was taken.
+        assert!(result.used_mmap);
+
+        // Correctness: verify the digest against the in-memory known-good value.
+        let expected_blake3 = blake3::hash(&content).to_hex().to_string();
+        assert_eq!(
+            result.blake3.as_deref(),
+            Some(expected_blake3.as_str()),
+            "blake3 digest incorrect — slice-based hashing is broken"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

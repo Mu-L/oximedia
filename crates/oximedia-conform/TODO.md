@@ -52,7 +52,7 @@
   - **Files:** `src/matching/bloom.rs` (new), `src/matching/mod.rs`, `src/matching/strategies.rs`, `TODO.md` L34
   - **Tests:** Bloom never produces false negatives on known-present set; Bloom pre-filter + full match == full-match-only (correctness invariant); FPR ≤ expected bound on a sized filter.
   - **Risk:** Bloom must be a pre-filter only — false positives waste time (acceptable), false negatives break correctness. The correctness-invariant test is load-bearing.
-- [ ] Profile and optimize `reconstruction.rs` for timelines with 1000+ clips
+- [x] Profile and optimize `reconstruction.rs` for timelines with 1000+ clips (implemented 2026-06-05: precompute sort keys once per build_video_tracks/build_audio_tracks, sort indices instead of full clone; 4 new tests: 1000-clip sort correctness, reference match, stable sort for duplicates, 1000-clip < 100ms perf bound)
 
 ## Testing
 - [ ] Add end-to-end conform test with sample EDL, source media, and expected output verification

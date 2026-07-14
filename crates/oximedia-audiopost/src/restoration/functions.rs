@@ -559,7 +559,7 @@ mod tests {
     #[test]
     fn test_levinson_durbin_basics() {
         let data: Vec<f32> = std::iter::once(1.0_f32)
-            .chain(std::iter::repeat(0.0_f32).take(63))
+            .chain(std::iter::repeat_n(0.0_f32, 63))
             .collect();
         let coeffs = levinson_durbin(&data, 4).expect("ok");
         assert_eq!(coeffs.len(), 4);

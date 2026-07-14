@@ -15,7 +15,7 @@
 //!
 //! ## Node styling
 //!
-//! Nodes are styled by their [`JobState`]-equivalent status:
+//! Nodes are styled by their [`JobState`](crate::JobState)-equivalent status:
 //! - `Completed` → solid green border
 //! - `Running`   → dashed blue border
 //! - `Failed`    → solid red border

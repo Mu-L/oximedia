@@ -35,7 +35,7 @@
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_possible_wrap)]
 
-use crate::{GpuError, Result};
+use crate::{GpuError, Result, Shared};
 use rayon::prelude::*;
 
 // =============================================================================
@@ -826,7 +826,7 @@ impl GpuAccelerator for CpuAccelerator {
 /// individual operations can be migrated to GPU shaders without changing the
 /// public interface.
 pub struct WgpuAccelerator {
-    device: std::sync::Arc<crate::GpuDevice>,
+    device: Shared<crate::GpuDevice>,
     /// CPU fallback for operations not yet ported to shaders.
     cpu: CpuAccelerator,
     backend_name: String,
@@ -842,7 +842,7 @@ impl WgpuAccelerator {
         let device = crate::GpuDevice::new(None)?;
         let backend_name = format!("{} GPU", device.info().backend);
         Ok(Self {
-            device: std::sync::Arc::new(device),
+            device: Shared::new(device),
             cpu: CpuAccelerator::new(),
             backend_name,
         })
@@ -850,7 +850,7 @@ impl WgpuAccelerator {
 
     /// Underlying GPU device.
     #[must_use]
-    pub fn gpu_device(&self) -> &std::sync::Arc<crate::GpuDevice> {
+    pub fn gpu_device(&self) -> &Shared<crate::GpuDevice> {
         &self.device
     }
 }

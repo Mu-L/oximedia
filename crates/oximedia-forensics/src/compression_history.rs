@@ -5,6 +5,46 @@
 //! JPEG compression (re-saves), estimates the number of compression
 //! generations, and identifies quality level changes. Double/triple
 //! compression is a strong forensic indicator of manipulation.
+//!
+//! # Methodology
+//!
+//! A single JPEG compression quantizes each 8×8 block's DCT coefficients to
+//! multiples of the quantization step, producing a coefficient histogram
+//! with one dominant comb-like periodicity. Recompressing an *already*
+//! JPEG-compressed image at a different quality re-quantizes coefficients
+//! that are already multiples of the first step, which — unless the second
+//! quantization step evenly divides the first — creates characteristic
+//! secondary peaks and "double-quantization" gaps in the coefficient
+//! histogram at multiples of the original step
+//! ([`DctHistogram`], [`analyze_dct_double_compression`]). Detecting the
+//! depth of these valleys at multiples of 8 (`detect_double_jpeg` in
+//! [`crate::compression`]) yields a quantitative double-compression score,
+//! and matching the whole quantization table against known-camera and
+//! known-editor signatures ([`crate::quantization_table`]) helps identify
+//! *which* generation's table produced a given re-save
+//! ([`CompressionGeneration`], [`CompressionHistory`]).
+//!
+//! # References
+//!
+//! - A. C. Popescu, H. Farid, "Statistical Tools for Digital Forensics",
+//!   6th International Workshop on Information Hiding (2004) — introduces
+//!   detection of periodic artifacts from double JPEG quantization.
+//! - Z. Lin, J. He, X. Tang, C.-K. Tang, "Fast, automatic and fine-grained
+//!   tampered JPEG image detection via DCT coefficient analysis", Pattern
+//!   Recognition, 42(11), 2492–2501 (2009) — DCT coefficient histogram
+//!   analysis for localizing double-compressed regions, the basis for the
+//!   histogram-valley approach in [`DctHistogram`] /
+//!   `analyze_dct_double_compression`.
+//! - T. Pevný, J. Fridrich, "Detection of Double-Compression in JPEG Images
+//!   for Applications in Steganography", IEEE Transactions on Information
+//!   Forensics and Security, 3(2), 247–258 (2008) — quantization-step
+//!   estimation from the DCT histogram, informing
+//!   [`DctDoubleCompressionConfig`] / [`DctDoubleCompressionResult`].
+//! - H. Farid, "Exposing Digital Forgeries From JPEG Ghosts", IEEE
+//!   Transactions on Information Forensics and Security, 4(1), 154–160
+//!   (2009) — complementary recompression-based detection of a prior,
+//!   lower quality level within a locally re-saved region (see also
+//!   [`crate::ela`]).
 
 use std::collections::HashMap;
 

@@ -1,6 +1,6 @@
 //! Streaming CSV and JSON export for benchmark results.
 //!
-//! Unlike the batch export methods on [`BenchmarkResults`](crate::BenchmarkResults),
+//! Unlike the batch export methods on [`BenchmarkResults`],
 //! this module writes results incrementally to an [`io::Write`] sink so that
 //! memory usage remains constant regardless of the number of codec/sequence
 //! pairs.  This is particularly useful for very large benchmark suites with

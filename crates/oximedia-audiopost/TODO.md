@@ -3,8 +3,9 @@
 ## Current Status
 - 41 modules covering ADR, Foley, sound design, mixing, restoration, stems, loudness, automation, and delivery
 - Key subsystems: `adr`/`adr_manager`, `foley`/`foley_manager`, `mixing`/`mix_session`, `effects`, `restoration`, `stems`/`stem_export`, `loudness`/`loudness_session`, `surround`, `pipeline`
-- Dependencies on `rustfft`, `rubato`, `ndarray`, `rand` (policy violations pending cleanup)
+- [x] Dependency policy cleanup complete: `rustfft`/`ndarray`/`rand` never landed (oxifft/scirs2-core used); `rubato` removed 2026-07-08
 - [x] Migrated `convert_sample_rate()` in `delivery.rs` from removed rubato 1.x `SincFixedIn` API to rubato 2.0 `Async::new_sinc` + `process_all_into_buffer` + `InterleavedOwned` API (2026-05-05)
+- [x] Replaced rubato entirely: `convert_sample_rate()` now uses the Pure-Rust `oximedia_audio::Resampler` (windowed-sinc polyphase, group-delay compensated, `flush()` tail drain); 1 kHz 48k→44.1k tone-preservation + round-trip tests added in `delivery.rs` (2026-07-08)
 
 ## Enhancements
 - [x] Replace `rustfft` dependency with OxiFFT per COOLJAPAN policy (already using `oxifft` in Cargo.toml)

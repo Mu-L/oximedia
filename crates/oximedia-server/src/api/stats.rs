@@ -3,7 +3,6 @@
 use crate::{auth::AuthUser, error::ServerResult, AppState};
 use axum::{extract::State, response::IntoResponse, Json};
 use serde::Serialize;
-use sqlx::Row;
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
@@ -213,19 +212,20 @@ pub async fn get_stats(
     // Only admins can view server stats
     if !auth_user.is_admin() {
         // Return user-specific stats
-        let total_media: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM media WHERE user_id = ?")
-            .bind(&auth_user.user_id)
-            .fetch_one(state.db.pool())
-            .await?;
+        let total_media: i64 =
+            crate::db::query_scalar("SELECT COUNT(*) FROM media WHERE user_id = ?")
+                .bind(&auth_user.user_id)
+                .fetch_one(state.db.pool())
+                .await?;
 
         let total_storage: Option<i64> =
-            sqlx::query_scalar("SELECT SUM(file_size) FROM media WHERE user_id = ?")
+            crate::db::query_scalar("SELECT SUM(file_size) FROM media WHERE user_id = ?")
                 .bind(&auth_user.user_id)
                 .fetch_one(state.db.pool())
                 .await?;
 
         let total_collections: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM collections WHERE user_id = ?")
+            crate::db::query_scalar("SELECT COUNT(*) FROM collections WHERE user_id = ?")
                 .bind(&auth_user.user_id)
                 .fetch_one(state.db.pool())
                 .await?;
@@ -238,25 +238,25 @@ pub async fn get_stats(
     }
 
     // Admin stats
-    let total_users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+    let total_users: i64 = crate::db::query_scalar("SELECT COUNT(*) FROM users")
         .fetch_one(state.db.pool())
         .await?;
 
-    let total_media: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM media")
+    let total_media: i64 = crate::db::query_scalar("SELECT COUNT(*) FROM media")
         .fetch_one(state.db.pool())
         .await?;
 
-    let total_storage: Option<i64> = sqlx::query_scalar("SELECT SUM(file_size) FROM media")
+    let total_storage: Option<i64> = crate::db::query_scalar("SELECT SUM(file_size) FROM media")
         .fetch_one(state.db.pool())
         .await?;
 
-    let active_jobs: i64 = sqlx::query_scalar(
+    let active_jobs: i64 = crate::db::query_scalar(
         "SELECT COUNT(*) FROM transcode_jobs WHERE status IN ('queued', 'processing')",
     )
     .fetch_one(state.db.pool())
     .await?;
 
-    let total_collections: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM collections")
+    let total_collections: i64 = crate::db::query_scalar("SELECT COUNT(*) FROM collections")
         .fetch_one(state.db.pool())
         .await?;
 
@@ -278,7 +278,7 @@ pub async fn get_storage_stats(
     let db_stats = state.db.get_storage_stats().await?;
 
     // Get stats by media type
-    let type_rows = sqlx::query(
+    let type_rows = crate::db::query(
         r"
         SELECT
             CASE
@@ -307,7 +307,7 @@ pub async fn get_storage_stats(
         .map(|row| StorageByType {
             media_type: row.get("media_type"),
             count: row.get("count"),
-            size: row.get::<Option<i64>, _>("size").unwrap_or(0),
+            size: row.get::<Option<i64>>("size").unwrap_or(0),
         })
         .collect();
 

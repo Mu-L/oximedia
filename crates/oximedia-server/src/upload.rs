@@ -7,7 +7,6 @@ use crate::{
     models::upload::{MultipartUpload, UploadChunk, UploadStatus},
 };
 use sha2::{Digest, Sha256};
-use sqlx::Row;
 use std::path::PathBuf;
 use tokio::{
     fs::File,
@@ -48,7 +47,7 @@ impl UploadManager {
             24, // 24 hours expiration
         );
 
-        sqlx::query(
+        crate::db::query(
             r"
             INSERT INTO multipart_uploads (
                 id, user_id, filename, total_size, uploaded_size,
@@ -104,7 +103,7 @@ impl UploadManager {
         }
 
         // Check if chunk already uploaded
-        let exists = sqlx::query_scalar::<_, i64>(
+        let exists = crate::db::query_scalar::<i64, _>(
             "SELECT COUNT(*) FROM upload_chunks WHERE upload_id = ? AND chunk_number = ?",
         )
         .bind(upload_id)
@@ -142,7 +141,7 @@ impl UploadManager {
         );
 
         // Save chunk info to database
-        sqlx::query(
+        crate::db::query(
             r"
             INSERT INTO upload_chunks (
                 upload_id, chunk_number, chunk_path, chunk_size, checksum, uploaded_at
@@ -159,7 +158,7 @@ impl UploadManager {
         .await?;
 
         // Update upload progress
-        sqlx::query(
+        crate::db::query(
             r"
             UPDATE multipart_uploads
             SET completed_chunks = completed_chunks + 1,
@@ -191,14 +190,14 @@ impl UploadManager {
         }
 
         // Update status to assembling
-        sqlx::query("UPDATE multipart_uploads SET status = ? WHERE id = ?")
+        crate::db::query("UPDATE multipart_uploads SET status = ? WHERE id = ?")
             .bind(UploadStatus::Assembling.to_string())
             .bind(upload_id)
             .execute(self.db.pool())
             .await?;
 
         // Get all chunks in order
-        let rows = sqlx::query(
+        let rows = crate::db::query(
             r"
             SELECT chunk_path FROM upload_chunks
             WHERE upload_id = ?
@@ -224,7 +223,7 @@ impl UploadManager {
         output_file.flush().await?;
 
         // Update status to completed
-        sqlx::query("UPDATE multipart_uploads SET status = ? WHERE id = ?")
+        crate::db::query("UPDATE multipart_uploads SET status = ? WHERE id = ?")
             .bind(UploadStatus::Completed.to_string())
             .bind(upload_id)
             .execute(self.db.pool())
@@ -244,7 +243,7 @@ impl UploadManager {
     /// Returns an error if the abort operation fails.
     pub async fn abort_upload(&self, upload_id: &str) -> ServerResult<()> {
         // Update status
-        sqlx::query("UPDATE multipart_uploads SET status = ? WHERE id = ?")
+        crate::db::query("UPDATE multipart_uploads SET status = ? WHERE id = ?")
             .bind(UploadStatus::Cancelled.to_string())
             .bind(upload_id)
             .execute(self.db.pool())
@@ -263,7 +262,7 @@ impl UploadManager {
     ///
     /// Returns an error if the upload is not found.
     pub async fn get_upload(&self, upload_id: &str) -> ServerResult<MultipartUpload> {
-        let row = sqlx::query(
+        let row = crate::db::query(
             r"
             SELECT * FROM multipart_uploads WHERE id = ?
             ",
@@ -302,7 +301,7 @@ impl UploadManager {
         let now = chrono::Utc::now().timestamp();
 
         // Get expired uploads
-        let rows = sqlx::query(
+        let rows = crate::db::query(
             r"
             SELECT id FROM multipart_uploads
             WHERE expires_at < ? AND status = 'uploading'

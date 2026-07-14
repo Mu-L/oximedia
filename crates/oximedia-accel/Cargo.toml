@@ -270,8 +270,14 @@ never_loop = "allow"
 metal-backend = ["dep:metal"]
 # Real WebGPU compute dispatch using wgpu (optional; CPU fallback when absent)
 webgpu = ["dep:wgpu", "dep:pollster"]
-# Detect Vulkan availability at runtime via the device module
-vulkan-detect = []
+# Real Vulkan GPU compute via vulkano (feature-gated: vulkano-shaders pulls in the
+# shaderc/glslang C++ toolchain via shaderc-sys at build time — see README.md).
+# Pure-Rust CpuFallback (and, when enabled, the `webgpu` backend) are used when
+# this feature is off.
+vulkan-backend = ["dep:vulkano", "dep:vulkano-shaders"]
+# Detect Vulkan availability at runtime via the device module. Implies
+# `vulkan-backend` since detection requires the real vulkano types.
+vulkan-detect = ["vulkan-backend"]
 
 [dependencies]
 oximedia-core.workspace = true
@@ -279,12 +285,13 @@ thiserror.workspace = true
 tracing.workspace = true
 bytes.workspace = true
 
-# Vulkan compute
-vulkano = "0.35"
-vulkano-shaders = "0.35"
+# Vulkan compute (optional — see `vulkan-backend` feature; C/C++ shaderc toolchain
+# via vulkano-shaders/shaderc-sys, opt-in only, non-default)
+vulkano = { version = "0.35", optional = true }
+vulkano-shaders = { version = "0.35", optional = true }
 bytemuck = { workspace = true }
 rayon = { workspace = true }
-once_cell = "1.21"
+once_cell.workspace = true
 
 # WebGPU compute (optional — Pure Rust, cross-platform)
 wgpu = { workspace = true, optional = true }
@@ -295,4 +302,4 @@ pollster = { workspace = true, optional = true }
 metal = { workspace = true, optional = true }
 
 [dev-dependencies]
-tracing-subscriber = "0.3"
+tracing-subscriber = { workspace = true }

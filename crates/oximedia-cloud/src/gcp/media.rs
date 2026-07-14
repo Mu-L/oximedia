@@ -21,6 +21,7 @@ impl GcpMediaServices {
     /// Returns an error if initialization fails
     #[allow(clippy::unused_async)]
     pub async fn new(project_id: String) -> Result<Self> {
+        crate::tls_provider::install_default_crypto_provider();
         let client = Client::new();
 
         // In production, would use Google Auth library to get token

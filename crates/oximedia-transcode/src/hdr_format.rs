@@ -1,7 +1,7 @@
 //! HDR format enumeration and passthrough configuration.
 //!
 //! This module provides a higher-level, format-centric API for HDR metadata
-//! handling that complements the detailed [`super::hdr_passthrough`] module.
+//! handling that complements the detailed [`crate::hdr_passthrough`] module.
 //!
 //! Where `hdr_passthrough` operates at the level of individual transfer
 //! functions and colour-primaries codes, this module exposes named HDR

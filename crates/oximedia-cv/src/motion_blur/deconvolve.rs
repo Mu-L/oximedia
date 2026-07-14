@@ -23,7 +23,7 @@ pub enum DeconvolutionMethod {
     /// Implements the Wiener filter matched to the correlation-based forward blur
     /// used by `MotionPSF::apply_to_channel`:
     ///
-    ///   g[y,x] = Σ_{m,n} h[m,n] · f[y+m-c_h, x+n-c_w]   (correlation)
+    ///   `g[y,x] = Σ_{m,n} h[m,n] · f[y+m-c_h, x+n-c_w]`   (correlation)
     ///
     /// Forward model in DFT: G = conj(H) · F
     ///

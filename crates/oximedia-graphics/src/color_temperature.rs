@@ -10,7 +10,7 @@
 //! - **Simulate time-of-day** lighting transitions in virtual sets.
 //!
 //! This module provides:
-//! - [`KelvinToRgb`]: conversion from a color temperature in Kelvin to a
+//! - [`KelvinRgb`]: conversion from a color temperature in Kelvin to a
 //!   linear-light RGB gain triplet, using the classic Tanner Helland
 //!   approximation refined with piece-wise functions for broadcast accuracy.
 //! - [`WhiteBalanceAdjust`]: applies a white-balance correction to a full

@@ -1,9 +1,9 @@
 //! Tempo stability analysis module.
 //!
-//! Measures tempo consistency from a sequence of [`TempoEvent`]s (frame-indexed
+//! Measures tempo consistency from a sequence of [`TempoEvent`](crate::tempo_stability::TempoEvent)s (frame-indexed
 //! BPM snapshots with confidence values). The analysis computes mean BPM,
 //! standard deviation, coefficient-of-variation-based stability score, tap
-//! variance, and inter-event jitter in milliseconds.  A [`TempoClass`] enum
+//! variance, and inter-event jitter in milliseconds.  A [`TempoClass`](crate::tempo_stability::TempoClass) enum
 //! provides a human-readable interpretation of the result.
 //!
 //! # Example

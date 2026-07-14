@@ -40,17 +40,17 @@
 - [x] Add HTTP/2 server push for related resources (thumbnail with metadata response) (verified 2026-05-16; src/http2_push.rs)
 - [x] Implement lazy deserialization in `handlers` for large JSON request bodies (verified 2026-05-16; src/lazy_deser.rs)
 - [x] Add query result pagination with cursor-based pagination for stable ordering in `list_media`
-- [ ] Optimize `streaming::handlers` segment serving with memory-mapped file I/O
+- [x] Optimize `streaming::handlers` segment serving with memory-mapped file I/O
 
 ## Testing
 - [x] Add CDN uploader tests for S3, GCS, and Azure backends (completed 2026-05-05)
   - `tests/cdn_uploaders.rs` — 17 tests total: S3 (7), GCS (4), Azure (6); key validation, single-part, multipart/multi-block, file upload, presigned/signed/SAS URLs, delete, list
 - [ ] Add integration tests for the full upload -> transcode -> stream workflow
-- [ ] Test `auth` token refresh flow with expired and valid refresh tokens
+- [x] Test `auth` token refresh flow with expired and valid refresh tokens (src/auth.rs:240-307 — refresh_with_valid/expired/garbage + wrong-secret + direct-expiry)
 - [ ] Add load tests for concurrent HLS segment requests (100+ simultaneous viewers)
-- [ ] Test `batch_ops` with mixed success/failure operations and verify partial completion handling
-- [ ] Add tests for `webhooks` delivery retry logic with simulated endpoint failures
-- [ ] Test `WebSocket` handler with connection lifecycle (connect, subscribe, receive events, disconnect)
+- [x] Test `batch_ops` with mixed success/failure operations and verify partial completion handling (src/batch_ops.rs:545-640 — 10-item 3-fail partition coherence, all-fail, multi-status JSON shape)
+- [x] Add tests for `webhooks` delivery retry logic with simulated endpoint failures (src/webhooks.rs:700-957 — ScriptedTransport+RecordingDelay seam: [1,4] backoff to 3 attempts→Failed, early-stop on 2nd success, no-delay on 1st success)
+- [x] Test `WebSocket` handler with connection lifecycle (connect, subscribe, receive events, disconnect) (src/websocket/manager.rs:104-203 — connect/push/disconnect, per-subscription filtering, broadcast, unknown-user no-op)
 
 ## Documentation
 - [ ] Add OpenAPI/Swagger specification for all REST endpoints

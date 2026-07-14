@@ -1391,4 +1391,91 @@ mod tests {
         assert!((mid.g as i32 - 100).abs() <= 2);
         assert!((mid.b as i32 - 25).abs() <= 2);
     }
+
+    // ParameterTrack edge-case tests
+
+    #[test]
+    fn test_param_track_empty_returns_none() {
+        let track = ParameterTrack::new();
+        assert_eq!(track.evaluate(0.0), None);
+    }
+
+    #[test]
+    fn test_param_track_single_keyframe_constant() {
+        let mut track = ParameterTrack::new();
+        track.add_keyframe(1.0, 42.0, EasingFunction::Linear);
+        // Before, at, and after the single keyframe should all return the same value.
+        let v0 = track
+            .evaluate(0.5)
+            .expect("single keyframe must produce a value");
+        let v1 = track
+            .evaluate(1.0)
+            .expect("single keyframe must produce a value");
+        let v2 = track
+            .evaluate(2.0)
+            .expect("single keyframe must produce a value");
+        assert!((v0 - 42.0_f32).abs() < 1e-5, "expected 42.0, got {v0}");
+        assert!((v1 - 42.0_f32).abs() < 1e-5, "expected 42.0, got {v1}");
+        assert!((v2 - 42.0_f32).abs() < 1e-5, "expected 42.0, got {v2}");
+    }
+
+    #[test]
+    fn test_param_track_before_first_clamps() {
+        let mut track = ParameterTrack::new();
+        track.add_keyframe(1.0, 10.0, EasingFunction::Linear);
+        track.add_keyframe(2.0, 20.0, EasingFunction::Linear);
+        // Querying before first keyframe should clamp to the first value.
+        let v = track.evaluate(0.0).expect("must produce a value");
+        assert!(
+            (v - 10.0_f32).abs() < 1e-5,
+            "expected clamp to 10.0, got {v}"
+        );
+    }
+
+    #[test]
+    fn test_param_track_after_last_clamps() {
+        let mut track = ParameterTrack::new();
+        track.add_keyframe(1.0, 10.0, EasingFunction::Linear);
+        track.add_keyframe(2.0, 20.0, EasingFunction::Linear);
+        // Querying after last keyframe should clamp to the last value.
+        let v = track.evaluate(100.0).expect("must produce a value");
+        assert!(
+            (v - 20.0_f32).abs() < 1e-5,
+            "expected clamp to 20.0, got {v}"
+        );
+    }
+
+    #[test]
+    fn test_param_track_same_time_replaces() {
+        let mut track = ParameterTrack::new();
+        track.add_keyframe(1.0, 1.0, EasingFunction::Linear);
+        track.add_keyframe(1.0, 2.0, EasingFunction::Linear);
+        // Second add at the same time should replace the first.
+        assert_eq!(track.len(), 1, "duplicate-time add should leave len=1");
+        let v = track.evaluate(1.0).expect("must produce a value");
+        assert!(
+            (v - 2.0_f32).abs() < 1e-5,
+            "replaced keyframe should have value 2.0, got {v}"
+        );
+    }
+
+    #[test]
+    fn test_param_track_nan_time_no_panic() {
+        // NaN time must not cause a panic in add_keyframe or evaluate.
+        let mut track = ParameterTrack::new();
+        track.add_keyframe(f64::NAN, 1.0, EasingFunction::Linear);
+        let _ = track.evaluate(f64::NAN);
+    }
+
+    #[test]
+    fn test_param_track_linear_midpoint() {
+        let mut track = ParameterTrack::new();
+        track.add_keyframe(0.0, 0.0, EasingFunction::Linear);
+        track.add_keyframe(1.0, 1.0, EasingFunction::Linear);
+        let v = track.evaluate(0.5).expect("must produce a value");
+        assert!(
+            (v - 0.5_f32).abs() < 1e-5,
+            "linear midpoint should be 0.5, got {v}"
+        );
+    }
 }

@@ -171,6 +171,7 @@ impl B2Provider {
     ///
     /// Returns an error if the configuration is invalid.
     pub fn new(config: B2Config) -> Result<Self> {
+        crate::tls_provider::install_default_crypto_provider();
         config.validate()?;
         Ok(Self {
             config,

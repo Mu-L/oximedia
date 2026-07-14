@@ -43,11 +43,11 @@
 
 ## Testing
 - [x] Add loopback test: NdiVideoFrame encode→decode in-process round-trip verifying width/height/stride/sequence (src/lib.rs: loopback_encode_decode_video_frame; 2026-05-31)
-- [ ] Test discovery with multiple sources on same machine verifying unique naming
+- [x] Test discovery with multiple sources on same machine verifying unique naming (src/ndi_ext.rs:349 DiscoveryCache::insert_unique deterministic ` (N)` suffix collision-avoidance + get():414; tests test_discovery_cache_unique_naming_collision_avoidance, test_discovery_cache_unique_naming_reannounce_refreshes, test_discovery_cache_n_distinct_sources_all_unique, test_discovery_cache_three_way_same_name_collision; 2026-06-05)
 - [ ] Add latency measurement test: timestamp frames at send, measure at receive
 - [ ] Test failover behavior when primary source goes offline and backup takes over
 - [x] Verify PTZ command serialization/deserialization roundtrip for all PtzCommand variants (src/ptz.rs: encode_ptz_command/decode_ptz_command; test_ptz_command_roundtrip_all_variants covers 12 variants; 2026-05-31)
-- [ ] Test tally state propagation: set program tally on sender, verify receiver sees it
+- [x] Test tally state propagation: set program tally on sender, verify receiver sees it (src/tally_bus.rs: end-to-end TallySender→TallyBus→TallyReceiver via encode_tally_byte/decode_tally_byte; tests test_tally_propagation_sender_to_bus_to_receiver_program, test_tally_propagation_preview_then_clear, test_tally_propagation_cut_reassigns_program_across_receivers; 2026-06-05)
 
 ## Documentation
 - [ ] Document the NDI protocol wire format as implemented (packet structure, handshake, frame headers)

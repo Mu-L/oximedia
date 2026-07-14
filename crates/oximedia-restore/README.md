@@ -1,6 +1,6 @@
 # oximedia-restore
 
-**Status: [Stable]** | Version: 0.1.8 | Tests: 700 | Updated: 2026-05-21
+**Status: [Stable]** | Version: 0.1.9 | Tests: extensively tested | Updated: 2026-07-08
 
 Professional audio and video restoration tools for OxiMedia. Provides comprehensive restoration capabilities for recovering and enhancing degraded recordings, including audio restoration and video artifact removal.
 
@@ -53,7 +53,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-restore = "0.1.8"
+oximedia-restore = "0.1.9"
 ```
 
 ```rust

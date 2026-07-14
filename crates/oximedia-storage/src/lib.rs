@@ -80,6 +80,8 @@
 //! assert!(opts.is_high_throughput());
 //! ```
 
+#![warn(missing_docs)]
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -178,49 +180,64 @@ pub mod write_ahead_log;
 /// Errors that can occur during storage operations
 #[derive(Error, Debug)]
 pub enum StorageError {
+    /// The requested object key does not exist in the backing store.
     #[error("Object not found: {0}")]
     NotFound(String),
 
+    /// Credentials were rejected or could not be validated by the provider.
     #[error("Authentication failed: {0}")]
     AuthenticationError(String),
 
+    /// The caller lacks permission to perform the requested operation.
     #[error("Permission denied: {0}")]
     PermissionDenied(String),
 
+    /// The supplied `UnifiedConfig` (or derived configuration) is invalid.
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),
 
+    /// A transport-level failure occurred while talking to the provider.
     #[error("Network error: {0}")]
     NetworkError(String),
 
+    /// Encoding or decoding request/response data failed.
     #[error("Serialization error: {0}")]
     SerializationError(String),
 
+    /// A local filesystem I/O operation failed.
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 
+    /// A multipart/resumable upload could not be completed.
     #[error("Multipart upload error: {0}")]
     MultipartError(String),
 
+    /// The local cache layer encountered an error.
     #[error("Cache error: {0}")]
     CacheError(String),
 
+    /// The provider rejected the request due to rate limiting.
     #[error("Rate limit exceeded")]
     RateLimitExceeded,
 
+    /// The object key is malformed (empty, too long, or contains invalid bytes).
     #[error("Invalid object key: {0}")]
     InvalidKey(String),
 
+    /// The configured storage quota has been exceeded.
     #[error("Storage quota exceeded")]
     QuotaExceeded,
 
+    /// The requested operation is not supported by this provider backend.
     #[error("Unsupported operation: {0}")]
     UnsupportedOperation(String),
 
+    /// A provider-specific error not covered by the other variants.
     #[error("Provider-specific error: {0}")]
     ProviderError(String),
 }
 
+/// Convenience alias for results returned by this crate's storage operations.
 pub type Result<T> = std::result::Result<T, StorageError>;
 
 /// Storage provider type
@@ -280,7 +297,12 @@ pub enum EncryptionConfig {
     /// Server-side encryption with customer-provided keys
     CustomerKey(String),
     /// Client-side encryption
-    ClientSide { key: String, algorithm: String },
+    ClientSide {
+        /// Base64 or hex-encoded encryption key material.
+        key: String,
+        /// Name of the client-side encryption algorithm (e.g. `"AES-256-GCM"`).
+        algorithm: String,
+    },
 }
 
 /// Configuration for object download

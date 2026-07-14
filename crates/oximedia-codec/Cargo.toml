@@ -12,6 +12,10 @@ keywords = ["codec", "encoding", "decoding", "video", "audio"]
 categories = ["multimedia::encoding", "multimedia"]
 readme = "README.md"
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lints.rust]
 unsafe_code = "deny"
 missing_docs = "allow"
@@ -301,5 +305,5 @@ png = { workspace = true, optional = true }
 jpeg-decoder = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["full"] }
 proptest = { workspace = true }

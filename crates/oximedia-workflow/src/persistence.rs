@@ -1,12 +1,11 @@
-//! Workflow state persistence using `SQLite`.
+//! Workflow state persistence using `SQLite` (Pure-Rust via OxiSQL).
 
 use crate::error::{Result, WorkflowError};
 use crate::task::{Task, TaskId, TaskState};
 use crate::workflow::{Workflow, WorkflowConfig, WorkflowId, WorkflowState};
 use chrono::Utc;
-use r2d2::Pool;
-use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{params, Row};
+use oxisql_core::{ToSqlValue, Value};
+use oxisql_sqlite_compat::SqliteConnectionBlocking;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
@@ -17,7 +16,7 @@ use tracing::{debug, info};
 
 /// Wraps a raw JSON string and provides lazy on-demand deserialization of
 /// [`WorkflowConfig`].  Parsing occurs only on the first call to
-/// [`LazyWorkflowConfig::get`]; subsequent calls return the cached result.
+/// [`LazyWorkflowConfig::get_cloned`]; subsequent calls return the cached result.
 ///
 /// The cache is stored inside a `Mutex<Option<WorkflowConfig>>` so the
 /// struct can be shared safely and `get()` can take `&self`.
@@ -29,7 +28,7 @@ pub struct LazyWorkflowConfig {
 
 impl LazyWorkflowConfig {
     /// Construct a lazy wrapper around the raw JSON string. No parsing happens
-    /// until [`Self::get`] is first called.
+    /// until [`Self::get_cloned`] is first called.
     #[must_use]
     pub fn new(raw_json: String) -> Self {
         Self {
@@ -73,49 +72,114 @@ impl LazyWorkflowConfig {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Error helpers
+// ---------------------------------------------------------------------------
+
+fn map_oxi(e: impl std::fmt::Display) -> WorkflowError {
+    WorkflowError::Database(e.to_string())
+}
+
+fn col_text(row: &oxisql_core::Row, idx: usize) -> Result<String> {
+    match row.get_by_index(idx) {
+        Some(Value::Text(s)) => Ok(s.clone()),
+        Some(other) => Err(WorkflowError::Database(format!(
+            "column {idx}: expected text, got {}",
+            other.type_name()
+        ))),
+        None => Err(WorkflowError::Database(format!(
+            "column {idx} missing from result row"
+        ))),
+    }
+}
+
+fn col_opt_text(row: &oxisql_core::Row, idx: usize) -> Result<Option<String>> {
+    match row.get_by_index(idx) {
+        Some(Value::Null) | None => Ok(None),
+        Some(Value::Text(s)) => Ok(Some(s.clone())),
+        Some(other) => Err(WorkflowError::Database(format!(
+            "column {idx}: expected text or null, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn col_i64(row: &oxisql_core::Row, idx: usize) -> Result<i64> {
+    match row.get_by_index(idx) {
+        Some(Value::I64(n)) => Ok(*n),
+        Some(other) => Err(WorkflowError::Database(format!(
+            "column {idx}: expected integer, got {}",
+            other.type_name()
+        ))),
+        None => Err(WorkflowError::Database(format!(
+            "column {idx} missing from result row"
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared inner state
+// ---------------------------------------------------------------------------
+
+struct Inner {
+    conn: SqliteConnectionBlocking,
+}
+
+impl Inner {
+    fn exec(&self, sql: &str, params: &[&dyn ToSqlValue]) -> Result<u64> {
+        self.conn.execute(sql, params).map_err(map_oxi)
+    }
+
+    fn query(&self, sql: &str, params: &[&dyn ToSqlValue]) -> Result<Vec<oxisql_core::Row>> {
+        self.conn.query(sql, params).map_err(map_oxi)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PersistenceManager
+// ---------------------------------------------------------------------------
+
 /// Workflow persistence manager.
 pub struct PersistenceManager {
-    pool: Arc<Pool<SqliteConnectionManager>>,
+    inner: Arc<Mutex<Inner>>,
 }
 
 impl PersistenceManager {
     /// Create a new persistence manager.
     pub fn new(db_path: impl AsRef<Path>) -> Result<Self> {
-        let manager = SqliteConnectionManager::file(db_path);
-        let pool = Pool::new(manager).map_err(|e| {
-            WorkflowError::Database(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
-        })?;
-
-        let persistence = Self {
-            pool: Arc::new(pool),
+        let path_str = db_path.as_ref().to_string_lossy().into_owned();
+        let conn = SqliteConnectionBlocking::open(&path_str).map_err(map_oxi)?;
+        let p = Self {
+            inner: Arc::new(Mutex::new(Inner { conn })),
         };
-
-        persistence.initialize_schema()?;
-        Ok(persistence)
+        p.initialize_schema()?;
+        Ok(p)
     }
 
     /// Create an in-memory persistence manager.
     pub fn in_memory() -> Result<Self> {
-        let manager = SqliteConnectionManager::memory();
-        let pool = Pool::new(manager).map_err(|e| {
-            WorkflowError::Database(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
-        })?;
-
-        let persistence = Self {
-            pool: Arc::new(pool),
+        let conn = SqliteConnectionBlocking::open_memory().map_err(map_oxi)?;
+        let p = Self {
+            inner: Arc::new(Mutex::new(Inner { conn })),
         };
+        p.initialize_schema()?;
+        Ok(p)
+    }
 
-        persistence.initialize_schema()?;
-        Ok(persistence)
+    fn with_inner<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Inner) -> Result<T>,
+    {
+        let guard = self.inner.lock().map_err(|_| WorkflowError::LockPoisoned)?;
+        f(&guard)
     }
 
     fn initialize_schema(&self) -> Result<()> {
-        let conn = self.pool.get().map_err(|e| {
-            WorkflowError::Database(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
-        })?;
-
-        conn.execute_batch(
-            r"
+        self.with_inner(|inner| {
+            inner
+                .conn
+                .execute_batch(
+                    r"
             CREATE TABLE IF NOT EXISTS workflows (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -185,59 +249,64 @@ impl PersistenceManager {
             CREATE INDEX IF NOT EXISTS idx_task_results_workflow ON task_results(workflow_id);
             CREATE INDEX IF NOT EXISTS idx_execution_history_workflow ON execution_history(workflow_id);
             ",
-        )?;
-
+                )
+                .map(|_| ())
+                .map_err(map_oxi)?;
+            Ok(())
+        })?;
         info!("Database schema initialized");
         Ok(())
     }
 
     /// Save a workflow to the database.
     pub fn save_workflow(&self, workflow: &Workflow) -> Result<()> {
-        let conn = self.pool.get().map_err(|e| {
-            WorkflowError::Database(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
-        })?;
-
         let now = Utc::now().to_rfc3339();
         let config_json = serde_json::to_string(&workflow.config)?;
         let metadata_json = serde_json::to_string(&workflow.metadata)?;
+        let state_s = format!("{:?}", workflow.state);
+        let id_s = workflow.id.to_string();
 
-        conn.execute(
-            "INSERT OR REPLACE INTO workflows (id, name, description, state, config, metadata, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                workflow.id.to_string(),
-                workflow.name,
-                workflow.description,
-                format!("{:?}", workflow.state),
-                config_json,
-                metadata_json,
-                now,
-                now,
-            ],
-        )?;
+        self.with_inner(|inner| {
+            inner.exec(
+                "INSERT OR REPLACE INTO workflows (id, name, description, state, config, metadata, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                &[
+                    &id_s,
+                    &workflow.name.as_str(),
+                    &workflow.description.as_str(),
+                    &state_s,
+                    &config_json,
+                    &metadata_json,
+                    &now,
+                    &now,
+                ],
+            )?;
+            Ok(())
+        })?;
 
         // Save tasks
         for task in workflow.tasks.values() {
             self.save_task(workflow.id, task)?;
         }
 
-        // Save edges
-        conn.execute(
-            "DELETE FROM edges WHERE workflow_id = ?1",
-            params![workflow.id.to_string()],
-        )?;
-
-        for edge in &workflow.edges {
-            conn.execute(
-                "INSERT INTO edges (workflow_id, from_task, to_task, condition) VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    workflow.id.to_string(),
-                    edge.from.to_string(),
-                    edge.to.to_string(),
-                    edge.condition,
-                ],
-            )?;
-        }
+        // Delete then re-insert edges
+        let id_s = workflow.id.to_string();
+        self.with_inner(|inner| {
+            inner.exec("DELETE FROM edges WHERE workflow_id = $1", &[&id_s])?;
+            for edge in &workflow.edges {
+                let from_s = edge.from.to_string();
+                let to_s = edge.to.to_string();
+                inner.exec(
+                    "INSERT INTO edges (workflow_id, from_task, to_task, condition) VALUES ($1, $2, $3, $4)",
+                    &[
+                        &id_s,
+                        &from_s,
+                        &to_s,
+                        &edge.condition.as_deref(),
+                    ],
+                )?;
+            }
+            Ok(())
+        })?;
 
         debug!("Saved workflow: {}", workflow.id);
         Ok(())
@@ -245,42 +314,33 @@ impl PersistenceManager {
 
     /// Load a workflow from the database.
     pub fn load_workflow(&self, workflow_id: WorkflowId) -> Result<Workflow> {
-        let conn = self.pool.get().map_err(|e| {
-            WorkflowError::Database(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+        let id_s = workflow_id.to_string();
+
+        let rows = self.with_inner(|inner| {
+            inner.query(
+                "SELECT id, name, description, state, config, metadata FROM workflows WHERE id = $1",
+                &[&id_s],
+            )
         })?;
 
-        let mut stmt = conn.prepare(
-            "SELECT id, name, description, state, config, metadata FROM workflows WHERE id = ?1",
-        )?;
+        let row = rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| WorkflowError::WorkflowNotFound(id_s.clone()))?;
 
-        let workflow = stmt.query_row(params![workflow_id.to_string()], |row| {
-            let config_json: String = row.get(4)?;
-            let metadata_json: String = row.get(5)?;
+        let config_json = col_text(&row, 4)?;
+        let metadata_json = col_text(&row, 5)?;
+        let state_str = col_text(&row, 3)?;
 
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                config_json,
-                metadata_json,
-            ))
-        })?;
-
-        // Wrap config JSON in a lazy wrapper — parsing is deferred until
-        // the caller first accesses the config.  Here we call get_cloned()
-        // immediately (demonstrating the pattern), but in a scenario where
-        // config is only needed conditionally the parse can be skipped.
-        let lazy_config = LazyWorkflowConfig::new(workflow.4.clone());
+        let lazy_config = LazyWorkflowConfig::new(config_json);
         let config = lazy_config.get_cloned()?;
-
-        let metadata = serde_json::from_str(&workflow.5)?;
-        let state = self.parse_workflow_state(&workflow.3);
+        let metadata = serde_json::from_str(&metadata_json)?;
+        let state = self.parse_workflow_state(&state_str);
 
         let mut result = Workflow {
             id: workflow_id,
-            name: workflow.1,
-            description: workflow.2,
+            name: col_text(&row, 1)?,
+            description: col_opt_text(&row, 2)?.unwrap_or_default(),
             tasks: Default::default(),
             edges: Vec::new(),
             config,
@@ -302,102 +362,99 @@ impl PersistenceManager {
     }
 
     fn save_task(&self, workflow_id: WorkflowId, task: &Task) -> Result<()> {
-        let conn = self.pool.get().map_err(|e| {
-            WorkflowError::Database(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
-        })?;
-
         let now = Utc::now().to_rfc3339();
         let task_type_json = serde_json::to_string(&task.task_type)?;
         let retry_policy_json = serde_json::to_string(&task.retry)?;
         let dependencies_json = serde_json::to_string(&task.dependencies)?;
         let metadata_json = serde_json::to_string(&task.metadata)?;
         let conditions_json = serde_json::to_string(&task.conditions)?;
+        let state_s = format!("{:?}", task.state);
+        let priority_i = task.priority as i64;
+        let timeout_i = task.timeout.as_secs() as i64;
+        let retry_count_i = task.retry_count as i64;
+        let task_id_s = task.id.to_string();
+        let workflow_id_s = workflow_id.to_string();
 
-        conn.execute(
-            "INSERT OR REPLACE INTO tasks
-             (id, workflow_id, name, task_type, state, priority, retry_policy, timeout_secs,
-              dependencies, metadata, retry_count, conditions, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-            params![
-                task.id.to_string(),
-                workflow_id.to_string(),
-                task.name,
-                task_type_json,
-                format!("{:?}", task.state),
-                task.priority as i32,
-                retry_policy_json,
-                task.timeout.as_secs() as i64,
-                dependencies_json,
-                metadata_json,
-                task.retry_count,
-                conditions_json,
-                now,
-                now,
-            ],
-        )?;
-
-        Ok(())
+        self.with_inner(|inner| {
+            inner.exec(
+                "INSERT OR REPLACE INTO tasks
+                 (id, workflow_id, name, task_type, state, priority, retry_policy, timeout_secs,
+                  dependencies, metadata, retry_count, conditions, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+                &[
+                    &task_id_s,
+                    &workflow_id_s,
+                    &task.name.as_str(),
+                    &task_type_json,
+                    &state_s,
+                    &priority_i,
+                    &retry_policy_json,
+                    &timeout_i,
+                    &dependencies_json,
+                    &metadata_json,
+                    &retry_count_i,
+                    &conditions_json,
+                    &now,
+                    &now,
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     fn load_tasks(&self, workflow_id: WorkflowId) -> Result<Vec<Task>> {
-        let conn = self.pool.get().map_err(|e| {
-            WorkflowError::Database(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+        let id_s = workflow_id.to_string();
+        let rows = self.with_inner(|inner| {
+            inner.query(
+                "SELECT id, name, task_type, state, priority, retry_policy, timeout_secs,
+                         dependencies, metadata, retry_count, conditions
+                  FROM tasks WHERE workflow_id = $1",
+                &[&id_s],
+            )
         })?;
 
-        let mut stmt = conn.prepare(
-            "SELECT id, name, task_type, state, priority, retry_policy, timeout_secs,
-                    dependencies, metadata, retry_count, conditions
-             FROM tasks WHERE workflow_id = ?1",
-        )?;
-
-        let tasks = stmt
-            .query_map(params![workflow_id.to_string()], |row| {
-                self.task_from_row(row)
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(tasks)
+        rows.iter().map(|row| self.task_from_row(row)).collect()
     }
 
-    fn task_from_row(&self, row: &Row) -> rusqlite::Result<Task> {
-        let id_str: String = row.get(0)?;
+    fn task_from_row(&self, row: &oxisql_core::Row) -> Result<Task> {
+        let id_str = col_text(row, 0)?;
         let id = uuid::Uuid::parse_str(&id_str)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            .map_err(|e| WorkflowError::Database(format!("invalid task UUID: {e}")))?;
 
-        let task_type_json: String = row.get(2)?;
+        let task_type_json = col_text(row, 2)?;
         let task_type: crate::task::TaskType = serde_json::from_str(&task_type_json)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            .map_err(|e| WorkflowError::Database(format!("task_type deserialize: {e}")))?;
 
-        let state_str: String = row.get(3)?;
+        let state_str = col_text(row, 3)?;
         let state = self.parse_task_state(&state_str);
 
-        let priority_int: i32 = row.get(4)?;
-        let priority = self.parse_task_priority(priority_int);
+        let priority_int = col_i64(row, 4)?;
+        let priority = self.parse_task_priority(priority_int as i32);
 
-        let retry_policy_json: String = row.get(5)?;
+        let retry_policy_json = col_text(row, 5)?;
         let retry = serde_json::from_str(&retry_policy_json)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            .map_err(|e| WorkflowError::Database(format!("retry_policy deserialize: {e}")))?;
 
-        let timeout_secs: i64 = row.get(6)?;
+        let timeout_secs = col_i64(row, 6)?;
         let timeout = std::time::Duration::from_secs(u64::try_from(timeout_secs).unwrap_or(3600));
 
-        let dependencies_json: String = row.get(7)?;
+        let dependencies_json = col_text(row, 7)?;
         let dependencies = serde_json::from_str(&dependencies_json)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            .map_err(|e| WorkflowError::Database(format!("dependencies deserialize: {e}")))?;
 
-        let metadata_json: String = row.get(8)?;
+        let metadata_json = col_text(row, 8)?;
         let metadata = serde_json::from_str(&metadata_json)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            .map_err(|e| WorkflowError::Database(format!("metadata deserialize: {e}")))?;
 
-        let retry_count: u32 = row.get(9)?;
+        let retry_count = col_i64(row, 9)? as u32;
 
-        let conditions_json: String = row.get(10)?;
+        let conditions_json = col_text(row, 10)?;
         let conditions = serde_json::from_str(&conditions_json)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            .map_err(|e| WorkflowError::Database(format!("conditions deserialize: {e}")))?;
 
         Ok(Task {
             id: TaskId::from(id),
-            name: row.get(1)?,
+            name: col_text(row, 1)?,
             task_type,
             state,
             priority,
@@ -411,65 +468,55 @@ impl PersistenceManager {
     }
 
     fn load_edges(&self, workflow_id: WorkflowId) -> Result<Vec<crate::workflow::Edge>> {
-        let conn = self.pool.get().map_err(|e| {
-            WorkflowError::Database(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+        let id_s = workflow_id.to_string();
+        let rows = self.with_inner(|inner| {
+            inner.query(
+                "SELECT from_task, to_task, condition FROM edges WHERE workflow_id = $1",
+                &[&id_s],
+            )
         })?;
 
-        let mut stmt =
-            conn.prepare("SELECT from_task, to_task, condition FROM edges WHERE workflow_id = ?1")?;
-
-        let edges = stmt
-            .query_map(params![workflow_id.to_string()], |row| {
-                let from_str: String = row.get(0)?;
-                let to_str: String = row.get(1)?;
-                let condition: Option<String> = row.get(2)?;
+        rows.iter()
+            .map(|row| {
+                let from_str = col_text(row, 0)?;
+                let to_str = col_text(row, 1)?;
+                let condition = col_opt_text(row, 2)?;
 
                 let from_uuid = uuid::Uuid::parse_str(&from_str)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                    .map_err(|e| WorkflowError::Database(format!("edge from_uuid: {e}")))?;
                 let to_uuid = uuid::Uuid::parse_str(&to_str)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                    .map_err(|e| WorkflowError::Database(format!("edge to_uuid: {e}")))?;
 
                 Ok(crate::workflow::Edge {
                     from: TaskId::from(from_uuid),
                     to: TaskId::from(to_uuid),
                     condition,
                 })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(edges)
+            })
+            .collect()
     }
 
     /// List all workflows.
     pub fn list_workflows(&self) -> Result<Vec<WorkflowId>> {
-        let conn = self.pool.get().map_err(|e| {
-            WorkflowError::Database(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
-        })?;
+        let rows = self.with_inner(|inner| inner.query("SELECT id FROM workflows", &[]))?;
 
-        let mut stmt = conn.prepare("SELECT id FROM workflows")?;
-        let workflows = stmt
-            .query_map([], |row| {
-                let id_str: String = row.get(0)?;
+        rows.iter()
+            .map(|row| {
+                let id_str = col_text(row, 0)?;
                 let uuid = uuid::Uuid::parse_str(&id_str)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                    .map_err(|e| WorkflowError::Database(format!("workflow UUID: {e}")))?;
                 Ok(WorkflowId::from(uuid))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(workflows)
+            })
+            .collect()
     }
 
     /// Delete a workflow.
     pub fn delete_workflow(&self, workflow_id: WorkflowId) -> Result<()> {
-        let conn = self.pool.get().map_err(|e| {
-            WorkflowError::Database(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+        let id_s = workflow_id.to_string();
+        self.with_inner(|inner| {
+            inner.exec("DELETE FROM workflows WHERE id = $1", &[&id_s])?;
+            Ok(())
         })?;
-
-        conn.execute(
-            "DELETE FROM workflows WHERE id = ?1",
-            params![workflow_id.to_string()],
-        )?;
-
         debug!("Deleted workflow: {}", workflow_id);
         Ok(())
     }

@@ -123,7 +123,7 @@ impl ClipFaceIndex {
     /// Register a known identity with a reference embedding.
     ///
     /// If the identity already exists the embedding is **updated** to the new
-    /// value (not averaged).  For a running mean, use [`update_identity`].
+    /// value (not averaged).  For a running mean, use [`Self::update_identity`].
     pub fn add_identity(&mut self, label: String, embedding: Vec<f32>) {
         self.gallery.insert(label, embedding);
     }

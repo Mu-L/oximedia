@@ -130,21 +130,111 @@ impl CameraCalibrator {
         })
     }
 
-    /// Compute the color matrix from `ColorChecker` measurements.
-    fn compute_color_matrix(&self, colorchecker: &ColorChecker) -> CalibrationResult<Matrix3x3> {
-        // This is a simplified implementation
-        // A real implementation would use least-squares optimization to find
-        // the best matrix that transforms measured colors to reference colors
+    /// Fit a least-squares 3×3 colour-correction matrix from a `ColorChecker`.
+    ///
+    /// Public entry point to the calibration's colour-matrix solver. Returns the
+    /// matrix `M` that best maps each patch's `measured_rgb` onto its
+    /// `reference_rgb` in the least-squares sense (see
+    /// `CameraCalibrator::compute_color_matrix` for the full derivation).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalibrationError::InsufficientData`] if the checker has no
+    /// patches, or [`CalibrationError::NumericalInstability`] if the (Tikhonov-
+    /// regularised) normal-equation system is singular.
+    pub fn fit_color_matrix(&self, colorchecker: &ColorChecker) -> CalibrationResult<Matrix3x3> {
+        self.compute_color_matrix(colorchecker)
+    }
 
+    /// Apply a 3×3 colour matrix to a single RGB triplet.
+    ///
+    /// Convenience wrapper exposing the matrix-application path used internally
+    /// by [`CameraCalibrator::apply_calibration`].
+    #[must_use]
+    pub fn apply_color_matrix(&self, matrix: &Matrix3x3, rgb: &Rgb) -> Rgb {
+        self.apply_matrix(matrix, rgb)
+    }
+
+    /// Compute the colour matrix from `ColorChecker` measurements.
+    ///
+    /// Fits a 3×3 matrix `M` minimising the sum of squared residuals
+    /// `Σ_i ‖M·measured_i − reference_i‖²` over all patches. The closed-form
+    /// solution of the normal equations is
+    ///
+    /// ```text
+    /// A = Σ_i measured_i · measured_iᵀ   (3×3)
+    /// B = Σ_i reference_i · measured_iᵀ  (3×3)
+    /// M = B · A⁻¹
+    /// ```
+    ///
+    /// A small Tikhonov regularisation term (`A += λI`, `λ = 1e-6`) is added to
+    /// keep the system well-posed for degenerate or low-rank patch sets (e.g.
+    /// only neutral greys). The 3×3 inverse is computed in closed form via the
+    /// adjugate; if the (regularised) system is still numerically singular an
+    /// error is returned rather than panicking.
+    fn compute_color_matrix(&self, colorchecker: &ColorChecker) -> CalibrationResult<Matrix3x3> {
         if colorchecker.patches.is_empty() {
             return Err(CalibrationError::InsufficientData(
                 "No patches available for matrix computation".to_string(),
             ));
         }
 
-        // For now, return an identity matrix
-        // In a real implementation, this would be computed from the patches
-        Ok([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+        // Tikhonov regularisation strength used to condition the normal
+        // equations for valid-but-ill-conditioned patch sets.
+        const LAMBDA: f64 = 1e-6;
+        // Minimum |det(A)| (of the *un-regularised* normal matrix) below which
+        // the patch set is rank-deficient: it carries no information to fit a
+        // full 3×3 transform, so we error out instead of returning a
+        // λ-dominated (meaningless) matrix.
+        const DET_EPS: f64 = 1e-12;
+
+        // Accumulate the normal-equation matrices.
+        //   a = Σ meas·measᵀ   (symmetric, positive semi-definite)
+        //   b = Σ ref·measᵀ
+        let mut a = [[0.0_f64; 3]; 3];
+        let mut b = [[0.0_f64; 3]; 3];
+
+        for patch in &colorchecker.patches {
+            let m = patch.measured_rgb;
+            let r = patch.reference_rgb;
+            for i in 0..3 {
+                for j in 0..3 {
+                    a[i][j] += m[i] * m[j];
+                    b[i][j] += r[i] * m[j];
+                }
+            }
+        }
+
+        // Reject genuinely rank-deficient inputs using the determinant of the
+        // *un-regularised* A (e.g. all-identical patches, or patches confined to
+        // a plane/line in RGB). Tikhonov below would otherwise make any system
+        // invertible and silently return a meaningless λ-dominated solution.
+        if determinant_3x3(&a).abs() < DET_EPS {
+            return Err(CalibrationError::NumericalInstability(
+                "color-matrix normal equations are rank-deficient (degenerate patch set)"
+                    .to_string(),
+            ));
+        }
+
+        // Tikhonov regularisation on a copy: A_reg = A + λI. Solving with the
+        // regularised matrix keeps the fit well-posed without perturbing the
+        // rank check above.
+        let mut a_reg = a;
+        for (i, row) in a_reg.iter_mut().enumerate() {
+            row[i] += LAMBDA;
+        }
+
+        // Closed-form 3×3 inverse via the adjugate. `invert_3x3` recomputes the
+        // determinant and returns `None` (→ graceful error) if the regularised
+        // system is still numerically singular.
+        let a_inv = invert_3x3(&a_reg, DET_EPS).ok_or_else(|| {
+            CalibrationError::NumericalInstability(
+                "color-matrix normal equations are singular (degenerate patch set)".to_string(),
+            )
+        })?;
+
+        // M = B · A⁻¹.
+        Ok(mat3x3_mul(&b, &a_inv))
     }
 
     /// Generate a 3D calibration LUT from the `ColorChecker` measurements.
@@ -330,6 +420,61 @@ impl CameraCalibrator {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 3×3 linear-algebra helpers (Pure Rust, closed form — no oxiblas needed)
+// ---------------------------------------------------------------------------
+
+/// Multiply two row-major 3×3 matrices: returns `lhs · rhs`.
+fn mat3x3_mul(lhs: &Matrix3x3, rhs: &Matrix3x3) -> Matrix3x3 {
+    let mut out = [[0.0_f64; 3]; 3];
+    for (i, out_row) in out.iter_mut().enumerate() {
+        for (j, out_cell) in out_row.iter_mut().enumerate() {
+            *out_cell = lhs[i][0] * rhs[0][j] + lhs[i][1] * rhs[1][j] + lhs[i][2] * rhs[2][j];
+        }
+    }
+    out
+}
+
+/// Determinant of a row-major 3×3 matrix (rule of Sarrus / cofactor expansion).
+fn determinant_3x3(m: &Matrix3x3) -> f64 {
+    let c00 = m[1][1] * m[2][2] - m[1][2] * m[2][1];
+    let c01 = m[1][0] * m[2][2] - m[1][2] * m[2][0];
+    let c02 = m[1][0] * m[2][1] - m[1][1] * m[2][0];
+    m[0][0] * c00 - m[0][1] * c01 + m[0][2] * c02
+}
+
+/// Invert a row-major 3×3 matrix in closed form via the adjugate.
+///
+/// Returns `None` if `|det| < det_eps` (numerically singular), so callers can
+/// surface a graceful error instead of producing `inf`/`NaN` coefficients.
+fn invert_3x3(m: &Matrix3x3, det_eps: f64) -> Option<Matrix3x3> {
+    // Cofactors (transposed → adjugate) computed alongside the determinant.
+    let c00 = m[1][1] * m[2][2] - m[1][2] * m[2][1];
+    let c01 = m[1][0] * m[2][2] - m[1][2] * m[2][0];
+    let c02 = m[1][0] * m[2][1] - m[1][1] * m[2][0];
+
+    let det = m[0][0] * c00 - m[0][1] * c01 + m[0][2] * c02;
+    if det.abs() < det_eps {
+        return None;
+    }
+    let inv_det = 1.0 / det;
+
+    let c10 = m[0][1] * m[2][2] - m[0][2] * m[2][1];
+    let c11 = m[0][0] * m[2][2] - m[0][2] * m[2][0];
+    let c12 = m[0][0] * m[2][1] - m[0][1] * m[2][0];
+
+    let c20 = m[0][1] * m[1][2] - m[0][2] * m[1][1];
+    let c21 = m[0][0] * m[1][2] - m[0][2] * m[1][0];
+    let c22 = m[0][0] * m[1][1] - m[0][1] * m[1][0];
+
+    // adjugate = cofactor matrixᵀ, then scale by 1/det.
+    Some([
+        [c00 * inv_det, -c10 * inv_det, c20 * inv_det],
+        [-c01 * inv_det, c11 * inv_det, -c21 * inv_det],
+        [c02 * inv_det, -c12 * inv_det, c22 * inv_det],
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,6 +522,87 @@ mod tests {
         let reference = [0.5, 0.5, 0.5];
         let error = calibrator.calculate_patch_error(&measured, &reference);
         assert!(error < 1e-10);
+    }
+
+    // ------------------------------------------------------------------
+    // 3×3 linear-algebra helper tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_invert_identity_is_identity() {
+        let id: Matrix3x3 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let inv = invert_3x3(&id, 1e-12).expect("identity is invertible");
+        for i in 0..3 {
+            for j in 0..3 {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!((inv[i][j] - expected).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn test_invert_times_original_is_identity() {
+        // A well-conditioned, asymmetric, non-singular matrix.
+        let m: Matrix3x3 = [[2.0, 0.3, 0.1], [0.2, 1.5, 0.4], [0.05, 0.25, 1.8]];
+        let inv = invert_3x3(&m, 1e-12).expect("m is invertible");
+        let prod = mat3x3_mul(&m, &inv);
+        for i in 0..3 {
+            for j in 0..3 {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (prod[i][j] - expected).abs() < 1e-10,
+                    "M·M⁻¹[{i}][{j}]={} expected {expected}",
+                    prod[i][j]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_invert_singular_returns_none() {
+        // Rank-1 matrix: all rows identical → det = 0.
+        let singular: Matrix3x3 = [[1.0, 2.0, 3.0], [1.0, 2.0, 3.0], [1.0, 2.0, 3.0]];
+        assert!(invert_3x3(&singular, 1e-12).is_none());
+    }
+
+    #[test]
+    fn test_compute_color_matrix_identity_for_classic24() {
+        // classic24 has measured == reference for every patch, so the
+        // least-squares fit must recover (approximately) the identity matrix.
+        let calibrator = CameraCalibrator::default_calibrator();
+        let checker = ColorChecker {
+            checker_type: ColorCheckerType::Classic24,
+            patches: ColorChecker::classic24_reference(),
+            bounding_box: None,
+            confidence: 1.0,
+        };
+
+        let m = calibrator
+            .compute_color_matrix(&checker)
+            .expect("fit must succeed for classic24");
+
+        for i in 0..3 {
+            for j in 0..3 {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (m[i][j] - expected).abs() < 1e-4,
+                    "M[{i}][{j}]={} should be ~{expected}",
+                    m[i][j]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_compute_color_matrix_empty_is_error() {
+        let calibrator = CameraCalibrator::default_calibrator();
+        let checker = ColorChecker {
+            checker_type: ColorCheckerType::Classic24,
+            patches: vec![],
+            bounding_box: None,
+            confidence: 1.0,
+        };
+        assert!(calibrator.compute_color_matrix(&checker).is_err());
     }
 
     // ------------------------------------------------------------------

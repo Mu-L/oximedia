@@ -49,7 +49,7 @@ fn file_copy_job(name: &str) -> BatchJob {
 /// The engine persists job state in SQLite upon submission, so we can
 /// verify the complete data path (submit → persist → query) without
 /// requiring workers to actually run the job.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_lifecycle_submit_and_query_status() {
     let db_file = temp_db_path();
     let db_path = db_file
@@ -80,7 +80,7 @@ async fn test_lifecycle_submit_and_query_status() {
 
 /// Verify that multiple jobs submitted in sequence all receive unique IDs
 /// and are initially in the `Queued` state.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_lifecycle_multiple_jobs_are_queued() {
     let db_file = temp_db_path();
     let db_path = db_file
@@ -125,7 +125,7 @@ async fn test_lifecycle_multiple_jobs_are_queued() {
 
 /// Verify that a queued job can be cancelled and is subsequently reported
 /// as `Cancelled`.  The cancelled job must still appear in `list_jobs`.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_lifecycle_cancel_queued_job() {
     let db_file = temp_db_path();
     let db_path = db_file
@@ -176,7 +176,7 @@ async fn test_lifecycle_cancel_queued_job() {
 
 /// Verify that `BatchEngine::start` and `BatchEngine::stop` complete
 /// without hanging when no jobs are present.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_lifecycle_start_stop_idle_engine() {
     let db_file = temp_db_path();
     let db_path = db_file
@@ -209,7 +209,7 @@ async fn test_lifecycle_start_stop_idle_engine() {
 /// We explicitly cancel the job before starting the engine workers to avoid
 /// them picking it up (since the job would fail due to missing input files).
 /// This tests the complete data path without requiring actual job execution.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_lifecycle_full_submit_cancel_query() {
     let db_file = temp_db_path();
     let db_path = db_file
@@ -253,7 +253,7 @@ async fn test_lifecycle_full_submit_cancel_query() {
 }
 
 /// Verify that cancelling a non-existent job ID returns Ok (idempotent).
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_lifecycle_cancel_unknown_job_is_ok() {
     let db_file = temp_db_path();
     let db_path = db_file
@@ -273,7 +273,7 @@ async fn test_lifecycle_cancel_unknown_job_is_ok() {
 }
 
 /// Verify that list_jobs returns an empty Vec when no jobs have been submitted.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_lifecycle_list_jobs_empty_initially() {
     let db_file = temp_db_path();
     let db_path = db_file

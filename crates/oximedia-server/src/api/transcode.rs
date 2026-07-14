@@ -13,7 +13,6 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 use std::sync::Arc;
 
 /// Submit transcoding job request.
@@ -101,7 +100,7 @@ pub async fn submit_job(
     );
 
     // Save to database
-    sqlx::query(
+    crate::db::query(
         r"
         INSERT INTO transcode_jobs (
             id, user_id, media_id, status, progress,
@@ -145,7 +144,7 @@ pub async fn get_job(
     auth_user: AuthUser,
     Path(job_id): Path<String>,
 ) -> ServerResult<impl IntoResponse> {
-    let row = sqlx::query(
+    let row = crate::db::query(
         r"
         SELECT * FROM transcode_jobs WHERE id = ?
         ",
@@ -175,7 +174,7 @@ pub async fn cancel_job(
     auth_user: AuthUser,
     Path(job_id): Path<String>,
 ) -> ServerResult<impl IntoResponse> {
-    let row = sqlx::query("SELECT user_id, status FROM transcode_jobs WHERE id = ?")
+    let row = crate::db::query("SELECT user_id, status FROM transcode_jobs WHERE id = ?")
         .bind(&job_id)
         .fetch_one(state.db.pool())
         .await
@@ -199,7 +198,7 @@ pub async fn cancel_job(
     }
 
     // Update status
-    sqlx::query("UPDATE transcode_jobs SET status = ? WHERE id = ?")
+    crate::db::query("UPDATE transcode_jobs SET status = ? WHERE id = ?")
         .bind(TranscodeStatus::Cancelled.to_string())
         .bind(&job_id)
         .execute(state.db.pool())
@@ -222,7 +221,7 @@ pub async fn get_job_status(
     auth_user: AuthUser,
     Path(job_id): Path<String>,
 ) -> ServerResult<impl IntoResponse> {
-    let row = sqlx::query(
+    let row = crate::db::query(
         r"
         SELECT user_id, status, progress, error_message
         FROM transcode_jobs
@@ -256,7 +255,7 @@ pub async fn list_jobs(
     State(state): State<Arc<AppState>>,
     auth_user: AuthUser,
 ) -> ServerResult<impl IntoResponse> {
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         r"
         SELECT * FROM transcode_jobs
         WHERE user_id = ?
@@ -275,7 +274,7 @@ pub async fn list_jobs(
 }
 
 /// Helper to convert database row to [`TranscodeJob`].
-fn row_to_job(row: &sqlx::sqlite::SqliteRow) -> ServerResult<TranscodeJob> {
+fn row_to_job(row: &crate::db::Row) -> ServerResult<TranscodeJob> {
     let status_str: String = row.get("status");
     let status = status_str
         .parse::<TranscodeStatus>()

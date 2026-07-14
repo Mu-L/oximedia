@@ -110,8 +110,8 @@ pub mod version_lazy;
 pub mod error;
 
 pub use compare::{
-    apply_compare_filter, CompareFilter, CompareLayout, CompareResult, CompareVersion, DiffStats,
-    MediaComparator, WipeAngle,
+    apply_compare_filter, compare_cached, CompareCache, CompareFilter, CompareLayout,
+    CompareResult, CompareVersion, DiffStats, MediaComparator, WipeAngle,
 };
 pub use error::{ReviewError, ReviewResult};
 pub use session::ReviewSession;

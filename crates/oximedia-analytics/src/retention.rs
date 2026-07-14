@@ -1036,4 +1036,113 @@ mod tests {
         assert!(curve.buckets.is_empty());
         assert_eq!(curve.total_starts, 0);
     }
+
+    // ── drop_off_points numeric pins ─────────────────────────────────────────
+
+    #[test]
+    fn test_drop_off_detects_large_drop() {
+        // Bucket sequence: 100 → 80 (Δ=20) → 40 (Δ=40) → 38 (Δ=2).
+        // Threshold = 30.0.  Only the 80→40 step (Δ=40 > 30) should be flagged.
+        // The 100→80 step (Δ=20) and 40→38 step (Δ=2) must NOT be flagged.
+        let curve = RetentionCurve {
+            buckets: vec![
+                RetentionBucket {
+                    position_pct: 0.0,
+                    retention_pct: 100.0,
+                },
+                RetentionBucket {
+                    position_pct: 0.25,
+                    retention_pct: 80.0,
+                },
+                RetentionBucket {
+                    position_pct: 0.5,
+                    retention_pct: 40.0,
+                },
+                RetentionBucket {
+                    position_pct: 0.75,
+                    retention_pct: 38.0,
+                },
+            ],
+            total_starts: 100,
+            completed_views: 0,
+        };
+        let drops = drop_off_points(&curve, 30.0);
+        assert_eq!(
+            drops.len(),
+            1,
+            "expected exactly 1 drop-off point, got {:?}",
+            drops
+        );
+        assert!(
+            (drops[0] - 0.5_f32).abs() < 1e-5,
+            "expected drop at position 0.5, got {}",
+            drops[0]
+        );
+    }
+
+    #[test]
+    fn test_drop_off_empty_result_when_no_drop() {
+        // All drops are well below the threshold of 50.0.
+        let curve = RetentionCurve {
+            buckets: vec![
+                RetentionBucket {
+                    position_pct: 0.0,
+                    retention_pct: 100.0,
+                },
+                RetentionBucket {
+                    position_pct: 33.0,
+                    retention_pct: 95.0,
+                },
+                RetentionBucket {
+                    position_pct: 66.0,
+                    retention_pct: 90.0,
+                },
+                RetentionBucket {
+                    position_pct: 100.0,
+                    retention_pct: 87.0,
+                },
+            ],
+            total_starts: 50,
+            completed_views: 44,
+        };
+        let drops = drop_off_points(&curve, 50.0);
+        assert!(drops.is_empty(), "expected no drops, got {:?}", drops);
+    }
+
+    #[test]
+    fn test_drop_off_strict_boundary() {
+        // Delta equals threshold exactly (10.0 == 10.0).
+        // The impl uses strict `>`, so an equal delta must NOT be included.
+        let curve = RetentionCurve {
+            buckets: vec![
+                RetentionBucket {
+                    position_pct: 0.0,
+                    retention_pct: 100.0,
+                },
+                RetentionBucket {
+                    position_pct: 50.0,
+                    retention_pct: 90.0,
+                }, // Δ = 10.0 exactly
+                RetentionBucket {
+                    position_pct: 100.0,
+                    retention_pct: 78.0,
+                }, // Δ = 12.0 > 10.0
+            ],
+            total_starts: 30,
+            completed_views: 0,
+        };
+        // Threshold = 10.0; Δ=10.0 is NOT strictly greater, Δ=12.0 IS.
+        let drops = drop_off_points(&curve, 10.0);
+        assert_eq!(
+            drops.len(),
+            1,
+            "only the Δ=12 step should appear, got {:?}",
+            drops
+        );
+        assert!(
+            (drops[0] - 100.0_f32).abs() < 1e-5,
+            "expected drop at position 100.0, got {}",
+            drops[0]
+        );
+    }
 }

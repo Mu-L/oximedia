@@ -549,4 +549,60 @@ mod tests {
         let detector = StatisticalAnomalyDetector::new(1.5);
         assert!((detector.sensitivity - 1.0).abs() < f64::EPSILON);
     }
+
+    #[test]
+    fn test_lsb_detects_stego() {
+        // Embed LSB steganography: set ALL LSBs to 1.
+        // This yields lsb_one_ratio=1.0, deviation 0.5 > threshold 0.05 → suspected=true.
+        let mut pixels = vec![128u8; 4096];
+        for p in pixels.iter_mut() {
+            *p |= 1; // force LSB to 1
+        }
+        let mut result = LsbAnalysisResult::new("luma", 4096);
+        result.compute_from_pixels(&pixels);
+        assert!(
+            result.suspected,
+            "all-LSB-set pattern should be detected as suspected \
+             (chi_square={}, lsb_one_ratio={})",
+            result.chi_square, result.lsb_one_ratio
+        );
+    }
+
+    #[test]
+    fn test_lsb_clean_not_suspected() {
+        // Balanced alternating-LSB data: half pixels 128 (LSB=0), half 129 (LSB=1).
+        // lsb_one_ratio=0.5, chi_square≈0 → suspected=false.
+        let pixels: Vec<u8> = (0..4096u32).map(|i| 128 + (i % 2) as u8).collect();
+        let mut result = LsbAnalysisResult::new("luma", 4096);
+        result.compute_from_pixels(&pixels);
+        assert!(
+            !result.suspected,
+            "balanced 50/50 LSB data should not be suspected \
+             (chi_square={}, lsb_one_ratio={})",
+            result.chi_square, result.lsb_one_ratio
+        );
+    }
+
+    #[test]
+    fn test_rs_analysis_stego_detected() {
+        // Construct pairs (small_odd, large_even) that maximise RS asymmetry.
+        // For pair (a=9, b=200) where b is even and b > a:
+        //   b_flip = 201, diff_flip=192 > diff=191 → singular_pos
+        //   b_neg  = 199, diff_neg =190 < diff=191 → regular_neg
+        // This yields sm=1, rm_neg=1, rm=0, sm_neg=0 → asymmetry=1.0 → payload=1.0.
+        let pixels: Vec<u8> = (0..4096u32)
+            .map(|i| if i % 2 == 0 { 9u8 } else { 200u8 })
+            .collect();
+        let result = StatisticalAnomalyDetector::new(0.5).rs_analysis(&pixels);
+        assert!(
+            result.stego_detected(0.0),
+            "RS analysis must detect high-asymmetry stego signal \
+             (estimated_payload={}, rm={:.3}, sm={:.3}, rm_neg={:.3}, sm_neg={:.3})",
+            result.estimated_payload,
+            result.rm,
+            result.sm,
+            result.rm_neg,
+            result.sm_neg,
+        );
+    }
 }

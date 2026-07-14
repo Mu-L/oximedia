@@ -577,7 +577,7 @@ mod tests {
         Ok(JobQueue::new(db, 100, 100))
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_job_submission() -> Result<()> {
         let queue = create_test_queue().await?;
 
@@ -595,7 +595,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_task_assignment() -> Result<()> {
         let queue = create_test_queue().await?;
 
@@ -620,7 +620,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_task_progress() -> Result<()> {
         let queue = create_test_queue().await?;
 
@@ -642,7 +642,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_job_cancellation() -> Result<()> {
         let queue = create_test_queue().await?;
 
@@ -723,7 +723,7 @@ mod tests {
         assert_eq!(caps2, vec!["h264"]);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_reassign_worker_tasks() -> Result<()> {
         let queue = create_test_queue().await?;
         let worker_id = WorkerId::new("worker-99");
@@ -755,7 +755,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_worker_assignments_tracked_in_memory() -> Result<()> {
         let queue = create_test_queue().await?;
         let worker_id = WorkerId::new("worker-mem");
@@ -801,7 +801,7 @@ mod tests {
 
     // ── Task H: output validator integration tests ─────────────────────────────
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_validate_job_output_missing_file_returns_completed() -> Result<()> {
         let queue = create_test_queue().await?;
         // A non-existent absolute path is treated as a simulated/pending job —
@@ -813,7 +813,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_validate_job_output_valid_large_file_returns_completed() -> Result<()> {
         use std::io::Write;
         let path = std::env::temp_dir().join("oximedia_farm_valid_output.mp4");
@@ -831,7 +831,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_validate_job_output_small_file_returns_completed_with_warnings() -> Result<()> {
         use std::io::Write;
         let path = std::env::temp_dir().join("oximedia_farm_small_output.mp4");
@@ -849,7 +849,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_validate_job_output_empty_path_returns_completed() -> Result<()> {
         let queue = create_test_queue().await?;
         // Empty path — synthetic/mock job, should not block.
@@ -858,7 +858,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_validate_job_output_relative_path_returns_completed() -> Result<()> {
         let queue = create_test_queue().await?;
         // Relative path — treated as synthetic.

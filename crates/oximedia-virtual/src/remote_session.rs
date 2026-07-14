@@ -90,7 +90,7 @@ pub struct TelemetrySnapshot {
     pub timestamp_ns: u64,
     /// Frame number.
     pub frame_number: u64,
-    /// Camera pose (position [x,y,z] in meters, euler angles [rx,ry,rz] in degrees).
+    /// Camera pose (position `[x,y,z]` in meters, euler angles `[rx,ry,rz]` in degrees).
     pub camera_position: [f64; 3],
     pub camera_euler_deg: [f64; 3],
     /// LED wall brightness (0.0–1.0).

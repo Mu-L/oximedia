@@ -140,7 +140,7 @@ impl IngestSession {
         tokio::spawn(async move {
             while let Some(packet) = packet_rx.recv().await {
                 if let Err(e) = stream.publish(packet) {
-                    eprintln!("Failed to publish packet: {e}");
+                    tracing::error!(error = %e, "failed to publish packet; stopping forwarder");
                     break;
                 }
             }
@@ -431,7 +431,10 @@ async fn run_srt_accept_loop(
                         tokio::spawn(forward_srt_payload(receiver, session));
                     }
                     Err(e) => {
-                        eprintln!("SRT stream registry rejected stream: {e}; dropping connection");
+                        tracing::warn!(
+                            error = %e,
+                            "SRT stream registry rejected stream; dropping connection"
+                        );
                     }
                 }
             }
@@ -441,11 +444,11 @@ async fn run_srt_accept_loop(
                     std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied
                 ) =>
             {
-                eprintln!("Fatal SRT bind error: {e}; terminating accept loop");
+                tracing::error!(error = %e, "fatal SRT bind error; terminating accept loop");
                 return Err(NetError::Io(e));
             }
             Err(e) => {
-                eprintln!("SRT accept transient error: {e}; retrying");
+                tracing::warn!(error = %e, "transient SRT accept error; retrying");
                 // Brief back-off so a flapping peer doesn't spin the loop.
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
@@ -471,7 +474,7 @@ async fn forward_srt_payload(receiver: crate::srt::SrtReceiver, session: Arc<Ing
             }
             Err(NetError::Eof) => break,
             Err(e) => {
-                eprintln!("SRT recv error: {e}; closing forwarder");
+                tracing::warn!(error = %e, "SRT recv error; closing forwarder");
                 break;
             }
         }

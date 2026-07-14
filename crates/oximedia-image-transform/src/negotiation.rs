@@ -6,6 +6,67 @@
 //!
 //! Implements RFC 7231 Accept header parsing with quality factors, and provides
 //! format auto-negotiation that prefers modern formats (AVIF > WebP > JPEG/PNG).
+//!
+//! # Priority rules
+//!
+//! [`negotiate_format`] only runs its Accept-header logic when the caller's
+//! requested format is [`OutputFormat::Auto`] (i.e. `format=auto` or no
+//! `format` parameter at all in the source URL). Any other explicit format
+//! (e.g. `format=png`) is returned verbatim and skips negotiation entirely --
+//! this matches Cloudflare Images' documented behaviour that an explicit
+//! `format` parameter always overrides content negotiation.
+//!
+//! When negotiation does run, formats are tried in this fixed priority order,
+//! and the first one the client's Accept header accepts (exact MIME match,
+//! `image/*` wildcard, or `*/*` wildcard, each with quality factor > 0) wins:
+//!
+//! | Priority | Format         | MIME type     | Rationale                                        |
+//! |----------|----------------|---------------|---------------------------------------------------|
+//! | 1        | AVIF           | `image/avif`  | Best compression of the supported modern formats.  |
+//! | 2        | WebP           | `image/webp`  | Wide support, good compression, older than AVIF.   |
+//! | 3        | PNG            | `image/png`   | Lossless fallback, useful for source transparency. |
+//! | 4        | JPEG (fallback)| `image/jpeg`  | Universal support; used when nothing else matches. |
+//!
+//! JPEG is the unconditional final fallback: it is returned even for an
+//! empty Accept header (`""`) or one containing no recognised image MIME
+//! type at all (see [`negotiate_format`]'s tests for concrete browser Accept
+//! header combinations exercising every branch of this table).
+//!
+//! Quality factors (`q=`) matter only for accept/reject, not for re-ranking:
+//! an entry with `q=0` is treated as "not accepted" regardless of its
+//! position (see the private `accepts_mime` helper), but any positive
+//! quality (even `q=0.001`) is as good as `q=1.0` for negotiation purposes --
+//! Cloudflare Images' negotiation similarly does not attempt fine-grained
+//! quality-weighted selection among image formats.
+//!
+//! **Wildcard caveat:** because `image/*` and `*/*` wildcard entries are
+//! matched literally per RFC 7231 semantics, a client that advertises a
+//! generic `image/*;q=0.8` catch-all (as e.g. Safari's Accept header does,
+//! per the WHATWG Fetch spec's default `image`-destination Accept value)
+//! is treated as accepting AVIF even if it never lists `image/avif`
+//! explicitly and may not actually support decoding it. This crate performs
+//! Accept-header negotiation exactly as specified rather than layering
+//! User-Agent sniffing or a hard-coded per-browser codec support table on
+//! top -- see the `test_browser_safari_wildcard_still_satisfies_avif_priority`
+//! test for a concrete illustration.
+//!
+//! # Client hints fallback
+//!
+//! [`ClientHints`] (the `DPR`, `Viewport-Width`, and `Width` request headers)
+//! provide an *independent, secondary* signal that only supplements --  never
+//! overrides -- explicit URL transform parameters:
+//!
+//! - The `Width` hint sets [`TransformParams::width`](crate::transform::TransformParams::width)
+//!   only when no explicit width was requested via the URL.
+//! - The `DPR` hint sets [`TransformParams::dpr`](crate::transform::TransformParams::dpr)
+//!   only when the params are still at the untouched default (`1.0`).
+//! - `Viewport-Width` is recorded for observability/analytics only; it never
+//!   changes output dimensions directly.
+//! - Missing or invalid hint values (non-numeric, zero, negative, or out of
+//!   the sane range enforced by [`ClientHints::from_headers`]) are silently
+//!   treated as absent rather than causing an error -- this mirrors the
+//!   Accept-header parser's own lenient fallback-to-default behaviour for
+//!   malformed `q=` values.
 
 use crate::transform::OutputFormat;
 
@@ -1062,5 +1123,185 @@ mod tests {
         params.quality = 49;
         let cc = generate_cache_control(&params);
         assert_eq!(cc, "public, max-age=86400");
+    }
+
+    // ── Real-world browser `Accept` header combinations ──
+    //
+    // These headers are the actual values sent by current browsers for
+    // top-level document navigations and for `<img>` sub-resource requests,
+    // captured from browser network-panel inspection. They exercise
+    // `parse_accept_header`, `negotiate_format`, and `supports_format`
+    // end-to-end against realistic input rather than synthetic strings.
+
+    /// Chrome/Chromium (Blink) `<img>` sub-resource request Accept header.
+    const CHROME_IMG_ACCEPT: &str =
+        "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8";
+
+    /// Chrome/Chromium top-level document navigation Accept header (includes
+    /// non-image MIME types ahead of the image ones, all at q=1.0 except the
+    /// trailing wildcard).
+    const CHROME_DOCUMENT_ACCEPT: &str =
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8";
+
+    /// Microsoft Edge (Chromium-based) `<img>` sub-resource Accept header --
+    /// identical to Chrome's since Edge shares the Blink image-loading stack.
+    const EDGE_IMG_ACCEPT: &str =
+        "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8";
+
+    /// Firefox (Gecko) `<img>` sub-resource Accept header.
+    const FIREFOX_IMG_ACCEPT: &str = "image/avif,image/webp,*/*";
+
+    /// Firefox top-level document navigation Accept header.
+    const FIREFOX_DOCUMENT_ACCEPT: &str =
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8";
+
+    /// Safari (WebKit) Accept header, matching the WHATWG Fetch
+    /// specification's hard-coded default `Accept` value for the `image`
+    /// request destination. Safari does not explicitly list `image/avif` (its
+    /// Accept header predates and has historically lagged behind its actual
+    /// AVIF decode support), but it *does* include the generic `image/*`
+    /// wildcard as a lower-quality catch-all.
+    const SAFARI_ACCEPT: &str = "image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5";
+
+    /// A narrow, non-wildcard client Accept header (no `image/*` or `*/*`
+    /// fallback entries at all) that only explicitly lists WebP/PNG/SVG
+    /// support -- representative of a strict image-proxy health-checker or
+    /// a locked-down internal service, and used to exercise the WebP
+    /// (rather than AVIF) selection branch of the priority table.
+    const NARROW_NON_WILDCARD_ACCEPT: &str = "image/webp,image/png,image/svg+xml";
+
+    /// A generic non-browser HTTP client (e.g. `curl`, a bare `reqwest`
+    /// request) that sends the default wildcard Accept header.
+    const GENERIC_CLIENT_ACCEPT: &str = "*/*";
+
+    #[test]
+    fn test_browser_chrome_img_negotiates_avif() {
+        let format = negotiate_format(CHROME_IMG_ACCEPT, OutputFormat::Auto);
+        assert_eq!(format, OutputFormat::Avif);
+        assert!(supports_format(CHROME_IMG_ACCEPT, OutputFormat::WebP));
+        assert!(supports_format(CHROME_IMG_ACCEPT, OutputFormat::Jpeg));
+    }
+
+    #[test]
+    fn test_browser_chrome_document_navigation_negotiates_avif() {
+        // Even though `text/html` appears first (and at q=1.0), format
+        // negotiation only cares about whether an */* -equivalent image MIME
+        // type is present in the accept set, not its position.
+        let format = negotiate_format(CHROME_DOCUMENT_ACCEPT, OutputFormat::Auto);
+        assert_eq!(format, OutputFormat::Avif);
+    }
+
+    #[test]
+    fn test_browser_edge_img_negotiates_avif() {
+        let format = negotiate_format(EDGE_IMG_ACCEPT, OutputFormat::Auto);
+        assert_eq!(format, OutputFormat::Avif);
+    }
+
+    #[test]
+    fn test_browser_firefox_img_negotiates_avif() {
+        let format = negotiate_format(FIREFOX_IMG_ACCEPT, OutputFormat::Auto);
+        assert_eq!(format, OutputFormat::Avif);
+        assert!(supports_format(FIREFOX_IMG_ACCEPT, OutputFormat::Avif));
+        assert!(supports_format(FIREFOX_IMG_ACCEPT, OutputFormat::WebP));
+    }
+
+    #[test]
+    fn test_browser_firefox_document_navigation_negotiates_avif() {
+        let format = negotiate_format(FIREFOX_DOCUMENT_ACCEPT, OutputFormat::Auto);
+        assert_eq!(format, OutputFormat::Avif);
+    }
+
+    #[test]
+    fn test_browser_safari_wildcard_still_satisfies_avif_priority() {
+        // Safari's real header does not literally contain `image/avif`, but
+        // it does contain the generic `image/*;q=0.8` wildcard. Per RFC 7231
+        // wildcard semantics (and this crate's `accepts_mime`), a type-level
+        // wildcard with a positive quality factor counts as accepting *every*
+        // subtype of that type, `image/avif` included -- so AVIF still wins
+        // priority position 1. This is a deliberate, documented consequence
+        // of following the Accept header literally rather than trying to
+        // infer per-browser codec support out-of-band.
+        assert!(supports_format(SAFARI_ACCEPT, OutputFormat::Avif));
+        let format = negotiate_format(SAFARI_ACCEPT, OutputFormat::Auto);
+        assert_eq!(format, OutputFormat::Avif);
+    }
+
+    #[test]
+    fn test_browser_narrow_non_wildcard_client_negotiates_webp() {
+        // With no `image/*` or `*/*` wildcard present at all, AVIF is
+        // genuinely not accepted, so negotiation correctly falls through to
+        // priority position 2 (WebP), skipping PNG (position 3) since WebP
+        // is explicitly listed and comes first in the priority table.
+        assert!(!supports_format(
+            NARROW_NON_WILDCARD_ACCEPT,
+            OutputFormat::Avif
+        ));
+        assert!(supports_format(
+            NARROW_NON_WILDCARD_ACCEPT,
+            OutputFormat::Png
+        ));
+        let format = negotiate_format(NARROW_NON_WILDCARD_ACCEPT, OutputFormat::Auto);
+        assert_eq!(format, OutputFormat::WebP);
+    }
+
+    #[test]
+    fn test_browser_narrow_client_without_webp_negotiates_png() {
+        // Drop WebP from the narrow (non-wildcard) client's list: negotiation
+        // should now fall all the way through to priority position 3 (PNG).
+        let accept = "image/png,image/svg+xml";
+        assert!(!supports_format(accept, OutputFormat::Avif));
+        assert!(!supports_format(accept, OutputFormat::WebP));
+        let format = negotiate_format(accept, OutputFormat::Auto);
+        assert_eq!(format, OutputFormat::Png);
+    }
+
+    #[test]
+    fn test_browser_generic_client_wildcard_negotiates_avif() {
+        // A bare `*/*` (curl, reqwest, generic HTTP client default) should
+        // still resolve to our most-preferred modern format since a
+        // full wildcard accepts everything.
+        let format = negotiate_format(GENERIC_CLIENT_ACCEPT, OutputFormat::Auto);
+        assert_eq!(format, OutputFormat::Avif);
+    }
+
+    #[test]
+    fn test_browser_explicit_format_request_bypasses_negotiation_regardless_of_client() {
+        // Whatever the client's Accept header claims, an explicit
+        // (non-Auto) requested format always wins -- this mirrors Cloudflare
+        // Images' `format=` URL parameter behaviour.
+        for accept in &[
+            CHROME_IMG_ACCEPT,
+            FIREFOX_IMG_ACCEPT,
+            SAFARI_ACCEPT,
+            NARROW_NON_WILDCARD_ACCEPT,
+            GENERIC_CLIENT_ACCEPT,
+        ] {
+            assert_eq!(
+                negotiate_format(accept, OutputFormat::Png),
+                OutputFormat::Png
+            );
+        }
+    }
+
+    #[test]
+    fn test_browser_all_accept_headers_parse_without_dropping_entries() {
+        // Sanity check: every realistic header above must parse into at
+        // least one entry, and every entry's quality must be in [0.0, 1.0].
+        for accept in &[
+            CHROME_IMG_ACCEPT,
+            CHROME_DOCUMENT_ACCEPT,
+            EDGE_IMG_ACCEPT,
+            FIREFOX_IMG_ACCEPT,
+            FIREFOX_DOCUMENT_ACCEPT,
+            SAFARI_ACCEPT,
+            NARROW_NON_WILDCARD_ACCEPT,
+            GENERIC_CLIENT_ACCEPT,
+        ] {
+            let entries = parse_accept_header(accept);
+            assert!(!entries.is_empty(), "accept header should parse: {accept}");
+            for entry in &entries {
+                assert!((0.0..=1.0).contains(&entry.quality));
+            }
+        }
     }
 }

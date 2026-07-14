@@ -24,7 +24,7 @@
 
 ## New Features
 - [x] Add live captioning pipeline: STT -> caption generation -> rendering in real-time
-- [ ] Implement automatic audio description from scene analysis (integrate with oximedia-analysis) (verified-open 2026-05-16: audio_desc/generator.rs has scripting/template but no scene analysis integration with oximedia-analysis)
+- [x] Implement automatic audio description from scene analysis (integrate with oximedia-analysis) (done 2026-06-24: new `src/audio_desc/scene_analysis.rs` — `SceneAudioDescriber` consumes `oximedia_analysis::AnalysisResults` {scenes + `frame_rate` + `content_classification`}, derives a `SceneTrigger` per shot boundary (cut/fade/dissolve/wipe + dominant content label + temporal/spatial dynamics), then places one cue per dialogue gap via the existing `TimingAnalyzer` with a reading-rate word budget so AD never overlaps speech; honest templated wording from labels only — richer descriptors (saliency/face/object/text) documented as follow-ups since `AnalysisResults` does not surface them. Also `gaps_from_silence()` consumes `oximedia_analysis::audio::AudioAnalysis` silence segments as a transcript-free quiet-region gap source. Added `oximedia-analysis` workspace dep (no cycle: nothing depends on `oximedia-access`). 24 new tests; build/test/clippy --all-features green)
 - [x] Add haptic feedback description generation for touch-enabled devices (verified 2026-05-16; src/haptic.rs 553 lines)
 - [x] Implement reading level assessment in `transcript` for plain language compliance
 - [x] Add ASL/BSL/JSL-specific sign language grammar rules in `sign` module (verified 2026-05-16; src/sign/grammar.rs:1 ASL/BSL/JSL grammar rules, 497 lines)
@@ -36,7 +36,7 @@
 ## Performance
 - [x] Cache TTS synthesis results in `tts/synthesize` for repeated text segments (TtsSynthesisCache: HashMap+VecDeque LRU, keyed (text,voice_id)→Vec<u8>; 3 tests: hit/miss/eviction)
 - [x] Implement incremental STT processing in `stt` (process audio chunks, not entire files) (done — IncrementalSttProcessor at src/tts/transcribe.rs)
-- [ ] Add parallel compliance checking across multiple media files in `compliance`
+- [x] Add parallel compliance checking across multiple media files in `compliance` (rayon par_iter + BatchConfig::thread_pool_size; 4 tests: correct_counts, empty_report, size_1, deterministic)
 - [x] Optimize `audio/clarity` enhancement pipeline with pre-computed filter coefficients
   - **Goal:** Replace `enhance()`/`enhance_speech()` clone-stubs with real DSP: speech-band biquad peaking boost + downward DRC for `enhance`, 4th-order Butterworth band-pass (300–3400 Hz) for `enhance_speech`. Wire existing dead-code helpers (`calculate_snr`, `speech_clarity_index`, `estimate_sti`) into post-enhancement metric. (Wave 20 Slice A, 2026-06-02)
   - **Design:** RBJ biquad Direct-Form-I peaking filter; DRC with envelope follower (attack/release); `enhance` = DRC → peaking boost → soft-clip guard; `enhance_speech` = cascaded biquads 300–3400 Hz. Remove `#[allow(dead_code)]` once helpers are called.

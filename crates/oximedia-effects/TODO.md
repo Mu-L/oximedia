@@ -9,7 +9,7 @@
 - Audio: Biquad, state variable, Moog ladder; pitch shifter, time stretch, harmonizer, auto-tune, vocoder
 - Audio: Stereo widener, spatial audio, auto-pan, transient shaper, saturation
 - Video: Blend modes, chroma key, luma key, barrel lens, chromatic aberration, composite, warp, glitch
-- Dependencies: oximedia-core, oximedia-audio, oxifft, rubato, scirs2-core
+- Dependencies: oximedia-core, oximedia-audio, oxifft, scirs2-core (rubato removed 2026-07-08 — was unused; Pure-Rust/OxiFFT policy)
 
 ## Enhancements
 - [x] Replace `rustfft` with OxiFFT per COOLJAPAN policy in convolution reverb and pitch/vocoder

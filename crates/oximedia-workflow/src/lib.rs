@@ -154,7 +154,9 @@ pub use persistence::PersistenceManager;
 pub use queue::{QueueStatistics, TaskQueue};
 pub use retry_policy::{ExponentialRetryPolicy, RetryDecision, RetryPolicyState};
 #[cfg(not(target_arch = "wasm32"))]
-pub use scheduler::{FileWatcher, ScheduledWorkflow, Trigger, WorkflowScheduler};
+pub use scheduler::{
+    Clock, FileWatcher, ScheduledWorkflow, SystemClock, Trigger, WorkflowScheduler,
+};
 pub use task::{
     AnalysisType, HttpMethod, NotificationChannel, RetryPolicy, Task, TaskId, TaskPriority,
     TaskResult, TaskState, TaskType, TransferProtocol,
@@ -265,7 +267,12 @@ impl WorkflowEngine {
     ///
     /// Returns an error if the workflow cannot be saved or executed.
     pub async fn submit_workflow(&self, workflow: &Workflow) -> Result<WorkflowId> {
-        self.persistence.save_workflow(workflow)?;
+        // `SqliteConnectionBlocking` uses an internal current_thread runtime
+        // (`block_local`). Calling it directly from an async worker thread
+        // panics with "Cannot start a runtime from within a runtime."
+        // `block_in_place` temporarily removes this thread from the executor
+        // scheduler, allowing the nested runtime to run safely.
+        tokio::task::block_in_place(|| self.persistence.save_workflow(workflow))?;
         Ok(workflow.id)
     }
 
@@ -275,7 +282,11 @@ impl WorkflowEngine {
     ///
     /// Returns an error if the workflow cannot be loaded or executed.
     pub async fn execute_workflow(&self, workflow_id: WorkflowId) -> Result<()> {
-        let mut workflow = self.persistence.load_workflow(workflow_id)?;
+        // Both load and save call SqliteConnectionBlocking methods that use
+        // block_local (creates its own current_thread runtime). block_in_place
+        // is required to avoid "cannot start a runtime from within a runtime".
+        let mut workflow =
+            tokio::task::block_in_place(|| self.persistence.load_workflow(workflow_id))?;
 
         let executor = WorkflowExecutor::new(self.executor.clone());
 
@@ -287,7 +298,7 @@ impl WorkflowEngine {
         self.monitoring
             .complete_workflow(workflow_id, result.state == WorkflowState::Completed);
 
-        self.persistence.save_workflow(&workflow)?;
+        tokio::task::block_in_place(|| self.persistence.save_workflow(&workflow))?;
 
         Ok(())
     }
@@ -303,7 +314,7 @@ impl WorkflowEngine {
         trigger: Trigger,
     ) -> Result<WorkflowId> {
         let workflow_id = workflow.id;
-        self.persistence.save_workflow(&workflow)?;
+        tokio::task::block_in_place(|| self.persistence.save_workflow(&workflow))?;
         self.scheduler.add_schedule(workflow, trigger).await?;
         Ok(workflow_id)
     }
@@ -337,7 +348,7 @@ impl WorkflowEngine {
 
         for workflow in ready_workflows {
             let workflow_id = workflow.id;
-            self.persistence.save_workflow(&workflow)?;
+            tokio::task::block_in_place(|| self.persistence.save_workflow(&workflow))?;
 
             // Execute in background
             let engine = Self {
@@ -384,15 +395,20 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_workflow_engine_creation() {
-        let engine = WorkflowEngine::in_memory();
+        // WorkflowEngine::in_memory() is synchronous but calls
+        // SqliteConnectionBlocking internally which uses block_local (builds a
+        // fresh current_thread runtime). block_in_place lets the nested runtime
+        // run by temporarily removing this worker from the executor pool.
+        let engine = tokio::task::block_in_place(WorkflowEngine::in_memory);
         assert!(engine.is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_submit_workflow() {
-        let engine = WorkflowEngine::in_memory().expect("should succeed in test");
+        let engine =
+            tokio::task::block_in_place(WorkflowEngine::in_memory).expect("should succeed in test");
         let workflow = Workflow::new("test-workflow");
 
         let workflow_id = engine
@@ -402,9 +418,10 @@ mod tests {
         assert_eq!(workflow_id, workflow.id);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_execute_workflow() {
-        let engine = WorkflowEngine::in_memory().expect("should succeed in test");
+        let engine =
+            tokio::task::block_in_place(WorkflowEngine::in_memory).expect("should succeed in test");
         let mut workflow = Workflow::new("test-workflow");
 
         let task = Task::new(
@@ -423,9 +440,10 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_schedule_workflow() {
-        let engine = WorkflowEngine::in_memory().expect("should succeed in test");
+        let engine =
+            tokio::task::block_in_place(WorkflowEngine::in_memory).expect("should succeed in test");
         let workflow = Workflow::new("test-workflow");
         let trigger = Trigger::Manual;
 
@@ -439,9 +457,10 @@ mod tests {
         assert_eq!(schedules[0].0, workflow_id);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_engine_start_stop() {
-        let engine = WorkflowEngine::in_memory().expect("should succeed in test");
+        let engine =
+            tokio::task::block_in_place(WorkflowEngine::in_memory).expect("should succeed in test");
 
         engine.start().await.expect("should succeed in test");
         engine.stop().await.expect("should succeed in test");

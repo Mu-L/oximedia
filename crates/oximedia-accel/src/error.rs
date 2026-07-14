@@ -90,18 +90,21 @@ pub enum AccelError {
     Core(#[from] oximedia_core::OxiError),
 }
 
+#[cfg(feature = "vulkan-backend")]
 impl From<vulkano::Validated<vulkano::VulkanError>> for AccelError {
     fn from(err: vulkano::Validated<vulkano::VulkanError>) -> Self {
         AccelError::Vulkan(format!("{err:?}"))
     }
 }
 
+#[cfg(feature = "vulkan-backend")]
 impl From<vulkano::VulkanError> for AccelError {
     fn from(err: vulkano::VulkanError) -> Self {
         AccelError::Vulkan(format!("{err:?}"))
     }
 }
 
+#[cfg(feature = "vulkan-backend")]
 impl From<vulkano::sync::HostAccessError> for AccelError {
     fn from(err: vulkano::sync::HostAccessError) -> Self {
         AccelError::Synchronization(format!("{err:?}"))

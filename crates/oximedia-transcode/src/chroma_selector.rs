@@ -4,12 +4,12 @@
 //! support, and which modes produce the best quality-vs-bitrate tradeoff for a given
 //! use-case.  This module provides:
 //!
-//! - [`ChromaSubsampling`] — an enum covering all three standard subsampling modes.
-//! - [`ChromaPolicy`] — a preference ordering used when selecting a subsampling mode
+//! - [`crate::chroma_selector::ChromaSubsampling`] — an enum covering all three standard subsampling modes.
+//! - [`crate::chroma_selector::ChromaPolicy`] — a preference ordering used when selecting a subsampling mode
 //!   for an encode (e.g. "prefer highest quality", "prefer lowest bitrate").
-//! - [`ChromaSelector`] — the main selector that, given a codec and a policy, returns
-//!   the optimal [`ChromaSubsampling`].
-//! - [`ChromaCompatibility`] — a query interface that reports which modes a given codec
+//! - [`crate::chroma_selector::ChromaSelector`] — the main selector that, given a codec and a policy, returns
+//!   the optimal [`crate::chroma_selector::ChromaSubsampling`].
+//! - [`crate::chroma_selector::ChromaCompatibility`] — a query interface that reports which modes a given codec
 //!   actually supports.
 
 use std::fmt;

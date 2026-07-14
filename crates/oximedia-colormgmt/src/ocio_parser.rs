@@ -302,7 +302,7 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 ///
 /// # Errors
 ///
-/// Returns [`ColorError::Parse`] if the YAML structure is malformed or missing
+/// Returns [`crate::error::ColorError::Parse`] if the YAML structure is malformed or missing
 /// the required `ocio_profile_version` key.
 pub fn parse_ocio(text: &str) -> Result<OcioConfig> {
     let mut parser = OcioParser::new(text);

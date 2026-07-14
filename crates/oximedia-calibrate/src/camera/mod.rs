@@ -4,6 +4,7 @@
 //! and generating camera profiles for color-accurate image reproduction.
 
 pub mod calibrate;
+pub mod color_space;
 pub mod colorchecker;
 pub mod dng;
 pub mod profile;

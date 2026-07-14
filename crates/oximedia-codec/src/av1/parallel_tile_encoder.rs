@@ -415,12 +415,12 @@ fn extract_luma_region(
 
         if src_start >= frame.len() {
             // Pad with grey when input is exhausted.
-            out.extend(std::iter::repeat(128u8).take(tile_w as usize));
+            out.extend(std::iter::repeat_n(128u8, tile_w as usize));
         } else {
             let avail_end = src_end.min(frame.len());
             out.extend_from_slice(&frame[src_start..avail_end]);
             if avail_end < src_end {
-                out.extend(std::iter::repeat(128u8).take(src_end - avail_end));
+                out.extend(std::iter::repeat_n(128u8, src_end - avail_end));
             }
         }
     }

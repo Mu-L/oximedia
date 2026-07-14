@@ -1,11 +1,11 @@
 //! Fine-grained genre sub-classification from spectral audio features.
 //!
 //! This module provides a rule-based genre classifier that maps low-level
-//! spectral features onto a hierarchical two-level taxonomy: a [`GenreFamily`]
+//! spectral features onto a hierarchical two-level taxonomy: a [`GenreFamily`](crate::genre_classify_new::GenreFamily)
 //! (broad category) and a `sub_genre` string within that family.  Up to the
-//! top-3 most likely [`GenreTag`]s are returned per classification.
+//! top-3 most likely [`GenreTag`](crate::genre_classify_new::GenreTag)s are returned per classification.
 //!
-//! The [`FeatureExtractor`] computes all required features from raw PCM samples
+//! The [`FeatureExtractor`](crate::genre_classify_new::FeatureExtractor) computes all required features from raw PCM samples
 //! without requiring an FFT library — it uses a brute-force DFT for small
 //! frame windows in the spectral rolloff and centroid computation, keeping the
 //! implementation fully self-contained.

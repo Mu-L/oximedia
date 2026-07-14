@@ -16,7 +16,7 @@
 //!                         └─ BurnInPlan (validated, ready for pipeline)
 //! ```
 //!
-//! A [`BurnInPlan`] is the resolved, validated artefact that a transcode stage
+//! A [`crate::burn_in_spec::BurnInPlan`] is the resolved, validated artefact that a transcode stage
 //! receives.  It bundles the global style with all per-cue render instructions
 //! and exposes helper methods for querying which cues are active at a given
 //! presentation timestamp.

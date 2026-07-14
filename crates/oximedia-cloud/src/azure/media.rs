@@ -26,6 +26,7 @@ impl AzureMediaServices {
         resource_group: String,
         subscription_id: String,
     ) -> Result<Self> {
+        crate::tls_provider::install_default_crypto_provider();
         let client = Client::new();
 
         // In production, would use Azure Identity SDK to get token

@@ -25,7 +25,7 @@
 //!
 //! let t1 = TransformMatrix::translation(10.0, 20.0);
 //! let t2 = TransformMatrix::scale(2.0, 2.0);
-//! let combined = compose_transforms(&t1, &t2);
+//! let combined = compose_transforms(&t2, &t1);
 //!
 //! // The combined transform scales first, then translates.
 //! let pt = combined.transform_point(1.0, 1.0);

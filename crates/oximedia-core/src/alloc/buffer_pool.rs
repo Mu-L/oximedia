@@ -1,7 +1,104 @@
-//! Buffer pool for zero-copy memory management.
+//! Buffer pool for zero-copy media pipeline operations.
 //!
-//! This module provides a [`BufferPool`] for efficient buffer reuse,
-//! avoiding allocation overhead in performance-critical paths.
+//! [`BufferPool`] manages a fixed-size set of reusable byte buffers, avoiding
+//! repeated heap allocation/deallocation in high-throughput video and audio
+//! processing paths where allocation cost would dominate.
+//!
+//! # Usage patterns
+//!
+//! ## Pattern 1 — basic acquire / release
+//!
+//! The simplest pattern: acquire a buffer, process data into it, then return
+//! it to the pool.  The pool zeroes the buffer on every release so stale data
+//! never leaks between uses.
+//!
+//! ```
+//! use oximedia_core::alloc::BufferPool;
+//!
+//! let pool = BufferPool::new(4, 1920 * 1080 * 3); // 4 × 1080p RGB buffers
+//! let buf = pool.acquire().expect("pool has free buffers");
+//! {
+//!     let mut guard = buf.write().expect("exclusive access");
+//!     guard[0] = 0xFF; // write pixel data
+//! }
+//! pool.release(buf); // buffer is zeroed and returned; available() increases
+//! ```
+//!
+//! ## Pattern 2 — acquire_or_alloc for unbounded pipelines
+//!
+//! When bursts can temporarily exhaust the pool, [`BufferPool::acquire_or_alloc`]
+//! falls back to a fresh allocation rather than returning `None`.  Released
+//! buffers are returned to the pool if there is room; excess buffers are
+//! dropped automatically.
+//!
+//! ```
+//! use std::sync::Arc;
+//! use oximedia_core::alloc::BufferPool;
+//!
+//! let pool = Arc::new(BufferPool::new(8, 4096));
+//!
+//! // Decode loop: never blocks, never returns None
+//! let buf = pool.acquire_or_alloc();
+//! // ... decode frame data into buf ...
+//! pool.release(buf); // return to pool or drop if at capacity
+//! ```
+//!
+//! ## Pattern 3 — memory-pressure management
+//!
+//! For long-running services, attach a [`PressureConfig`] to automatically
+//! shrink the free list when it grows beyond a high-watermark.  An optional
+//! callback fires before each shrink — useful for logging or metrics.
+//!
+//! ```
+//! use oximedia_core::alloc::{BufferPool, PressureConfig};
+//!
+//! let mut pool = BufferPool::new(32, 4096);
+//! pool.set_pressure_config(PressureConfig {
+//!     high_watermark_free: 16,  // shrink when > 16 free buffers
+//!     shrink_to_target: 8,      // retain 8 after shrink
+//! });
+//! pool.on_pressure(|| {
+//!     // e.g. emit a metric or log entry
+//!     eprintln!("buffer pool pressure: shrinking free list");
+//! });
+//! // After every release(), watermark_check() fires automatically.
+//! ```
+//!
+//! ## Pattern 4 — sharing across threads
+//!
+//! Wrap the pool in `Arc` to share it safely between producer and consumer
+//! threads.  Each `Arc<RwLock<Vec<u8>>>` buffer carries its own lock so
+//! a decoder and a renderer can hold different buffers simultaneously.
+//!
+//! ```
+//! use std::sync::Arc;
+//! use oximedia_core::alloc::BufferPool;
+//!
+//! let pool = Arc::new(BufferPool::new(8, 1920 * 1080 * 3));
+//!
+//! // Producer thread
+//! let pool_prod = Arc::clone(&pool);
+//! let produce = std::thread::spawn(move || {
+//!     let buf = pool_prod.acquire_or_alloc();
+//!     {
+//!         let mut guard = buf.write().expect("write");
+//!         guard.fill(0x80); // fill with grey
+//!     }
+//!     pool_prod.release(buf);
+//! });
+//! produce.join().expect("producer thread");
+//! ```
+//!
+//! ## Important invariants
+//!
+//! - **Never reclaim in-use buffers**: [`shrink_to`](BufferPool::shrink_to) and
+//!   the pressure auto-shrink only remove buffers from the *free* list.
+//!   Buffers that are currently checked out are tracked by `in_use_count()` and
+//!   are always safe to write to.
+//! - **Zeroed on release**: every buffer is `fill(0)`-ed before it re-enters the
+//!   free list, preventing data leakage between processing steps.
+//! - **Thread-safe**: all mutations go through `RwLock` / `Mutex`; it is safe
+//!   to share one `Arc<BufferPool>` across arbitrarily many threads.
 
 use std::sync::{Arc, Mutex, RwLock};
 

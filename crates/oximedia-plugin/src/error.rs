@@ -57,6 +57,23 @@ pub enum PluginError {
     /// JSON serialization/deserialization error.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    /// The plugin file's contents did not match the expected integrity digest.
+    ///
+    /// Returned by the checked loading APIs (e.g.
+    /// `LoadedPlugin::load_with_digest`) *before* the file is opened as a
+    /// shared library, so no plugin code is ever executed on a mismatch.
+    #[error(
+        "Plugin integrity check failed for '{path}': expected sha256:{expected}, got sha256:{actual}"
+    )]
+    IntegrityMismatch {
+        /// Path to the plugin file that failed verification.
+        path: String,
+        /// The expected digest (caller-supplied), lowercase hex.
+        expected: String,
+        /// The digest actually computed from the file, lowercase hex.
+        actual: String,
+    },
 }
 
 /// Result type alias for plugin operations.

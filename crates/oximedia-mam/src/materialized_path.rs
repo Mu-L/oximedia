@@ -19,7 +19,7 @@
 //! - `PathQuery` — declarative query builder for common path-based lookups.
 //! - `PathStats` — aggregate statistics over the tree.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 // ---------------------------------------------------------------------------
 // Node
@@ -167,10 +167,20 @@ pub enum PathError {
 // ---------------------------------------------------------------------------
 
 /// In-memory materialized-path tree indexed by node id.
+///
+/// In addition to the primary `nodes` map (id → node), a secondary
+/// `path_index` (BTreeMap: path → id) enables O(log n + k) range queries
+/// for `descendants` and `children`, replacing the previous O(n) linear scans.
 #[derive(Debug, Default)]
 pub struct PathTree {
     /// All nodes, keyed by their id.
     nodes: HashMap<String, MaterializedNode>,
+    /// Secondary index: materialized path → node id.
+    ///
+    /// All paths end with `/`.  Because [`BTreeMap`] stores keys in
+    /// lexicographic order, a prefix scan (`range(prefix..)`) followed by
+    /// `take_while(starts_with)` produces all descendants in O(log n + k).
+    path_index: BTreeMap<String, String>,
 }
 
 impl PathTree {
@@ -194,6 +204,7 @@ impl PathTree {
         if self.nodes.contains_key(&node.id) {
             return Err(PathError::DuplicateId(node.id.clone()));
         }
+        self.path_index.insert(node.path.clone(), node.id.clone());
         self.nodes.insert(node.id.clone(), node);
         Ok(())
     }
@@ -263,7 +274,9 @@ impl PathTree {
 
         let count = to_remove.len();
         for key in &to_remove {
-            self.nodes.remove(key);
+            if let Some(removed) = self.nodes.remove(key) {
+                self.path_index.remove(&removed.path);
+            }
         }
         Ok(count)
     }
@@ -312,7 +325,10 @@ impl PathTree {
 
         for key in &affected {
             if let Some(node) = self.nodes.get_mut(key) {
+                // Remove the old path from the index before mutating
+                self.path_index.remove(&node.path);
                 node.path = node.path.replacen(&old_path, &new_path, 1);
+                self.path_index.insert(node.path.clone(), node.id.clone());
             }
         }
 
@@ -330,38 +346,56 @@ impl PathTree {
     }
 
     /// Return all direct children of the node with the given id.
+    ///
+    /// Uses the BTreeMap path index for an O(log n + k) range scan rather than
+    /// an O(n) linear pass over all nodes.
     #[must_use]
     pub fn children(&self, parent_id: &str) -> Vec<&MaterializedNode> {
         let parent_path = match self.nodes.get(parent_id) {
-            Some(n) => &n.path,
+            Some(n) => n.path.clone(),
             None => return Vec::new(),
         };
-        self.nodes
-            .values()
-            .filter(|n| {
-                n.path != *parent_path
-                    && n.path.starts_with(parent_path.as_str())
-                    // Exactly one more segment beyond the parent
-                    && n.path[parent_path.len()..].trim_end_matches('/').find('/').is_none()
+        self.path_index
+            .range(parent_path.clone()..)
+            .take_while(|(k, _)| k.starts_with(parent_path.as_str()))
+            .filter(|(k, _)| {
+                // Exclude the parent itself
+                if k.as_str() == parent_path.as_str() {
+                    return false;
+                }
+                // Keep only direct children: the suffix after parent_path must
+                // contain exactly one non-empty segment (no additional '/').
+                let suffix = &k[parent_path.len()..];
+                !suffix.is_empty() && !suffix.trim_end_matches('/').contains('/')
             })
+            .filter_map(|(_, nid)| self.nodes.get(nid))
             .collect()
     }
 
     /// Return all descendants of the node with `id` (excluding `id` itself).
+    ///
+    /// Uses the BTreeMap path index for an O(log n + k) range scan rather than
+    /// an O(n) linear pass over all nodes.
     #[must_use]
     pub fn descendants(&self, id: &str) -> Vec<&MaterializedNode> {
         let path = match self.nodes.get(id) {
             Some(n) => n.path.clone(),
             None => return Vec::new(),
         };
-        self.nodes
-            .values()
-            .filter(|n| n.path.starts_with(&path) && n.path != path)
+        self.path_index
+            .range(path.clone()..)
+            .take_while(|(k, _)| k.starts_with(path.as_str()))
+            // Exclude the node itself
+            .filter(|(k, _)| k.as_str() != path.as_str())
+            .filter_map(|(_, nid)| self.nodes.get(nid))
             .collect()
     }
 
     /// Return all ancestors of the node with `id` (root first, parent last),
     /// excluding the node itself.
+    ///
+    /// Uses the BTreeMap path index for O(d · log n) point lookups (where d is
+    /// depth) rather than an O(n) linear scan over all nodes.
     #[must_use]
     pub fn ancestors(&self, id: &str) -> Vec<&MaterializedNode> {
         let path = match self.nodes.get(id) {
@@ -369,21 +403,19 @@ impl PathTree {
             None => return Vec::new(),
         };
 
-        // Build set of ancestor paths
+        // Enumerate ancestor paths from shallowest to deepest (root first).
+        // For path `/a/b/c/` the ancestors are `/a/` and `/a/b/`.
         let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-        let mut ancestor_paths = Vec::new();
+        let mut result = Vec::with_capacity(segments.len().saturating_sub(1));
         for len in 1..segments.len() {
-            ancestor_paths.push(format!("/{}/", segments[..len].join("/")));
+            let ancestor_path = format!("/{}/", segments[..len].join("/"));
+            if let Some(nid) = self.path_index.get(&ancestor_path) {
+                if let Some(node) = self.nodes.get(nid) {
+                    result.push(node);
+                }
+            }
         }
-
-        let mut result: Vec<&MaterializedNode> = self
-            .nodes
-            .values()
-            .filter(|n| ancestor_paths.contains(&n.path))
-            .collect();
-
-        // Sort root-first
-        result.sort_by_key(|n| n.depth());
+        // result is already root-first because we iterate from len=1 upwards
         result
     }
 
@@ -712,5 +744,154 @@ mod tests {
     fn test_parent_path_of_child() {
         let node = MaterializedNode::new("id", "child", "/root/").expect("ok");
         assert_eq!(node.parent_path(), "/root/");
+    }
+
+    // -----------------------------------------------------------------------
+    // BTreeMap path-prefix index tests (Wave 22, Slice 2)
+    // -----------------------------------------------------------------------
+
+    /// Build a PathTree with `count` leaf nodes arranged as a single root with
+    /// `count` direct children.
+    fn build_wide_tree(count: usize) -> PathTree {
+        let mut tree = PathTree::new();
+        tree.insert_root("root", "root").expect("ok");
+        for i in 0..count {
+            let child_id = format!("child-{i}");
+            let child_name = format!("child{i}");
+            tree.insert_child("root", &child_id, &child_name)
+                .expect("ok");
+        }
+        tree
+    }
+
+    /// 1. Build 10k-node tree, call `descendants` on root, verify count.
+    #[test]
+    fn test_path_index_descendants_10k() {
+        const N: usize = 10_000;
+        let tree = build_wide_tree(N);
+        let descs = tree.descendants("root");
+        assert_eq!(
+            descs.len(),
+            N,
+            "descendants count should match inserted nodes"
+        );
+        // Spot-check: first and last child should be present
+        assert!(descs.iter().any(|n| n.id == "child-0"));
+        assert!(descs.iter().any(|n| n.id == format!("child-{}", N - 1)));
+        // The root itself must not appear
+        assert!(!descs.iter().any(|n| n.id == "root"));
+    }
+
+    /// 2. Deep chain `/a/b/c/d/e/` — ancestors of "e" must be [a, b, c, d].
+    #[test]
+    fn test_path_index_ancestors_chain() {
+        let mut tree = PathTree::new();
+        tree.insert_root("a", "a").expect("ok");
+        tree.insert_child("a", "b", "b").expect("ok");
+        tree.insert_child("b", "c", "c").expect("ok");
+        tree.insert_child("c", "d", "d").expect("ok");
+        tree.insert_child("d", "e", "e").expect("ok");
+
+        let ancestors = tree.ancestors("e");
+        // Expect root-first order: a, b, c, d
+        assert_eq!(ancestors.len(), 4);
+        assert_eq!(ancestors[0].id, "a");
+        assert_eq!(ancestors[1].id, "b");
+        assert_eq!(ancestors[2].id, "c");
+        assert_eq!(ancestors[3].id, "d");
+    }
+
+    /// 3. `children` must return only direct children, not grandchildren.
+    #[test]
+    fn test_path_index_children_single_level_only() {
+        let mut tree = PathTree::new();
+        tree.insert_root("root", "root").expect("ok");
+        tree.insert_child("root", "child-a", "childA").expect("ok");
+        tree.insert_child("root", "child-b", "childB").expect("ok");
+        // Grandchildren — must NOT appear in children("root")
+        tree.insert_child("child-a", "grandchild-1", "gc1")
+            .expect("ok");
+        tree.insert_child("child-a", "grandchild-2", "gc2")
+            .expect("ok");
+
+        let children = tree.children("root");
+        assert_eq!(children.len(), 2, "only direct children expected");
+        let ids: Vec<&str> = children.iter().map(|n| n.id.as_str()).collect();
+        assert!(ids.contains(&"child-a"));
+        assert!(ids.contains(&"child-b"));
+        // Grandchildren must not appear
+        assert!(!ids.contains(&"grandchild-1"));
+        assert!(!ids.contains(&"grandchild-2"));
+    }
+
+    /// 4. After `move_node`, `descendants` and `children` reflect updated paths.
+    #[test]
+    fn test_path_index_move_node_updates_index() {
+        let mut tree = PathTree::new();
+        tree.insert_root("root", "root").expect("ok");
+        tree.insert_child("root", "alpha", "alpha").expect("ok");
+        tree.insert_child("root", "beta", "beta").expect("ok");
+        // alpha has one child
+        tree.insert_child("alpha", "child-of-alpha", "sub")
+            .expect("ok");
+
+        // Move "alpha" (with its subtree) under "beta"
+        tree.move_node("alpha", "beta").expect("ok");
+
+        // "root" should now only have "beta" as direct child
+        let root_children = tree.children("root");
+        assert_eq!(root_children.len(), 1);
+        assert_eq!(root_children[0].id, "beta");
+
+        // "beta" should have "alpha" as direct child
+        let beta_children = tree.children("beta");
+        assert_eq!(beta_children.len(), 1);
+        assert_eq!(beta_children[0].id, "alpha");
+
+        // descendants of "root" = beta + alpha + child-of-alpha
+        let root_descs = tree.descendants("root");
+        assert_eq!(root_descs.len(), 3);
+
+        // The moved node's path must reflect the new location
+        let alpha = tree.get("alpha").expect("exists");
+        assert!(
+            alpha.path.starts_with("/root/beta/"),
+            "alpha should be under /root/beta/ but is at {}",
+            alpha.path
+        );
+
+        // child-of-alpha also moved
+        let sub = tree.get("child-of-alpha").expect("exists");
+        assert!(
+            sub.path.starts_with("/root/beta/alpha/"),
+            "child-of-alpha should be under /root/beta/alpha/ but is at {}",
+            sub.path
+        );
+    }
+
+    /// 5. After `remove_subtree`, removed nodes no longer appear in descendants.
+    #[test]
+    fn test_path_index_remove_node_clears_index() {
+        let mut tree = PathTree::new();
+        tree.insert_root("root", "root").expect("ok");
+        tree.insert_child("root", "keep", "keep").expect("ok");
+        tree.insert_child("root", "prune", "prune").expect("ok");
+        tree.insert_child("prune", "sub-prune", "subprune")
+            .expect("ok");
+
+        let removed = tree.remove_subtree("prune").expect("ok");
+        assert_eq!(removed, 2, "prune + sub-prune should be removed");
+
+        // Descendants of root must not include the pruned subtree
+        let descs = tree.descendants("root");
+        assert_eq!(descs.len(), 1);
+        assert_eq!(descs[0].id, "keep");
+
+        // Verify path_index is clean: looking up descendants of the removed
+        // node returns empty (not found).
+        assert!(tree.get("prune").is_none());
+        assert!(tree.get("sub-prune").is_none());
+        let descs_of_pruned = tree.descendants("prune");
+        assert!(descs_of_pruned.is_empty());
     }
 }

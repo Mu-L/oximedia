@@ -926,4 +926,56 @@ mod tests {
         assert_eq!(out.width, 64);
         assert_eq!(out.height, 64);
     }
+
+    // ── Early-termination fast-path ──
+
+    /// Resize to a sub-threshold target (8×8 = 64 pixels < 4096 threshold).
+    /// Verifies that the early-termination path is taken and output dimensions
+    /// are correct without panicking.
+    #[test]
+    fn test_early_termination_small_output() {
+        // 200×150 source → 8×8 target (well below the 64×64 pixel threshold)
+        let src = make_test_buffer(200, 150);
+        let result = apply_resize(src, 8, 8, FitMode::Fill, &Gravity::Center)
+            .expect("small target resize must succeed");
+        assert_eq!(result.width, 8);
+        assert_eq!(result.height, 8);
+        assert_eq!(result.data.len(), 8 * 8 * 4);
+    }
+
+    /// Target is below threshold for each dimension separately: 32×32 = 1024 px.
+    #[test]
+    fn test_early_termination_contain_small_output() {
+        let src = make_test_buffer(400, 300);
+        let result = apply_resize(src, 32, 32, FitMode::Contain, &Gravity::Center)
+            .expect("small contain resize must succeed");
+        // Contain preserves aspect ratio: 400×300 → fits in 32×32.
+        // Width-limited: 32×(300/400*32) = 32×24.
+        assert!(result.width <= 32 && result.height <= 32);
+        assert!(result.data.len() == result.width as usize * result.height as usize * 4);
+    }
+
+    /// Resize to a target above the threshold (256×256 = 65536 pixels > 4096).
+    /// Verifies that the normal dispatch path is taken and the output is correct.
+    #[test]
+    fn test_above_threshold_no_early_exit() {
+        // 512×512 source → 256×256 target (above threshold, normal path)
+        let src = make_test_buffer(512, 512);
+        let result = apply_resize(src, 256, 256, FitMode::Fill, &Gravity::Center)
+            .expect("above-threshold resize must succeed");
+        assert_eq!(result.width, 256);
+        assert_eq!(result.height, 256);
+        assert_eq!(result.data.len(), 256 * 256 * 4);
+    }
+
+    /// Threshold boundary: exactly 64×64 = 4096 pixels is NOT below the threshold
+    /// (we use strict `<`), so the normal path applies.
+    #[test]
+    fn test_threshold_boundary_exact() {
+        let src = make_test_buffer(512, 512);
+        let result = apply_resize(src, 64, 64, FitMode::Fill, &Gravity::Center)
+            .expect("boundary resize must succeed");
+        assert_eq!(result.width, 64);
+        assert_eq!(result.height, 64);
+    }
 }

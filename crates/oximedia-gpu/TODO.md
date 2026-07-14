@@ -53,6 +53,12 @@
 - [x] Test multi-GPU device selection and fallback behavior
 - [x] Add performance regression benchmarks for core operations (color convert, scale, blur)
 - [x] Test `shader_cache.rs` invalidation when shader source changes
+- [x] Wave 29 CPU-path known-answer tests (`tests/cpu_paths.rs`): FNV-1a `hash_source` golden vectors + determinism/distinctness
+- [x] Wave 29: `GpuShaderCache` LRU + LFU eviction-victim assertions (touched/least-recently-used survivors)
+- [x] Wave 29: `DiskShaderCache` byte-identical put/get roundtrip + `.shd`/`.meta` file-pair layout + `clear()` (temp_dir)
+- [x] Wave 29: `WorkgroupAutoTuner::tune_1d`/`tune_2d` known dispatch dims (1M→256/3907; 1080p→32×8/60×135) + `is_valid` boundaries + `SharedMemoryLayout` sizing
+- [x] Wave 29: BT.709 `convert_rgb_to_yuv` + `expand_limited_to_full` known answers + RGB↔YUV roundtrip
+- [x] Wave 29: `IndirectDispatchArgs` little-endian `to_bytes`/`from_bytes` roundtrip + short-slice rejection
 
 ## Documentation
 - [ ] Document supported GPU backends and their feature differences

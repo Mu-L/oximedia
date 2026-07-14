@@ -9,7 +9,7 @@
 //!
 //! [`HardwareCapabilities`] describes the host environment (available CPU
 //! threads, available RAM, GPU presence).  The validator compares each
-//! [`ExecutionStage`]'s [`ResourceEstimate`] against the declared capabilities
+//! [`ExecutionStage`]'s [`ResourceEstimate`](crate::execution_plan::ResourceEstimate) against the declared capabilities
 //! and accumulates warnings where the plan *might* exceed limits.
 //!
 //! Warnings (not hard errors) are used because actual usage depends on runtime

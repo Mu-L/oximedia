@@ -1,7 +1,7 @@
 //! TranscodeProfile import and export in JSON format.
 //!
 //! This module provides a self-contained, dependency-free implementation for
-//! serialising and deserialising [`TranscodeProfileExport`] to/from a compact
+//! serialising and deserialising [`crate::profile_io::TranscodeProfileExport`] to/from a compact
 //! JSON object.  No external JSON crate is required.
 //!
 //! # JSON format

@@ -4,7 +4,7 @@
 //! - **Bezier splines**: cubic and quadratic Bézier segments with configurable control points
 //! - **Easing functions**: full set from linear to spring physics (via [`EasingKind`])
 //! - **Independent tracks**: separate [`MotionTrack`] for X, Y, rotation, scale-X, scale-Y
-//! - **`MotionPath`**: assembled multi-track animator driving a [`Transform2D`]-equivalent
+//! - **`MotionPath`**: assembled multi-track animator driving a [`Transform2D`](crate::scene_graph::Transform2D)-equivalent
 //!   [`MotionTransform`] output
 //! - **Path following**: attach a node to a spline and query its world-space pose at any `t`
 //!

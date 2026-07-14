@@ -2,12 +2,24 @@
 
 WebAssembly bindings for OxiMedia - Patent-free multimedia processing in the browser.
 
+This is the original, monolithic `oximedia-wasm` crate (77+ bound modules
+covering demuxing, color management, HDR, LUTs, spatial audio, editing,
+QC, and more). If you only need WebCodecs-adjacent color/scopes/scaling/quality
+tooling with a strict size budget, see
+[`@cooljapan/oximedia-web`](../web/README.md) instead (a separate,
+actively-maintained package from a different part of this monorepo -- see
+[Installation](#installation) below for how the two relate).
+
 ## Features
 
 - **Format Probing**: Detect container formats (WebM, Matroska, Ogg, FLAC, WAV, MP4)
-- **Container Demuxing**: Extract compressed packets from media files
-- **Zero-Copy**: Efficient buffer management using JavaScript `ArrayBuffer`
-- **Patent-Free**: Only supports royalty-free codecs (AV1, VP9, VP8, Opus, Vorbis, FLAC)
+- **Container Demuxing**: Extract compressed packets from media files (does not
+  imply the packets' codec is decodable -- see [Supported Formats](#supported-formats))
+- **Zero-Copy**: Efficient buffer management using JavaScript `ArrayBuffer`;
+  buffer-crossing APIs use `Uint8Array`/`Uint8ClampedArray` (8-bit SDR) or
+  `Float32Array` (HDR/linear) exclusively -- never `Float64Array`
+- **Patent-Free Decoders**: Opus and FLAC audio decode; AV1 video decode
+  (via `WasmMediaPlayer`) -- all royalty-free
 - **Browser-Native**: No file system dependencies, works entirely in-memory
 
 ## Installation
@@ -18,10 +30,19 @@ WebAssembly bindings for OxiMedia - Patent-free multimedia processing in the bro
 npm install @cooljapan/oximedia
 ```
 
-Available as three packages:
-- `@cooljapan/oximedia` (bundler — for webpack, vite, rollup, etc.)
-- `@cooljapan/oximedia-web` (browser — `<script type="module">`)
-- `@cooljapan/oximedia-node` (Node.js — `require()`)
+`@cooljapan/oximedia` (the bundler build of *this* crate, for webpack, vite,
+rollup, etc.) is the **only** package this crate publishes to npm.
+
+`build.sh` also produces `pkg-web/` and `pkg-node/` directories for local
+testing (`wasm-pack build --target web` / `--target nodejs`), but these are
+unpublished build artifacts, not installable npm packages -- do not `npm
+install` them.
+
+If you need a browser-native, size-budgeted package (no bundler required),
+use [`@cooljapan/oximedia-web`](../web/README.md) instead. That name belongs
+to a separate, independently-versioned package (`/web` in this monorepo) with
+its own four WebCodecs-adjacent modules (`scopes`, `color`, `scale`,
+`quality`) -- it is **not** produced by this crate's build scripts.
 
 ### From Source
 
@@ -146,7 +167,7 @@ Available targets:
 ### With a Bundler (webpack, vite, etc.)
 
 ```javascript
-import init, * as oximedia from 'oximedia-wasm';
+import init, * as oximedia from '@cooljapan/oximedia';
 
 async function processMedia(data) {
     // Initialize WASM module
@@ -268,34 +289,51 @@ Compressed media packet.
 
 ## Supported Formats
 
-### Containers
+### Containers (demux only -- packet extraction, no decoding)
 - Matroska (.mkv)
 - WebM (.webm)
 - Ogg (.ogg, .opus, .oga)
 - FLAC (.flac)
 - WAV (.wav)
-- MP4 (.mp4) - AV1/VP9 only
+- MP4 (.mp4)
 
-### Video Codecs
-- AV1
-- VP9
-- VP8
-- Theora
+Demuxing a container extracts compressed packets and stream metadata
+regardless of the codec inside; it does not imply this crate can decode
+that codec (see below).
 
-### Audio Codecs
-- Opus
-- Vorbis
-- FLAC
-- PCM
+### Decoders (real, verified decode -> PCM/YUV)
+- **Audio**: Opus (`WasmOpusDecoder`), FLAC (`WasmFlacDecoder`)
+- **Video**: AV1, via `WasmMediaPlayer` only (no standalone `WasmAv1Decoder`
+  class -- see [Removed decoders](#removed-decoders))
+
+### Removed decoders
+
+Earlier releases exposed standalone `WasmVp8Decoder`, `WasmAv1Decoder`, and
+`WasmVorbisDecoder` classes. They were removed from the WASM surface because
+they did not do what their names claimed:
+- `WasmVp8Decoder` wrapped a VP8 decoder that returned an error on every
+  `decode_frame()` call.
+- `WasmAv1Decoder` wrapped an AV1 decoder that returned `Ok` with buffers
+  that were never actually populated with decoded pixels.
+- `WasmVorbisDecoder` wrapped a codec that only round-trips its own
+  synthetic test format, not real Ogg Vorbis bitstreams.
+
+Shipping classes that silently produce garbage or empty output is worse than
+not shipping them. `WasmMediaPlayer` retains real AV1 decode internally; VP8
+and Vorbis decode are not available anywhere in this crate today. This is a
+WASM-surface-only change -- the underlying native codecs in
+`crates/oximedia-codec` / `crates/oximedia-audio` are untouched by it and may
+be fixed independently of this crate.
 
 ## License
 
 Apache-2.0
 
-Version: 0.1.5 — 2026-04-20 — 505 tests
+Version: 0.1.9 — 2026-07-12 — data-plane, decoder-honesty, and dependency-hygiene pass
 
 ## See Also
 
 - [OxiMedia](https://github.com/cool-japan/oximedia) - The main Rust library
+- [`@cooljapan/oximedia-web`](../web/README.md) - Separate, size-budgeted WebCodecs-adjacent package (scopes/color/scale/quality)
 - [wasm-bindgen](https://rustwasm.github.io/wasm-bindgen/) - Rust/WASM interop
 - [wasm-pack](https://rustwasm.github.io/wasm-pack/) - WASM build tool

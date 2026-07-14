@@ -1,5 +1,13 @@
 # npm Publishing Workflow for OxiMedia WASM bindings
-# Builds and publishes @cooljapan/oximedia to npm using wasm-pack
+# Builds and publishes @cooljapan/oximedia to npm using wasm-pack.
+#
+# Only the bundler-target build (pkg-bundler) is renamed to and published as
+# @cooljapan/oximedia. pkg-web and pkg-node are built and uploaded as CI
+# artifacts for inspection/local testing only -- they are NOT published and
+# keep wasm-pack's default scoped name (@cooljapan/oximedia-wasm), so their
+# package.json never claims to be an installable package under a name
+# nobody publishes. @cooljapan/oximedia-web is a separate, independently
+# published package (see /web in this monorepo); it is not produced here.
 
 name: npm Publish
 
@@ -74,44 +82,48 @@ jobs:
         working-directory: oximedia-wasm
         run: wasm-pack build --scope ${{ env.SCOPE }} --target nodejs --out-dir pkg-node --release
 
-      - name: Rename packages to @cooljapan/oximedia
+      # Only the bundler build is published, so only it is renamed to
+      # @cooljapan/oximedia. pkg-web/pkg-node keep wasm-pack's default
+      # scoped name (@cooljapan/oximedia-wasm) -- they are uploaded below as
+      # CI artifacts for inspection only, never published, and must not be
+      # confused with the separately-published @cooljapan/oximedia-web
+      # package (see /web in this monorepo).
+      - name: Rename bundler package to @cooljapan/oximedia
         working-directory: oximedia-wasm
         run: |
-          for dir in pkg-bundler pkg-web pkg-node; do
-            if [ -f "${dir}/package.json" ]; then
-              sed -i "s|\"@${SCOPE}/oximedia-wasm\"|\"${NPM_PACKAGE}\"|g" "${dir}/package.json"
-              echo "Updated ${dir}/package.json → ${NPM_PACKAGE}"
-            fi
-          done
+          if [ -f "pkg-bundler/package.json" ]; then
+            sed -i "s|\"@${SCOPE}/oximedia-wasm\"|\"${NPM_PACKAGE}\"|g" "pkg-bundler/package.json"
+            echo "Updated pkg-bundler/package.json → ${NPM_PACKAGE}"
+          fi
 
       - name: Show package info
         working-directory: oximedia-wasm
         run: |
-          echo "=== bundler ==="
+          echo "=== bundler (published as ${NPM_PACKAGE}) ==="
           cat pkg-bundler/package.json
           echo ""
-          echo "=== web ==="
+          echo "=== web (unpublished build artifact) ==="
           cat pkg-web/package.json
           echo ""
-          echo "=== node ==="
+          echo "=== node (unpublished build artifact) ==="
           cat pkg-node/package.json
           echo ""
           echo "=== WASM size ==="
           ls -lh pkg-bundler/*.wasm
 
-      - name: Upload bundler package
+      - name: Upload bundler package (published)
         uses: actions/upload-artifact@v4
         with:
           name: npm-pkg-bundler
           path: oximedia-wasm/pkg-bundler/
 
-      - name: Upload web package
+      - name: Upload web package (unpublished build artifact)
         uses: actions/upload-artifact@v4
         with:
           name: npm-pkg-web
           path: oximedia-wasm/pkg-web/
 
-      - name: Upload node package
+      - name: Upload node package (unpublished build artifact)
         uses: actions/upload-artifact@v4
         with:
           name: npm-pkg-node

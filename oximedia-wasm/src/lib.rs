@@ -70,7 +70,6 @@ mod audio_decoder;
 mod audiopost_wasm;
 /// Automated editing utilities for the browser.
 mod auto_wasm;
-mod av1_decoder;
 /// Batch processing utilities for the browser.
 mod batch_wasm;
 /// In-memory LRU cache for browser-side use.
@@ -105,11 +104,15 @@ mod forensics_wasm;
 mod gaming_wasm;
 /// Broadcast graphics for the browser.
 mod graphics_wasm;
+/// HDR transfer functions (PQ/HLG) and tone mapping for the browser.
+mod hdr_wasm;
 /// Professional image operations (DPX/EXR header parsing, filtering, histograms).
 mod image_wasm;
 /// IMF package operations for the browser.
 mod imf_wasm;
 mod io;
+/// 3-D LUT application, photographic presets, and `.cube` parsing for the browser.
+mod lut_wasm;
 mod media_player;
 mod metadata_wasm;
 /// Music Information Retrieval for the browser.
@@ -158,6 +161,8 @@ mod scene_wasm;
 mod scopes_wasm;
 /// Shot boundary (cut) detection for the browser.
 mod shots_wasm;
+/// Ambisonics (HOA) encode/decode and VBAP panning for the browser.
+mod spatial_wasm;
 /// Video stabilization for the browser.
 mod stabilize_wasm;
 /// Streaming manifest utilities for the browser.
@@ -176,7 +181,6 @@ mod types;
 mod utils;
 /// Visual effects and compositing for the browser.
 mod vfx_wasm;
-mod video_decoder;
 mod video_encoder;
 /// Virtual production for the browser.
 mod virtual_wasm;
@@ -196,12 +200,11 @@ pub use analytics_wasm::SessionTracker;
 pub use archivepro_wasm::{
     wasm_archive_formats, wasm_validate_archive_policy, wasm_verify_checksum,
 };
-pub use audio_decoder::{WasmFlacDecoder, WasmOpusDecoder, WasmVorbisDecoder};
+pub use audio_decoder::{WasmFlacDecoder, WasmOpusDecoder};
 pub use audiopost_wasm::{
     wasm_check_delivery_spec, wasm_export_stems_info, wasm_mix_audio, wasm_restore_audio,
 };
 pub use auto_wasm::{wasm_auto_templates, wasm_list_auto_tasks, wasm_validate_automation};
-pub use av1_decoder::WasmAv1Decoder;
 pub use batch_wasm::{wasm_estimate_batch_time, wasm_validate_batch_config, WasmBatchQueue};
 pub use cache_wasm::WasmLruCache;
 pub use calibrate_wasm::{
@@ -213,8 +216,9 @@ pub use collab_wasm::{
     wasm_collab_features, wasm_collab_status, wasm_create_session_config, wasm_merge_edits,
 };
 pub use colormgmt_wasm::{
-    wasm_apply_tone_map, wasm_convert_colorspace, wasm_delta_e, wasm_delta_e_2000,
-    wasm_gamut_check, wasm_list_colorspaces, wasm_list_tone_map_operators, WasmColorPipeline,
+    wasm_apply_tone_map, wasm_convert_colorspace, wasm_convert_colorspace_u8, wasm_delta_e,
+    wasm_delta_e_2000, wasm_gamut_check, wasm_list_colorspaces, wasm_list_tone_map_operators,
+    WasmColorPipeline,
 };
 pub use conform_wasm::{
     wasm_check_conform, wasm_get_delivery_spec, wasm_list_conform_specs, wasm_validate_against_spec,
@@ -244,11 +248,21 @@ pub use gaming_wasm::{
 pub use graphics_wasm::{
     wasm_list_templates, wasm_render_color_bars, wasm_render_template, WasmGraphicsRenderer,
 };
+pub use hdr_wasm::{
+    wasm_apply_eotf, wasm_apply_oetf, wasm_hdr_tone_map, wasm_hlg_eotf, wasm_hlg_eotf_frame,
+    wasm_hlg_oetf, wasm_hlg_oetf_frame, wasm_list_tone_operators, wasm_list_transfer_functions,
+    wasm_pq_eotf, wasm_pq_eotf_frame, wasm_pq_oetf, wasm_pq_oetf_frame, wasm_sdr_gamma,
+    wasm_sdr_gamma_inv, WasmHdrConverter,
+};
 pub use image_wasm::{
     wasm_apply_image_filter, wasm_convert_pixel_depth, wasm_detect_image_format,
     wasm_image_histogram, wasm_image_info, wasm_read_dpx, wasm_read_exr,
 };
 pub use imf_wasm::{wasm_imf_track_info, wasm_parse_imf_cpl, wasm_validate_imf_cpl};
+pub use lut_wasm::{
+    wasm_apply_cube_lut, wasm_apply_lut_preset_frame, wasm_apply_lut_preset_pixel,
+    wasm_inspect_cube_lut, wasm_lut_identity, wasm_lut_preset_names, WasmLut3d,
+};
 pub use media_player::WasmMediaPlayer;
 pub use metadata_wasm::wasm_parse_metadata;
 pub use mir_wasm::{
@@ -299,6 +313,10 @@ pub use scaling_wasm::{
 pub use scene_wasm::wasm_detect_scenes;
 pub use scopes_wasm::{wasm_analyze_exposure, wasm_false_color, wasm_scope_types, WasmVideoScopes};
 pub use shots_wasm::ShotDetector;
+pub use spatial_wasm::{
+    wasm_ambisonics_channel_count, wasm_ambisonics_decode_stereo, wasm_ambisonics_encode,
+    wasm_ambisonics_orders, wasm_spatial_speaker_layouts, wasm_vbap_pan, WasmAmbisonicsEncoder,
+};
 pub use stabilize_wasm::{wasm_estimate_motion, wasm_stabilization_modes, WasmStabilizer};
 pub use stream_wasm::{parse_manifest_info, wasm_build_master_playlist, ManifestInfo};
 pub use streaming_demuxer::WasmStreamingDemuxer;
@@ -325,7 +343,6 @@ pub use vfx_wasm::{
     wasm_apply_effect, wasm_chroma_key, wasm_dissolve, wasm_generate_pattern, wasm_list_effects,
     wasm_list_patterns, wasm_list_transitions,
 };
-pub use video_decoder::WasmVp8Decoder;
 pub use video_encoder::WasmVideoEncoder;
 pub use virtual_wasm::{
     wasm_generate_test_source, wasm_virtual_settings, wasm_virtual_source_types,
@@ -336,7 +353,7 @@ pub use watermark_wasm::{
     wasm_embed_image_watermark, wasm_list_watermark_algorithms, wasm_watermark_capacity,
     wasm_watermark_quality,
 };
-pub use webcodecs_bridge::WasmWebCodecsBridge;
+pub use webcodecs_bridge::{WasmEncodedChunkInfo, WasmVideoDecoderConfig, WasmWebCodecsBridge};
 pub use worker_helpers::{
     parse_transfer_header, split_transfer_planes, transferable_frame, transferable_frame_rgba,
 };

@@ -20,9 +20,11 @@ oximedia-core = { workspace = true }
 oximedia-audio = { workspace = true }
 oximedia-subtitle = { workspace = true }
 oximedia-graph = { workspace = true }
+oximedia-analysis = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 bytes = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]

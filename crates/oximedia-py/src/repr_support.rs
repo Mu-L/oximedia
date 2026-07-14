@@ -20,7 +20,7 @@ use std::fmt;
 ///
 /// # Example
 /// ```
-/// use oximedia::repr_support::ReprBuilder;
+/// use oximedia_py::repr_support::ReprBuilder;
 ///
 /// let repr = ReprBuilder::new("EncoderConfig")
 ///     .field("width", &1920)

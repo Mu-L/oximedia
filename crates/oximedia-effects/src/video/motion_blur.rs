@@ -149,7 +149,7 @@ impl MotionBlur {
 /// Ring-buffer accumulation cache for temporal motion blur.
 ///
 /// Stores the last `max_cache_size` frames and produces their pixel-wise
-/// average via [`accumulated_blend`].  A running per-pixel sum is maintained
+/// average via [`MotionBlurCache::accumulated_blend`].  A running per-pixel sum is maintained
 /// so each `push_frame` call is O(frame_size) regardless of `max_cache_size`.
 ///
 /// All frames must have the same pixel count (bytes length).  If a pushed

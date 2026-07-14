@@ -36,8 +36,8 @@ uuid.workspace = true
 rayon.workspace = true
 
 # Text processing
-regex = "1.12"
-unicode-segmentation = "1.13"
+regex.workspace = true
+unicode-segmentation = { workspace = true }
 unicode-normalization = "0.1"
 unicode-width = "0.2"
 
@@ -45,7 +45,7 @@ unicode-width = "0.2"
 quick-xml = { workspace = true }
 
 # Encoding detection and conversion
-encoding_rs = "0.8"
+encoding_rs = { workspace = true }
 
 # Language detection
 whatlang = "0.18"

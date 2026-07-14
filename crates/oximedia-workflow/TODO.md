@@ -38,9 +38,9 @@
 ## Testing
 - [x] Add integration test for full workflow lifecycle: create -> submit -> execute -> complete with SQLite persistence (Wave 15: test_sqlite_lifecycle in tests/wave15_tests.rs, sqlite feature-gated)
 - [x] Test `dag` cycle detection with intentionally cyclic graphs and verify proper error reporting (Wave 15: test_dag_cycle_detection_negative verifies add_edge returns Err(DagError::CycleDetected))
-- [ ] Add stress test for `queue` with 1000+ concurrent task submissions and verify ordering correctness
-- [ ] Test `scheduler` cron trigger firing accuracy with mock clock
-- [ ] Add `approval_gate` test verifying workflow blocks until approval is granted and resumes correctly
+- [x] Add stress test for `queue` with 1000+ concurrent task submissions and verify ordering correctness (Wave 27: tests/wave27_queue_stress.rs — 1000 concurrent enqueues no-loss/no-dup HashSet drain, FIFO-within-priority 100-task order, priority-bucket monotone non-increasing drain)
+- [x] Test `scheduler` cron trigger firing accuracy with mock clock (Wave 27: injectable `Clock` trait + `SystemClock` default in scheduler.rs, `WorkflowScheduler::with_clock`; tests/wave27_scheduler_clock.rs FakeClock drives per-minute cron — fires exactly when now>=next_execution then empties, next_execution advances one period)
+- [x] Add `approval_gate` test verifying workflow blocks until approval is granted and resumes correctly (Wave 27: tests/wave27_approval_block.rs — Notify+Mutex<ApprovalGate> harness, deterministic ["blocked","approved","resumed"] order, no sleeps, timeout only as safety net)
 - [ ] Test `workflow_checkpoint` save/restore across process restarts (serialize state, reload, continue execution)
 - [ ] Test `sla_tracking` with workflows that exceed SLA and verify breach notification
 

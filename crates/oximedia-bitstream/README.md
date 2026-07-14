@@ -4,7 +4,7 @@
 
 Part of the [OxiMedia](https://github.com/cool-japan/oximedia) multimedia framework.
 
-Version: 0.1.8 — 2026-05-29 — 2 tests
+Version: 0.1.9 — 2026-07-08 — extensively tested
 
 ## Features
 
@@ -22,7 +22,7 @@ Version: 0.1.8 — 2026-05-29 — 2 tests
 
 ```toml
 [dependencies]
-oximedia-bitstream = { version = "0.1.8" }
+oximedia-bitstream = { version = "0.1.9" }
 ```
 
 ### Reading bits
@@ -104,4 +104,9 @@ Alpha — API may change between minor versions.
 
 ## License
 
-Apache-2.0 / MIT — Copyright 2017 Brian Langenberger; 2024-2026 COOLJAPAN OU (Team Kitasan)
+Apache-2.0 — Copyright 2017 Brian Langenberger; 2024-2026 COOLJAPAN OU (Team Kitasan)
+
+This crate derives from [`bitstream-io`](https://crates.io/crates/bitstream-io) 4.9.0,
+originally dual-licensed "MIT OR Apache-2.0" by its author. COOLJAPAN OU redistributes
+this derivative work under the Apache-2.0 option, as permitted by that upstream license
+grant (see "Upstream Attribution" above).

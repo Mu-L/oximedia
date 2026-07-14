@@ -1,7 +1,7 @@
 # oximedia-cli — Command-Line Interface TODO
 
-**Version: 0.1.3**
-**Status as of: 2026-04-15**
+**Version: 0.1.9**
+**Status as of: 2026-07-08**
 
 The `oximedia-cli` crate is the primary user-facing entry point to the OxiMedia
 Sovereign Media Framework. It ships **two binaries** from a single crate — the
@@ -22,22 +22,22 @@ files (counted on 2026-04-15 via `wc -l src/*.rs src/bin/*.rs`).
 
 | Binary         | Entry point                | Purpose                                                  |
 |----------------|----------------------------|----------------------------------------------------------|
-| `oximedia`     | `src/main.rs` (775 lines)  | Primary multitool; dispatches all domain subcommands.    |
+| `oximedia`     | `src/main.rs` (1005 lines) | Primary multitool; dispatches all domain subcommands.    |
 | `oximedia-ff`  | `src/bin/oximedia-ff.rs`   | FFmpeg drop-in — argv → `oximedia-compat-ffmpeg` → exec. |
 
 Both share code via the thin `src/lib.rs` (33 lines) which publicly re-exports
 `presets`, `progress`, and `transcode` so the `oximedia-ff` binary does not
 duplicate transcode plumbing.
 
-### Source layout (89 files, ~50,900 SLOC)
+### Source layout (117 files, ~68,007 SLOC)
 
-- **Entry**: `main.rs` (775), `lib.rs` (33), `bin/oximedia-ff.rs` (348).
+- **Entry**: `main.rs` (1005), `lib.rs` (33), `bin/oximedia-ff.rs` (348).
 - **Command surface**: `commands.rs` (1442) — defines the top-level `Commands`
   enum (~85 variants) and shared `MonitorCommand`, `RestoreCommand`,
   `CaptionsCommand`, `PresetCommand` sub-enums; `handlers.rs` (829) — shared
   handler functions (`probe_file`, `show_info`, `show_version`, logging init,
   monitor/restore/captions/preset dispatch).
-- **Domain modules (`*_cmd.rs`)**: 77 files, one per top-level subcommand group
+- **Domain modules (`*_cmd.rs`)**: 75 files, one per top-level subcommand group
   (aaf, access, align, archive, archivepro, audio, audiopost, auto, batch,
   calibrate, captions, clips, cloud, collab, color, conform, dedup, denoise,
   distributed, dolbyvision, drm, edl, farm, ffcompat, filter, forensics, gaming,
@@ -115,10 +115,47 @@ tabs, `↑`/`↓` navigate, `Enter` show details.
 - [x] Two-binary crate layout — `oximedia` (primary) and `oximedia-ff` (FFmpeg
   drop-in) both shipping from the same `oximedia-cli` crate.
 - [x] Core inspection suite — `probe` (text/json/csv, chapters, per-stream,
-  metadata dump, content hash, quality snapshot), `info`, `version`.
-- [x] Full transcode pipeline — `transcode` with FFmpeg-compatible aliases
-  (`-i`, `-c:v`, `-c:a`, `-b:v`, `-b:a`, `-vf`, `-af`, `-ss`, `-t`, `-r`, `-y`),
-  two-pass, CRF, preset names, resume, stream mapping, loudness normalize hook.
+  metadata dump), `info`, `version`.
+  - **Correction (2026-07-14 audit):** the `--hash` and `--quality-snapshot`
+    flags on `probe` parse successfully but are dead on arrival —
+    destructured as `hash: _hash` / `quality_snapshot: _quality_snapshot` in
+    `main.rs::run()` and never passed to `probe_file()`, which has no
+    parameter for either. Both are silent no-ops today. Tracked as a new
+    gap under "Subcommand-level gaps" below.
+  - **Update (2026-07-14, later same day):** `--hash` has SHIPPED —
+    `main.rs::run()` now destructures `hash` (no underscore) and forwards
+    it into `probe_file(..., hash, ...)`, which takes a real
+    `compute_hash: bool` parameter (`handlers/inspect.rs:24`). This is
+    DONE, not open. `--quality-snapshot` is still discarded
+    (`quality_snapshot: _quality_snapshot`) — see "CLI Flag Wiring
+    Investigation (2026-07-14)" below for a ready-to-implement design.
+- [x] Transcode pipeline — `transcode` with working FFmpeg-compatible
+  aliases (`-i`, `-c:v`, `-c:a`, `-b:v`, `-b:a`, `--scale`, `-y`), two-pass,
+  CRF, preset names.
+  - **Correction (2026-07-14 audit):** `-vf`, `-af`, `-ss`, `-t`, `-r`,
+    `--threads`, and `--resume` all parse without error but are never
+    read — they land on `TranscodeOptions` fields marked
+    `#[allow(dead_code)]` (present unchanged since the very first
+    `5e1fd8c7` / 0.1.0 commit, so this is longstanding, not a regression) —
+    and `--map` / `--normalize-audio` are dropped even earlier, discarded
+    in `main.rs`'s match arm before ever reaching `TranscodeOptions`.
+    `print_transcode_plan` doesn't surface any of these fields either, so
+    users get no warning that their seek/duration/filter/thread/resume/map/
+    normalize flags did nothing. Because `oximedia ff` and `oximedia-ff`
+    both build a `TranscodeOptions` and call the same
+    `transcode::transcode()` (see `ffcompat_cmd.rs::execute_job` /
+    `bin/oximedia-ff.rs::execute_job`), real FFmpeg command lines using
+    `-ss`/`-t`/`-vf`/`-af` are silently executed as a full-file, unfiltered
+    transcode. Tracked as a new gap under "Subcommand-level gaps" below.
+  - **Update (2026-07-14, later same day):** `--normalize-audio` has
+    SHIPPED — `main.rs::run()` destructures `normalize_audio` (no
+    underscore) straight into `TranscodeOptions.normalize_audio`, and
+    `transcode.rs` reads it in both `transcode_single_pass` (~line 528)
+    and `transcode_two_pass` (~line 624) to apply a real
+    `NormalizationConfig::new(LoudnessStandard::EbuR128)` pass. It is no
+    longer part of this gap. `-vf`, `-af`, `-ss`, `-t`, `-r`, `--threads`,
+    `--resume`, and `--map` remain open — see "CLI Flag Wiring
+    Investigation (2026-07-14)" below for per-flag design notes.
 - [x] Frame / thumbnail / sprite generation — `extract`, `thumbnail` (single /
   multiple / grid / auto), `sprite` with WebVTT + JSON manifest, configurable
   sampling strategy (uniform / scene-based / keyframe-only / smart) and layout
@@ -165,6 +202,15 @@ tabs, `↑`/`↓` navigate, `Enter` show details.
   compat (keeps crate-specific build config available for the future).
 - [x] WASM / non-CLI surface explicitly NOT linked — the crate only compiles
   for native targets by design; `oximedia-wasm` handles the browser story.
+- [x] Pure-Rust TLS crypto provider installed process-wide at startup —
+  `oximedia_net::install_default_crypto_provider()` (rustls-rustcrypto) is
+  called first thing in all three binaries (`main.rs`, `bin/oximedia-ff.rs`,
+  `bin/oximedia-cv2.rs`) before any subcommand can open a TLS connection
+  (cloud storage, distributed rendering, monitoring exporters). The
+  workspace builds `reqwest`/`rustls` without a compiled-in default
+  provider to keep the default build Pure Rust, so without this call the
+  first TLS use would panic. Landed 2026-07-10 in commit `eaf9dfdd`
+  (untracked in this TODO until the 2026-07-14 content audit).
 
 ---
 
@@ -240,6 +286,15 @@ tabs, `↑`/`↓` navigate, `Enter` show details.
   - **Tests:** smoke (`--version`/`--help` exit 0), list (functions ≥30 / constants ≥130), imread+imwrite PNG round-trip via assert_cmd, cvt-color BGR2GRAY output is 1-ch, explain does NOT write output file
   - **Risk:** binary size increase; acceptable — users can opt out at build time with `--bins oximedia`
   - **Prerequisite:** `oximedia-compat-cv2` crate (Slices A-E)
+  - **Note (verified 2026-07-14):** the binary now ships 22 subcommands
+    (grew via Run 4 Slices C/E/F below). 3 of the originally-listed 14 —
+    `FindContours`, `HoughLines`, `LkFlow` — are not yet wired as CLI
+    subcommands, even though the underlying `oximedia-compat-cv2` functions
+    exist (`contour.rs`, `hough.rs`, `optical_flow.rs`); many additional ops
+    (`Flip`, `Rotate`, `Sobel`, `Laplacian`, `AdaptiveThreshold`,
+    `MorphologyEx`, `FastCorners`, `HarrisCorners`, `OrbDetect`,
+    `DnnForward`, `MedianBlur`, `BilateralFilter`) shipped instead. The
+    Goal/introspection-flags claims are otherwise accurate.
 
 ### TUI polish (`tui_cmd.rs`)
 
@@ -275,6 +330,11 @@ tabs, `↑`/`↓` navigate, `Enter` show details.
   writes the input through unchanged. Wire to `oximedia-restore` decoders. (Wave 2 Slices 4+5)
   - **Goal:** Format-aware WAV/FLAC/MP3 decode for audio restore; frame-level deinterlace/upscale/color-correct for video restore via FramePipelineConfig.
   - **Files:** `restore_cmd.rs`, `commands.rs`, `crates/oximedia-transcode/src/frame_pipeline.rs`
+  - **Note (verified 2026-07-14):** WAV and MP3 decode for real. FLAC input
+    is honestly rejected with a clear error directing the user to convert
+    to WAV or use `--raw` — `oximedia-audio`'s `FlacDecoder` is itself a
+    stub upstream (`send_packet`/`receive_frame` are no-ops), so this is a
+    deliberate honest-error choice, not a silent-garbage placeholder.
 - [x] Wire conform_cmd to single-file QC path (replace byte-copy stub)
   - **Goal:** `conform check/report` use `oximedia-qc::QualityControl` + `oximedia-transcode::TranscodePipeline` for single-file QC. `ConformSession` is reserved for the EDL-timeline matching path (different use case).
   - **Design:** `ConformSession::new(timeline_path)?.match_assets(paths).await?` for check; `compute_statistics()` for report
@@ -311,6 +371,291 @@ tabs, `↑`/`↓` navigate, `Enter` show details.
   lossless stand-in; finish the PNG/JPEG output encoders.
   (Done: real container probe + demux + codec decode pipeline; PNG via PngEncoder,
   JPEG via JpegEncoder; synthetic frame generator removed; log updated to show actual input path.)
+- [ ] `transcode.rs` — `-vf`/`-af`/`-ss`/`-t`/`-r`/`--threads`/`--resume`
+  fields on `TranscodeOptions` are marked `#[allow(dead_code)]` and never
+  read by `transcode()`/`transcode_single_pass()`/`transcode_two_pass()`;
+  `--map` isn't even threaded from `main.rs` into `TranscodeOptions` in
+  the first place. Wire seek/duration trimming, arbitrary filter-chain
+  application, thread-count, resume-from-partial, and stream mapping into
+  the real `oximedia_transcode::TranscodePipeline` builder (likely needs
+  new builder methods for several of these). Affects both `oximedia
+  transcode` and the shared FFmpeg-compat execution path (`oximedia ff` /
+  `oximedia-ff`), since both call the same `transcode::transcode()`.
+  (Found during the 2026-07-14 TODO content audit; confirmed present since
+  the 0.1.0 commit `5e1fd8c7`, not a recent regression.) **Update
+  (2026-07-14, later same day):** `--normalize-audio` — originally listed
+  here — has SHIPPED (see "Completed" above) and is no longer part of this
+  gap. Ready-to-implement per-flag designs for the remainder now live in
+  "CLI Flag Wiring Investigation (2026-07-14)" below.
+- [x] `probe --hash` — SHIPPED. `main.rs::run()` now forwards the real
+  `hash` value (previously `hash: _hash`) into `probe_file(..., hash,
+  ...)`, which takes a genuine `compute_hash: bool` parameter
+  (`handlers/inspect.rs:24`) threaded through to a real hash/fingerprint
+  computation. (Implemented after the 2026-07-14 TODO content audit that
+  originally found it discarded.)
+- [ ] `probe --quality-snapshot` — still discarded in `main.rs::run()`
+  (`quality_snapshot: _quality_snapshot`); `probe_file()` has no parameter
+  for it. Wire to a quick no-reference quality metric, or remove the flag
+  if descoped. Ready-to-implement design (frame-0 decode via
+  `frame_extract::extract_video_frame_rgb`, BT.601 luma conversion, all 5
+  `oximedia-quality` no-reference metrics) recorded in "CLI Flag Wiring
+  Investigation (2026-07-14)" below, item 3. (Found during the 2026-07-14
+  TODO content audit.)
+
+### CLI Flag Wiring Investigation (2026-07-14)
+
+Design-level follow-up on the six flags left open above (`transcode`'s
+`-vf`/`-af`/`-ss`/`-t`/`-r`/`--threads`/`--resume`/`--map`, and `probe
+--quality-snapshot`). Each entry carries enough file:line detail and code
+sketches for a future session to implement directly without
+re-investigating; every reference below was independently re-verified
+against the current source during this pass. (`--normalize-audio` and
+`probe --hash` are NOT covered here — both shipped; see "Completed" above.)
+
+#### 1. `--map` (stream selection) — Medium, ready to implement
+
+- New module `crates/oximedia-transcode/src/stream_map.rs`, exported from
+  `lib.rs`:
+  ```rust
+  pub enum StreamKind { Video, Audio, Subtitle }
+  pub enum StreamMapSelector { All, Index(usize), Kind(StreamKind), KindIndex(StreamKind, usize) }
+  pub struct StreamMap { pub negative: bool, pub selector: StreamMapSelector }
+  impl StreamMap { pub fn parse(s: &str) -> Result<Self> }  // ffmpeg-style "0", "0:0", "0:v", "0:a:1", "-0:a"
+  pub fn resolve_stream_selection(streams: &[StreamInfo], maps: &[StreamMap]) -> Result<Vec<usize>>;
+  ```
+  Semantics: empty `maps` = keep all (today's behavior); positive selectors
+  union, negative selectors subtract; a positive selector matching nothing
+  is an error, as is a final empty selection when `maps` was non-empty.
+- Why a new parser instead of reusing
+  `oximedia_compat_ffmpeg::arg_parser::parse_map_spec`: that fn is private
+  (`arg_parser.rs:746`, confirmed `fn`, not `pub fn`), and
+  `oximedia-transcode` cannot depend on `oximedia-compat-ffmpeg` — the
+  dependency runs the other way (`oximedia-compat-ffmpeg/Cargo.toml` →
+  `oximedia-transcode`), so the reverse edge would cycle. Only the CLI
+  sees both crates.
+- New fields: `PipelineConfig.stream_map: Vec<StreamMap>` (`pipeline.rs`
+  struct, lines 213-234) and a matching `TranscodePipelineBuilder`
+  field/setter (struct 1174-1184, setters 1189-1268, `build()`'s
+  `PipelineConfig { .. }` literal at 1288-1298 needs `stream_map:
+  self.stream_map,` added). Two in-file test literals (`PipelineConfig {`
+  at lines 1360 and 1622) also need the new field.
+- **Critical correctness detail — the single most important finding of
+  this investigation; don't skip it in implementation.** Filtering must
+  happen in TWO places:
+  1. At the stream-gather point in `remux()` — `pipeline.rs:723`, `let
+     streams: Vec<StreamInfo> = demuxer.streams().to_vec();`. Filter via
+     `resolve_stream_selection`, then build an `index_remap:
+     HashMap<original_index, new_sequential_index>`.
+  2. Because **both the Matroska and Ogg muxers route `write_packet` by
+     the packet's position in the muxer's own stream list, not by
+     original stream identity** — confirmed in both `write_packet` impls:
+     `mux/matroska/writer.rs:731` (`if packet.stream_index >=
+     self.streams.len()`), `:738` (`&self.streams[packet.stream_index]`),
+     `:776` (`(packet.stream_index + 1) as u64` into
+     `write_simple_block`); `mux/ogg/writer.rs:260,267,274` (identical
+     pattern, plus `self.stream_writers[packet.stream_index]`). Matroska's
+     `write_tracks` (`writer.rs:573-588`) numbers tracks via
+     `self.streams.iter().enumerate()` — muxer-local position, unrelated
+     to the original demuxer stream index. So `drain_packets_with_gain`
+     (defined `pipeline.rs:975`, called from the Matroska/Ogg arms of
+     `remux()` at `:805` and `:836`) must *also* skip packets whose
+     original `stream_index` was filtered out, and rewrite
+     `pkt.stream_index` to the new sequential index before
+     `muxer.write_packet()` — otherwise the muxer returns `Err("Invalid
+     stream index: {n}")` on the first orphaned packet.
+- CLI wiring: add `TranscodeOptions.map: Vec<String>`
+  (`oximedia-cli/src/transcode.rs`), parsed via `StreamMap::parse` and
+  passed to the builder in `transcode_single_pass`/`transcode_two_pass`.
+  Currently discarded at `main.rs:426` (`map: _map`) — forward it instead.
+  Other `TranscodeOptions { .. }` construction sites (`batch.rs`,
+  `ffcompat_cmd.rs`, `bin/oximedia-ff.rs`, the test helper
+  `tests/transcode_normalize_audio.rs`) need `map: Vec::new()` added to
+  keep compiling.
+- Optional follow-up: `oximedia-cli/src/concat.rs:210-223` has an
+  identical unwired `StreamSelection` enum (`#[allow(dead_code)]`,
+  hardcoded `stream_selection: None` in `main.rs`'s concat arm) that could
+  reuse the same `resolve_stream_selection` resolver.
+- Test plan: new `crates/oximedia-transcode/tests/remux_map_seek.rs` —
+  build a real 2-stream (video+audio) Matroska fixture in
+  `std::env::temp_dir()`, run with `stream_map` selecting only audio,
+  re-demux the output and assert only 1 stream remains and every packet's
+  `stream_index == 0`. That specific assertion proves the remap works —
+  without it the muxer would error instead.
+
+#### 2. `-ss` / `-t` (seek / trim) — Medium, ready to implement
+
+- New fields `PipelineConfig.start_time_secs: Option<f64>` /
+  `.duration_secs: Option<f64>` — parsed seconds, not raw strings (same
+  dependency-direction constraint as `--map` applies).
+- CLI-side parsing: reuse `oximedia_compat_ffmpeg::parse_duration(&str) ->
+  Result<Duration, SeekError>` (`crates/oximedia-compat-ffmpeg/src/seek.rs:63`,
+  re-exported from the crate's `lib.rs`; already handles
+  `HH:MM:SS[.ms]`/plain seconds/`Nh`/`Nm`/`Ns`) rather than writing a new
+  time parser.
+- Seek insertion point: in `remux()`, once streams/remap are resolved and
+  before `match out_format` (~`pipeline.rs:789`). If `start_time_secs` is
+  set and `demuxer.is_seekable()`, call `demuxer.seek_to_time(s).await` —
+  a real trait method (`crates/oximedia-container/src/demux/traits.rs:109`,
+  default impl `self.seek(SeekTarget::time(timestamp)).await`), with real
+  overrides in Matroska (`demux/matroska/mod.rs:1025` `seek`, `:1030`
+  `is_seekable`) and Ogg (`demux/ogg/mod.rs:511` `seek`, `:516`
+  `is_seekable`). WAV (`demux/wav/mod.rs`) and FLAC (`demux/flac/mod.rs`)
+  override neither — confirmed by grep — so both fall back to the trait
+  defaults (`seek` → `Err(unsupported)`, `is_seekable` → `false`,
+  `traits.rs:91-95,158-160`). For those, fall back to read-and-discard:
+  pass a `start_discard_secs` into the drain loop and `continue` past
+  packets with `pkt.timestamp.to_seconds() < start_discard_secs`.
+- Duration: compute `end_secs = start_secs.unwrap_or(0) + duration_secs`
+  (or just `duration_secs` if no start given); pass into the drain loop;
+  `break` once `pkt.timestamp.to_seconds() >= end_secs`.
+  `Timestamp::to_seconds()` (`crates/oximedia-core/src/types/timestamp.rs:106`)
+  already accounts for each packet's own timebase, so no manual
+  per-stream timebase math is needed.
+- Test plan: single-video-stream Matroska fixture with known packet PTS
+  spacing — assert `duration_secs` alone reduces output packet count;
+  assert `start_time_secs` alone (real seek path) raises the minimum
+  retained PTS; add a WAV-input case to exercise the read-and-discard
+  fallback specifically (WAV packets carry monotonic sample-based PTS, so
+  the fallback is sample-accurate there).
+
+#### 3. `probe --quality-snapshot` — Medium, ready to implement
+
+- Decode **frame 0 only** (not middle/last — `frame_extract.rs`'s
+  container decode path has no seek and decodes sequentially from the
+  start, so anything past frame 0 isn't "quick"). Call the existing
+  `crate::frame_extract::extract_video_frame_rgb(path, 0)`
+  (`oximedia-cli/src/frame_extract.rs:38`) — already used by
+  `scopes_cmd`/thumbnail; real decode (Y4M native; MKV/WebM/TS via
+  demuxer + AV1/VP9/VP8).
+- **Do not copy** `quality_cmd.rs::make_grey_frame()`
+  (`oximedia-cli/src/quality_cmd.rs:160-166` —
+  `Frame::new(..).luma_mut().fill(128)`) — it scores a synthetic
+  constant-grey frame regardless of real input, and `--quality-snapshot`'s
+  help text explicitly promises "no-reference metrics" on the real file.
+- Conversion: confirmed by reading each metric's source that all 5
+  no-reference metrics (`crates/oximedia-quality/src/{niqe,brisque,
+  blockiness,blur,noise}.rs`) read only `frame.planes[0]` (luma) — so no
+  full RGB→YUV conversion is needed. Build a `PixelFormat::Gray8`
+  single-plane `quality::Frame` (`Frame::new(w, h, Gray8)`,
+  `crates/oximedia-quality/src/lib.rs:177`) and fill it with BT.601 luma,
+  `y = (299*r + 587*g + 114*b) / 1000` per pixel — matches the existing
+  integer formula in `oximedia_convert::color_convert::rgb_to_yuv`
+  (`crates/oximedia-convert/src/color_convert.rs:36`); replicate the
+  one-line formula locally rather than adding `oximedia-convert` as a
+  dependency (`oximedia-cli` doesn't otherwise depend on it).
+- Compute all 5 `MetricType` variants (Blur/Noise/Blockiness/Brisque/Niqe)
+  via `QualityAssessor::new().assess_no_reference(&frame, metric)`
+  (`crates/oximedia-quality/src/lib.rs:391,444`), each **independently
+  optional** — different minimum-size guards (Blur/Noise 8×8, Blockiness
+  16×16, Brisque 32×32, Niqe 96×96) mean small frames legitimately drop
+  some metrics while keeping others.
+- New module `oximedia-cli/src/quality_snapshot.rs`: `QualitySnapshot`
+  struct (`available: bool`, `reason: Option<String>` for the
+  whole-frame-failed case, `frame_index`/`width`/`height`, one
+  `MetricOutcome { score: Option<f64>, unavailable: Option<String> }` per
+  metric); `compute_quality_snapshot(path) -> QualitySnapshot` is
+  **infallible** (never returns `Err` — encodes failure inside the struct
+  so `probe` never crashes on e.g. an audio-only file), plus a `to_json()`.
+- Wiring: `probe_file()` (`oximedia-cli/src/handlers/inspect.rs:20-29`)
+  gains a `quality_snapshot: bool` param, inserted right after the
+  existing `compute_hash: bool` param the `--hash` work added.
+  `main.rs:385` currently discards it (`quality_snapshot:
+  _quality_snapshot`) — forward it instead. Slot the result into all 4
+  output branches (ndjson ~`:81`, json ~`:104`, csv ~`:147`, text
+  ~`:175`), following the same insertion pattern `--hash`'s
+  `hash_hex`/`hash` field used in each branch.
+- Test plan: new `oximedia-cli/tests/probe_quality_snapshot.rs` modeled on
+  `tests/probe_hash_flag.rs`. Build a small (96×96, so all 5 metrics
+  clear their size guards) Y4M fixture with a non-constant gradient
+  pattern in `std::env::temp_dir()`; assert real, non-constant scores come
+  back. **Key anti-regression assertion**: independently score a
+  solid-grey 96×96 frame in-process and assert the fixture's score
+  differs from it — proves a real frame was used, not the
+  `make_grey_frame` shortcut. Second case: a WAV (audio-only) fixture
+  asserting `probe` still exits 0 with `quality_snapshot.available ==
+  false` and a clear `reason`.
+
+#### 4. `--threads` — blocked, no live knob exists
+
+`PipelineConfig`/`TranscodePipelineBuilder` (`pipeline.rs`) have **zero**
+thread-related fields today (confirmed by grep — zero occurrences of
+"thread" in the whole file); the live remux path is a sequential
+packet-copy loop with nothing to parallelize. A stored-but-unused field
+would just relocate the "silently does nothing" problem. Recommended
+treatment once picked up: **warn and proceed** — print a clear message
+that threading has no effect until real frame-level encoding exists,
+rather than faking support (user's stated general preference for
+currently-inert flags).
+
+#### 5. `-vf` / `-af` / `-r` (video/audio filters, frame rate) — Large, architecture-blocked
+
+The most important finding to preserve. The frame-level
+decode→filter→encode capability these flags need
+(`oximedia_transcode::MultiTrackExecutor` + `PerTrack`,
+`crates/oximedia-transcode/src/multi_track.rs`) has real, working pieces —
+`FilterGraph::apply` does real pixel-level scale/gain, `FrameRateConverter`
+does real frame duplication/dropping — but:
+- **All 8 of its tests** (`crates/oximedia-transcode/tests/pipeline_execute.rs`)
+  run against `MockDecoder`/`MockEncoder` with hand-built synthetic
+  frames, never a real codec or real file.
+- **Zero production call sites anywhere in the workspace** — `grep
+  "MultiTrackExecutor::new"` across the whole repo returns exactly 8
+  test-site hits (`tests/pipeline_execute.rs`) plus 2 comment/doc-example
+  hits (`multi_track.rs:280` doc comment, `pipeline.rs:612` inline
+  comment) — confirmed, no others.
+- The only "wiring sketch" is a 3-line `rust,ignore` doc-comment block
+  (`pipeline.rs:602-615`, immediately before `requires_frame_level()`
+  gates the error at `:616-624`) referencing `muxer`/`decoder`/`encoder`/
+  `streams` bindings that don't exist anywhere in `execute_single_pass` —
+  it shows the *shape* of the call, not how to obtain a real
+  decoder/encoder/muxer/streams.
+- The live path (`Pipeline::execute_single_pass` → `remux()`) is
+  packet-level stream-copy only; it explicitly rejects any real codec
+  transcode via `requires_frame_level()` (`pipeline.rs:342-357`, checked
+  at `:616-624`) for everything except `copy`/`stream-copy` and the intra
+  codecs MJPEG/APV — and even those two are validation-only: the encoder
+  is constructed and immediately dropped (`pipeline.rs:767`, `let
+  _encoder = make_video_encoder(intra_id, &params)?;`), bytes are still
+  stream-copied, not re-encoded.
+
+**Conclusion for the record**: making `-vf`/`-af`/`-r` work is not a
+flag-wiring fix — it is "build and prove real decode→encode transcoding
+in oximedia-cli for the first time," a substantial, currently-unproven-
+at-real-file-level undertaking with real correctness risk (nothing like
+it has ever run against a real codec anywhere in this workspace).
+**User's stated intent: when picked up, attempt via a Fable-model
+subagent** (rather than the default model), given the scale and
+exploratory nature of proving out an unproven subsystem. Until then: same
+"warn and proceed" treatment as `--threads`.
+
+#### 6. `--resume` — no real design exists, disposition undecided
+
+`TranscodeJob::resume()` (`crates/oximedia-transcode/src/transcode_job.rs:185-189`)
+is a bare in-memory status-enum flip (`Paused`→`Running`) with no
+persistence — and it's **entirely unrelated** to the CLI's `--resume`
+flag, since the CLI's transcode path never constructs a `TranscodeJob` at
+all. The closest real precedent in the workspace is `oximedia-convert`'s
+`ConversionCheckpoint` (`crates/oximedia-convert/src/pipeline/job.rs:170-279`)
+— genuine single-file, disk-persisted JSON checkpoint scaffolding
+(`input_path`/`output_path`/`frames_processed`/`total_frames`/
+`byte_offset`) — but it currently hardcodes `byte_offset: 0` and only
+restores a proportional progress estimate, not actual resumable encoder
+state. `oximedia-batch`'s `CheckpointManager`
+(`crates/oximedia-batch/src/checkpoint.rs:133-140`, fields
+`dir`/`max_retained`/`next_sequence`) is queue/job-ID granularity only,
+not adaptable without new per-file fields. `--resume` is undocumented
+anywhere user-facing except its own `--help` string ("Resume from
+previous incomplete encode").
+
+**Disposition explicitly left open by the user — do not recommend one
+option over the other, record both as pending a decision:**
+- (a) Reject with a clear error when passed — consistent with "warn and
+  proceed" elsewhere would actually argue for a *warning* here too, but
+  `--resume` implies a stronger promise (avoiding redundant work) than
+  filters/threads do, so the user did not want this defaulted
+  automatically; or
+- (b) Remove the flag entirely (breaking CLI change, drops a `--help`
+  entry) — cleanest if nobody depends on it.
 
 ### Testing
 
@@ -354,6 +699,14 @@ tabs, `↑`/`↓` navigate, `Enter` show details.
   `abr-package`, `loudness-normalize`, `forensics-investigate`,
   `restore-degraded`, `live-broadcast`, `cv2-pipeline`. All scripts pass
   `bash -n` and use only verified-wired flags.)*
+- [x] Core CLI smoke-test gate — `tests/cli.rs` (267 lines; landed
+  2026-07-10 in commit `eaf9dfdd`, untracked in this TODO until the
+  2026-07-14 audit): `--version`/`version` agreement with the workspace
+  version (including `version --json`), `--help` mentions key subcommands,
+  invalid-subcommand handling (no panic, helpful stderr with usage
+  guidance), and a synthetic tiny-WAV `probe` / `probe --format json` round
+  trip plus a missing-file probe error path — all hermetic via
+  `tempfile::TempDir`.
 
 ### Performance & UX
 
@@ -397,23 +750,43 @@ tabs, `↑`/`↓` navigate, `Enter` show details.
 
 ## Known Issues / Gaps
 
-- The `monitor_cmd.rs` module (430 lines) exists on disk but the `Monitor`
-  variant is dispatched via `handlers::handle_monitor_command`. Audit whether
-  the handler fully delegates into `monitor_cmd` or still carries duplicate
-  logic in `handlers.rs` (which is 829 lines — at the 2000-line refactor
-  boundary but worth splitting sooner).
-- `commands.rs` was split 2026-05-06 into `commands/mod.rs` (1118 lines holding
-  the single 90-variant `Commands` enum) plus four per-domain submodules
-  (`infrastructure.rs`/`video.rs`/`subtitle.rs`/`compat.rs`) for the nested
-  sub-enums. The top-level enum cannot be further split — clap-derive requires
-  one `Subcommand` enum to live in one definition.
+- **Resolved (verified 2026-07-14):** the `monitor_cmd.rs` module (430 lines)
+  is dispatched via `handlers::handle_monitor_command`, which now lives in
+  `handlers/dispatch.rs` and fully delegates to `monitor_cmd::run_monitor_*`
+  for every `MonitorCommand` variant — no duplicate logic remains.
+  `handlers.rs` no longer exists as a single file: Run 4 Slice A (below)
+  split it into `handlers/{mod,logging,inspect,dispatch,preset_ui,
+  reference}.rs` (957 lines total across 6 files, largest 277 lines), well
+  inside the 2000-line-per-file policy.
+- `commands.rs` was split 2026-05-06 into `commands/mod.rs` (1124 lines as of
+  2026-07-14, holding the single 90-variant `Commands` enum) plus four
+  per-domain submodules (`infrastructure.rs`/`video.rs`/`subtitle.rs`/
+  `compat.rs`) for the nested sub-enums. The top-level enum cannot be
+  further split — clap-derive requires one `Subcommand` enum to live in one
+  definition.
 - Placeholder/stub behaviours enumerated above under "Subcommand-level gaps"
-  — each one is a working code path but short of the ecosystem's
-  production-grade capability.
-- No dedicated `tests/` directory; test coverage lives inside each
-  `*_cmd.rs` via `#[cfg(test)]` modules. At least `loudness_cmd`, `batch_cmd`,
-  `quality_cmd`, `normalize_cmd` have inline tests writing scratch files
-  under `std::env::temp_dir()` per policy.
+  were re-verified on 2026-07-14 by grepping each referenced function/
+  struct — all are now genuinely wired, working code paths (several
+  explicitly removed their old placeholder/synthetic fallback). That same
+  audit found two **new**, previously-untracked silent-no-op gaps, now
+  tracked under "Subcommand-level gaps" above: `transcode`'s
+  `-vf`/`-af`/`-ss`/`-t`/`-r`/`--threads`/`--resume`/`--map`/
+  `--normalize-audio` flags, and `probe`'s `--hash`/`--quality-snapshot`
+  flags — all parse successfully but have no effect on the output.
+  **Update (2026-07-14, later same day):** `--normalize-audio` and
+  `--hash` have since SHIPPED (see "Completed" above). The remaining open
+  flags are `transcode`'s `-vf`/`-af`/`-ss`/`-t`/`-r`/`--threads`/
+  `--resume`/`--map` and `probe`'s `--quality-snapshot` — ready-to-
+  implement design notes for each are in "CLI Flag Wiring Investigation
+  (2026-07-14)" above.
+- **Resolved:** a dedicated `tests/` directory now exists (36 files,
+  verified 2026-07-14) — `assert_cmd`/`predicates`-driven integration tests
+  covering help/version smoke, JSON strict output, NDJSON, exit codes,
+  FFmpeg golden fixtures, probe snapshots, `oximedia-cv2` subcommands,
+  `doctor`, and more (see "Testing" above). In-crate `#[cfg(test)]` modules
+  still exist alongside it for unit-level coverage (e.g. `loudness_cmd`,
+  `batch_cmd`, `quality_cmd`, `normalize_cmd`), writing scratch files under
+  `std::env::temp_dir()` per policy.
 
 ---
 
@@ -436,17 +809,17 @@ tabs, `↑`/`↓` navigate, `Enter` show details.
 
 ---
 
-*Last updated: 2026-05-06 — v0.1.8, oximedia-cli summary (Run 4 of `/ultra oximedia-cli` LANDED 2026-05-06: handlers.rs split into per-domain submodule, doctor `--full` Phase 1 with codec matrix + plugin path validation + OXICUDA probe, oximedia-compat-cv2 `dnn` module wrapping oxionnx + ORB pipeline followups (BFMatcher / knn_match / mask), 10 new oximedia-cv2 subcommands; bookkeeping flips Refinement 8 done and closes Refinement 5 as WONT-FIX)*
+*Last updated: 2026-05-06 — v0.1.9, oximedia-cli summary (Run 4 of `/ultra oximedia-cli` LANDED 2026-05-06: handlers.rs split into per-domain submodule, doctor `--full` Phase 1 with codec matrix + plugin path validation + OXICUDA probe, oximedia-compat-cv2 `dnn` module wrapping oxionnx + ORB pipeline followups (BFMatcher / knn_match / mask), 10 new oximedia-cv2 subcommands; bookkeeping flips Refinement 8 done and closes Refinement 5 as WONT-FIX)*
 
 ---
 
 ## Refinement Proposals (added 2026-05-05 by /ultra)
 
-### Refinement 1 — TUI polish (deferred)
-Four items in `interactive_cmd.rs`: real mini-probe render, "run command" tab, mouse + PgUp/PgDn + `/` search, persist cwd nav. Needs interactive terminal capture. Defer to `/ultra tui`.
+### Refinement 1 — TUI polish (RESOLVED — see "TUI polish (`tui_cmd.rs`)" above)
+Four items (this refinement predates the file's current name; the file is `tui_cmd.rs`, not `interactive_cmd.rs`): real mini-probe render, "run command" tab, mouse + PgUp/PgDn + `/` search, persist cwd nav. All four are implemented and checked off under "TUI polish" above; re-verified present in `tui_cmd.rs` during the 2026-07-14 content audit.
 
-### Refinement 2 — ffcompat coverage expansion (deferred)
-Four items: `-filter_complex` depth, `-map_metadata`, `-hwaccel`, `--explain` mode, `oximedia-cv2` binary. Depends on `oximedia-compat-ffmpeg` API extension. Defer to `/ultra ffcompat`.
+### Refinement 2 — ffcompat coverage expansion (RESOLVED — see "`oximedia-ff` / `ffcompat` coverage" above)
+`-filter_complex` depth, `-map_metadata`, `-hwaccel`, `--explain` mode, `oximedia-cv2` binary. All are implemented and checked off under "`oximedia-ff` / `ffcompat` coverage" above; re-verified present during the 2026-07-14 content audit.
 
 ### Refinement 3 — Platform packaging (deferred)
 `cargo-dist`, Homebrew formula, winget, .deb, RPM, AUR. Outside CI policy (only pypi-publish.yml/npm-publish.yml allowed). Defer to dedicated release-engineering pass.
@@ -493,9 +866,9 @@ Feature-gate `windowing = ["winit", "softbuffer"]`. Not core to cv2 API; users t
 - [x] Done 2026-05-06 — full ORB BRIEF descriptor (256-bit, rotated, Gaussian-smoothed) + Hamming brute-force matcher implemented; orb_create() now returns Ok.
 If Slice D's ORB lift has only keypoint detection without BRIEF descriptor extraction + matching, add BRIEF for full ORB feature-parity with cv2. Estimated 200 LoC.
 
-## Run 4 (planned 2026-05-06)
+## Run 4 (completed 2026-05-06)
 
-Slice plan from `/Users/kitasan/.claude/plans/parallel-scribbling-nebula.md` (approved
+Slice plan from `$HOME/.claude/plans/parallel-scribbling-nebula.md` (approved
 2026-05-06). Six slices, all pure-Rust, all in-repo. No CI yaml, no real ffmpeg.
 
 - [x] **Slice A** — `handlers.rs` (927 lines) → `handlers/` submodule split via splitrs

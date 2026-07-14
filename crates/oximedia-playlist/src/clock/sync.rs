@@ -186,4 +186,26 @@ mod tests {
         clock.set_drift_compensation(1.001);
         assert!((clock.get_drift_compensation() - 1.001).abs() < f64::EPSILON);
     }
+
+    #[test]
+    fn test_clocksync_offset_roundtrip() {
+        // A 100ms offset set on the sync manager round-trips exactly through
+        // get_offset, and synchronize() populates last_sync_time.
+        let clock = ClockSync::new(ClockSource::Ntp);
+        assert!(
+            clock.last_sync_time().is_none(),
+            "no sync should have happened yet"
+        );
+
+        clock.set_offset(Duration::from_millis(100));
+        assert_eq!(clock.get_offset(), Duration::from_millis(100));
+
+        clock.synchronize().expect("Ntp synchronize succeeds");
+        assert!(
+            clock.last_sync_time().is_some(),
+            "synchronize must update last_sync_time"
+        );
+        // The offset is unaffected by synchronization.
+        assert_eq!(clock.get_offset(), Duration::from_millis(100));
+    }
 }

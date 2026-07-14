@@ -267,8 +267,8 @@ impl ProgressBar {
         #[allow(clippy::cast_precision_loss)]
         let filled = (clamped * self.width as f64).round() as usize;
         let empty = self.width.saturating_sub(filled);
-        let fill_str: String = std::iter::repeat(self.fill_char).take(filled).collect();
-        let empty_str: String = std::iter::repeat(self.empty_char).take(empty).collect();
+        let fill_str: String = std::iter::repeat_n(self.fill_char, filled).collect();
+        let empty_str: String = std::iter::repeat_n(self.empty_char, empty).collect();
         format!("[{fill_str}{empty_str}]")
     }
 }

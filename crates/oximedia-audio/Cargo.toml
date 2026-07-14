@@ -12,6 +12,10 @@ keywords = ["audio", "codec", "sound", "dsp", "multimedia"]
 categories = ["multimedia::audio", "multimedia"]
 readme = "README.md"
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lints]
 workspace = true
 
@@ -27,10 +31,7 @@ pcm = []
 oximedia-core.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
-rubato = "2.0"
-audioadapter = "3.0"
-audioadapter-buffers = "3.0"
 oxifft.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["full"] }

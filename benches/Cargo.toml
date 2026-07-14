@@ -151,8 +151,7 @@ oximedia-compat-ffmpeg = { workspace = true }
 oximedia-quality = { workspace = true }
 oximedia-metering = { workspace = true }
 oximedia-dedup = { workspace = true }
-criterion = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["full"] }
 bytes = { workspace = true }
 sha2 = { workspace = true }
 xxhash-rust = { workspace = true }
@@ -167,6 +166,13 @@ oximedia-360 = { workspace = true }
 oximedia-analytics = { workspace = true }
 oximedia-caption-gen = { workspace = true }
 oximedia-pipeline = { workspace = true }
+
+[dev-dependencies]
+# Pure-Rust default build: criterion (0.8) unconditionally pulls `alloca`,
+# whose build.rs compiles alloca.c via `cc` on unix/windows. As a
+# dev-dependency it is only compiled for bench/test targets, keeping the
+# default (no-dev) workspace build free of C compilation.
+criterion = { workspace = true }
 
 [features]
 default = []

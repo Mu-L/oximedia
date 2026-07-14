@@ -23,7 +23,7 @@ thiserror.workspace = true
 serde = { workspace = true, features = ["derive"] }
 rayon = { workspace = true, optional = true }
 nom.workspace = true
-byteorder = "1.5"
+byteorder.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

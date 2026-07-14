@@ -188,10 +188,7 @@ mod tests {
 
     #[test]
     fn upmix_output_length() {
-        let stereo: Vec<f32> = std::iter::repeat([0.5f32, -0.5])
-            .take(100)
-            .flatten()
-            .collect();
+        let stereo: Vec<f32> = std::iter::repeat_n([0.5f32, -0.5], 100).flatten().collect();
         let out = upmix_stereo_to_5_1(&stereo);
         assert_eq!(out.len(), 600);
     }
@@ -204,10 +201,7 @@ mod tests {
 
     #[test]
     fn upmix_lfe_is_zero() {
-        let stereo: Vec<f32> = std::iter::repeat([0.8f32, 0.6])
-            .take(10)
-            .flatten()
-            .collect();
+        let stereo: Vec<f32> = std::iter::repeat_n([0.8f32, 0.6], 10).flatten().collect();
         let out = upmix_stereo_to_5_1(&stereo);
         for frame in 0..10 {
             let lfe = out[frame * 6 + CH_LFE];

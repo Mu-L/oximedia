@@ -1,10 +1,10 @@
 //! PN (pseudorandom noise) sequence cache for spread-spectrum watermarking.
 //!
-//! The spread-spectrum embedder and detector call [`generate_pn_sequence`]
+//! The spread-spectrum embedder and detector call [`crate::payload::generate_pn_sequence`]
 //! for every bit index on every embed/detect call.  For typical payloads this
 //! means the same sequences are recomputed hundreds of times per second.
 //!
-//! [`PnSequenceCache`] memoises these calls: it stores already-generated
+//! [`crate::pn_cache::PnSequenceCache`] memoises these calls: it stores already-generated
 //! sequences in a hash map keyed by `(length, seed)` and returns a shared
 //! reference on subsequent calls.  The first call for a given key runs the
 //! generator exactly once; every subsequent call returns the cached result in
@@ -12,7 +12,7 @@
 //!
 //! # Thread Safety
 //!
-//! [`PnSequenceCache`] is `!Send` + `!Sync` by default — it is designed for
+//! [`crate::pn_cache::PnSequenceCache`] is `!Send` + `!Sync` by default — it is designed for
 //! single-threaded embedder/detector state.  If you need a shared cache
 //! across threads, wrap it in `Arc<Mutex<PnSequenceCache>>`.
 //!

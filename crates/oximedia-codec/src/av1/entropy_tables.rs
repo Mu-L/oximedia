@@ -658,7 +658,7 @@ pub struct CdfContext {
     /// EOB multi-symbol CDFs.
     ///
     /// Indexed by `ctx = tx_size_idx * EOB_PLANE_COUNT + plane` (see
-    /// [`EOB_MULTI_TOTAL_CONTEXTS`]). Each inner `Vec<u16>` is a CDF whose
+    /// `EOB_MULTI_TOTAL_CONTEXTS`). Each inner `Vec<u16>` is a CDF whose
     /// length is selected per transform area — `_8` (9 entries) for small
     /// blocks (area ≤ 64) and `_16` (17 entries) for larger blocks.
     pub eob_multi: Vec<Vec<u16>>,
@@ -740,9 +740,9 @@ impl CdfContext {
     /// Get EOB multi CDF for a context.
     ///
     /// The context is `tx_size_idx * EOB_PLANE_COUNT + plane`. Indices that
-    /// fall outside [`EOB_MULTI_TOTAL_CONTEXTS`] are clamped to the final
+    /// fall outside `EOB_MULTI_TOTAL_CONTEXTS` are clamped to the final
     /// slot, which holds the largest-area default CDF (see
-    /// [`default_eob_multi_for_tx_size_idx`]).
+    /// `default_eob_multi_for_tx_size_idx`).
     #[must_use]
     pub fn get_eob_multi_cdf(&self, ctx: usize) -> &[u16] {
         let idx = ctx.min(self.eob_multi.len().saturating_sub(1));

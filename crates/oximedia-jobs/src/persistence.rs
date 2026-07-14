@@ -5,10 +5,10 @@
 
 use crate::job::{Job, JobStatus, Priority};
 use chrono::{DateTime, Utc};
-use r2d2::Pool;
-use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{params, OptionalExtension, Row};
+use oxisql_core::{ToSqlValue, Value};
+use oxisql_sqlite_compat::SqliteConnectionBlocking;
 use std::path::Path;
+use std::sync::Mutex;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -17,11 +17,7 @@ use uuid::Uuid;
 pub enum PersistenceError {
     /// Database error
     #[error("Database error: {0}")]
-    Database(#[from] rusqlite::Error),
-
-    /// Connection pool error
-    #[error("Connection pool error: {0}")]
-    Pool(#[from] r2d2::Error),
+    Database(String),
 
     /// Serialization error
     #[error("Serialization error: {0}")]
@@ -32,116 +28,214 @@ pub enum PersistenceError {
     JobNotFound(Uuid),
 }
 
+/// Map an OxiSQL error to [`PersistenceError`].
+fn map_oxi(e: impl std::fmt::Display) -> PersistenceError {
+    PersistenceError::Database(e.to_string())
+}
+
 /// Result type for persistence operations
 pub type Result<T> = std::result::Result<T, PersistenceError>;
 
-/// Job persistence layer using `SQLite`
+/// Drive a blocking closure safely from any calling context, including from
+/// within a running Tokio async task.
+///
+/// `SqliteConnectionBlocking::execute/query/execute_batch` use an internal
+/// `block_local` helper that builds a fresh `current_thread` Tokio runtime and
+/// calls `block_on` on it. That panics when called from within an already-active
+/// Tokio runtime ("`Cannot start a runtime from within a runtime`"), because
+/// Tokio forbids nesting a blocking `block_on` call on the same thread that is
+/// driving async tasks.
+///
+/// `tokio::task::block_in_place` solves this by temporarily moving the current
+/// async task off the executor thread, giving the closure a clean synchronous
+/// context to block in. It requires a `multi_thread` runtime; callers inside a
+/// `current_thread` runtime must not call persistence operations directly from
+/// async code (they must use `spawn_blocking` instead) — that is a usage error
+/// and will be caught at runtime.
+///
+/// When called from a fully synchronous context (no active Tokio runtime),
+/// the closure is invoked directly with no overhead.
+fn run_blocking<F, T>(f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(_) => tokio::task::block_in_place(f),
+        Err(_) => f(),
+    }
+}
+
+/// Extract an `i64` from a result row at the given column index.
+fn col_i64(row: &oxisql_core::Row, idx: usize) -> Result<i64> {
+    match row.get_by_index(idx) {
+        Some(Value::I64(n)) => Ok(*n),
+        Some(other) => Err(PersistenceError::Database(format!(
+            "column {idx}: expected integer, got {}",
+            other.type_name()
+        ))),
+        None => Err(PersistenceError::Database(format!(
+            "column {idx} missing from result row"
+        ))),
+    }
+}
+
+/// Extract a `String` from a result row at the given column index.
+fn col_text(row: &oxisql_core::Row, idx: usize) -> Result<String> {
+    match row.get_by_index(idx) {
+        Some(Value::Text(s)) => Ok(s.clone()),
+        Some(other) => Err(PersistenceError::Database(format!(
+            "column {idx}: expected text, got {}",
+            other.type_name()
+        ))),
+        None => Err(PersistenceError::Database(format!(
+            "column {idx} missing from result row"
+        ))),
+    }
+}
+
+/// Extract an optional `String` from a result row (NULL or missing → `None`).
+fn col_opt_text(row: &oxisql_core::Row, idx: usize) -> Result<Option<String>> {
+    match row.get_by_index(idx) {
+        Some(Value::Null) | None => Ok(None),
+        Some(Value::Text(s)) => Ok(Some(s.clone())),
+        Some(other) => Err(PersistenceError::Database(format!(
+            "column {idx}: expected text or null, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+/// Thread-safe inner state.
+struct Inner {
+    conn: SqliteConnectionBlocking,
+}
+
+impl Inner {
+    fn exec(&self, sql: &str, params: &[&dyn ToSqlValue]) -> Result<u64> {
+        run_blocking(|| self.conn.execute(sql, params)).map_err(map_oxi)
+    }
+
+    fn query(&self, sql: &str, params: &[&dyn ToSqlValue]) -> Result<Vec<oxisql_core::Row>> {
+        run_blocking(|| self.conn.query(sql, params)).map_err(map_oxi)
+    }
+}
+
+/// Job persistence layer using SQLite (Pure-Rust via OxiSQL).
+///
+/// Thread-safe: a `Mutex` serializes all database operations so that the
+/// layer can be wrapped in `Arc` and shared across threads.
 pub struct JobPersistence {
-    pool: Pool<SqliteConnectionManager>,
+    inner: Mutex<Inner>,
 }
 
 impl JobPersistence {
-    /// Create a new persistence layer with WAL mode enabled for better concurrency.
-    ///
-    /// WAL (Write-Ahead Logging) mode allows concurrent reads and a single writer,
-    /// dramatically improving throughput for the job queue's read-heavy workload.
+    fn with_inner<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Inner) -> Result<T>,
+    {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| PersistenceError::Database("mutex poisoned".to_string()))?;
+        f(&guard)
+    }
+
+    /// Create a new persistence layer.
     ///
     /// # Errors
     ///
     /// Returns an error if database initialization fails
     pub fn new<P: AsRef<Path>>(db_path: P) -> Result<Self> {
-        let manager = SqliteConnectionManager::file(db_path);
-        let pool = Pool::new(manager)?;
-
-        let persistence = Self { pool };
-        persistence.enable_wal()?;
-        persistence.initialize_schema()?;
-        Ok(persistence)
+        let path_str = db_path.as_ref().to_string_lossy().into_owned();
+        let conn = SqliteConnectionBlocking::open(&path_str).map_err(map_oxi)?;
+        let p = Self {
+            inner: Mutex::new(Inner { conn }),
+        };
+        p.initialize_schema()?;
+        Ok(p)
     }
 
     /// Create an in-memory persistence layer (for testing).
-    ///
-    /// WAL is not applicable to in-memory databases; normal journal mode is used.
     ///
     /// # Errors
     ///
     /// Returns an error if database initialization fails
     pub fn in_memory() -> Result<Self> {
-        let manager = SqliteConnectionManager::memory();
-        let pool = Pool::new(manager)?;
-
-        let persistence = Self { pool };
-        persistence.initialize_schema()?;
-        Ok(persistence)
+        let conn = SqliteConnectionBlocking::open_memory().map_err(map_oxi)?;
+        let p = Self {
+            inner: Mutex::new(Inner { conn }),
+        };
+        p.initialize_schema()?;
+        Ok(p)
     }
 
-    /// Enable WAL journal mode and set synchronous=NORMAL for better write performance.
-    ///
-    /// WAL mode allows concurrent reads while a write is in progress, which is ideal
-    /// for the job queue where many workers query job state while the dispatcher writes.
-    fn enable_wal(&self) -> Result<()> {
-        let conn = self.pool.get()?;
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA synchronous=NORMAL;
-             PRAGMA wal_autocheckpoint=1000;",
-        )?;
-        Ok(())
+    /// Helper: execute a statement (serialized via mutex).
+    fn exec(&self, sql: &str, params: &[&dyn ToSqlValue]) -> Result<u64> {
+        self.with_inner(|i| i.exec(sql, params))
+    }
+
+    /// Helper: query returning all rows (serialized via mutex).
+    fn query(&self, sql: &str, params: &[&dyn ToSqlValue]) -> Result<Vec<oxisql_core::Row>> {
+        self.with_inner(|i| i.query(sql, params))
     }
 
     /// Initialize database schema
     fn initialize_schema(&self) -> Result<()> {
-        let conn = self.pool.get()?;
-
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS jobs (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                priority INTEGER NOT NULL,
-                status TEXT NOT NULL,
-                payload_type TEXT NOT NULL,
-                payload_data TEXT NOT NULL,
-                retry_policy TEXT NOT NULL,
-                resource_quota TEXT NOT NULL,
-                condition_type TEXT NOT NULL,
-                condition_data TEXT NOT NULL,
-                dependencies TEXT NOT NULL,
-                tags TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                scheduled_at TEXT,
-                started_at TEXT,
-                completed_at TEXT,
-                deadline TEXT,
-                attempts INTEGER NOT NULL,
-                error TEXT,
-                progress INTEGER NOT NULL,
-                worker_id TEXT,
-                next_jobs TEXT NOT NULL
-            )",
-            [],
-        )?;
-
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)",
-            [],
-        )?;
-
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_jobs_priority ON jobs(priority)",
-            [],
-        )?;
-
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_jobs_scheduled ON jobs(scheduled_at)",
-            [],
-        )?;
-
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_jobs_deadline ON jobs(deadline)",
-            [],
-        )?;
-
-        Ok(())
+        self.with_inner(|inner| {
+            // Create table first. `execute_batch` returns the affected-row count
+            // (`u64`); discard it with `.map(|_| ())` for the DDL `-> Result<()>`
+            // contract.
+            run_blocking(|| {
+                inner.conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS jobs (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        priority INTEGER NOT NULL,
+                        status TEXT NOT NULL,
+                        payload_type TEXT NOT NULL,
+                        payload_data TEXT NOT NULL,
+                        retry_policy TEXT NOT NULL,
+                        resource_quota TEXT NOT NULL,
+                        condition_type TEXT NOT NULL,
+                        condition_data TEXT NOT NULL,
+                        dependencies TEXT NOT NULL,
+                        tags TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        scheduled_at TEXT,
+                        started_at TEXT,
+                        completed_at TEXT,
+                        deadline TEXT,
+                        attempts INTEGER NOT NULL,
+                        error TEXT,
+                        progress INTEGER NOT NULL,
+                        worker_id TEXT,
+                        next_jobs TEXT NOT NULL
+                    );",
+                )
+            })
+            .map(|_| ())
+            .map_err(map_oxi)?;
+            // Create indexes individually — oxisqlite's execute_batch may not
+            // properly honour IF NOT EXISTS on secondary DDL statements when the
+            // index already exists, so we use separate execute calls and silently
+            // ignore "already exists" errors for idempotent re-opens.
+            let indexes = [
+                "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)",
+                "CREATE INDEX IF NOT EXISTS idx_jobs_priority ON jobs(priority)",
+                "CREATE INDEX IF NOT EXISTS idx_jobs_scheduled ON jobs(scheduled_at)",
+                "CREATE INDEX IF NOT EXISTS idx_jobs_deadline ON jobs(deadline)",
+            ];
+            for ddl in &indexes {
+                let result = run_blocking(|| inner.conn.execute(ddl, &[]));
+                if let Err(e) = result {
+                    let msg = e.to_string();
+                    if !msg.contains("already exists") {
+                        return Err(map_oxi(e));
+                    }
+                }
+            }
+            Ok(())
+        })
     }
 
     /// Save a job to the database
@@ -150,8 +244,6 @@ impl JobPersistence {
     ///
     /// Returns an error if database operation fails
     pub fn save_job(&self, job: &Job) -> Result<()> {
-        let conn = self.pool.get()?;
-
         let payload_type = job.payload.job_type();
         let payload_data = serde_json::to_string(&job.payload)?;
         let retry_policy = serde_json::to_string(&job.retry_policy)?;
@@ -161,42 +253,59 @@ impl JobPersistence {
         let tags = serde_json::to_string(&job.tags)?;
         let next_jobs = serde_json::to_string(&job.next_jobs)?;
 
-        conn.execute(
+        let id_s = job.id.to_string();
+        let priority_i = job.priority as i64;
+        let status_s = job.status.to_string();
+        let created_at_s = job.created_at.to_rfc3339();
+        let scheduled_at_s = job.scheduled_at.map(|dt| dt.to_rfc3339());
+        let started_at_s = job.started_at.map(|dt| dt.to_rfc3339());
+        let completed_at_s = job.completed_at.map(|dt| dt.to_rfc3339());
+        let deadline_s = job.deadline.map(|dt| dt.to_rfc3339());
+        let attempts_i = job.attempts as i64;
+        let progress_i = job.progress as i64;
+
+        let scheduled_at_ref: Option<&str> = scheduled_at_s.as_deref();
+        let started_at_ref: Option<&str> = started_at_s.as_deref();
+        let completed_at_ref: Option<&str> = completed_at_s.as_deref();
+        let deadline_ref: Option<&str> = deadline_s.as_deref();
+        let error_ref: Option<&str> = job.error.as_deref();
+        let worker_id_ref: Option<&str> = job.worker_id.as_deref();
+
+        self.exec(
             "INSERT OR REPLACE INTO jobs (
                 id, name, priority, status, payload_type, payload_data,
                 retry_policy, resource_quota, condition_type, condition_data,
                 dependencies, tags, created_at, scheduled_at, started_at,
                 completed_at, deadline, attempts, error, progress, worker_id, next_jobs
             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
             )",
-            params![
-                job.id.to_string(),
-                job.name,
-                job.priority as i32,
-                job.status.to_string(),
-                payload_type,
-                payload_data,
-                retry_policy,
-                resource_quota,
-                "condition",
-                condition_data,
-                dependencies,
-                tags,
-                job.created_at.to_rfc3339(),
-                job.scheduled_at.map(|dt| dt.to_rfc3339()),
-                job.started_at.map(|dt| dt.to_rfc3339()),
-                job.completed_at.map(|dt| dt.to_rfc3339()),
-                job.deadline.map(|dt| dt.to_rfc3339()),
-                job.attempts,
-                &job.error,
-                job.progress,
-                &job.worker_id,
-                next_jobs,
+            &[
+                &id_s,
+                &job.name,
+                &priority_i,
+                &status_s,
+                &payload_type,
+                &payload_data,
+                &retry_policy,
+                &resource_quota,
+                &"condition",
+                &condition_data,
+                &dependencies,
+                &tags,
+                &created_at_s,
+                &scheduled_at_ref,
+                &started_at_ref,
+                &completed_at_ref,
+                &deadline_ref,
+                &attempts_i,
+                &error_ref,
+                &progress_i,
+                &worker_id_ref,
+                &next_jobs,
             ],
         )?;
-
         Ok(())
     }
 
@@ -206,18 +315,13 @@ impl JobPersistence {
     ///
     /// Returns an error if database operation fails or job is not found
     pub fn get_job(&self, id: Uuid) -> Result<Job> {
-        let conn = self.pool.get()?;
-
-        let job = conn
-            .query_row(
-                "SELECT * FROM jobs WHERE id = ?1",
-                params![id.to_string()],
-                Self::row_to_job,
-            )
-            .optional()?
+        let id_s = id.to_string();
+        let rows = self.query("SELECT * FROM jobs WHERE id = $1", &[&id_s])?;
+        let row = rows
+            .into_iter()
+            .next()
             .ok_or(PersistenceError::JobNotFound(id))?;
-
-        Ok(job)
+        Self::row_to_job(&row)
     }
 
     /// Delete a job by ID
@@ -226,79 +330,20 @@ impl JobPersistence {
     ///
     /// Returns an error if database operation fails
     pub fn delete_job(&self, id: Uuid) -> Result<()> {
-        let conn = self.pool.get()?;
-        conn.execute("DELETE FROM jobs WHERE id = ?1", params![id.to_string()])?;
+        let id_s = id.to_string();
+        self.exec("DELETE FROM jobs WHERE id = $1", &[&id_s])?;
         Ok(())
     }
 
-    /// Save a batch of jobs atomically in a single transaction.
-    ///
-    /// All jobs are written in one `BEGIN`/`COMMIT` pair via `prepare_cached`,
-    /// reducing per-job SQLite transaction overhead.
+    /// Save a batch of jobs — sequential executes (no transaction available in compat alpha).
     ///
     /// # Errors
     ///
-    /// Returns an error if any serialization or database operation fails. The
-    /// entire batch is rolled back on the first error.
+    /// Returns an error if any serialization or database operation fails.
     pub fn save_jobs_batch(&self, jobs: &[Job]) -> Result<()> {
-        if jobs.is_empty() {
-            return Ok(());
+        for job in jobs {
+            self.save_job(job)?;
         }
-
-        let conn = self.pool.get()?;
-        let tx = conn.unchecked_transaction()?;
-
-        {
-            let mut stmt = tx.prepare_cached(
-                "INSERT OR REPLACE INTO jobs (
-                    id, name, priority, status, payload_type, payload_data,
-                    retry_policy, resource_quota, condition_type, condition_data,
-                    dependencies, tags, created_at, scheduled_at, started_at,
-                    completed_at, deadline, attempts, error, progress, worker_id, next_jobs
-                ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                    ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
-                )",
-            )?;
-
-            for job in jobs {
-                let payload_type = job.payload.job_type();
-                let payload_data = serde_json::to_string(&job.payload)?;
-                let retry_policy = serde_json::to_string(&job.retry_policy)?;
-                let resource_quota = serde_json::to_string(&job.resource_quota)?;
-                let condition_data = serde_json::to_string(&job.condition)?;
-                let dependencies = serde_json::to_string(&job.dependencies)?;
-                let tags = serde_json::to_string(&job.tags)?;
-                let next_jobs = serde_json::to_string(&job.next_jobs)?;
-
-                stmt.execute(params![
-                    job.id.to_string(),
-                    job.name,
-                    job.priority as i32,
-                    job.status.to_string(),
-                    payload_type,
-                    payload_data,
-                    retry_policy,
-                    resource_quota,
-                    "condition",
-                    condition_data,
-                    dependencies,
-                    tags,
-                    job.created_at.to_rfc3339(),
-                    job.scheduled_at.map(|dt| dt.to_rfc3339()),
-                    job.started_at.map(|dt| dt.to_rfc3339()),
-                    job.completed_at.map(|dt| dt.to_rfc3339()),
-                    job.deadline.map(|dt| dt.to_rfc3339()),
-                    job.attempts,
-                    &job.error,
-                    job.progress,
-                    &job.worker_id,
-                    next_jobs,
-                ])?;
-            }
-        }
-
-        tx.commit()?;
         Ok(())
     }
 
@@ -308,14 +353,9 @@ impl JobPersistence {
     ///
     /// Returns an error if database operation fails
     pub fn get_jobs_by_status(&self, status: JobStatus) -> Result<Vec<Job>> {
-        let conn = self.pool.get()?;
-
-        let mut stmt = conn.prepare_cached("SELECT * FROM jobs WHERE status = ?1")?;
-        let jobs = stmt
-            .query_map(params![status.to_string()], Self::row_to_job)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(jobs)
+        let status_s = status.to_string();
+        let rows = self.query("SELECT * FROM jobs WHERE status = $1", &[&status_s])?;
+        rows.iter().map(Self::row_to_job).collect()
     }
 
     /// Get pending jobs ordered by priority
@@ -324,19 +364,11 @@ impl JobPersistence {
     ///
     /// Returns an error if database operation fails
     pub fn get_pending_jobs(&self) -> Result<Vec<Job>> {
-        let conn = self.pool.get()?;
-
-        let mut stmt = conn.prepare_cached(
-            "SELECT * FROM jobs
-             WHERE status = 'pending'
-             ORDER BY priority DESC, created_at ASC",
+        let rows = self.query(
+            "SELECT * FROM jobs WHERE status = 'pending' ORDER BY priority DESC, created_at ASC",
+            &[],
         )?;
-
-        let jobs = stmt
-            .query_map([], Self::row_to_job)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(jobs)
+        rows.iter().map(Self::row_to_job).collect()
     }
 
     /// Get scheduled jobs that are ready to run
@@ -345,20 +377,12 @@ impl JobPersistence {
     ///
     /// Returns an error if database operation fails
     pub fn get_scheduled_jobs_ready(&self) -> Result<Vec<Job>> {
-        let conn = self.pool.get()?;
         let now = Utc::now().to_rfc3339();
-
-        let mut stmt = conn.prepare_cached(
-            "SELECT * FROM jobs
-             WHERE status = 'scheduled' AND scheduled_at <= ?1
-             ORDER BY priority DESC, scheduled_at ASC",
+        let rows = self.query(
+            "SELECT * FROM jobs WHERE status = 'scheduled' AND scheduled_at <= $1 ORDER BY priority DESC, scheduled_at ASC",
+            &[&now],
         )?;
-
-        let jobs = stmt
-            .query_map(params![now], Self::row_to_job)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(jobs)
+        rows.iter().map(Self::row_to_job).collect()
     }
 
     /// Get jobs past their deadline
@@ -367,20 +391,12 @@ impl JobPersistence {
     ///
     /// Returns an error if database operation fails
     pub fn get_jobs_past_deadline(&self) -> Result<Vec<Job>> {
-        let conn = self.pool.get()?;
         let now = Utc::now().to_rfc3339();
-
-        let mut stmt = conn.prepare_cached(
-            "SELECT * FROM jobs
-             WHERE deadline IS NOT NULL AND deadline < ?1
-             AND status NOT IN ('completed', 'failed', 'cancelled')",
+        let rows = self.query(
+            "SELECT * FROM jobs WHERE deadline IS NOT NULL AND deadline < $1 AND status NOT IN ('completed', 'failed', 'cancelled')",
+            &[&now],
         )?;
-
-        let jobs = stmt
-            .query_map(params![now], Self::row_to_job)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(jobs)
+        rows.iter().map(Self::row_to_job).collect()
     }
 
     /// Get all jobs
@@ -389,14 +405,8 @@ impl JobPersistence {
     ///
     /// Returns an error if database operation fails
     pub fn get_all_jobs(&self) -> Result<Vec<Job>> {
-        let conn = self.pool.get()?;
-
-        let mut stmt = conn.prepare_cached("SELECT * FROM jobs ORDER BY created_at DESC")?;
-        let jobs = stmt
-            .query_map([], Self::row_to_job)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(jobs)
+        let rows = self.query("SELECT * FROM jobs ORDER BY created_at DESC", &[])?;
+        rows.iter().map(Self::row_to_job).collect()
     }
 
     /// Get jobs by tag
@@ -405,15 +415,9 @@ impl JobPersistence {
     ///
     /// Returns an error if database operation fails
     pub fn get_jobs_by_tag(&self, tag: &str) -> Result<Vec<Job>> {
-        let conn = self.pool.get()?;
-
-        let mut stmt = conn.prepare_cached("SELECT * FROM jobs WHERE tags LIKE ?1")?;
         let pattern = format!("%\"{tag}\" %");
-        let jobs = stmt
-            .query_map(params![pattern], Self::row_to_job)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(jobs)
+        let rows = self.query("SELECT * FROM jobs WHERE tags LIKE $1", &[&pattern])?;
+        rows.iter().map(Self::row_to_job).collect()
     }
 
     /// Update job status
@@ -422,11 +426,12 @@ impl JobPersistence {
     ///
     /// Returns an error if database operation fails
     pub fn update_job_status(&self, id: Uuid, status: JobStatus) -> Result<()> {
-        let conn = self.pool.get()?;
-
-        conn.prepare_cached("UPDATE jobs SET status = ?1 WHERE id = ?2")?
-            .execute(params![status.to_string(), id.to_string()])?;
-
+        let status_s = status.to_string();
+        let id_s = id.to_string();
+        self.exec(
+            "UPDATE jobs SET status = $1 WHERE id = $2",
+            &[&status_s, &id_s],
+        )?;
         Ok(())
     }
 
@@ -436,11 +441,12 @@ impl JobPersistence {
     ///
     /// Returns an error if database operation fails
     pub fn update_job_progress(&self, id: Uuid, progress: u8) -> Result<()> {
-        let conn = self.pool.get()?;
-
-        conn.prepare_cached("UPDATE jobs SET progress = ?1 WHERE id = ?2")?
-            .execute(params![progress, id.to_string()])?;
-
+        let progress_i = progress as i64;
+        let id_s = id.to_string();
+        self.exec(
+            "UPDATE jobs SET progress = $1 WHERE id = $2",
+            &[&progress_i, &id_s],
+        )?;
         Ok(())
     }
 
@@ -450,13 +456,16 @@ impl JobPersistence {
     ///
     /// Returns an error if database operation fails
     pub fn count_jobs_by_status(&self, status: JobStatus) -> Result<usize> {
-        let conn = self.pool.get()?;
-
-        let count: i64 = conn
-            .prepare_cached("SELECT COUNT(*) FROM jobs WHERE status = ?1")?
-            .query_row(params![status.to_string()], |row| row.get(0))?;
-
-        Ok(count as usize)
+        let status_s = status.to_string();
+        let rows = self.query("SELECT COUNT(*) FROM jobs WHERE status = $1", &[&status_s])?;
+        match rows.first().and_then(|r| r.get_by_index(0)) {
+            Some(Value::I64(n)) => Ok(*n as usize),
+            Some(Value::Null) | None => Ok(0),
+            Some(other) => Err(PersistenceError::Database(format!(
+                "count_jobs_by_status: unexpected value {}",
+                other.type_name()
+            ))),
+        }
     }
 
     /// Get total job count
@@ -465,11 +474,15 @@ impl JobPersistence {
     ///
     /// Returns an error if database operation fails
     pub fn count_jobs(&self) -> Result<usize> {
-        let conn = self.pool.get()?;
-
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM jobs", [], |row| row.get(0))?;
-
-        Ok(count as usize)
+        let rows = self.query("SELECT COUNT(*) FROM jobs", &[])?;
+        match rows.first().and_then(|r| r.get_by_index(0)) {
+            Some(Value::I64(n)) => Ok(*n as usize),
+            Some(Value::Null) | None => Ok(0),
+            Some(other) => Err(PersistenceError::Database(format!(
+                "count_jobs: unexpected value {}",
+                other.type_name()
+            ))),
+        }
     }
 
     /// Clean up old completed jobs
@@ -478,44 +491,38 @@ impl JobPersistence {
     ///
     /// Returns an error if database operation fails
     pub fn cleanup_old_jobs(&self, days: i64) -> Result<usize> {
-        let conn = self.pool.get()?;
         let cutoff = (Utc::now() - chrono::Duration::days(days)).to_rfc3339();
-
-        let deleted = conn.execute(
-            "DELETE FROM jobs
-             WHERE status IN ('completed', 'failed', 'cancelled')
-             AND completed_at < ?1",
-            params![cutoff],
+        let affected = self.exec(
+            "DELETE FROM jobs WHERE status IN ('completed', 'failed', 'cancelled') AND completed_at < $1",
+            &[&cutoff],
         )?;
-
-        Ok(deleted)
+        Ok(affected as usize)
     }
 
-    /// Convert database row to Job
-    fn row_to_job(row: &Row<'_>) -> rusqlite::Result<Job> {
-        let id: String = row.get(0)?;
-        let payload_data: String = row.get(5)?;
-        let retry_policy: String = row.get(6)?;
-        let resource_quota: String = row.get(7)?;
-        let condition_data: String = row.get(9)?;
-        let dependencies: String = row.get(10)?;
-        let tags: String = row.get(11)?;
-        let created_at: String = row.get(12)?;
-        let scheduled_at: Option<String> = row.get(13)?;
-        let started_at: Option<String> = row.get(14)?;
-        let completed_at: Option<String> = row.get(15)?;
-        let deadline: Option<String> = row.get(16)?;
-        let next_jobs: String = row.get(21)?;
+    /// Convert a result row to a Job
+    fn row_to_job(row: &oxisql_core::Row) -> Result<Job> {
+        let id_s = col_text(row, 0)?;
+        let payload_data = col_text(row, 5)?;
+        let retry_policy_s = col_text(row, 6)?;
+        let resource_quota_s = col_text(row, 7)?;
+        let condition_data = col_text(row, 9)?;
+        let dependencies_s = col_text(row, 10)?;
+        let tags_s = col_text(row, 11)?;
+        let created_at_s = col_text(row, 12)?;
+        let scheduled_at_s = col_opt_text(row, 13)?;
+        let started_at_s = col_opt_text(row, 14)?;
+        let completed_at_s = col_opt_text(row, 15)?;
+        let deadline_s = col_opt_text(row, 16)?;
+        let next_jobs_s = col_text(row, 21)?;
 
-        let priority_val: i32 = row.get(2)?;
-        let priority = match priority_val {
+        let priority_i = col_i64(row, 2)?;
+        let priority = match priority_i {
             0 => Priority::Low,
-            1 => Priority::Normal,
             2 => Priority::High,
             _ => Priority::Normal,
         };
 
-        let status_str: String = row.get(3)?;
+        let status_str = col_text(row, 3)?;
         let status = match status_str.as_str() {
             "running" => JobStatus::Running,
             "completed" => JobStatus::Completed,
@@ -526,123 +533,77 @@ impl JobPersistence {
             _ => JobStatus::Pending,
         };
 
+        let attempts_i = col_i64(row, 17)?;
+        let error_s = col_opt_text(row, 18)?;
+        let progress_i = col_i64(row, 19)?;
+        let worker_id_s = col_opt_text(row, 20)?;
+
         Ok(Job {
-            id: Uuid::parse_str(&id).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
+            id: Uuid::parse_str(&id_s).map_err(|e| {
+                PersistenceError::Database(format!("invalid UUID in column 0: {e}"))
             })?,
-            name: row.get(1)?,
+            name: col_text(row, 1)?,
             priority,
             status,
-            payload: serde_json::from_str(&payload_data).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    5,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?,
-            retry_policy: serde_json::from_str(&retry_policy).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    6,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?,
-            resource_quota: serde_json::from_str(&resource_quota).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    7,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?,
-            condition: serde_json::from_str(&condition_data).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    9,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?,
-            dependencies: serde_json::from_str(&dependencies).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    10,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?,
-            tags: serde_json::from_str(&tags).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    11,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?,
-            created_at: DateTime::parse_from_rfc3339(&created_at)
+            payload: serde_json::from_str(&payload_data)
+                .map_err(|e| PersistenceError::Database(format!("payload_data column 5: {e}")))?,
+            retry_policy: serde_json::from_str(&retry_policy_s)
+                .map_err(|e| PersistenceError::Database(format!("retry_policy column 6: {e}")))?,
+            resource_quota: serde_json::from_str(&resource_quota_s)
+                .map_err(|e| PersistenceError::Database(format!("resource_quota column 7: {e}")))?,
+            condition: serde_json::from_str(&condition_data)
+                .map_err(|e| PersistenceError::Database(format!("condition column 9: {e}")))?,
+            dependencies: serde_json::from_str(&dependencies_s)
+                .map_err(|e| PersistenceError::Database(format!("dependencies column 10: {e}")))?,
+            tags: serde_json::from_str(&tags_s)
+                .map_err(|e| PersistenceError::Database(format!("tags column 11: {e}")))?,
+            created_at: DateTime::parse_from_rfc3339(&created_at_s)
                 .map(|dt| dt.with_timezone(&Utc))
-                .map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        12,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    )
-                })?,
-            scheduled_at: scheduled_at
+                .map_err(|e| PersistenceError::Database(format!("created_at column 12: {e}")))?,
+            scheduled_at: scheduled_at_s
                 .as_ref()
-                .map(|s| DateTime::parse_from_rfc3339(s).map(|dt| dt.with_timezone(&Utc)))
-                .transpose()
-                .map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        13,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    )
-                })?,
-            started_at: started_at
+                .map(|s| {
+                    DateTime::parse_from_rfc3339(s)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .map_err(|e| {
+                            PersistenceError::Database(format!("scheduled_at column 13: {e}"))
+                        })
+                })
+                .transpose()?,
+            started_at: started_at_s
                 .as_ref()
-                .map(|s| DateTime::parse_from_rfc3339(s).map(|dt| dt.with_timezone(&Utc)))
-                .transpose()
-                .map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        14,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    )
-                })?,
-            completed_at: completed_at
+                .map(|s| {
+                    DateTime::parse_from_rfc3339(s)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .map_err(|e| {
+                            PersistenceError::Database(format!("started_at column 14: {e}"))
+                        })
+                })
+                .transpose()?,
+            completed_at: completed_at_s
                 .as_ref()
-                .map(|s| DateTime::parse_from_rfc3339(s).map(|dt| dt.with_timezone(&Utc)))
-                .transpose()
-                .map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        15,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    )
-                })?,
-            deadline: deadline
+                .map(|s| {
+                    DateTime::parse_from_rfc3339(s)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .map_err(|e| {
+                            PersistenceError::Database(format!("completed_at column 15: {e}"))
+                        })
+                })
+                .transpose()?,
+            deadline: deadline_s
                 .as_ref()
-                .map(|s| DateTime::parse_from_rfc3339(s).map(|dt| dt.with_timezone(&Utc)))
-                .transpose()
-                .map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        16,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    )
-                })?,
-            attempts: row.get(17)?,
-            error: row.get(18)?,
-            progress: row.get(19)?,
-            worker_id: row.get(20)?,
-            next_jobs: serde_json::from_str(&next_jobs).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    21,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?,
+                .map(|s| {
+                    DateTime::parse_from_rfc3339(s)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .map_err(|e| PersistenceError::Database(format!("deadline column 16: {e}")))
+                })
+                .transpose()?,
+            attempts: attempts_i as u32,
+            error: error_s,
+            progress: progress_i as u8,
+            worker_id: worker_id_s,
+            next_jobs: serde_json::from_str(&next_jobs_s)
+                .map_err(|e| PersistenceError::Database(format!("next_jobs column 21: {e}")))?,
         })
     }
 }

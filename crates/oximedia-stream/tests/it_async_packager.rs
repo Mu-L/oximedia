@@ -9,6 +9,7 @@
 //! 6. `MediaUnitPool` concurrency safety under contended acquire/release.
 //! 7. `fmp4::build_sidx` re-export linkability.
 
+#[cfg(feature = "async")]
 use oximedia_stream::manifest_builder::{
     build_master_playlist, build_media_playlist, HlsManifest, HlsSegment, StreamVariant,
 };
@@ -17,6 +18,7 @@ use oximedia_stream::stream_packager::{MediaUnit, PackagerConfig, SegmentPackage
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+#[cfg(feature = "async")]
 fn make_variants() -> Vec<StreamVariant> {
     vec![
         StreamVariant {
@@ -36,6 +38,7 @@ fn make_variants() -> Vec<StreamVariant> {
     ]
 }
 
+#[cfg(feature = "async")]
 fn make_media_manifest() -> HlsManifest {
     HlsManifest {
         target_duration: 6,

@@ -2,7 +2,7 @@
 //!
 //! Walks the `(AUID, Vec<u8>)` pairs produced by the encoder and reconstructs
 //! the in-memory object model.  Unknown AUIDs are returned through the
-//! [`DecodedHeader::unknown`] / [`DecodedMob::unknown`] / etc. fields so the
+//! [`DecodedHeader::unknown`] / `DecodedMob::unknown` / etc. fields so the
 //! edit-session round-trip preserves extension properties verbatim.
 
 use crate::composition::{

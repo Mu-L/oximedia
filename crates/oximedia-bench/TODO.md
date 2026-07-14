@@ -31,11 +31,11 @@
 - [x] Add markdown report export format alongside existing JSON/CSV/HTML (verified 2026-05-16; src/markdown_report.rs:461 lines)
 
 ## Performance
-- [ ] Parallelize multi-codec benchmarks in `BenchmarkSuite::run_all()` using rayon thread pool
-- [ ] Implement incremental benchmarking: skip sequences whose results are cached and config unchanged
-- [ ] Add streaming CSV/JSON export in `BenchmarkResults` to avoid holding all results in memory
+- [x] Parallelize multi-codec benchmarks in `BenchmarkSuite::run_all()` using rayon thread pool
+- [x] Implement incremental benchmarking: skip sequences whose results are cached and config unchanged
+- [x] Add streaming CSV/JSON export in `BenchmarkResults` to avoid holding all results in memory (done 2026-06-05; declared pre-existing `streaming_export` module at `src/lib.rs:94` and added `BenchmarkResults::export_csv_streaming` at `src/lib.rs:520` / `export_json_streaming` at `src/lib.rs:538` delegating to `StreamingCsvWriter`/`StreamingJsonWriter`)
 - [ ] Use memory-mapped I/O for reading test sequences in `runner`
-- [ ] Pre-allocate frame buffers in `runner` based on sequence resolution to avoid repeated allocation
+- [x] Pre-allocate frame buffers in `runner` based on sequence resolution to avoid repeated allocation (done 2026-06-05; `LumaScratch` double-buffer at `src/runner.rs:995` + in-place `extract_luma_into` at `src/runner.rs:962`; `analyze_sequence` now ping-pongs two `Vec<f64>` buffers sized once from the sequence resolution, eliminating the per-frame `collect()` allocation in the ITU-T P.910 luma path while keeping output bit-identical)
 
 ## Testing
 - [ ] Add test for `BenchmarkSuite::run_all()` with synthetic test sequences

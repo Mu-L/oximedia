@@ -42,11 +42,11 @@
 
 ## Testing
 - [ ] Add visual regression tests comparing effect output against golden reference frames (pixel diff threshold)
-- [ ] Test all TransitionEffect implementations at progress 0.0, 0.5, and 1.0 for correct blending behavior
-- [ ] Add boundary tests for Frame with maximum resolution (8K) and minimum (1x1)
-- [ ] Test ParameterTrack interpolation with overlapping keyframes, NaN times, and single-keyframe tracks
+- [x] Test all TransitionEffect implementations at progress 0.0, 0.5, and 1.0 for correct blending behavior (done 2026-06-05; tests/transition_boundary.rs: Dissolve/Wipe/Push/Slide/Zoom, 15 tests)
+- [x] Add boundary tests for Frame with maximum resolution (8K) and minimum (1x1) (done 2026-06-06; tests/frame_boundary.rs: 8K 7680x4320 alloc/clear/corner-addressing, 1x1 set/get/OOB-neighbours/clear, 1x1 Compositor::composite no-panic, zero-width/height/0x0 + u32::MAX overflow InvalidDimensions; 7 tests)
+- [x] Test ParameterTrack interpolation with overlapping keyframes, NaN times, and single-keyframe tracks (done 2026-06-05; src/lib.rs tests: empty→None, single-kf, before/after clamp, same-time-replace, NaN-no-panic, linear-midpoint; 7 tests)
 - [ ] Add performance benchmarks for each effect category to track regression (using criterion)
-- [ ] Test compositing::layer_manager with deep layer stacks (50+ layers) for correctness
+- [x] Test compositing deep layer stacks (50+ layers) for correctness (done 2026-06-06; tests/layer_compositing.rs. NOTE: the real deep-layer API is `Compositor::flatten_layers` + `LayerStack`, NOT a `layer_manager` stack; tests pin byte-exact flatten_layers vs a sequential blend_pixels fold over a 50-layer opacity ramp, the 127/0/127 opacity-multiplied and 128/0/126 alpha-encoded truncation oracles, single-layer identity, plus a 50-layer bilinear LayerStack::composite smoke test; 5 tests)
 
 ## Documentation
 - [ ] Add visual examples (ASCII art or image references) for each transition type in `transition` module docs

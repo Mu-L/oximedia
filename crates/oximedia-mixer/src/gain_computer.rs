@@ -2,11 +2,11 @@
 //!
 //! Provides:
 //! - Accurate dB ↔ linear amplitude conversions with configurable reference levels.
-//! - A [`GainComputer`] that applies dynamic-range gain reduction with soft-knee,
+//! - A [`GainComputer`](crate::gain_computer::GainComputer) that applies dynamic-range gain reduction with soft-knee,
 //!   ballistic attack/release smoothing, and make-up gain.
-//! - A [`LoudnessNormalizer`] for target-loudness matching (EBU R128 / ITU-R BS.1770-4
+//! - A [`LoudnessNormalizer`](crate::gain_computer::LoudnessNormalizer) for target-loudness matching (EBU R128 / ITU-R BS.1770-4
 //!   compliant integrated loudness measurement using a K-weighted RMS approximation).
-//! - A [`GainStage`] component that chains input trim, gain computer output, make-up
+//! - A [`GainStage`](crate::gain_computer::GainStage) component that chains input trim, gain computer output, make-up
 //!   gain, and output limiter ceiling into a single processing unit.
 //!
 //! All processing is sample-accurate and allocation-free after construction.
@@ -284,7 +284,7 @@ impl LoudnessNormalizer {
 
     /// Feed mono samples into the loudness accumulator.
     ///
-    /// Call this continuously during playback, then read [`integrated_lufs`].
+    /// Call this continuously during playback, then read [`Self::integrated_lufs`].
     pub fn push_samples(&mut self, samples: &[f32]) {
         // Simple K-weighting approximation: high-shelf pre-filter at ~1500 Hz, +4 dB.
         // Coefficient computed for a first-order shelf.

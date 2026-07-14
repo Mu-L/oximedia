@@ -1,11 +1,11 @@
 // Copyright 2017 Brian Langenberger
 // Copyright 2024-2026 COOLJAPAN OU (Team Kitasan)
 //
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+// Originally dual-licensed "MIT OR Apache-2.0" as part of `bitstream-io`
+// 4.9.0 by Brian Langenberger. Redistributed here, per the terms of that
+// upstream license, under the Apache License, Version 2.0
+// <http://www.apache.org/licenses/LICENSE-2.0> only. This file may not be
+// copied, modified, or distributed except according to those terms.
 
 //! Bit-level I/O for OxiMedia — a `std`-only fork of
 //! [`bitstream-io`](https://crates.io/crates/bitstream-io) 4.9.0.

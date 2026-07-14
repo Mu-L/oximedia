@@ -540,6 +540,9 @@ pub enum ReportFormat {
     Xml,
     /// Self-contained HTML document.
     Html,
+    /// PDF 1.4 document (feature-gated).
+    #[cfg(feature = "pdf")]
+    Pdf,
 }
 
 impl ReportFormat {
@@ -551,7 +554,361 @@ impl ReportFormat {
             Self::Json | Self::JsonCompact => "json",
             Self::Xml => "xml",
             Self::Html => "html",
+            #[cfg(feature = "pdf")]
+            Self::Pdf => "pdf",
         }
+    }
+}
+
+// ── PDF export ───────────────────────────────────────────────────────────────
+
+/// Error type for PDF export operations.
+#[cfg(feature = "pdf")]
+#[derive(Debug)]
+pub enum PdfExportError {
+    /// Formatting error during write.
+    Io(std::fmt::Error),
+}
+
+#[cfg(feature = "pdf")]
+impl std::fmt::Display for PdfExportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "PDF export error: {e}"),
+        }
+    }
+}
+
+#[cfg(feature = "pdf")]
+impl std::error::Error for PdfExportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+        }
+    }
+}
+
+#[cfg(feature = "pdf")]
+impl From<std::fmt::Error> for PdfExportError {
+    fn from(e: std::fmt::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+/// Escape special PDF string characters: `(`, `)`, and `\`.
+#[cfg(feature = "pdf")]
+fn pdf_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for ch in s.chars() {
+        match ch {
+            '(' => out.push_str("\\("),
+            ')' => out.push_str("\\)"),
+            '\\' => out.push_str("\\\\"),
+            // Replace non-ASCII/control chars with '?' for Type1 safety
+            c if c.is_ascii() && !c.is_control() => out.push(c),
+            _ => out.push('?'),
+        }
+    }
+    out
+}
+
+/// A minimal hand-emitted PDF 1.4 builder.
+#[cfg(feature = "pdf")]
+struct PdfBuilder {
+    /// Accumulated bytes of the PDF being built.
+    buf: Vec<u8>,
+    /// Byte offsets of each object (1-indexed; entry 0 unused).
+    offsets: Vec<usize>,
+    /// Raw object payloads (stream dicts + streams) indexed by obj number (1-based).
+    objects: Vec<String>,
+}
+
+#[cfg(feature = "pdf")]
+impl PdfBuilder {
+    fn new() -> Self {
+        Self {
+            buf: Vec::with_capacity(65536),
+            offsets: Vec::new(),
+            objects: Vec::new(),
+        }
+    }
+
+    /// Reserve a slot for an object and return its 1-based object number.
+    fn reserve(&mut self) -> usize {
+        self.objects.push(String::new());
+        self.objects.len()
+    }
+
+    /// Assign content to a previously reserved object slot.
+    fn set_object(&mut self, obj_num: usize, content: String) {
+        self.objects[obj_num - 1] = content;
+    }
+
+    /// Emit all objects into `buf`, recording their byte offsets.
+    fn emit_objects(&mut self) {
+        // PDF header
+        self.buf.extend_from_slice(b"%PDF-1.4\n");
+        // Binary comment to mark the file as binary
+        self.buf.extend_from_slice(b"%\xc2\xb5\xc2\xb5\n");
+
+        self.offsets = vec![0usize; self.objects.len() + 1]; // index 0 unused
+
+        for (idx, obj_body) in self.objects.iter().enumerate() {
+            let obj_num = idx + 1;
+            self.offsets[obj_num] = self.buf.len();
+            let header = format!("{obj_num} 0 obj\n");
+            self.buf.extend_from_slice(header.as_bytes());
+            self.buf.extend_from_slice(obj_body.as_bytes());
+            self.buf.extend_from_slice(b"\nendobj\n");
+        }
+    }
+
+    /// Append xref table and trailer, return the final PDF bytes.
+    fn finalize(mut self, root_obj: usize) -> Vec<u8> {
+        let xref_offset = self.buf.len();
+        let n = self.objects.len() + 1; // +1 for object 0
+
+        self.buf.extend_from_slice(b"xref\n");
+        self.buf.extend_from_slice(format!("0 {n}\n").as_bytes());
+        // Object 0 — free head
+        self.buf.extend_from_slice(b"0000000000 65535 f \n");
+        // One entry per object
+        for obj_num in 1..n {
+            let off = self.offsets[obj_num];
+            let entry = format!("{off:010} 00000 n \n");
+            self.buf.extend_from_slice(entry.as_bytes());
+        }
+
+        // Trailer
+        let trailer = format!(
+            "trailer\n<< /Size {n} /Root {root_obj} 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n"
+        );
+        self.buf.extend_from_slice(trailer.as_bytes());
+        self.buf
+    }
+}
+
+/// Layout constants for the PDF page.
+#[cfg(feature = "pdf")]
+mod pdf_layout {
+    pub const PAGE_WIDTH: f32 = 595.0;
+    pub const PAGE_HEIGHT: f32 = 842.0;
+    pub const MARGIN_LEFT: f32 = 50.0;
+    pub const MARGIN_BOTTOM: f32 = 50.0;
+    pub const TOP_Y: f32 = PAGE_HEIGHT - 50.0; // 792
+    pub const LINE_HEIGHT: f32 = 18.0;
+    pub const FONT_SIZE: f32 = 11.0;
+    pub const TITLE_FONT_SIZE: f32 = 14.0;
+}
+
+/// Wraps long text to fit within `max_chars` wide columns, returning lines.
+#[cfg(feature = "pdf")]
+fn wrap_text(s: &str, max_chars: usize) -> Vec<String> {
+    if s.len() <= max_chars {
+        return vec![s.to_string()];
+    }
+    let mut lines = Vec::new();
+    let mut remaining = s;
+    while remaining.len() > max_chars {
+        // Try to break at a space
+        let slice = &remaining[..max_chars];
+        let break_at = slice.rfind(' ').unwrap_or(max_chars);
+        lines.push(remaining[..break_at].to_string());
+        remaining = remaining[break_at..].trim_start();
+    }
+    if !remaining.is_empty() {
+        lines.push(remaining.to_string());
+    }
+    lines
+}
+
+/// Generates a PDF 1.4 content stream for one page.
+///
+/// Returns the raw stream bytes (not yet wrapped in a stream object).
+#[cfg(feature = "pdf")]
+fn build_page_content(text_lines: &[String]) -> String {
+    use pdf_layout::*;
+    use std::fmt::Write as FmtWrite;
+
+    let mut s = String::with_capacity(text_lines.len() * 40 + 256);
+    // Begin text block
+    let _ = write!(
+        s,
+        "BT\n/F1 {TITLE_FONT_SIZE} Tf\n{MARGIN_LEFT} {TOP_Y} Td\n"
+    );
+
+    let mut current_font_size = TITLE_FONT_SIZE;
+    let mut first = true;
+
+    for line in text_lines {
+        // Switch to body font after the title line
+        if first {
+            // Title line: already at TITLE_FONT_SIZE, just emit it
+            let escaped = pdf_escape(line);
+            let _ = writeln!(s, "({escaped}) Tj");
+            // Switch font size for subsequent lines
+            let _ = writeln!(s, "/F1 {FONT_SIZE} Tf");
+            let _ = writeln!(s, "0 -{LINE_HEIGHT} Td");
+            current_font_size = FONT_SIZE;
+            first = false;
+        } else {
+            let _ = current_font_size; // suppress unused warning
+            let escaped = pdf_escape(line);
+            let _ = writeln!(s, "({escaped}) Tj");
+            let _ = writeln!(s, "0 -{LINE_HEIGHT} Td");
+        }
+    }
+
+    s.push_str("ET\n");
+    s
+}
+
+/// Exports `report` as a minimal PDF 1.4 document.
+///
+/// The PDF contains one or more A4 pages with:
+/// - A title line: "QC Report — PASS/FAIL"
+/// - A summary line with check counts
+/// - Each `CheckResult` as `[PASS/FAIL] rule_name: message`
+///
+/// # Errors
+///
+/// Returns a [`PdfExportError`] on formatting failure (currently infallible).
+#[cfg(feature = "pdf")]
+pub fn report_to_pdf(report: &QcReport) -> Result<Vec<u8>, PdfExportError> {
+    report.to_pdf()
+}
+
+#[cfg(feature = "pdf")]
+impl QcReport {
+    /// Exports the report as a minimal PDF 1.4 document.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`PdfExportError`] on formatting failure.
+    pub fn to_pdf(&self) -> Result<Vec<u8>, PdfExportError> {
+        use pdf_layout::*;
+        use std::fmt::Write as FmtWrite;
+
+        // ── Build the logical lines to lay out ──────────────────────────────
+        let status = if self.overall_passed { "PASS" } else { "FAIL" };
+        let mut all_lines: Vec<String> = Vec::new();
+        all_lines.push(format!("QC Report - {status}"));
+        all_lines.push(format!("File: {}", self.file_path));
+        all_lines.push(format!("Generated: {}", self.timestamp));
+        all_lines.push(format!(
+            "Checks: {} total, {} passed, {} failed",
+            self.total_checks, self.passed_checks, self.failed_checks
+        ));
+        all_lines.push(String::new()); // blank separator
+
+        for result in &self.results {
+            let pass_str = if result.passed { "PASS" } else { "FAIL" };
+            let raw = format!("[{pass_str}] {}: {}", result.rule_name, result.message);
+            // Wrap long lines at ~90 chars (roughly fits A4 at 11pt Helvetica)
+            for wrapped in wrap_text(&raw, 90) {
+                all_lines.push(wrapped);
+            }
+            if let Some(rec) = &result.recommendation {
+                let rec_raw = format!("  -> {rec}");
+                for wrapped in wrap_text(&rec_raw, 88) {
+                    all_lines.push(wrapped);
+                }
+            }
+        }
+
+        // ── Paginate ────────────────────────────────────────────────────────
+        // How many lines fit per page (first page has title so uses same count)
+        let lines_per_page = ((TOP_Y - MARGIN_BOTTOM) / LINE_HEIGHT) as usize;
+        let lines_per_page = lines_per_page.max(1);
+
+        // Split all_lines into pages
+        let mut pages: Vec<Vec<String>> = Vec::new();
+        let mut remaining = all_lines.as_slice();
+        while !remaining.is_empty() {
+            let take = remaining.len().min(lines_per_page);
+            pages.push(remaining[..take].to_vec());
+            remaining = &remaining[take..];
+        }
+        if pages.is_empty() {
+            pages.push(vec!["QC Report".to_string()]);
+        }
+
+        let num_pages = pages.len();
+
+        // ── Allocate object slots ────────────────────────────────────────────
+        // obj 1: Catalog
+        // obj 2: Pages
+        // obj 3..3+num_pages-1: Page objects
+        // obj 3+num_pages..end: Content stream objects (one per page)
+        let mut builder = PdfBuilder::new();
+        let catalog_obj = builder.reserve(); // 1
+        let pages_obj = builder.reserve(); // 2
+        let first_page_obj = 3usize;
+
+        // Reserve Page objects
+        let mut page_obj_nums: Vec<usize> = Vec::with_capacity(num_pages);
+        for _ in 0..num_pages {
+            page_obj_nums.push(builder.reserve());
+        }
+
+        // Reserve Content stream objects
+        let mut content_obj_nums: Vec<usize> = Vec::with_capacity(num_pages);
+        for _ in 0..num_pages {
+            content_obj_nums.push(builder.reserve());
+        }
+
+        let _ = first_page_obj; // suppress unused warning
+
+        // ── Catalog ──────────────────────────────────────────────────────────
+        builder.set_object(
+            catalog_obj,
+            format!("<< /Type /Catalog /Pages {pages_obj} 0 R >>"),
+        );
+
+        // ── Pages ────────────────────────────────────────────────────────────
+        let kids: String = page_obj_nums
+            .iter()
+            .map(|n| format!("{n} 0 R"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        builder.set_object(
+            pages_obj,
+            format!(
+                "<< /Type /Pages /Kids [{kids}] /Count {num_pages} /MediaBox [0 0 {PAGE_WIDTH} {PAGE_HEIGHT}] >>"
+            ),
+        );
+
+        // ── Page objects & content streams ───────────────────────────────────
+        let font_dict = "/Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >>";
+        for (i, page_lines) in pages.iter().enumerate() {
+            let page_obj = page_obj_nums[i];
+            let content_obj = content_obj_nums[i];
+
+            // Page dictionary
+            builder.set_object(
+                page_obj,
+                format!(
+                    "<< /Type /Page /Parent {pages_obj} 0 R \
+                     /MediaBox [0 0 {PAGE_WIDTH} {PAGE_HEIGHT}] \
+                     /Contents {content_obj} 0 R \
+                     /Resources << {font_dict} >> >>",
+                ),
+            );
+
+            // Content stream
+            let stream_content = build_page_content(page_lines);
+            let stream_len = stream_content.len();
+            let mut stream_obj = String::new();
+            let _ = write!(
+                stream_obj,
+                "<< /Length {stream_len} >>\nstream\n{stream_content}endstream"
+            );
+            builder.set_object(content_obj, stream_obj);
+        }
+
+        // ── Emit ─────────────────────────────────────────────────────────────
+        builder.emit_objects();
+        Ok(builder.finalize(catalog_obj))
     }
 }
 
@@ -661,3 +1018,141 @@ mod report_html_tests {
 }
 
 // Use actual chrono crate
+
+// ── PDF tests ────────────────────────────────────────────────────────────────
+#[cfg(all(test, feature = "pdf"))]
+mod report_pdf_tests {
+    use super::*;
+    use crate::rules::{CheckResult, Severity};
+
+    fn make_pdf_report() -> QcReport {
+        let mut r = QcReport::new("test_video.mkv");
+        r.add_result(CheckResult::pass("audio_loudness"));
+        r.add_result(CheckResult::fail(
+            "video_bitrate",
+            Severity::Error,
+            "Bitrate too low",
+        ));
+        r
+    }
+
+    #[test]
+    fn test_pdf_header_footer() {
+        let report = make_pdf_report();
+        let pdf = report.to_pdf().expect("PDF export should succeed");
+        assert!(pdf.starts_with(b"%PDF-1.4"), "PDF must start with %PDF-1.4");
+        let tail = pdf
+            .iter()
+            .rev()
+            .take(20)
+            .cloned()
+            .collect::<Vec<u8>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<u8>>();
+        let tail_str = String::from_utf8_lossy(&tail);
+        assert!(
+            tail_str.contains("%%EOF"),
+            "PDF must end with %%EOF, got: {tail_str:?}"
+        );
+    }
+
+    #[test]
+    fn test_pdf_has_catalog_and_page() {
+        let report = make_pdf_report();
+        let pdf = report.to_pdf().expect("PDF export should succeed");
+        assert!(
+            pdf.windows(b"/Type /Catalog".len())
+                .any(|w| w == b"/Type /Catalog"),
+            "PDF must contain /Type /Catalog"
+        );
+        assert!(
+            pdf.windows(b"/Type /Page".len())
+                .any(|w| w == b"/Type /Page"),
+            "PDF must contain /Type /Page"
+        );
+    }
+
+    #[test]
+    fn test_pdf_has_helvetica() {
+        let report = make_pdf_report();
+        let pdf = report.to_pdf().expect("PDF export should succeed");
+        assert!(
+            pdf.windows(b"Helvetica".len()).any(|w| w == b"Helvetica"),
+            "PDF must reference Helvetica font"
+        );
+    }
+
+    #[test]
+    fn test_pdf_startxref_offset_valid() {
+        let report = make_pdf_report();
+        let pdf = report.to_pdf().expect("PDF export should succeed");
+        let content = String::from_utf8_lossy(&pdf);
+
+        // Extract the number after `startxref\n`
+        let marker = "startxref\n";
+        let pos = content.find(marker).expect("startxref not found");
+        let after = &content[pos + marker.len()..];
+        let offset_str = after.lines().next().expect("no line after startxref");
+        let offset: usize = offset_str
+            .trim()
+            .parse()
+            .expect("startxref offset is not a number");
+
+        assert!(
+            offset < pdf.len(),
+            "startxref offset {offset} must be < pdf length {}",
+            pdf.len()
+        );
+        // The bytes at that offset should be the start of the xref table
+        assert!(
+            pdf[offset..].starts_with(b"xref"),
+            "bytes at startxref offset must start with 'xref'"
+        );
+    }
+
+    #[test]
+    fn test_pdf_contains_report_text() {
+        let report = make_pdf_report();
+        let pdf = report.to_pdf().expect("PDF export should succeed");
+
+        // File path should appear somewhere in the PDF content streams
+        assert!(
+            pdf.windows(b"test_video.mkv".len())
+                .any(|w| w == b"test_video.mkv"),
+            "PDF must contain the file path"
+        );
+        // Overall status (FAIL because of Error-severity check)
+        assert!(
+            pdf.windows(b"FAIL".len()).any(|w| w == b"FAIL"),
+            "PDF must contain FAIL status"
+        );
+        // Individual result pass status
+        assert!(
+            pdf.windows(b"PASS".len()).any(|w| w == b"PASS"),
+            "PDF must contain PASS for passing checks"
+        );
+    }
+
+    #[test]
+    fn test_pdf_multipage() {
+        // Create a report with 100 results to force multi-page layout
+        let mut report = QcReport::new("large_report.mxf");
+        for i in 0..100 {
+            report.add_result(CheckResult::fail(
+                &format!("rule_{i:03}"),
+                Severity::Warning,
+                &format!("Warning message number {i} with some additional text to fill the line"),
+            ));
+        }
+        let pdf = report.to_pdf().expect("PDF export should succeed");
+
+        // Count occurrences of "/Type /Page" (each Page dict has exactly one)
+        let needle = b"/Type /Page";
+        let count = pdf.windows(needle.len()).filter(|w| *w == needle).count();
+        assert!(
+            count >= 2,
+            "100 results should produce at least 2 pages, got {count} /Type /Page entries"
+        );
+    }
+}

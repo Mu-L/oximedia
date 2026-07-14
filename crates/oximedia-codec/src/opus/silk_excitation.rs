@@ -2,7 +2,7 @@
 //!
 //! This module handles the open-loop (non-NSQ) excitation path and the shell-
 //! coded pulse bitstream.  The NSQ closed-loop path lives in [`super::silk_nsq`]
-//! and replaces [`compute_excitation`] when enabled.
+//! and replaces `compute_excitation` when enabled.
 
 use crate::CodecResult;
 

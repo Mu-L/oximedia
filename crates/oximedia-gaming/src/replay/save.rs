@@ -260,11 +260,11 @@ impl Default for ReplaySaver {
 /// # Codec wiring (Wave 14)
 ///
 /// For [`SaveFormat::WebM`] and [`SaveFormat::Mkv`], each frame's raw data is
-/// passed through [`encode_frames_vp9`] which verifies it is already a valid
+/// passed through `encode_frames_vp9` which verifies it is already a valid
 /// VP9 bitstream (the common case when the gaming capture pipeline produces
 /// VP9-encoded NALUs).  If the payload looks like raw YUV (length equals
 /// `width * height * 3 / 2` for a typical 1280×720 frame) a lightweight
-/// VP9 re-encode via [`SimpleVp9Encoder`] is performed.
+/// VP9 re-encode via [`SimpleVp9Encoder`](oximedia_codec::SimpleVp9Encoder) is performed.
 ///
 /// For [`SaveFormat::Mp4`] the same logic is applied with AV1 OBU passthrough.
 ///

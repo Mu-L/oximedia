@@ -266,7 +266,7 @@ pub struct DependencyResolver {
     pub registered_plugins: HashMap<String, Vec<SemVer>>,
     /// Per-provider dependency declarations used for transitive resolution.
     ///
-    /// When a plugin is registered via [`register_with_deps`], its own
+    /// When a plugin is registered via [`DependencyResolver::register_with_deps`], its own
     /// dependency list is stored here so that `resolve` can propagate
     /// constraints transitively without the caller having to pre-expand
     /// the full graph.
@@ -314,7 +314,7 @@ impl DependencyResolver {
     ///
     /// After the direct (root-level) constraint pass, a BFS worklist propagates
     /// constraints from each resolved plugin's own declared dependencies
-    /// (registered via [`register_with_deps`]).  The process is monotone:
+    /// (registered via [`DependencyResolver::register_with_deps`]).  The process is monotone:
     /// constraints only narrow, so it terminates in at most
     /// `registered_plugins.len() * 10` iterations.
     ///

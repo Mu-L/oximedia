@@ -34,6 +34,7 @@ oximedia-core.workspace = true
 oximedia-distributed.workspace = true
 oximedia-farm.workspace = true
 oximedia-renderfarm.workspace = true
+oximedia-net.workspace = true
 oximedia-access.workspace = true
 oximedia-rights.workspace = true
 oximedia-auto.workspace = true
@@ -100,12 +101,12 @@ oximedia-caption-gen = { workspace = true, optional = true, features = ["onnx"] 
 # `oximedia-stabilize::Frame` for the `restore video --mode stabilize` path.
 scirs2-core = { workspace = true }
 uuid = { workspace = true }
-tokio.workspace = true
+tokio = { workspace = true, features = ["full"] }
 clap.workspace = true
 ratatui.workspace = true
 crossterm = "0.29"
 indicatif = "0.18"
-anyhow = "1"
+anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -119,7 +120,7 @@ rayon.workspace = true
 num_cpus.workspace = true
 chrono.workspace = true
 humantime = "2"
-dirs = "6"
+dirs = { workspace = true }
 
 [features]
 default = []

@@ -457,7 +457,7 @@ mod tests {
     use super::*;
     use tempfile::NamedTempFile;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_batch_engine_creation() {
         let temp_file = NamedTempFile::new().expect("failed to create temp file");
         let db_path = temp_file
@@ -468,7 +468,7 @@ mod tests {
         assert!(engine.is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_job_submission() {
         let temp_file = NamedTempFile::new().expect("failed to create temp file");
         let db_path = temp_file
@@ -488,7 +488,7 @@ mod tests {
         assert!(job_id.is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_job_status() {
         let temp_file = NamedTempFile::new().expect("failed to create temp file");
         let db_path = temp_file
@@ -509,7 +509,7 @@ mod tests {
         assert!(status.is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_job_cancellation() {
         let temp_file = NamedTempFile::new().expect("failed to create temp file");
         let db_path = temp_file
@@ -530,7 +530,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_list_jobs() {
         let temp_file = NamedTempFile::new().expect("failed to create temp file");
         let db_path = temp_file
@@ -630,7 +630,7 @@ mod shutdown_tests {
     }
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_shutdown_state_initially_running() {
         use tempfile::NamedTempFile;
         let tmp = NamedTempFile::new().expect("tmp file");
@@ -640,7 +640,7 @@ mod shutdown_tests {
     }
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_request_shutdown_empty_queue() {
         use tempfile::NamedTempFile;
         let tmp = NamedTempFile::new().expect("tmp file");

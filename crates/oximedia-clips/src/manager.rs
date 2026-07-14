@@ -4,15 +4,18 @@ use crate::clip::{Clip, ClipId};
 use crate::database::ClipDatabase;
 use crate::error::{ClipError, ClipResult};
 use crate::export::{ClipListExporter, EdlExporter};
-use crate::group::{Bin, BinId, Collection, CollectionId, Folder, FolderId, SmartCollection};
+use crate::group::{
+    Bin, BinId, ClipField, Collection, CollectionId, Folder, FolderId, SmartCollection,
+};
 use crate::import::{BatchImporter, MediaScanner};
 use crate::marker::{Marker, MarkerId, MarkerManager};
 use crate::proxy::{ProxyLink, ProxyManager};
 use crate::search::{ClipFilter, SearchEngine};
 use crate::take::{Take, TakeManager};
 use oximedia_core::types::Rational;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// Main clip management system.
 pub struct ClipManager {
@@ -25,7 +28,13 @@ pub struct ClipManager {
     bins: HashMap<BinId, Bin>,
     folders: HashMap<FolderId, Folder>,
     collections: HashMap<CollectionId, Collection>,
-    smart_collections: Vec<SmartCollection>,
+    /// Registered smart collections.
+    ///
+    /// Wrapped in a [`Mutex`] for interior mutability so that `&self` methods
+    /// (notably [`ClipManager::update_clip`], which is shared across concurrent
+    /// writers via `Arc<ClipManager>`) can invalidate dependent caches without
+    /// requiring `&mut self`.
+    smart_collections: Mutex<Vec<SmartCollection>>,
 }
 
 impl ClipManager {
@@ -46,7 +55,7 @@ impl ClipManager {
             bins: HashMap::new(),
             folders: HashMap::new(),
             collections: HashMap::new(),
-            smart_collections: Vec::new(),
+            smart_collections: Mutex::new(Vec::new()),
         })
     }
 
@@ -72,13 +81,45 @@ impl ClipManager {
         self.database.get_clip(clip_id).await
     }
 
-    /// Updates a clip.
+    /// Updates a clip, auto-invalidating dependent smart-collection caches.
+    ///
+    /// Before saving, the previous version of the clip is loaded so that the
+    /// set of changed fields can be computed. Only the smart collections whose
+    /// rules depend on a changed field have their caches invalidated (field
+    /// dependency). When the clip did not previously exist (i.e. this is an
+    /// insert), every smart-collection cache is invalidated, because a new clip
+    /// may newly match any rule.
+    ///
+    /// This method takes `&self` (interior mutability) so it remains safe to
+    /// share a `ClipManager` across concurrent writers via `Arc`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the clip cannot be updated.
+    /// Returns an error if the clip cannot be saved or if the smart-collection
+    /// registry lock is poisoned.
     pub async fn update_clip(&self, clip: Clip) -> ClipResult<()> {
-        self.database.save_clip(&clip).await
+        // Load the previous version (if any) to diff against. `get_clip`
+        // returns `Err(ClipNotFound)` for a brand-new clip, so `.ok()` cleanly
+        // distinguishes update (`Some`) from insert (`None`).
+        let previous = self.database.get_clip(&clip.id).await.ok();
+
+        // Persist first so the saved state is authoritative.
+        self.database.save_clip(&clip).await?;
+
+        match previous {
+            Some(old) => {
+                let changed = Self::changed_fields(&old, &clip);
+                for field in changed {
+                    self.invalidate_smart_collections_for(field)?;
+                }
+            }
+            None => {
+                // Insert: a new clip may match any rule, so invalidate all.
+                self.invalidate_all_smart_collections()?;
+            }
+        }
+
+        Ok(())
     }
 
     /// Deletes a clip.
@@ -292,24 +333,148 @@ impl ClipManager {
 
     // Smart collection operations
 
-    /// Creates a new smart collection.
-    pub fn create_smart_collection(&mut self, smart_collection: SmartCollection) {
-        self.smart_collections.push(smart_collection);
+    /// Locks the smart-collection registry, mapping a poisoned lock to a
+    /// recoverable [`ClipError`] instead of panicking.
+    fn lock_smart_collections(
+        &self,
+    ) -> ClipResult<std::sync::MutexGuard<'_, Vec<SmartCollection>>> {
+        self.smart_collections
+            .lock()
+            .map_err(|_| ClipError::Serialization("smart_collections mutex poisoned".into()))
     }
 
-    /// Updates all smart collections.
+    /// Creates a new smart collection.
     ///
     /// # Errors
     ///
-    /// Returns an error if clips cannot be loaded.
-    pub async fn update_smart_collections(&mut self) -> ClipResult<()> {
+    /// Returns an error if the smart-collection registry lock is poisoned.
+    pub fn create_smart_collection(&self, smart_collection: SmartCollection) -> ClipResult<()> {
+        self.lock_smart_collections()?.push(smart_collection);
+        Ok(())
+    }
+
+    /// Updates all smart collections by re-evaluating every clip.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if clips cannot be loaded or the registry lock is
+    /// poisoned.
+    pub async fn update_smart_collections(&self) -> ClipResult<()> {
         let clips = self.database.get_all_clips().await?;
 
-        for smart_collection in &mut self.smart_collections {
+        let mut guard = self.lock_smart_collections()?;
+        for smart_collection in guard.iter_mut() {
             smart_collection.update(&clips);
         }
 
         Ok(())
+    }
+
+    /// Invalidates the caches of every smart collection whose rules depend on
+    /// `field`.
+    ///
+    /// Returns the number of collections that were invalidated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the smart-collection registry lock is poisoned.
+    pub fn invalidate_smart_collections_for(&self, field: ClipField) -> ClipResult<usize> {
+        let mut guard = self.lock_smart_collections()?;
+        let mut count = 0;
+        for smart_collection in guard.iter_mut() {
+            if smart_collection.dependency_fields().contains(&field) {
+                smart_collection.invalidate_cache();
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    /// Invalidates the caches of all registered smart collections.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the smart-collection registry lock is poisoned.
+    pub fn invalidate_all_smart_collections(&self) -> ClipResult<()> {
+        let mut guard = self.lock_smart_collections()?;
+        for smart_collection in guard.iter_mut() {
+            smart_collection.invalidate_cache();
+        }
+        Ok(())
+    }
+
+    /// Returns the number of registered smart collections.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the smart-collection registry lock is poisoned.
+    pub fn smart_collection_count(&self) -> ClipResult<usize> {
+        Ok(self.lock_smart_collections()?.len())
+    }
+
+    /// Provides read-only access to the registered smart collections via a
+    /// closure, holding the registry lock for the duration of the call.
+    ///
+    /// This is the inspection counterpart to the cache-mutating methods; it
+    /// avoids exposing the interior [`Mutex`] while letting callers query
+    /// cache state (e.g. [`SmartCollection::needs_refresh`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the smart-collection registry lock is poisoned.
+    pub fn with_smart_collections<F, R>(&self, f: F) -> ClipResult<R>
+    where
+        F: FnOnce(&[SmartCollection]) -> R,
+    {
+        let guard = self.lock_smart_collections()?;
+        Ok(f(guard.as_slice()))
+    }
+
+    /// Computes the set of clip fields that differ between `old` and `new`.
+    ///
+    /// This is the basis for fine-grained smart-collection cache invalidation:
+    /// only collections whose rules depend on a changed field need refreshing.
+    fn changed_fields(old: &Clip, new: &Clip) -> HashSet<ClipField> {
+        let mut changed = HashSet::new();
+        if old.name != new.name {
+            changed.insert(ClipField::Name);
+        }
+        if old.rating != new.rating {
+            changed.insert(ClipField::Rating);
+        }
+        if old.is_favorite != new.is_favorite {
+            changed.insert(ClipField::Favorite);
+        }
+        if old.is_rejected != new.is_rejected {
+            changed.insert(ClipField::Rejected);
+        }
+        if old.keywords != new.keywords {
+            changed.insert(ClipField::Keywords);
+        }
+        if old.file_path != new.file_path {
+            changed.insert(ClipField::FilePath);
+        }
+        if old.duration != new.duration
+            || old.in_point != new.in_point
+            || old.out_point != new.out_point
+        {
+            // `effective_duration` (what the `Duration` rule matches on) is a
+            // function of duration plus the in/out points.
+            changed.insert(ClipField::Duration);
+        }
+        if old.created_at != new.created_at {
+            changed.insert(ClipField::CreatedDate);
+        }
+        if old.modified_at != new.modified_at {
+            changed.insert(ClipField::ModifiedDate);
+        }
+        if old.markers.len() != new.markers.len() {
+            changed.insert(ClipField::Markers);
+        }
+        if old.custom_metadata != new.custom_metadata {
+            changed.insert(ClipField::CustomMetadata);
+        }
+        changed
     }
 
     // Marker operations

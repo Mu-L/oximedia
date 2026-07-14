@@ -1,4 +1,7 @@
 //! Query builder for clip searches.
+//!
+//! Produces SQL with `$N` positional placeholders as understood by the
+//! Pure-Rust OxiSQL engine (`oxisql-sqlite-compat`).
 
 use crate::logging::Rating;
 
@@ -22,24 +25,27 @@ impl QueryBuilder {
     /// Adds a name condition.
     #[must_use]
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
-        self.conditions.push("name LIKE ?".to_string());
         self.params.push(format!("%{}%", name.into()));
+        self.conditions
+            .push(format!("name LIKE ${}", self.params.len()));
         self
     }
 
     /// Adds a rating condition.
     #[must_use]
     pub fn with_rating(mut self, rating: Rating) -> Self {
-        self.conditions.push("rating = ?".to_string());
         self.params.push(rating.to_value().to_string());
+        self.conditions
+            .push(format!("rating = ${}", self.params.len()));
         self
     }
 
     /// Adds a minimum rating condition.
     #[must_use]
     pub fn with_min_rating(mut self, rating: Rating) -> Self {
-        self.conditions.push("rating >= ?".to_string());
         self.params.push(rating.to_value().to_string());
+        self.conditions
+            .push(format!("rating >= ${}", self.params.len()));
         self
     }
 
@@ -92,8 +98,21 @@ mod tests {
             .build();
 
         assert!(query.contains("WHERE"));
-        assert!(query.contains("name LIKE ?"));
+        assert!(query.contains("name LIKE $1"));
         assert!(query.contains("is_favorite = 1"));
+    }
+
+    #[test]
+    fn test_query_builder_numbered_placeholders() {
+        let builder = QueryBuilder::new()
+            .with_name("test")
+            .with_min_rating(Rating::ThreeStars);
+        let query = builder.build();
+
+        assert!(query.contains("name LIKE $1"));
+        assert!(query.contains("rating >= $2"));
+        assert_eq!(builder.params().len(), 2);
+        assert_eq!(builder.params()[1], "3");
     }
 
     #[test]

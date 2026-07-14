@@ -385,7 +385,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_encoder_creation() {
         let config = make_encoder_config(320, 240);
         let enc = Ffv1Encoder::new(config).expect("valid config");
@@ -393,14 +392,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_encoder_invalid_dimensions() {
         let config = make_encoder_config(0, 240);
         assert!(Ffv1Encoder::new(config).is_err());
     }
 
     #[test]
-    #[ignore]
     fn test_encoder_extradata() {
         let config = make_encoder_config(320, 240);
         let enc = Ffv1Encoder::new(config).expect("valid");
@@ -410,7 +407,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_encode_single_frame() {
         let config = make_encoder_config(16, 16);
         let mut enc = Ffv1Encoder::new(config).expect("valid");
@@ -425,7 +421,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_encode_wrong_dimensions() {
         let config = make_encoder_config(16, 16);
         let mut enc = Ffv1Encoder::new(config).expect("valid");
@@ -434,7 +429,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_encoder_flush() {
         let config = make_encoder_config(16, 16);
         let mut enc = Ffv1Encoder::new(config).expect("valid");
@@ -444,7 +438,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_lossless_roundtrip() {
         // Encode a frame, then decode it, verify pixel-perfect roundtrip
         let width = 16u32;
@@ -498,7 +491,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_lossless_roundtrip_constant_frame() {
         let width = 8u32;
         let height = 8u32;
@@ -554,7 +546,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_lossless_roundtrip_random_pattern() {
         let width = 32u32;
         let height = 32u32;

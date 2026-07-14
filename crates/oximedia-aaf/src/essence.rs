@@ -528,13 +528,61 @@ impl EssenceAccess {
     }
 }
 
-/// Read essence data from AAF file
+/// Candidate essence stream paths in AAF compound files.
+///
+/// AAF files store embedded essence in named streams inside the compound file.
+/// The names vary across DAW vendors but these are the most common ones.
+const ESSENCE_STREAM_PATHS: &[&str] = &[
+    "Essence",
+    "essence",
+    "MediaData",
+    "EssenceData",
+    "Media",
+    "/Essence",
+    "/MediaData",
+];
+
+/// Read essence data from an AAF compound file.
+///
+/// Scans a fixed set of well-known essence stream names inside the structured
+/// storage container.  For each path that resolves to a non-empty stream the
+/// raw bytes are wrapped in an [`EssenceData`] value with a nil mob ID (the
+/// mob binding is not available from the stream name alone).
+///
+/// Returns an empty `Vec` when no recognisable essence streams are present —
+/// this is the common case for composition-only AAF files where all media is
+/// external.
+///
+/// # Errors
+///
+/// Propagates structured-storage I/O errors that are not `ObjectNotFound`.
 pub fn read_essence_data<R: Read + Seek>(
-    _storage: &mut StorageReader<R>,
+    storage: &mut StorageReader<R>,
 ) -> Result<Vec<EssenceData>> {
-    // In a real implementation, we would read embedded essence data
-    // from the AAF file's essence streams
-    Ok(Vec::new())
+    let mut results = Vec::new();
+
+    for &path in ESSENCE_STREAM_PATHS {
+        match storage.read_stream_by_path(path) {
+            Ok(data) if !data.is_empty() => {
+                // Mob ID is not encoded in the stream name; use nil UUID as
+                // a sentinel.  Callers that need the true mob binding should
+                // parse the AAF object model from the header.
+                results.push(EssenceData::new(Uuid::nil(), data));
+            }
+            Ok(_) => {
+                // Empty stream — skip.
+            }
+            Err(crate::AafError::ObjectNotFound(_)) => {
+                // Stream not present in this file — try next candidate.
+            }
+            Err(crate::AafError::InvalidStructuredStorage(_)) => {
+                // Entry exists but is a storage node, not a stream — skip.
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    Ok(results)
 }
 
 /// Codec registry for mapping AUIDs to codec names
@@ -735,5 +783,38 @@ mod tests {
 
         registry.add_codec(auid, codec_info);
         assert!(registry.get_codec(&auid).is_some());
+    }
+
+    // ── read_essence_data ──────────────────────────────────────────────────
+
+    /// Build a minimal valid AAF compound file (just root + one stream) in
+    /// memory.  We use `StorageWriter` → `StorageReader` round-trip so that
+    /// `read_stream_by_path` is exercised through the real code path.
+    #[test]
+    fn test_read_essence_data_empty_storage() {
+        use crate::structured_storage::StorageWriter;
+        use std::io::Cursor;
+
+        // Write a minimal compound file with no essence streams.
+        let mut buf = Vec::new();
+        {
+            let cursor = Cursor::new(&mut buf);
+            let mut writer = StorageWriter::new(cursor).expect("storage writer");
+            writer.finalize().expect("finalize");
+        }
+
+        // Read it back and call read_essence_data.
+        let cursor = Cursor::new(buf);
+        let mut storage =
+            crate::structured_storage::StorageReader::new(cursor).expect("storage reader");
+
+        let data = read_essence_data(&mut storage)
+            .expect("read_essence_data must not error on empty file");
+
+        // No essence streams present → empty result.
+        assert!(
+            data.is_empty(),
+            "Expected no essence data in a minimal compound file"
+        );
     }
 }

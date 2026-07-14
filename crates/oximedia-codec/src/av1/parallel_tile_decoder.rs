@@ -252,12 +252,12 @@ impl ParallelTileDecoder {
 
             if src_start >= frame_data.len() {
                 // Pad remaining rows with zeros when input is shorter.
-                bytes.extend(std::iter::repeat(0u8).take(tile_w as usize));
+                bytes.extend(std::iter::repeat_n(0u8, tile_w as usize));
             } else {
                 let available_end = src_end.min(frame_data.len());
                 bytes.extend_from_slice(&frame_data[src_start..available_end]);
                 if available_end < src_end {
-                    bytes.extend(std::iter::repeat(0u8).take(src_end - available_end));
+                    bytes.extend(std::iter::repeat_n(0u8, src_end - available_end));
                 }
             }
         }

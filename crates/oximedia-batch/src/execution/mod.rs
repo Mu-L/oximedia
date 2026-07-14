@@ -336,7 +336,7 @@ mod tests {
     use super::*;
     use tempfile::NamedTempFile;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_execution_engine_creation() {
         let temp_file = NamedTempFile::new().expect("failed to create temp file");
         let db_path = temp_file
@@ -351,7 +351,7 @@ mod tests {
         assert!(engine.is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_start_stop_engine() {
         let temp_file = NamedTempFile::new().expect("failed to create temp file");
         let db_path = temp_file
@@ -373,7 +373,7 @@ mod tests {
         assert!(!engine.is_running());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_worker_count() {
         let temp_file = NamedTempFile::new().expect("failed to create temp file");
         let db_path = temp_file

@@ -50,11 +50,18 @@
   - `FrameHistogramCache`, `HistogramData`, and `frame_hash_key` added to `src/histogram_analysis.rs`.
   - LRU eviction via `VecDeque<u64>` insertion-order queue; `get_or_compute` closure called at most once per key.
   - 2 tests: `test_histogram_cache_hit_skips_recompute`, `test_histogram_cache_miss_on_new_frame`.
-- [ ] Use integer histograms instead of float arrays in `color` and `scene` for speed
+- [x] Use integer histograms instead of float arrays in `color` and `scene` for speed (verified 2026-06-06: `type Histogram = [usize; 256];` at src/scene.rs:225)
 
 ## Testing
 - [x] Add test with synthetic gradient image for `scene` detector (known scene boundary)
-- [ ] Test `black` detector with various near-black thresholds and letterbox patterns
+- [x] Test `black` detector with various near-black thresholds (implemented 2026-06-06; Wave 28 Slice 3)
+  - New `tests/black_detection.rs` (64×64 Y-planes): `near_black_threshold_boundary` (threshold=16: 15u8 black via strict `<` / ratio, 16u8 closes the run), `full_black_all_zero_is_black` (all-0 run bounded by a non-black frame), `gray_253_not_black` (uniform 253 → empty).
+  - Letterbox/pillarbox/windowbox is the separate `BlackBarDetector`, already covered by in-file unit tests; intentionally not duplicated.
+- [x] Fix `BlackFrameDetector` segment-duration / `end_frame` divergence between close paths (fixed 2026-06-06; Wave 28 Slice 3)
+  - ROOT CAUSE: `process_frame` close used `end_frame = frame_number` / `duration = frame_number - start` (FIRST non-black frame index) while `finalize` used `end_frame = start + lums.len()` / `duration = lums.len()` (accumulated sample count). Disagreed for non-contiguous frame numbers (every-Nth sampling), e.g. black at 0,2,4,6 → 8 vs 4.
+  - FIX: extended `current_segment` to track `last_seen_frame`; both paths now route through one private `close_segment()` helper setting `end_frame = last_seen_frame + 1` (preserves documented exclusive semantics, so existing contiguous in-file tests stay green) and `duration = lums.len()`.
+  - Regression test `non_contiguous_frame_numbers_consistent_duration` proves the mid-stream and `finalize` close paths yield byte-identical `BlackSegment`s for the same run; existing `test_black_frame_detection` / `test_black_frame_min_duration` remain green.
+  - Also documented the deliberate per-pixel `<` (BlackFrameDetector) vs `<=` (BlackBarDetector) seam in `src/black.rs` (behaviour unchanged).
 - [ ] Add `quality` assessor accuracy test with reference VQEG test sequences
 - [ ] Test `thumbnail` selector diversity: verify selected frames span different scenes
 - [ ] Test `report` HTML output renders valid HTML (basic tag matching validation)

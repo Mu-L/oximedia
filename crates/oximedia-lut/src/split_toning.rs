@@ -8,14 +8,14 @@
 //!
 //! This module provides:
 //!
-//! * [`SplitToningParams`] – configures hue, saturation, and balance for
+//! * [`SplitToningParams`](crate::split_toning::SplitToningParams) – configures hue, saturation, and balance for
 //!   shadows and highlights.
-//! * [`apply_split_toning`] – applies the toning transform to a single RGB
+//! * [`apply_split_toning`](crate::split_toning::apply_split_toning) – applies the toning transform to a single RGB
 //!   pixel (normalised 0–1 display-referred).
-//! * [`generate_split_toning_lut`] – bakes the transform into a flat 3-D LUT.
-//! * [`SplitToningZone`] – zone breakdown (shadows / midtones / highlights)
+//! * [`generate_split_toning_lut`](crate::split_toning::generate_split_toning_lut) – bakes the transform into a flat 3-D LUT.
+//! * [`SplitToningZone`](crate::split_toning::SplitToningZone) – zone breakdown (shadows / midtones / highlights)
 //!   for per-zone analysis.
-//! * [`split_toning_diff`] – measures colour shift introduced by the toning.
+//! * [`SplitToningDiff`](crate::split_toning::SplitToningDiff) – measures colour shift introduced by the toning.
 //!
 //! # Algorithm
 //!

@@ -6,7 +6,7 @@
 //!
 //! # Design
 //!
-//! Each stage-to-stage connection is modelled as a [`BoundedStageQueue`].
+//! Each stage-to-stage connection is modelled as a `BoundedStageQueue`.
 //! A [`BackpressureController`] owns one queue per pipeline edge and exposes
 //! a unified API for producers and consumers:
 //!
@@ -16,7 +16,7 @@
 //! - **Consumer**: calls [`BackpressureController::pop`]; returns `None` when
 //!   the queue is empty.
 //!
-//! Dropped frame counts are tracked per edge so [`PipelineMetrics`] can later
+//! Dropped frame counts are tracked per edge so [`PipelineMetrics`](crate::PipelineMetrics) can later
 //! report them accurately.
 //!
 //! # Example

@@ -203,7 +203,7 @@ impl AudioEffect for ConvolutionReverb {
 
 /// Double-buffering overlap-add convolution engine.
 ///
-/// Exposes a block-oriented API: each call to [`process_block`] consumes
+/// Exposes a block-oriented API: each call to [`DoubleBufferConvolver::process_block`] consumes
 /// exactly `block_size` input samples and returns a reference to the
 /// `block_size`-sample output slice (the leading portion of the freshly
 /// computed OLA frame).

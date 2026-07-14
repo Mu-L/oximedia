@@ -161,7 +161,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore]
     fn test_predict_median_basic() {
         // When all neighbors are the same, prediction equals that value
         assert_eq!(predict_median(100, 100, 100), 100);
@@ -172,7 +171,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_predict_median_edge_cases() {
         // left < top: top_left >= top => min(left, top) = left
         assert_eq!(predict_median(10, 20, 30), 10);
@@ -182,7 +180,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_predict_median_symmetric() {
         // left >= top case
         assert_eq!(predict_median(200, 100, 50), 200);
@@ -191,7 +188,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_encode_decode_roundtrip() {
         let line = vec![10, 20, 30, 40, 50];
         let above = vec![5, 15, 25, 35, 45];
@@ -205,7 +201,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_encode_decode_first_line() {
         let line = vec![128, 130, 132, 134, 136];
         let above = vec![0, 0, 0, 0, 0]; // first line
@@ -219,7 +214,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_encode_decode_constant_line() {
         // All same value: residuals should be small
         let line = vec![100; 8];
@@ -239,7 +233,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_encode_decode_empty() {
         let line: Vec<i32> = vec![];
         let above: Vec<i32> = vec![];
@@ -254,7 +247,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_encode_decode_gradient() {
         // Gradient pattern
         let line: Vec<i32> = (0..16).collect();
@@ -269,7 +261,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_quantize_gradient() {
         assert_eq!(quantize_gradient(0), 0);
         assert_eq!(quantize_gradient(-1), -1);
@@ -279,7 +270,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_compute_context_range() {
         // Context should always be in valid range
         for top in [-100, -1, 0, 1, 100] {

@@ -31,6 +31,83 @@
 //! println!("Container: {:?}", format);
 //! ```
 //!
+//! ## Runnable Examples
+//!
+//! The three doctests below are compiled *and executed* by `cargo test --doc`
+//! (unlike the `ignore`d snippet above, which needs a real file on disk).
+//! Feature-gated sections are wrapped in `# #[cfg(feature = "…")]` blocks so
+//! the doctest as a whole always compiles; the gated assertions only run
+//! when the corresponding feature is enabled (e.g. `cargo test --doc
+//! --features dedup,transcode,quality`).
+//!
+//! ### Probing + deduplication
+//!
+//! ```
+//! use oximedia::probe_format;
+//!
+//! // Minimal ftyp box: size(4) + "ftyp"(4) + brand "isom"(4) + version(4).
+//! let mut mp4_header = vec![0u8; 16];
+//! mp4_header[0..4].copy_from_slice(&16u32.to_be_bytes());
+//! mp4_header[4..8].copy_from_slice(b"ftyp");
+//! mp4_header[8..12].copy_from_slice(b"isom");
+//!
+//! // Probing a well-formed (if minimal) header must not panic.
+//! let _ = probe_format(&mp4_header);
+//!
+//! # #[cfg(feature = "dedup")]
+//! # {
+//! use oximedia::dedup::DedupConfig;
+//!
+//! // A fresh deduplication engine ships with sane default thresholds.
+//! let config = DedupConfig::default();
+//! assert!(config.perceptual_threshold > 0.9);
+//! assert!(config.parallel, "parallel scanning is on by default");
+//! # }
+//! ```
+//!
+//! ### Transcode configuration + quality assessment
+//!
+//! ```
+//! # #[cfg(feature = "transcode")]
+//! # {
+//! use oximedia::transcode::TranscodeConfig;
+//!
+//! let config = TranscodeConfig {
+//!     video_codec: Some("av1".to_string()),
+//!     audio_codec: Some("opus".to_string()),
+//!     ..TranscodeConfig::default()
+//! };
+//! assert_eq!(config.video_codec.as_deref(), Some("av1"));
+//! # }
+//!
+//! # #[cfg(feature = "quality")]
+//! # {
+//! use oximedia::quality::{Frame, MetricType, QualityAssessor};
+//! use oximedia::PixelFormat;
+//!
+//! let frame = Frame::new(16, 16, PixelFormat::Gray8).expect("frame creation must succeed");
+//! let assessor = QualityAssessor::new();
+//! let score = assessor
+//!     .assess(&frame, &frame, MetricType::Psnr)
+//!     .expect("PSNR of identical frames must succeed");
+//! assert!(score.score.is_infinite() || score.score >= 60.0);
+//! # }
+//! ```
+//!
+//! ### Prelude quick-start
+//!
+//! ```
+//! use oximedia::prelude::*;
+//!
+//! // `Timestamp` + `Rational` are always available (core re-exports).
+//! let ts = Timestamp::new(90_000, Rational::new(1, 90_000));
+//! assert!((ts.to_seconds() - 1.0).abs() < f64::EPSILON);
+//!
+//! // `CodecId` classification helpers.
+//! let codec = CodecId::Av1;
+//! assert!(codec.is_video());
+//! ```
+//!
 //! ## Feature Flags
 //!
 //! | Feature | Crates enabled | Purpose |
@@ -162,6 +239,42 @@
 //!   (`net`, `packager`, `drm`, `stream`, `cdn`, `cache`, `server`).
 //! - **`full`**: every optional feature enabled.
 //!
+//! ## Cookbook
+//!
+//! Worked examples live in the workspace `examples/` directory and are run
+//! with `cargo run --example <name> --features <flags>` (a bare `--` with no
+//! flags means the example only needs the always-on core). See the crate
+//! README for a one-line description of what each example demonstrates.
+//!
+//! | Example file | Required features |
+//! |---|---|
+//! | `probe_file.rs` | *(none)* |
+//! | `corner_detection.rs` | *(none)* |
+//! | `optical_flow.rs` | *(none)* |
+//! | `face_detection.rs` | *(none)* |
+//! | `image_processing.rs` | *(none)* |
+//! | `decode_video.rs` | *(none)* |
+//! | `audio_metering.rs` | `metering` |
+//! | `quality_assessment.rs` | `quality` |
+//! | `timecode_operations.rs` | `timecode` |
+//! | `dedup_detection.rs` | `dedup` |
+//! | `workflow_pipeline.rs` | `workflow` |
+//! | `video_scopes.rs` | `scopes` |
+//! | `shot_detection.rs` | `shots` |
+//! | `nmos_registry.rs` | `routing` |
+//! | `color_pipeline.rs` | `colormgmt`, `lut` |
+//! | `media_pipeline.rs` | `quality`, `metering`, `transcode`, `timecode`, `workflow`, `archive` |
+//! | `nmos_server_demo.rs` | `routing` |
+//! | `ml_scene_classify.rs` | `ml`, `ml-scene-classifier` |
+//! | `ml_auto_caption.rs` | `ml` |
+//! | `ml_model_zoo.rs` | `ml` |
+//! | `ffmpeg_translate_demo.rs` | `compat-ffmpeg` |
+//!
+//! Every file above except `ffmpeg_translate_demo.rs` lives in the
+//! workspace-root `examples/` directory (`cargo run --example <name>` finds
+//! it via the `[[example]]` table in `Cargo.toml`); `ffmpeg_translate_demo.rs`
+//! lives in `oximedia/examples/` instead.
+//!
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -197,6 +310,8 @@ pub use oximedia_cv as cv;
 /// Audio processing: codecs (Opus, Vorbis, FLAC, PCM), frames, resampling.
 ///
 /// Enable with `features = ["audio"]`.
+///
+/// See the [`oximedia_audio`] crate for the full API surface.
 #[cfg(feature = "audio")]
 pub mod audio {
     //! Audio processing subsystem.
@@ -210,6 +325,8 @@ pub mod audio {
 /// Video codec support: AV1, VP9, VP8 encoding/decoding.
 ///
 /// Enable with `features = ["video"]`.
+///
+/// See the [`oximedia_codec`] crate for the full API surface.
 #[cfg(feature = "video")]
 pub mod video {
     //! Video codec subsystem.
@@ -223,6 +340,8 @@ pub mod video {
 /// Filter graph pipeline: nodes, ports, connections, frame routing.
 ///
 /// Enable with `features = ["graph"]`.
+///
+/// See the [`oximedia_graph`] crate for the full API surface.
 #[cfg(feature = "graph")]
 pub mod graph {
     //! Filter graph processing pipeline.
@@ -236,6 +355,8 @@ pub mod graph {
 /// Professional audio effects: reverb, delay, compression, EQ, pitch, and more.
 ///
 /// Enable with `features = ["effects"]`.
+///
+/// See the [`oximedia_effects`] crate for the full API surface.
 #[cfg(feature = "effects")]
 pub mod effects {
     //! Professional audio effects suite.
@@ -249,6 +370,8 @@ pub mod effects {
 /// Network streaming: HLS, DASH, SRT, RTMP, WebRTC, SMPTE ST 2110.
 ///
 /// Enable with `features = ["net"]`.
+///
+/// See the [`oximedia_net`] crate for the full API surface.
 #[cfg(feature = "net")]
 pub mod net {
     //! Network streaming subsystem.
@@ -261,6 +384,8 @@ pub mod net {
 /// Broadcast loudness metering: EBU R128, ATSC A/85, ITU-R BS.1770-4.
 ///
 /// Enable with `features = ["metering"]`.
+///
+/// See the [`oximedia_metering`] crate for the full API surface.
 #[cfg(feature = "metering")]
 pub mod metering {
     //! Broadcast-standard audio loudness metering.
@@ -274,6 +399,8 @@ pub mod metering {
 /// Loudness normalization: two-pass, real-time, ReplayGain, streaming targets.
 ///
 /// Enable with `features = ["normalize"]`.
+///
+/// See the [`oximedia_normalize`] crate for the full API surface.
 #[cfg(feature = "normalize")]
 pub mod normalize {
     //! Broadcast loudness normalization.
@@ -286,6 +413,8 @@ pub mod normalize {
 /// Video quality assessment: PSNR, SSIM, MS-SSIM, VMAF, VIF, NIQE, BRISQUE.
 ///
 /// Enable with `features = ["quality"]`.
+///
+/// See the [`oximedia_quality`] crate for the full API surface.
 #[cfg(feature = "quality")]
 pub mod quality {
     //! Video quality assessment and objective metrics.
@@ -298,6 +427,8 @@ pub mod quality {
 /// Extended metadata: ID3v2, Vorbis Comments, APEv2, iTunes, XMP, EXIF, IPTC.
 ///
 /// Enable with `features = ["metadata-ext"]`.
+///
+/// See the [`oximedia_metadata`] crate for the full API surface.
 #[cfg(feature = "metadata-ext")]
 pub mod metadata_ext {
     //! Comprehensive media metadata support.
@@ -311,6 +442,8 @@ pub mod metadata_ext {
 /// SMPTE timecode: LTC and VITC reading/writing at all standard frame rates.
 ///
 /// Enable with `features = ["timecode"]`.
+///
+/// See the [`oximedia_timecode`] crate for the full API surface.
 #[cfg(feature = "timecode")]
 pub mod timecode {
     //! SMPTE 12M timecode reading and writing.
@@ -323,6 +456,8 @@ pub mod timecode {
 /// Workflow orchestration: DAG-based workflows, scheduling, persistence.
 ///
 /// Enable with `features = ["workflow"]`.
+///
+/// See the [`oximedia_workflow`] crate for the full API surface.
 #[cfg(feature = "workflow")]
 pub mod workflow {
     //! DAG-based workflow orchestration engine.
@@ -336,6 +471,8 @@ pub mod workflow {
 /// Batch processing: job queuing, worker pools, watch-folder automation.
 ///
 /// Enable with `features = ["batch"]`.
+///
+/// See the [`oximedia_batch`] crate for the full API surface.
 #[cfg(feature = "batch")]
 pub mod batch {
     //! Production-ready batch processing engine.
@@ -348,6 +485,8 @@ pub mod batch {
 /// System monitoring: metrics, alerting, health checks, Prometheus export.
 ///
 /// Enable with `features = ["monitor"]`.
+///
+/// See the [`oximedia_monitor`] crate for the full API surface.
 #[cfg(feature = "monitor")]
 pub mod monitor {
     //! Comprehensive system and application monitoring.
@@ -361,6 +500,8 @@ pub mod monitor {
 /// LUT processing: 1D/3D LUTs with tetrahedral interpolation, HDR pipeline.
 ///
 /// Enable with `features = ["lut"]`.
+///
+/// See the [`oximedia_lut`] crate for the full API surface.
 #[cfg(feature = "lut")]
 pub mod lut {
     //! 1D and 3D LUT processing with HDR pipeline support.
@@ -374,6 +515,8 @@ pub mod lut {
 /// Color management: ICC profiles, ACES workflow, HDR, gamut mapping.
 ///
 /// Enable with `features = ["colormgmt"]`.
+///
+/// See the [`oximedia_colormgmt`] crate for the full API surface.
 #[cfg(feature = "colormgmt")]
 pub mod colormgmt {
     //! Professional color management system.
@@ -387,6 +530,8 @@ pub mod colormgmt {
 /// Transcoding pipeline: parallel encoding, ABR ladders, multi-pass, audio normalization.
 ///
 /// Enable with `features = ["transcode"]`.
+///
+/// See the [`oximedia_transcode`] crate for the full API surface.
 #[cfg(feature = "transcode")]
 pub mod transcode {
     //! Full-featured transcoding pipeline.
@@ -400,6 +545,8 @@ pub mod transcode {
 /// Subtitle rendering: SRT, ASS/SSA, WebVTT with font rendering and animation.
 ///
 /// Enable with `features = ["subtitle"]`.
+///
+/// See the [`oximedia_subtitle`] crate for the full API surface.
 #[cfg(feature = "subtitle")]
 pub mod subtitle {
     //! Subtitle rendering and format support.
@@ -412,6 +559,8 @@ pub mod subtitle {
 /// Closed captions: SRT, WebVTT, SCC, TTML, EBU-STL, and many more formats.
 ///
 /// Enable with `features = ["captions"]`.
+///
+/// See the [`oximedia_captions`] crate for the full API surface.
 #[cfg(feature = "captions")]
 pub mod captions {
     //! Closed caption format support.
@@ -424,6 +573,8 @@ pub mod captions {
 /// Archive verification: checksums, fixity checks, OAIS-compliant preservation.
 ///
 /// Enable with `features = ["archive"]`.
+///
+/// See the [`oximedia_archive`] crate for the full API surface.
 #[cfg(feature = "archive")]
 pub mod archive {
     //! Media archive verification and long-term preservation.
@@ -437,6 +588,8 @@ pub mod archive {
 /// Deduplication: exact-hash, perceptual, SSIM, audio fingerprint, metadata matching.
 ///
 /// Enable with `features = ["dedup"]`.
+///
+/// See the [`oximedia_dedup`] crate for the full API surface.
 #[cfg(feature = "dedup")]
 pub mod dedup {
     //! Media deduplication and duplicate detection.
@@ -449,6 +602,8 @@ pub mod dedup {
 /// Media search: full-text, visual similarity, audio fingerprint, faceted, color, OCR.
 ///
 /// Enable with `features = ["search"]`.
+///
+/// See the [`oximedia_search`] crate for the full API surface.
 #[cfg(feature = "search")]
 pub mod search {
     //! Advanced media search and indexing engine.
@@ -462,6 +617,8 @@ pub mod search {
 /// Media Asset Management: asset lifecycle, collections, ingest, workflows, RBAC.
 ///
 /// Enable with `features = ["mam"]`.
+///
+/// See the [`oximedia_mam`] crate for the full API surface.
 #[cfg(feature = "mam")]
 pub mod mam {
     //! Comprehensive Media Asset Management system.
@@ -475,6 +632,8 @@ pub mod mam {
 /// Scene understanding: classification, object/face detection, composition analysis.
 ///
 /// Enable with `features = ["scene"]`.
+///
+/// See the [`oximedia_scene`] crate for the full API surface.
 #[cfg(feature = "scene")]
 pub mod scene {
     //! AI-powered scene understanding and video analysis.
@@ -488,6 +647,8 @@ pub mod scene {
 /// Shot detection: hard cuts, dissolves, fades, shot type and camera movement.
 ///
 /// Enable with `features = ["shots"]`.
+///
+/// See the [`oximedia_shots`] crate for the full API surface.
 #[cfg(feature = "shots")]
 pub mod shots {
     //! Shot detection, classification, and analysis.
@@ -501,6 +662,8 @@ pub mod shots {
 /// Broadcast video scopes: waveform, vectorscope, histogram, parade, false color.
 ///
 /// Enable with `features = ["scopes"]`.
+///
+/// See the [`oximedia_scopes`] crate for the full API surface.
 #[cfg(feature = "scopes")]
 pub mod scopes {
     //! Professional broadcast video scopes.
@@ -514,6 +677,8 @@ pub mod scopes {
 /// Visual effects and compositing: transitions, keying, particles, generators, stylization.
 ///
 /// Enable with `features = ["vfx"]`.
+///
+/// See the [`oximedia_vfx`] crate for the full API surface.
 #[cfg(feature = "vfx")]
 pub mod vfx {
     //! Professional visual effects and compositing engine.
@@ -528,6 +693,8 @@ pub mod vfx {
 /// Advanced image processing: DPX, OpenEXR, TIFF, ICC, DNG, XMP, pyramid, tone curves.
 ///
 /// Enable with `features = ["image-ext"]`.
+///
+/// See the [`oximedia_image`] crate for the full API surface.
 #[cfg(feature = "image-ext")]
 pub mod image_ext {
     //! Professional image sequence I/O and processing for cinema and VFX workflows.
@@ -542,6 +709,8 @@ pub mod image_ext {
 /// Perceptual watermark embedding and forensic detection (DSSS, echo, phase, QIM).
 ///
 /// Enable with `features = ["watermark"]`.
+///
+/// See the [`oximedia_watermark`] crate for the full API surface.
 #[cfg(feature = "watermark")]
 pub mod watermark {
     //! Professional audio watermarking and steganography.
@@ -556,6 +725,8 @@ pub mod watermark {
 /// Music Information Retrieval: beat tracking, key detection, fingerprinting, MIR analysis.
 ///
 /// Enable with `features = ["mir"]`.
+///
+/// See the [`oximedia_mir`] crate for the full API surface.
 #[cfg(feature = "mir")]
 pub mod mir {
     //! Music Information Retrieval (MIR) system.
@@ -570,6 +741,8 @@ pub mod mir {
 /// Content recommendation engine with collaborative filtering and personalization.
 ///
 /// Enable with `features = ["recommend"]`.
+///
+/// See the [`oximedia_recommend`] crate for the full API surface.
 #[cfg(feature = "recommend")]
 pub mod recommend {
     //! Content recommendation and discovery engine.
@@ -584,6 +757,8 @@ pub mod recommend {
 /// Broadcast playlist management, scheduling, SCTE-35, EPG, and automation.
 ///
 /// Enable with `features = ["playlist"]`.
+///
+/// See the [`oximedia_playlist`] crate for the full API surface.
 #[cfg(feature = "playlist")]
 pub mod playlist {
     //! Broadcast playlist and scheduling system.
@@ -598,6 +773,8 @@ pub mod playlist {
 /// Broadcast playout server with ad insertion, graphics overlays, and failover.
 ///
 /// Enable with `features = ["playout"]`.
+///
+/// See the [`oximedia_playout`] crate for the full API surface.
 #[cfg(feature = "playout")]
 pub mod playout {
     //! Professional broadcast playout server.
@@ -612,6 +789,8 @@ pub mod playout {
 /// Digital rights management: licensing, territory restrictions, royalties, clearances.
 ///
 /// Enable with `features = ["rights"]`.
+///
+/// See the [`oximedia_rights`] crate for the full API surface.
 #[cfg(feature = "rights")]
 pub mod rights {
     //! Content rights and licensing management.
@@ -626,6 +805,8 @@ pub mod rights {
 /// Collaborative media review and approval workflow with frame-accurate annotations.
 ///
 /// Enable with `features = ["review"]`.
+///
+/// See the [`oximedia_review`] crate for the full API surface.
 #[cfg(feature = "review")]
 pub mod review {
     //! Collaborative media review and approval workflow.
@@ -640,6 +821,8 @@ pub mod review {
 /// Audio/video restoration: click/crackle removal, noise reduction, telecine, declipping.
 ///
 /// Enable with `features = ["restore"]`.
+///
+/// See the [`oximedia_restore`] crate for the full API surface.
 #[cfg(feature = "restore")]
 pub mod restore {
     //! Professional audio/video restoration tools.
@@ -655,6 +838,8 @@ pub mod restore {
 /// Media file repair and recovery: corruption detection, header repair, index rebuilding.
 ///
 /// Enable with `features = ["repair"]`.
+///
+/// See the [`oximedia_repair`] crate for the full API surface.
 #[cfg(feature = "repair")]
 pub mod repair {
     //! Media file repair and recovery tools.
@@ -669,6 +854,8 @@ pub mod repair {
 /// Multi-camera sync and angle switching with automatic camera selection.
 ///
 /// Enable with `features = ["multicam"]`.
+///
+/// See the [`oximedia_multicam`] crate for the full API surface.
 #[cfg(feature = "multicam")]
 pub mod multicam {
     //! Multi-camera synchronization and switching.
@@ -683,6 +870,8 @@ pub mod multicam {
 /// Video stabilization: motion estimation, trajectory smoothing, rolling shutter correction.
 ///
 /// Enable with `features = ["stabilize"]`.
+///
+/// See the [`oximedia_stabilize`] crate for the full API surface.
 #[cfg(feature = "stabilize")]
 pub mod stabilize {
     //! Professional video stabilization.
@@ -698,6 +887,8 @@ pub mod stabilize {
 /// Cloud storage and processing abstraction: S3, Azure Blob, GCS, CDN, cost optimization.
 ///
 /// Enable with `features = ["cloud"]`.
+///
+/// See the [`oximedia_cloud`] crate for the full API surface.
 #[cfg(feature = "cloud")]
 pub mod cloud {
     //! Cloud storage and media services integration.
@@ -713,6 +904,8 @@ pub mod cloud {
 /// EDL (Edit Decision List) parsing and generation: CMX 3600, GVG, Sony BVE-9000.
 ///
 /// Enable with `features = ["edl"]`.
+///
+/// See the [`oximedia_edl`] crate for the full API surface.
 #[cfg(feature = "edl")]
 pub mod edl {
     //! EDL (Edit Decision List) parsing and generation.
@@ -728,6 +921,8 @@ pub mod edl {
 /// NDI (Network Device Interface) clean-room protocol implementation for IP video.
 ///
 /// Enable with `features = ["ndi"]`.
+///
+/// See the [`oximedia_ndi`] crate for the full API surface.
 #[cfg(feature = "ndi")]
 pub mod ndi {
     //! NDI (Network Device Interface) protocol support.
@@ -742,6 +937,8 @@ pub mod ndi {
 /// IMF (Interoperable Master Format) package support per SMPTE ST 2067.
 ///
 /// Enable with `features = ["imf"]`.
+///
+/// See the [`oximedia_imf`] crate for the full API surface.
 #[cfg(feature = "imf")]
 pub mod imf {
     //! IMF (Interoperable Master Format) package support.
@@ -757,6 +954,8 @@ pub mod imf {
 /// AAF (Advanced Authoring Format) interchange per SMPTE ST 377-1.
 ///
 /// Enable with `features = ["aaf"]`.
+///
+/// See the [`oximedia_aaf`] crate for the full API surface.
 #[cfg(feature = "aaf")]
 pub mod aaf {
     //! AAF (Advanced Authoring Format) interchange support.
@@ -771,6 +970,8 @@ pub mod aaf {
 /// PTP/NTP time synchronization for broadcast production (IEEE 1588-2019, RFC 5905).
 ///
 /// Enable with `features = ["timesync"]`.
+///
+/// See the [`oximedia_timesync`] crate for the full API surface.
 #[cfg(feature = "timesync")]
 pub mod timesync {
     //! Precision time synchronization for broadcast media production.
@@ -786,6 +987,8 @@ pub mod timesync {
 /// Media forensics: tampering detection, ELA, noise analysis, copy-move, provenance.
 ///
 /// Enable with `features = ["forensics"]`.
+///
+/// See the [`oximedia_forensics`] crate for the full API surface.
 #[cfg(feature = "forensics")]
 pub mod forensics {
     //! Media forensics analysis and tampering detection.
@@ -801,6 +1004,8 @@ pub mod forensics {
 /// Hardware acceleration: Vulkan GPU compute, CPU fallback, device management.
 ///
 /// Enable with `features = ["accel"]`.
+///
+/// See the [`oximedia_accel`] crate for the full API surface.
 #[cfg(feature = "accel")]
 pub mod accel {
     //! Hardware acceleration abstraction layer.
@@ -813,6 +1018,8 @@ pub mod accel {
 /// SIMD-optimised kernels: DCT, SAD, interpolation, blending, color conversion.
 ///
 /// Enable with `features = ["simd"]`.
+///
+/// See the [`oximedia_simd`] crate for the full API surface.
 #[cfg(feature = "simd")]
 pub mod simd {
     //! Hand-tuned SIMD media kernels.
@@ -825,6 +1032,8 @@ pub mod simd {
 /// Professional live video switcher: M/E rows, keyers, DVE, tally, macros.
 ///
 /// Enable with `features = ["switcher"]`.
+///
+/// See the [`oximedia_switcher`] crate for the full API surface.
 #[cfg(feature = "switcher")]
 pub mod switcher {
     //! Professional live production video switcher.
@@ -838,6 +1047,8 @@ pub mod switcher {
 /// Multi-track timeline editor: frame-accurate editing, keyframes, EDL/XML/AAF.
 ///
 /// Enable with `features = ["timeline"]`.
+///
+/// See the [`oximedia_timeline`] crate for the full API surface.
 #[cfg(feature = "timeline")]
 pub mod timeline {
     //! Professional multi-track timeline editor.
@@ -851,6 +1062,8 @@ pub mod timeline {
 /// Codec optimisation suite: RDO, psychovisual, adaptive quantization, motion search.
 ///
 /// Enable with `features = ["optimize"]`.
+///
+/// See the [`oximedia_optimize`] crate for the full API surface.
 #[cfg(feature = "optimize")]
 pub mod optimize {
     //! Advanced codec optimisation and tuning.
@@ -864,6 +1077,8 @@ pub mod optimize {
 /// Performance profiling: CPU, GPU, memory, frame timing, flame graphs, bottlenecks.
 ///
 /// Enable with `features = ["profiler"]`.
+///
+/// See the [`oximedia_profiler`] crate for the full API surface.
 #[cfg(feature = "profiler")]
 pub mod profiler {
     //! Comprehensive performance profiling tools.
@@ -877,6 +1092,8 @@ pub mod profiler {
 /// Distributed render farm coordinator: job management, worker pools, cloud bursting.
 ///
 /// Enable with `features = ["renderfarm"]`.
+///
+/// See the [`oximedia_renderfarm`] crate for the full API surface.
 #[cfg(feature = "renderfarm")]
 pub mod renderfarm {
     //! Enterprise-grade render farm coordinator.
@@ -890,6 +1107,8 @@ pub mod renderfarm {
 /// Cloud-agnostic object storage: S3, Azure Blob, GCS, local, caching, lifecycle.
 ///
 /// Enable with `features = ["storage"]`.
+///
+/// See the [`oximedia_storage`] crate for the full API surface.
 #[cfg(feature = "storage")]
 pub mod storage {
     //! Unified cloud and local object storage abstraction.
@@ -903,6 +1122,8 @@ pub mod storage {
 /// Real-time CRDT-based collaborative editing for multi-user video production.
 ///
 /// Enable with `features = ["collab"]`.
+///
+/// See the [`oximedia_collab`] crate for the full API surface.
 #[cfg(feature = "collab")]
 pub mod collab {
     //! Real-time multi-user collaborative video editing.
@@ -916,6 +1137,8 @@ pub mod collab {
 /// Game streaming and screen capture: ultra-low latency, overlays, replay buffer.
 ///
 /// Enable with `features = ["gaming"]`.
+///
+/// See the [`oximedia_gaming`] crate for the full API surface.
 #[cfg(feature = "gaming")]
 pub mod gaming {
     //! Game streaming and screen capture optimisation.
@@ -929,6 +1152,8 @@ pub mod gaming {
 /// Virtual production and LED wall tools: camera tracking, in-camera VFX, genlock.
 ///
 /// Enable with `features = ["virtual-prod"]`.
+///
+/// See the [`oximedia_virtual`] crate for the full API surface.
 #[cfg(feature = "virtual-prod")]
 pub mod virtual_prod {
     //! Virtual production and LED wall tooling.
@@ -942,6 +1167,8 @@ pub mod virtual_prod {
 /// Accessibility: audio description, captions, sign language, compliance (WCAG, EBU).
 ///
 /// Enable with `features = ["access"]`.
+///
+/// See the [`oximedia_access`] crate for the full API surface.
 #[cfg(feature = "access")]
 pub mod access {
     //! Inclusive media accessibility tools.
@@ -955,6 +1182,8 @@ pub mod access {
 /// Media conforming: EDL/XML/AAF timeline-to-media matching and reconstruction.
 ///
 /// Enable with `features = ["conform"]`.
+///
+/// See the [`oximedia_conform`] crate for the full API surface.
 #[cfg(feature = "conform")]
 pub mod conform {
     //! Professional media conforming system.
@@ -968,6 +1197,8 @@ pub mod conform {
 /// Media format conversion: batch transcoding, format detection, metadata preservation.
 ///
 /// Enable with `features = ["convert"]`.
+///
+/// See the [`oximedia_convert`] crate for the full API surface.
 #[cfg(feature = "convert")]
 pub mod convert {
     //! Comprehensive media format conversion utilities.
@@ -981,6 +1212,8 @@ pub mod convert {
 /// Broadcast automation: master control, 24/7 playout, device control, failover, EAS.
 ///
 /// Enable with `features = ["automation"]`.
+///
+/// See the [`oximedia_automation`] crate for the full API surface.
 #[cfg(feature = "automation")]
 pub mod automation {
     //! 24/7 broadcast automation and master control system.
@@ -994,6 +1227,8 @@ pub mod automation {
 /// Professional clip management: logging, subclips, bins, smart collections, export.
 ///
 /// Enable with `features = ["clips"]`.
+///
+/// See the [`oximedia_clips`] crate for the full API surface.
 #[cfg(feature = "clips")]
 pub mod clips {
     //! Professional clip management and logging system.
@@ -1007,6 +1242,8 @@ pub mod clips {
 /// Proxy and offline editing workflows: generation, linking, conforming, relink.
 ///
 /// Enable with `features = ["proxy"]`.
+///
+/// See the [`oximedia_proxy`] crate for the full API surface.
 #[cfg(feature = "proxy")]
 pub mod proxy {
     //! Proxy and offline editing workflow system.
@@ -1020,6 +1257,8 @@ pub mod proxy {
 /// Encoding preset library: 200+ platform, broadcast, streaming, and archive presets.
 ///
 /// Enable with `features = ["presets"]`.
+///
+/// See the [`oximedia_presets`] crate for the full API surface.
 #[cfg(feature = "presets")]
 pub mod presets {
     //! Advanced encoding preset library.
@@ -1033,6 +1272,8 @@ pub mod presets {
 /// Color calibration: ColorChecker profiling, display calibration, ICC, LUT generation.
 ///
 /// Enable with `features = ["calibrate"]`.
+///
+/// See the [`oximedia_calibrate`] crate for the full API surface.
 #[cfg(feature = "calibrate")]
 pub mod calibrate {
     //! Professional color calibration and matching tools.
@@ -1046,6 +1287,8 @@ pub mod calibrate {
 /// Spatial and temporal video denoising: bilateral, NLM, Wiener, wavelet, Kalman.
 ///
 /// Enable with `features = ["denoise"]`.
+///
+/// See the [`oximedia_denoise`] crate for the full API surface.
 #[cfg(feature = "denoise")]
 pub mod denoise {
     //! Professional video denoising.
@@ -1059,6 +1302,8 @@ pub mod denoise {
 /// Video alignment and registration: temporal sync, spatial homography, feature matching.
 ///
 /// Enable with `features = ["align"]`.
+///
+/// See the [`oximedia_align`] crate for the full API surface.
 #[cfg(feature = "align")]
 pub mod align {
     //! Multi-camera video alignment and registration.
@@ -1072,6 +1317,8 @@ pub mod align {
 /// Comprehensive media analysis: scene detection, quality assessment, content classification.
 ///
 /// Enable with `features = ["analysis"]`.
+///
+/// See the [`oximedia_analysis`] crate for the full API surface.
 #[cfg(feature = "analysis")]
 pub mod analysis {
     //! Comprehensive media analysis and quality assessment.
@@ -1085,6 +1332,8 @@ pub mod analysis {
 /// Professional audio post-production: ADR, Foley, mixing console, stems, delivery.
 ///
 /// Enable with `features = ["audiopost"]`.
+///
+/// See the [`oximedia_audiopost`] crate for the full API surface.
 #[cfg(feature = "audiopost")]
 pub mod audiopost {
     //! Professional audio post-production suite.
@@ -1098,6 +1347,8 @@ pub mod audiopost {
 /// Broadcast-grade quality control: video, audio, container, and compliance validation.
 ///
 /// Enable with `features = ["qc"]`.
+///
+/// See the [`oximedia_qc`] crate for the full API surface.
 #[cfg(feature = "qc")]
 pub mod qc {
     //! Quality control and delivery validation.
@@ -1111,6 +1362,8 @@ pub mod qc {
 /// Job queue and worker management for scalable media transcoding pipelines.
 ///
 /// Enable with `features = ["jobs"]`.
+///
+/// See the [`oximedia_jobs`] crate for the full API surface.
 #[cfg(feature = "jobs")]
 pub mod jobs {
     //! Job queue and worker management for video transcoding.
@@ -1124,6 +1377,8 @@ pub mod jobs {
 /// Automated video editing: highlight detection, smart cutting, auto-assembly, rules engine.
 ///
 /// Enable with `features = ["auto"]`.
+///
+/// See the [`oximedia_auto`] crate for the full API surface.
 #[cfg(feature = "auto")]
 pub mod auto {
     //! Automated video editing system.
@@ -1137,6 +1392,8 @@ pub mod auto {
 /// Video timeline editor: multi-track, effects, transitions, keyframes, rendering.
 ///
 /// Enable with `features = ["edit"]`.
+///
+/// See the [`oximedia_edit`] crate for the full API surface.
 #[cfg(feature = "edit")]
 pub mod edit {
     //! Video timeline editor.
@@ -1150,6 +1407,8 @@ pub mod edit {
 /// Signal routing, NMOS IS-04/IS-05/IS-07, crosspoint matrix, virtual patch bay.
 ///
 /// Enable with `features = ["routing"]`.
+///
+/// See the [`oximedia_routing`] crate for the full API surface.
 #[cfg(feature = "routing")]
 pub mod routing {
     //! Professional audio/video signal routing and patching.
@@ -1163,6 +1422,8 @@ pub mod routing {
 /// Advanced audio analysis: spectral, voice, music, source separation, forensics, pitch.
 ///
 /// Enable with `features = ["audio-analysis"]`.
+///
+/// See the [`oximedia_audio_analysis`] crate for the full API surface.
 #[cfg(feature = "audio-analysis")]
 pub mod audio_analysis {
     //! Comprehensive audio analysis and forensics.
@@ -1178,6 +1439,8 @@ pub mod audio_analysis {
 /// GPU compute pipeline: WGPU-based acceleration (Vulkan, Metal, DX12, WebGPU).
 ///
 /// Enable with `features = ["gpu"]`.
+///
+/// See the [`oximedia_gpu`] crate for the full API surface.
 #[cfg(feature = "gpu")]
 pub mod gpu {
     //! Cross-platform GPU acceleration layer.
@@ -1191,6 +1454,8 @@ pub mod gpu {
 /// HLS/DASH adaptive streaming packager: manifests, segments, bitrate ladders, encryption.
 ///
 /// Enable with `features = ["packager"]`.
+///
+/// See the [`oximedia_packager`] crate for the full API surface.
 #[cfg(feature = "packager")]
 pub mod packager {
     //! Adaptive streaming packaging for HLS and DASH.
@@ -1204,6 +1469,8 @@ pub mod packager {
 /// Content protection: CENC, Widevine, PlayReady, FairPlay, Clear Key DRM.
 ///
 /// Enable with `features = ["drm"]`.
+///
+/// See the [`oximedia_drm`] crate for the full API surface.
 #[cfg(feature = "drm")]
 pub mod drm {
     //! Digital Rights Management and encryption.
@@ -1217,6 +1484,8 @@ pub mod drm {
 /// Professional digital preservation: BagIt, OAIS, PREMIS, METS, fixity, migration.
 ///
 /// Enable with `features = ["archive-pro"]`.
+///
+/// See the [`oximedia_archive_pro`] crate for the full API surface.
 #[cfg(feature = "archive-pro")]
 pub mod archive_pro {
     //! Advanced digital preservation system.
@@ -1230,6 +1499,8 @@ pub mod archive_pro {
 /// Distributed encoding: multi-node coordinator, load balancing, segment/tile/GOP splitting.
 ///
 /// Enable with `features = ["distributed"]`.
+///
+/// See the [`oximedia_distributed`] crate for the full API surface.
 #[cfg(feature = "distributed")]
 pub mod distributed {
     //! Distributed video encoding system.
@@ -1243,6 +1514,8 @@ pub mod distributed {
 /// Render farm coordinator: gRPC workers, priority scheduling, SQLite persistence.
 ///
 /// Enable with `features = ["farm"]`.
+///
+/// See the [`oximedia_farm`] crate for the full API surface.
 #[cfg(feature = "farm")]
 pub mod farm {
     //! Distributed render farm coordinator.
@@ -1256,6 +1529,8 @@ pub mod farm {
 /// Dolby Vision RPU metadata: parser and writer for Profiles 5, 7, 8, 8.1, 8.4.
 ///
 /// Enable with `features = ["dolbyvision"]`.
+///
+/// See the [`oximedia_dolbyvision`] crate for the full API surface.
 #[cfg(feature = "dolbyvision")]
 pub mod dolbyvision {
     //! Dolby Vision RPU (Reference Processing Unit) metadata support.
@@ -1269,6 +1544,8 @@ pub mod dolbyvision {
 /// Professional digital audio mixer: 100+ channels, automation, effects, bus architecture.
 ///
 /// Enable with `features = ["mixer"]`.
+///
+/// See the [`oximedia_mixer`] crate for the full API surface.
 #[cfg(feature = "mixer")]
 pub mod mixer {
     //! Full-featured digital audio mixing console.
@@ -1283,6 +1560,8 @@ pub mod mixer {
 /// High-quality video scaling: bilinear, bicubic, Lanczos, super-resolution, content-aware.
 ///
 /// Enable with `features = ["scaling"]`.
+///
+/// See the [`oximedia_scaling`] crate for the full API surface.
 #[cfg(feature = "scaling")]
 pub mod scaling {
     //! Professional video scaling operations.
@@ -1296,6 +1575,8 @@ pub mod scaling {
 /// Broadcast graphics engine: lower thirds, tickers, tally, keyframe animation, templates.
 ///
 /// Enable with `features = ["graphics"]`.
+///
+/// See the [`oximedia_graphics`] crate for the full API surface.
 #[cfg(feature = "graphics")]
 pub mod graphics {
     //! Broadcast graphics and overlay engine.
@@ -1310,6 +1591,8 @@ pub mod graphics {
 /// Patent-free video-over-IP: VP9/AV1 transport, mDNS discovery, FEC, tally, PTZ.
 ///
 /// Enable with `features = ["videoip"]`.
+///
+/// See the [`oximedia_videoip`] crate for the full API surface.
 #[cfg(feature = "videoip")]
 pub mod videoip {
     //! Professional video-over-IP protocol (patent-free NDI alternative).
@@ -1323,6 +1606,8 @@ pub mod videoip {
 /// FFmpeg CLI compatibility: parse FFmpeg arguments and translate to OxiMedia operations.
 ///
 /// Enable with `features = ["compat-ffmpeg"]`.
+///
+/// See the [`oximedia_compat_ffmpeg`] crate for the full API surface.
 #[cfg(feature = "compat-ffmpeg")]
 pub mod compat_ffmpeg {
     //! FFmpeg CLI argument compatibility layer.
@@ -1336,6 +1621,8 @@ pub mod compat_ffmpeg {
 /// Dynamic and static codec plugin system for extending OxiMedia with external codecs.
 ///
 /// Enable with `features = ["plugin"]`.
+///
+/// See the [`oximedia_plugin`] crate for the full API surface.
 #[cfg(feature = "plugin")]
 pub mod plugin {
     //! Codec plugin system.
@@ -1350,6 +1637,8 @@ pub mod plugin {
 /// RESTful media server: JWT auth, HLS/DASH streaming, WebSocket progress, media library.
 ///
 /// Enable with `features = ["server"]`.
+///
+/// See the [`oximedia_server`] crate for the full API surface.
 #[cfg(feature = "server")]
 pub mod server {
     //! Production-ready RESTful media server.
@@ -1364,6 +1653,8 @@ pub mod server {
 /// HDR video processing: PQ/HLG transfer functions, tone mapping, HDR10/HDR10+ metadata.
 ///
 /// Enable with `features = ["hdr"]`.
+///
+/// See the [`oximedia_hdr`] crate for the full API surface.
 #[cfg(feature = "hdr")]
 pub mod hdr {
     //! HDR video processing: PQ/HLG transfer functions, tone mapping, HDR10+ metadata.
@@ -1378,6 +1669,8 @@ pub mod hdr {
 /// Spatial audio processing: Higher-Order Ambisonics, binaural HRTF rendering, room simulation.
 ///
 /// Enable with `features = ["spatial"]`.
+///
+/// See the [`oximedia_spatial`] crate for the full API surface.
 #[cfg(feature = "spatial")]
 pub mod spatial {
     //! Spatial audio processing: Ambisonics, binaural HRTF, room acoustics.
@@ -1391,6 +1684,8 @@ pub mod spatial {
 /// High-performance caching infrastructure: LRU, tiered cache, predictive warming.
 ///
 /// Enable with `features = ["cache"]`.
+///
+/// See the [`oximedia_cache`] crate for the full API surface.
 #[cfg(feature = "cache")]
 pub mod cache {
     //! High-performance media caching primitives.
@@ -1406,6 +1701,8 @@ pub mod cache {
 /// Adaptive streaming pipeline: quality ladders, ABR switching, segment management, QoE health.
 ///
 /// Enable with `features = ["stream"]`.
+///
+/// See the [`oximedia_stream`] crate for the full API surface.
 #[cfg(feature = "stream")]
 pub mod stream {
     //! Adaptive streaming pipeline, segment lifecycle management, and stream health monitoring.
@@ -1419,6 +1716,8 @@ pub mod stream {
 /// Video processing algorithms: scene detection, pulldown detection, temporal denoising, and perceptual fingerprinting.
 ///
 /// Enable with `features = ["video-proc"]`.
+///
+/// See the [`oximedia_video`] crate for the full API surface.
 #[cfg(feature = "video-proc")]
 pub mod video_proc {
     //! Video processing: scene detection, 3:2 pulldown, temporal denoising, perceptual fingerprinting.
@@ -1428,6 +1727,8 @@ pub mod video_proc {
 /// CDN edge management, cache invalidation, geographic routing, and origin failover.
 ///
 /// Enable with `features = ["cdn"]`.
+///
+/// See the [`oximedia_cdn`] crate for the full API surface.
 #[cfg(feature = "cdn")]
 pub mod cdn {
     //! CDN edge management, cache invalidation, geo-routing, and origin failover.
@@ -1437,6 +1738,8 @@ pub mod cdn {
 /// Lightweight neural network inference for media: tensor ops, conv2d, scene classification.
 ///
 /// Enable with `features = ["neural"]`.
+///
+/// See the [`oximedia_neural`] crate for the full API surface.
 #[cfg(feature = "neural")]
 pub mod neural {
     //! Lightweight neural network inference for media processing.
@@ -1447,6 +1750,8 @@ pub mod neural {
 /// 360° VR video processing: equirectangular/cubemap projections, fisheye, stereo 3D.
 ///
 /// Enable with `features = ["vr360"]`.
+///
+/// See the [`oximedia_360`] crate for the full API surface.
 #[cfg(feature = "vr360")]
 pub mod vr360 {
     //! 360° VR video: spherical projection conversions, fisheye, stereo 3D, and spatial metadata.
@@ -1456,6 +1761,8 @@ pub mod vr360 {
 /// Media engagement analytics: session tracking, retention curves, A/B testing, scoring.
 ///
 /// Enable with `features = ["analytics"]`.
+///
+/// See the [`oximedia_analytics`] crate for the full API surface.
 #[cfg(feature = "analytics")]
 pub mod analytics {
     //! Media analytics: viewer sessions, retention curves, A/B testing, engagement scoring.
@@ -1465,6 +1772,8 @@ pub mod analytics {
 /// Advanced caption generation: speech alignment, WCAG compliance, speaker diarization.
 ///
 /// Enable with `features = ["caption-gen"]`.
+///
+/// See the [`oximedia_caption_gen`] crate for the full API surface.
 #[cfg(feature = "caption-gen")]
 pub mod caption_gen {
     //! Caption generation: speech alignment, Knuth-Plass line breaking, WCAG 2.1 compliance, diarization.
@@ -1474,6 +1783,8 @@ pub mod caption_gen {
 /// Image transformation: resize, crop, rotate, flip, color conversion.
 ///
 /// Enable with `features = ["image-transform"]`.
+///
+/// See the [`oximedia_image_transform`] crate for the full API surface.
 #[cfg(feature = "image-transform")]
 pub mod image_transform {
     //! Image transformation operations: resize, crop, rotate, flip, and color conversion.
@@ -1500,6 +1811,8 @@ pub mod image_transform {
 ///     .expect("pipeline validation");
 /// # }
 /// ```
+///
+/// See the [`oximedia_pipeline`] crate for the full API surface.
 #[cfg(feature = "pipeline")]
 pub mod pipeline {
     //! Declarative media processing pipeline DSL.
@@ -1567,6 +1880,8 @@ pub mod ml {
 /// Motion JPEG (MJPEG) intra-frame video codec.
 ///
 /// Enable with `features = ["mjpeg"]`.
+///
+/// See the [`oximedia_codec`] crate for the full API surface.
 #[cfg(feature = "mjpeg")]
 pub mod mjpeg {
     //! Motion JPEG video codec.
@@ -1581,6 +1896,8 @@ pub mod mjpeg {
 /// APV (Advanced Professional Video) intra-frame codec (ISO/IEC 23009-13).
 ///
 /// Enable with `features = ["apv"]`.
+///
+/// See the [`oximedia_codec`] crate for the full API surface.
 #[cfg(feature = "apv")]
 pub mod apv {
     //! APV (Advanced Professional Video) codec.

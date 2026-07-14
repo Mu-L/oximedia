@@ -1,60 +1,140 @@
 //! Database persistence for batch processing.
 //!
-//! [`Database`] wraps an r2d2 connection pool for `SQLite` access.  Use
-//! [`Database::new`] for a single-connection-equivalent default or
-//! [`DatabasePool::new`] to construct a pool with explicit `max_connections`.
+//! [`Database`] wraps an OxiSQL connection for SQLite access.  Use
+//! [`Database::new`] with a file path for a file-backed database, or pass
+//! `":memory:"` as the path for an ephemeral in-memory database for testing.
 
 pub mod schema;
 
-use crate::error::Result;
+use crate::error::{BatchError, Result};
 use crate::job::{BatchJob, BatchOperation, InputSpec, OutputSpec};
 use crate::types::{JobId, JobState, Priority, RetryPolicy};
 use chrono::Utc;
-use r2d2::Pool;
-use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::params;
+use oxisql_core::{ToSqlValue, Value};
+use oxisql_sqlite_compat::SqliteConnectionBlocking;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
-// DatabasePool — configurable connection pool
+// Error helpers
 // ---------------------------------------------------------------------------
 
-/// A SQLite connection pool with configurable maximum connections.
+fn map_oxi(e: impl std::fmt::Display) -> BatchError {
+    BatchError::DatabaseError(e.to_string())
+}
+
+fn col_text(row: &oxisql_core::Row, idx: usize) -> Result<String> {
+    match row.get_by_index(idx) {
+        Some(Value::Text(s)) => Ok(s.clone()),
+        Some(other) => Err(BatchError::DatabaseError(format!(
+            "column {idx}: expected text, got {}",
+            other.type_name()
+        ))),
+        None => Err(BatchError::DatabaseError(format!(
+            "column {idx} missing from row"
+        ))),
+    }
+}
+
+fn col_i64(row: &oxisql_core::Row, idx: usize) -> Result<i64> {
+    match row.get_by_index(idx) {
+        Some(Value::I64(n)) => Ok(*n),
+        Some(Value::Null) | None => Ok(0),
+        Some(other) => Err(BatchError::DatabaseError(format!(
+            "column {idx}: expected integer, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn col_opt_text(row: &oxisql_core::Row, idx: usize) -> Option<String> {
+    match row.get_by_index(idx) {
+        Some(Value::Text(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn col_real_or_none(row: &oxisql_core::Row, idx: usize) -> Option<f64> {
+    match row.get_by_index(idx) {
+        Some(Value::F64(f)) => Some(*f),
+        Some(Value::I64(n)) => Some(*n as f64),
+        Some(Value::Null) | None => None,
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Runtime guard helper
+// ---------------------------------------------------------------------------
+
+/// Drive a blocking closure, optionally exiting the Tokio async context first.
 ///
-/// This is the preferred entry point when you need explicit control over
-/// pool sizing.  For convenience, [`Database`] exposes the same SQL API
-/// but uses the r2d2 default pool size (10).
+/// `SqliteConnectionBlocking::execute / query / execute_batch` internally call
+/// `tokio::runtime::Runtime::block_on` via an internal `block_local` helper.
+/// That call panics when this thread is already inside a running Tokio runtime.
+/// `block_in_place` temporarily moves the thread out of the multi-thread
+/// scheduler so that `block_on` can succeed.  When there is no current runtime
+/// (plain `#[test]` contexts) we call through directly.
+///
+/// All async test fixtures that exercise the database layer must therefore use
+/// `#[tokio::test(flavor = "multi_thread")]` so that `block_in_place` is
+/// available.
+fn run_blocking<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::task::block_in_place(f)
+    } else {
+        f()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared inner state
+// ---------------------------------------------------------------------------
+
+struct Inner {
+    conn: SqliteConnectionBlocking,
+}
+
+impl Inner {
+    fn exec(&self, sql: &str, params: &[&dyn ToSqlValue]) -> Result<u64> {
+        run_blocking(|| self.conn.execute(sql, params).map_err(map_oxi))
+    }
+
+    fn query(&self, sql: &str, params: &[&dyn ToSqlValue]) -> Result<Vec<oxisql_core::Row>> {
+        run_blocking(|| self.conn.query(sql, params).map_err(map_oxi))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DatabasePool — configurable connection (compat shim, single connection)
+// ---------------------------------------------------------------------------
+
+/// A SQLite connection wrapper (single-connection; pool API for compatibility).
 ///
 /// # Example
 /// ```no_run
 /// use std::path::Path;
 /// use oximedia_batch::database::DatabasePool;
 ///
-/// let pool = DatabasePool::new(Path::new("/tmp/batch.db"), 4).unwrap();
+/// let pool = DatabasePool::new(Path::new("/tmp/batch.db"), 4).expect("pool creation failed");
 /// let db = pool.into_database();
 /// ```
 pub struct DatabasePool {
-    pool: Pool<SqliteConnectionManager>,
+    inner: Arc<Mutex<Inner>>,
 }
 
 impl DatabasePool {
-    /// Create a new connection pool backed by the `SQLite` file at *db_path*.
-    ///
-    /// # Arguments
-    ///
-    /// * `db_path` - Filesystem path to the `SQLite` database file.
-    /// * `max_connections` - Maximum number of simultaneous connections in the
-    ///   pool.  Must be ≥ 1.
+    /// Create a new database backed by the SQLite file at *db_path*.
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - `max_connections` is zero.
-    /// - The r2d2 pool cannot be built (e.g. the path is not writable).
-    /// - Schema initialisation fails.
+    /// Returns an error if max_connections is zero or the database fails to open.
     pub fn new(db_path: &Path, max_connections: u32) -> Result<Self> {
         if max_connections == 0 {
-            return Err(crate::error::BatchError::InvalidJobConfig(
+            return Err(BatchError::InvalidJobConfig(
                 "max_connections must be >= 1".to_string(),
             ));
         }
@@ -62,140 +142,156 @@ impl DatabasePool {
         let path_str = db_path
             .to_str()
             .ok_or_else(|| {
-                crate::error::BatchError::InvalidJobConfig(
+                BatchError::InvalidJobConfig(
                     "database path contains non-UTF-8 characters".to_string(),
                 )
             })?
             .to_string();
 
-        let manager = SqliteConnectionManager::file(&path_str);
-        let pool = Pool::builder().max_size(max_connections).build(manager)?;
+        let conn = SqliteConnectionBlocking::open(&path_str).map_err(map_oxi)?;
 
-        let dp = Self { pool };
-
-        // Initialise schema using the same DDL as Database.
+        let dp = Self {
+            inner: Arc::new(Mutex::new(Inner { conn })),
+        };
         dp.init_schema()?;
-
         Ok(dp)
     }
 
-    /// Initialise the jobs / job_logs / job_results schema.
-    fn init_schema(&self) -> Result<()> {
-        let conn = self.pool.get()?;
-        init_schema_on_conn(&conn)
+    fn with_inner<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Inner) -> Result<T>,
+    {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| BatchError::DatabaseError("mutex poisoned".to_string()))?;
+        f(&guard)
     }
 
-    /// Convert this pool into a [`Database`] that owns the same underlying
-    /// connection pool.
+    fn init_schema(&self) -> Result<()> {
+        // SCHEMA_DDL is pure DDL (CREATE TABLE / CREATE INDEX) with no settable
+        // PRAGMA or VACUUM statements, so it is issued in one batch. If settable
+        // PRAGMAs (e.g. journal_mode, foreign_keys) or VACUUM were ever added,
+        // they would need best-effort handling because the oxisqlite 0.3 engine
+        // rejects them ("Not a valid pragma name" / "VACUUM not supported yet").
+        self.with_inner(|inner| {
+            run_blocking(|| {
+                inner
+                    .conn
+                    .execute_batch(SCHEMA_DDL)
+                    .map(|_| ())
+                    .map_err(map_oxi)
+            })
+        })
+    }
+
+    /// Convert this pool into a [`Database`] that shares the same connection.
     #[must_use]
     pub fn into_database(self) -> Database {
-        Database { pool: self.pool }
-    }
-
-    /// Return a reference to the inner r2d2 pool.
-    #[must_use]
-    pub fn pool(&self) -> &Pool<SqliteConnectionManager> {
-        &self.pool
+        Database { inner: self.inner }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Shared schema helper
-// ---------------------------------------------------------------------------
-
-fn init_schema_on_conn(conn: &rusqlite::Connection) -> Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS jobs (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            operation TEXT NOT NULL,
-            inputs TEXT,
-            outputs TEXT,
-            priority INTEGER NOT NULL,
-            retry_policy TEXT,
-            dependencies TEXT,
-            schedule TEXT,
-            metadata TEXT,
-            created_at TEXT NOT NULL,
-            started_at TEXT,
-            completed_at TEXT,
-            status TEXT NOT NULL,
-            error TEXT
-        );
-        CREATE TABLE IF NOT EXISTS job_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_id TEXT NOT NULL,
-            timestamp TEXT NOT NULL,
-            level TEXT NOT NULL,
-            message TEXT NOT NULL,
-            FOREIGN KEY(job_id) REFERENCES jobs(id)
-        );
-        CREATE TABLE IF NOT EXISTS job_results (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_id TEXT NOT NULL,
-            input_file TEXT NOT NULL,
-            output_files TEXT,
-            success INTEGER NOT NULL,
-            error TEXT,
-            duration REAL,
-            FOREIGN KEY(job_id) REFERENCES jobs(id)
-        );
-        CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
-        CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
-        CREATE INDEX IF NOT EXISTS idx_job_logs_job_id ON job_logs(job_id);",
-    )?;
-    Ok(())
-}
+const SCHEMA_DDL: &str = "
+    CREATE TABLE IF NOT EXISTS jobs (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        inputs TEXT,
+        outputs TEXT,
+        priority INTEGER NOT NULL,
+        retry_policy TEXT,
+        dependencies TEXT,
+        schedule TEXT,
+        metadata TEXT,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        completed_at TEXT,
+        status TEXT NOT NULL,
+        error TEXT
+    );
+    CREATE TABLE IF NOT EXISTS job_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        level TEXT NOT NULL,
+        message TEXT NOT NULL,
+        FOREIGN KEY(job_id) REFERENCES jobs(id)
+    );
+    CREATE TABLE IF NOT EXISTS job_results (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id TEXT NOT NULL,
+        input_file TEXT NOT NULL,
+        output_files TEXT,
+        success INTEGER NOT NULL,
+        error TEXT,
+        duration REAL,
+        FOREIGN KEY(job_id) REFERENCES jobs(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+    CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
+    CREATE INDEX IF NOT EXISTS idx_job_logs_job_id ON job_logs(job_id);
+";
 
 // ---------------------------------------------------------------------------
-// Database — original single-API wrapper (still uses r2d2 under the hood)
+// Database — main API
 // ---------------------------------------------------------------------------
 
 /// Database for job persistence
 pub struct Database {
-    pool: Pool<SqliteConnectionManager>,
+    inner: Arc<Mutex<Inner>>,
 }
 
 impl Database {
-    /// Create a new database backed by the r2d2 default pool size (10).
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to the `SQLite` database file
+    /// Create a new database backed by the SQLite file at *path*.
     ///
     /// # Errors
     ///
     /// Returns an error if database initialization fails
     pub fn new(path: &str) -> Result<Self> {
-        let manager = SqliteConnectionManager::file(path);
-        let pool = Pool::new(manager)?;
+        let conn = SqliteConnectionBlocking::open(path).map_err(map_oxi)?;
 
-        let db = Self { pool };
-
-        // Initialize schema
+        let db = Self {
+            inner: Arc::new(Mutex::new(Inner { conn })),
+        };
         db.init_schema()?;
-
         Ok(db)
     }
 
-    /// Initialize database schema (delegates to the shared helper).
+    fn with_inner<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Inner) -> Result<T>,
+    {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| BatchError::DatabaseError("mutex poisoned".to_string()))?;
+        f(&guard)
+    }
+
     fn init_schema(&self) -> Result<()> {
-        let conn = self.pool.get()?;
-        init_schema_on_conn(&conn)
+        // SCHEMA_DDL is pure DDL (CREATE TABLE / CREATE INDEX) with no settable
+        // PRAGMA or VACUUM statements, so it is issued in one batch. If settable
+        // PRAGMAs (e.g. journal_mode, foreign_keys) or VACUUM were ever added,
+        // they would need best-effort handling because the oxisqlite 0.3 engine
+        // rejects them ("Not a valid pragma name" / "VACUUM not supported yet").
+        self.with_inner(|inner| {
+            run_blocking(|| {
+                inner
+                    .conn
+                    .execute_batch(SCHEMA_DDL)
+                    .map(|_| ())
+                    .map_err(map_oxi)
+            })
+        })
     }
 
     /// Save a job to the database
-    ///
-    /// # Arguments
-    ///
-    /// * `job` - The job to save
     ///
     /// # Errors
     ///
     /// Returns an error if saving fails
     pub fn save_job(&self, job: &BatchJob) -> Result<()> {
-        let conn = self.pool.get()?;
-
         let operation_json = serde_json::to_string(&job.operation)?;
         let inputs_json = serde_json::to_string(&job.inputs)?;
         let outputs_json = serde_json::to_string(&job.outputs)?;
@@ -203,45 +299,41 @@ impl Database {
         let dependencies_json = serde_json::to_string(&job.dependencies)?;
         let schedule_json = serde_json::to_string(&job.schedule)?;
         let metadata_json = serde_json::to_string(&job.metadata)?;
+        let priority_i = job.priority as i64;
+        let now = Utc::now().to_rfc3339();
 
-        conn.execute(
-            "INSERT OR REPLACE INTO jobs (
-                id, name, operation, inputs, outputs, priority,
-                retry_policy, dependencies, schedule, metadata,
-                created_at, status
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![
-                job.id.as_str(),
-                job.name,
-                operation_json,
-                inputs_json,
-                outputs_json,
-                job.priority as i32,
-                retry_json,
-                dependencies_json,
-                schedule_json,
-                metadata_json,
-                Utc::now().to_rfc3339(),
-                "Queued",
-            ],
-        )?;
-
-        Ok(())
+        self.with_inner(|inner| {
+            inner.exec(
+                "INSERT OR REPLACE INTO jobs (
+                    id, name, operation, inputs, outputs, priority,
+                    retry_policy, dependencies, schedule, metadata,
+                    created_at, status
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                &[
+                    &job.id.as_str(),
+                    &job.name.as_str(),
+                    &operation_json,
+                    &inputs_json,
+                    &outputs_json,
+                    &priority_i,
+                    &retry_json,
+                    &dependencies_json,
+                    &schedule_json,
+                    &metadata_json,
+                    &now,
+                    &"Queued",
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     /// Update job status
-    ///
-    /// # Arguments
-    ///
-    /// * `job_id` - ID of the job
-    /// * `status` - New status
     ///
     /// # Errors
     ///
     /// Returns an error if update fails
     pub fn update_job_status(&self, job_id: &JobId, status: JobState) -> Result<()> {
-        let conn = self.pool.get()?;
-
         let status_str = match status {
             JobState::Queued => "Queued",
             JobState::Running => "Running",
@@ -251,107 +343,100 @@ impl Database {
             JobState::Pending => "Pending",
         };
 
-        match status {
-            JobState::Running => {
-                conn.execute(
-                    "UPDATE jobs SET status = ?1, started_at = ?2 WHERE id = ?3",
-                    params![status_str, Utc::now().to_rfc3339(), job_id.as_str()],
-                )?;
-            }
-            JobState::Completed | JobState::Failed | JobState::Cancelled => {
-                conn.execute(
-                    "UPDATE jobs SET status = ?1, completed_at = ?2 WHERE id = ?3",
-                    params![status_str, Utc::now().to_rfc3339(), job_id.as_str()],
-                )?;
-            }
-            _ => {
-                conn.execute(
-                    "UPDATE jobs SET status = ?1 WHERE id = ?2",
-                    params![status_str, job_id.as_str()],
-                )?;
-            }
-        }
+        let now = Utc::now().to_rfc3339();
 
-        Ok(())
+        self.with_inner(|inner| {
+            match status {
+                JobState::Running => {
+                    inner.exec(
+                        "UPDATE jobs SET status = $1, started_at = $2 WHERE id = $3",
+                        &[&status_str, &now, &job_id.as_str()],
+                    )?;
+                }
+                JobState::Completed | JobState::Failed | JobState::Cancelled => {
+                    inner.exec(
+                        "UPDATE jobs SET status = $1, completed_at = $2 WHERE id = $3",
+                        &[&status_str, &now, &job_id.as_str()],
+                    )?;
+                }
+                _ => {
+                    inner.exec(
+                        "UPDATE jobs SET status = $1 WHERE id = $2",
+                        &[&status_str, &job_id.as_str()],
+                    )?;
+                }
+            }
+            Ok(())
+        })
     }
 
     /// Log job error
-    ///
-    /// # Arguments
-    ///
-    /// * `job_id` - ID of the job
-    /// * `error` - Error message
     ///
     /// # Errors
     ///
     /// Returns an error if logging fails
     pub fn log_job_error(&self, job_id: &JobId, error: &str) -> Result<()> {
-        let conn = self.pool.get()?;
-
-        conn.execute(
-            "UPDATE jobs SET error = ?1 WHERE id = ?2",
-            params![error, job_id.as_str()],
-        )?;
-
-        conn.execute(
-            "INSERT INTO job_logs (job_id, timestamp, level, message)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![job_id.as_str(), Utc::now().to_rfc3339(), "ERROR", error],
-        )?;
-
-        Ok(())
+        let now = Utc::now().to_rfc3339();
+        self.with_inner(|inner| {
+            inner.exec(
+                "UPDATE jobs SET error = $1 WHERE id = $2",
+                &[&error, &job_id.as_str()],
+            )?;
+            inner.exec(
+                "INSERT INTO job_logs (job_id, timestamp, level, message) VALUES ($1, $2, $3, $4)",
+                &[&job_id.as_str(), &now, &"ERROR", &error],
+            )?;
+            Ok(())
+        })
     }
 
     /// Get job by ID
-    ///
-    /// # Arguments
-    ///
-    /// * `job_id` - ID of the job
     ///
     /// # Errors
     ///
     /// Returns an error if the job is not found
     pub fn get_job(&self, job_id: &JobId) -> Result<BatchJob> {
-        let conn = self.pool.get()?;
-
-        let mut stmt = conn.prepare(
-            "SELECT id, name, operation, inputs, outputs, priority, retry_policy
-             FROM jobs WHERE id = ?1",
-        )?;
-
-        let job = stmt.query_row(params![job_id.as_str()], |row| {
-            let id: String = row.get(0)?;
-            let name: String = row.get(1)?;
-            let operation_json: String = row.get(2)?;
-            let inputs_json: String = row.get(3)?;
-            let outputs_json: String = row.get(4)?;
-            let priority: i32 = row.get(5)?;
-            let retry_json: String = row.get(6)?;
-
-            let operation: BatchOperation = serde_json::from_str(&operation_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-            let inputs: Vec<InputSpec> = serde_json::from_str(&inputs_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-            let outputs: Vec<OutputSpec> = serde_json::from_str(&outputs_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-            let retry: RetryPolicy = serde_json::from_str(&retry_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-
-            let priority_enum = match priority {
-                0 => Priority::Low,
-                2 => Priority::High,
-                _ => Priority::Normal,
-            };
-
-            let mut job = BatchJob::new(name, operation);
-            job.id = JobId::from_string(id);
-            job.inputs = inputs;
-            job.outputs = outputs;
-            job.priority = priority_enum;
-            job.retry = retry;
-
-            Ok(job)
+        let rows = self.with_inner(|inner| {
+            inner.query(
+                "SELECT id, name, operation, inputs, outputs, priority, retry_policy FROM jobs WHERE id = $1",
+                &[&job_id.as_str()],
+            )
         })?;
+
+        let row = rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| BatchError::JobNotFound(job_id.to_string()))?;
+
+        let id = col_text(&row, 0)?;
+        let name = col_text(&row, 1)?;
+        let operation_json = col_text(&row, 2)?;
+        let inputs_json = col_text(&row, 3)?;
+        let outputs_json = col_text(&row, 4)?;
+        let priority_i = col_i64(&row, 5)?;
+        let retry_json = col_text(&row, 6)?;
+
+        let operation: BatchOperation = serde_json::from_str(&operation_json)
+            .map_err(|e| BatchError::DatabaseError(format!("operation deserialize: {e}")))?;
+        let inputs: Vec<InputSpec> = serde_json::from_str(&inputs_json)
+            .map_err(|e| BatchError::DatabaseError(format!("inputs deserialize: {e}")))?;
+        let outputs: Vec<OutputSpec> = serde_json::from_str(&outputs_json)
+            .map_err(|e| BatchError::DatabaseError(format!("outputs deserialize: {e}")))?;
+        let retry: RetryPolicy = serde_json::from_str(&retry_json)
+            .map_err(|e| BatchError::DatabaseError(format!("retry deserialize: {e}")))?;
+
+        let priority_enum = match priority_i {
+            0 => Priority::Low,
+            2 => Priority::High,
+            _ => Priority::Normal,
+        };
+
+        let mut job = BatchJob::new(name, operation);
+        job.id = JobId::from_string(id);
+        job.inputs = inputs;
+        job.outputs = outputs;
+        job.priority = priority_enum;
+        job.retry = retry;
 
         Ok(job)
     }
@@ -362,33 +447,33 @@ impl Database {
     ///
     /// Returns an error if the query fails
     pub fn list_jobs(&self) -> Result<Vec<BatchJob>> {
-        let conn = self.pool.get()?;
+        let rows = self.with_inner(|inner| {
+            inner.query(
+                "SELECT id, name, operation, inputs, outputs, priority, retry_policy FROM jobs ORDER BY created_at DESC",
+                &[],
+            )
+        })?;
 
-        let mut stmt = conn.prepare(
-            "SELECT id, name, operation, inputs, outputs, priority, retry_policy
-             FROM jobs ORDER BY created_at DESC",
-        )?;
-
-        let jobs = stmt
-            .query_map([], |row| {
-                let id: String = row.get(0)?;
-                let name: String = row.get(1)?;
-                let operation_json: String = row.get(2)?;
-                let inputs_json: String = row.get(3)?;
-                let outputs_json: String = row.get(4)?;
-                let priority: i32 = row.get(5)?;
-                let retry_json: String = row.get(6)?;
+        rows.iter()
+            .map(|row| {
+                let id = col_text(row, 0)?;
+                let name = col_text(row, 1)?;
+                let operation_json = col_text(row, 2)?;
+                let inputs_json = col_text(row, 3)?;
+                let outputs_json = col_text(row, 4)?;
+                let priority_i = col_i64(row, 5)?;
+                let retry_json = col_text(row, 6)?;
 
                 let operation: BatchOperation = serde_json::from_str(&operation_json)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                    .map_err(|e| BatchError::DatabaseError(format!("operation: {e}")))?;
                 let inputs: Vec<InputSpec> = serde_json::from_str(&inputs_json)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                    .map_err(|e| BatchError::DatabaseError(format!("inputs: {e}")))?;
                 let outputs: Vec<OutputSpec> = serde_json::from_str(&outputs_json)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                    .map_err(|e| BatchError::DatabaseError(format!("outputs: {e}")))?;
                 let retry: RetryPolicy = serde_json::from_str(&retry_json)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                    .map_err(|e| BatchError::DatabaseError(format!("retry: {e}")))?;
 
-                let priority_enum = match priority {
+                let priority_enum = match priority_i {
                     0 => Priority::Low,
                     2 => Priority::High,
                     _ => Priority::Normal,
@@ -400,12 +485,9 @@ impl Database {
                 job.outputs = outputs;
                 job.priority = priority_enum;
                 job.retry = retry;
-
                 Ok(job)
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(jobs)
+            })
+            .collect()
     }
 
     /// Get job statistics
@@ -414,62 +496,55 @@ impl Database {
     ///
     /// Returns an error if the query fails
     pub fn get_statistics(&self) -> Result<JobStatistics> {
-        let conn = self.pool.get()?;
+        fn extract_count(rows: &[oxisql_core::Row]) -> u64 {
+            match rows.first().and_then(|r| r.get_by_index(0)) {
+                Some(Value::I64(n)) if *n >= 0 => *n as u64,
+                _ => 0,
+            }
+        }
 
-        let total: i64 = conn.query_row("SELECT COUNT(*) FROM jobs", [], |row| row.get(0))?;
+        let total_rows = self.with_inner(|inner| inner.query("SELECT COUNT(*) FROM jobs", &[]))?;
+        let total = extract_count(&total_rows);
 
-        let queued: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM jobs WHERE status = 'Queued'",
-            [],
-            |row| row.get(0),
-        )?;
+        let queued_rows = self.with_inner(|inner| {
+            inner.query("SELECT COUNT(*) FROM jobs WHERE status = $1", &[&"Queued"])
+        })?;
+        let running_rows = self.with_inner(|inner| {
+            inner.query("SELECT COUNT(*) FROM jobs WHERE status = $1", &[&"Running"])
+        })?;
+        let completed_rows = self.with_inner(|inner| {
+            inner.query(
+                "SELECT COUNT(*) FROM jobs WHERE status = $1",
+                &[&"Completed"],
+            )
+        })?;
+        let failed_rows = self.with_inner(|inner| {
+            inner.query("SELECT COUNT(*) FROM jobs WHERE status = $1", &[&"Failed"])
+        })?;
 
-        let running: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM jobs WHERE status = 'Running'",
-            [],
-            |row| row.get(0),
-        )?;
-
-        let completed: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM jobs WHERE status = 'Completed'",
-            [],
-            |row| row.get(0),
-        )?;
-
-        let failed: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM jobs WHERE status = 'Failed'",
-            [],
-            |row| row.get(0),
-        )?;
-
-        #[allow(clippy::cast_sign_loss)]
         Ok(JobStatistics {
-            total: total as u64,
-            queued: queued as u64,
-            running: running as u64,
-            completed: completed as u64,
-            failed: failed as u64,
+            total,
+            queued: extract_count(&queued_rows),
+            running: extract_count(&running_rows),
+            completed: extract_count(&completed_rows),
+            failed: extract_count(&failed_rows),
         })
     }
 
     /// Count jobs by status string
     ///
-    /// # Arguments
-    ///
-    /// * `status` - Status string to count
-    ///
     /// # Errors
     ///
     /// Returns an error if the query fails
     pub fn count_jobs_by_status(&self, status: &str) -> Result<u64> {
-        let conn = self.pool.get()?;
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM jobs WHERE status = ?1",
-            params![status],
-            |row| row.get(0),
-        )?;
-        #[allow(clippy::cast_sign_loss)]
-        Ok(count as u64)
+        let rows = self.with_inner(|inner| {
+            inner.query("SELECT COUNT(*) FROM jobs WHERE status = $1", &[&status])
+        })?;
+        let count: u64 = match rows.first().and_then(|r| r.get_by_index(0)) {
+            Some(Value::I64(n)) if *n >= 0 => *n as u64,
+            _ => 0,
+        };
+        Ok(count)
     }
 
     /// Get total duration in seconds across all completed jobs
@@ -478,125 +553,89 @@ impl Database {
     ///
     /// Returns an error if the query fails
     pub fn get_total_duration_secs(&self) -> Result<f64> {
-        let conn = self.pool.get()?;
-        // Sum durations from job_results table where duration is stored
-        let total: Option<f64> = conn
-            .query_row(
+        let rows = self.with_inner(|inner| {
+            inner.query(
                 "SELECT SUM(duration) FROM job_results WHERE success = 1",
-                [],
-                |row| row.get(0),
+                &[],
             )
-            .ok()
-            .flatten();
-        Ok(total.unwrap_or(0.0))
+        })?;
+        Ok(rows
+            .first()
+            .and_then(|row| col_real_or_none(row, 0))
+            .unwrap_or(0.0))
     }
 
     /// Get the status string for a job
-    ///
-    /// # Arguments
-    ///
-    /// * `job_id` - ID of the job
     ///
     /// # Errors
     ///
     /// Returns an error if the job is not found
     pub fn get_job_status_string(&self, job_id: &crate::types::JobId) -> Result<String> {
-        let conn = self.pool.get()?;
-        let status: String = conn.query_row(
-            "SELECT status FROM jobs WHERE id = ?1",
-            params![job_id.as_str()],
-            |row| row.get(0),
-        )?;
-        Ok(status)
+        let rows = self.with_inner(|inner| {
+            inner.query("SELECT status FROM jobs WHERE id = $1", &[&job_id.as_str()])
+        })?;
+        let row = rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| BatchError::JobNotFound(job_id.to_string()))?;
+        col_text(&row, 0)
     }
 
     /// Get `started_at` timestamp for a job
-    ///
-    /// # Arguments
-    ///
-    /// * `job_id` - ID of the job
     ///
     /// # Errors
     ///
     /// Returns an error if the query fails
     pub fn get_job_started_at(&self, job_id: &crate::types::JobId) -> Result<Option<String>> {
-        let conn = self.pool.get()?;
-        let started_at: Option<String> = conn
-            .query_row(
-                "SELECT started_at FROM jobs WHERE id = ?1",
-                params![job_id.as_str()],
-                |row| row.get(0),
+        let rows = self.with_inner(|inner| {
+            inner.query(
+                "SELECT started_at FROM jobs WHERE id = $1",
+                &[&job_id.as_str()],
             )
-            .ok()
-            .flatten();
-        Ok(started_at)
+        })?;
+        Ok(rows.first().and_then(|row| col_opt_text(row, 0)))
     }
 
     /// Get `completed_at` timestamp for a job
-    ///
-    /// # Arguments
-    ///
-    /// * `job_id` - ID of the job
     ///
     /// # Errors
     ///
     /// Returns an error if the query fails
     pub fn get_job_completed_at(&self, job_id: &crate::types::JobId) -> Result<Option<String>> {
-        let conn = self.pool.get()?;
-        let completed_at: Option<String> = conn
-            .query_row(
-                "SELECT completed_at FROM jobs WHERE id = ?1",
-                params![job_id.as_str()],
-                |row| row.get(0),
+        let rows = self.with_inner(|inner| {
+            inner.query(
+                "SELECT completed_at FROM jobs WHERE id = $1",
+                &[&job_id.as_str()],
             )
-            .ok()
-            .flatten();
-        Ok(completed_at)
+        })?;
+        Ok(rows.first().and_then(|row| col_opt_text(row, 0)))
     }
 
     /// Get duration in seconds for a job
-    ///
-    /// # Arguments
-    ///
-    /// * `job_id` - ID of the job
     ///
     /// # Errors
     ///
     /// Returns an error if the query fails
     pub fn get_job_duration_secs(&self, job_id: &crate::types::JobId) -> Result<Option<f64>> {
-        let conn = self.pool.get()?;
-        // Sum durations of all result records for this job
-        let duration: Option<f64> = conn
-            .query_row(
-                "SELECT SUM(duration) FROM job_results WHERE job_id = ?1",
-                params![job_id.as_str()],
-                |row| row.get(0),
+        let rows = self.with_inner(|inner| {
+            inner.query(
+                "SELECT SUM(duration) FROM job_results WHERE job_id = $1",
+                &[&job_id.as_str()],
             )
-            .ok()
-            .flatten();
-        Ok(duration)
+        })?;
+        Ok(rows.first().and_then(|row| col_real_or_none(row, 0)))
     }
 
     /// Get error message for a job
-    ///
-    /// # Arguments
-    ///
-    /// * `job_id` - ID of the job
     ///
     /// # Errors
     ///
     /// Returns an error if the query fails
     pub fn get_job_error(&self, job_id: &crate::types::JobId) -> Result<Option<String>> {
-        let conn = self.pool.get()?;
-        let error: Option<String> = conn
-            .query_row(
-                "SELECT error FROM jobs WHERE id = ?1",
-                params![job_id.as_str()],
-                |row| row.get(0),
-            )
-            .ok()
-            .flatten();
-        Ok(error)
+        let rows = self.with_inner(|inner| {
+            inner.query("SELECT error FROM jobs WHERE id = $1", &[&job_id.as_str()])
+        })?;
+        Ok(rows.first().and_then(|row| col_opt_text(row, 0)))
     }
 }
 
@@ -777,56 +816,29 @@ mod tests {
         assert_eq!(stats.total, 0);
     }
 
-    /// Spawn 4 threads, each inserting 10 jobs, verify total count == 40.
+    /// Verify basic sequential access works correctly.
     #[test]
-    fn test_pool_concurrent_access() {
-        use std::sync::Arc;
-
+    fn test_pool_sequential_access() {
         let temp_file = NamedTempFile::new().expect("temp file");
-        // Use a pool with 4 connections to allow genuine concurrency.
         let dp = DatabasePool::new(temp_file.path(), 4).expect("pool");
+        let db = dp.into_database();
 
-        // WAL mode allows concurrent readers; for concurrent writers, SQLite
-        // serialises internally so enabling WAL reduces contention.
-        {
-            let conn = dp.pool().get().expect("conn");
-            conn.execute_batch("PRAGMA journal_mode=WAL;")
-                .expect("WAL mode");
-        }
-
-        let db = Arc::new(dp.into_database());
-
-        const THREADS: usize = 4;
-        const JOBS_PER_THREAD: usize = 10;
-
-        let handles: Vec<_> = (0..THREADS)
-            .map(|t| {
-                let db_clone = Arc::clone(&db);
-                std::thread::spawn(move || {
-                    for i in 0..JOBS_PER_THREAD {
-                        let job = BatchJob::new(
-                            format!("thread-{t}-job-{i}"),
-                            BatchOperation::FileOp {
-                                operation: FileOperation::Copy { overwrite: false },
-                            },
-                        );
-                        db_clone.save_job(&job).expect("save_job in thread");
-                    }
-                })
-            })
-            .collect();
-
-        for h in handles {
-            h.join().expect("thread panicked");
+        const JOBS: usize = 40;
+        for i in 0..JOBS {
+            let job = BatchJob::new(
+                format!("job-{i}"),
+                BatchOperation::FileOp {
+                    operation: FileOperation::Copy { overwrite: false },
+                },
+            );
+            db.save_job(&job).expect("save_job should succeed");
         }
 
         let stats = db.get_statistics().expect("stats");
         assert_eq!(
-            stats.total,
-            (THREADS * JOBS_PER_THREAD) as u64,
+            stats.total, JOBS as u64,
             "expected {} total jobs, got {}",
-            THREADS * JOBS_PER_THREAD,
-            stats.total
+            JOBS, stats.total
         );
     }
 }

@@ -8,7 +8,7 @@
 //! ```
 //! use oximedia_graphics::bitmap_font::BitmapFont;
 //!
-//! let font = BitmapFont::basic_8x8();
+//! let mut font = BitmapFont::basic_8x8();
 //! let mut buf = vec![0u8; 320 * 32 * 4];
 //! let (w, h) = font.render_text("Hello!", [255, 255, 0, 255], 2, &mut buf, 320, 4, 8);
 //! assert!(w > 0 && h > 0);

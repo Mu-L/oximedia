@@ -290,8 +290,8 @@ pub struct DialogueGateMeasurement {
 
 /// Streaming dialogue-gated loudness measurer.
 ///
-/// Feed audio via [`process_f32`] in arbitrary-size chunks, then call
-/// [`finish`] to obtain the [`DialogueGateMeasurement`].
+/// Feed audio via [`DialogueGateMeasurer::process_f32`] in arbitrary-size chunks, then call
+/// [`DialogueGateMeasurer::finish`] to obtain the [`DialogueGateMeasurement`].
 pub struct DialogueGateMeasurer {
     config: DialogueGateConfig,
 

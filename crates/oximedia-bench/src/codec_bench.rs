@@ -182,8 +182,8 @@ impl CodecBenchSuite {
         for candidate in &self.results {
             let dominated = self.results.iter().any(|other| {
                 // `other` dominates `candidate`
-                let other_ptr = other as *const EncodeBenchResult;
-                let cand_ptr = candidate as *const EncodeBenchResult;
+                let other_ptr = std::ptr::from_ref::<EncodeBenchResult>(other);
+                let cand_ptr = std::ptr::from_ref::<EncodeBenchResult>(candidate);
                 if other_ptr == cand_ptr {
                     return false;
                 }

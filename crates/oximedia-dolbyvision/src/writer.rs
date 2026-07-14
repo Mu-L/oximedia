@@ -1,6 +1,39 @@
 //! RPU writer for creating NAL units and bitstreams.
 //!
 //! Handles writing of Dolby Vision RPU to HEVC SEI messages and raw bitstreams.
+//!
+//! # RPU binary format (writer side)
+//!
+//! This module is the mirror image of [`crate::parser`] and must stay
+//! bit-for-bit compatible with it (round-trip parity is exercised by the
+//! round-trip fidelity tests: parse -> write -> parse must yield an
+//! identical [`DolbyVisionRpu`]). It builds the same three nested layers,
+//! outermost first:
+//!
+//! 1. **HEVC NAL unit** ([`write_nal_unit`]) — prepends a 2-byte HEVC NAL
+//!    header (`forbidden_zero_bit` = 0, `nal_unit_type` =
+//!    [`NAL_TYPE_SEI_UNREGISTERED`] = 39, `nuh_layer_id` = 0,
+//!    `nuh_temporal_id_plus1` = 1) in front of the SEI payload produced by
+//!    `create_sei_payload`, then runs `add_emulation_prevention` to insert
+//!    `0x03` emulation-prevention bytes after any `0x00 0x00 0x0{0,1,2,3}`
+//!    sequence so the result is safe to embed in an Annex-B byte stream.
+//! 2. **SEI envelope** (`create_sei_payload`) — writes `payload_type`
+//!    ([`SEI_TYPE_USER_DATA_UNREGISTERED`] = 5) and `payload_size` using the
+//!    standard `0xFF`-continued variable-length encoding, then the T.35
+//!    header: 1-byte `country_code` ([`T35_COUNTRY_CODE`] = `0xB5`) and
+//!    2-byte `terminal_provider_code` ([`T35_TERMINAL_PROVIDER_CODE`] =
+//!    `0x003C`), immediately followed by the raw RPU bitstream bytes.
+//! 3. **Raw RPU bitstream** ([`write_rpu_bitstream`]) — serializes the RPU
+//!    header fields in exactly the field order and bit widths documented on
+//!    [`crate::parser`] (via [`oximedia_bitstream::BitWriter`], big-endian),
+//!    followed conditionally by the VDR DM data block (written only when
+//!    `change_flags` signals `VDR_CHANGED`, matching the parser's gate), and
+//!    finally the L1/L2/L5/L6/L8/L9/L11 metadata levels in that fixed order
+//!    (see the level reference table on [`crate::metadata`]).
+//!
+//! Because every level is written unconditionally in the same fixed slot
+//! order the parser expects, an RPU whose optional levels were never
+//! populated still round-trips through their `Default` values.
 
 use crate::{metadata::*, rpu::*, DolbyVisionError, DolbyVisionRpu, Profile, Result};
 use oximedia_bitstream::{BigEndian, BitWrite, BitWriter};

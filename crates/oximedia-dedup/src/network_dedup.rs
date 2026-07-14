@@ -251,7 +251,7 @@ pub enum DuplicateMethod {
 
 /// Engine for detecting duplicates across distributed media nodes.
 ///
-/// Add manifests from each remote node then call [`find_cross_node_duplicates`]
+/// Add manifests from each remote node then call [`NetworkDedupEngine::find_cross_node_duplicates`]
 /// to get a list of [`CrossNodeGroup`]s.
 #[derive(Debug)]
 pub struct NetworkDedupEngine {

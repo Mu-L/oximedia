@@ -67,7 +67,7 @@ impl MeasurementRecord {
         )
     }
 
-    /// Parse from a single CSV row produced by [`to_csv_row`].
+    /// Parse from a single CSV row produced by [`Self::to_csv_row`].
     pub fn from_csv_row(row: &str) -> NormalizeResult<Self> {
         let mut parts = row.splitn(5, ',');
         let ts_str = parts.next().ok_or_else(|| {
@@ -478,7 +478,7 @@ impl LoudnessHistoryDb {
         out.into_bytes()
     }
 
-    /// Deserialise a database from CSV bytes produced by [`to_csv_bytes`].
+    /// Deserialise a database from CSV bytes produced by [`Self::to_csv_bytes`].
     ///
     /// Unknown or malformed rows are silently skipped (best-effort import).
     pub fn from_csv_bytes(data: &[u8]) -> NormalizeResult<Self> {

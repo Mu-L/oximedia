@@ -105,8 +105,14 @@ impl GatingProcessor {
             }
         }
 
+        // Per ITU-R BS.1770-4: z_i = (1/T) Σ y_i² is the *per-channel* mean
+        // square, and the gated loudness sums the weighted channel powers
+        // (`-0.691 + 10·log10(Σ Gi·z_i)`). The channel weights `Gi` are already
+        // folded into `power_sum`, so the block mean is `power_sum / frames`.
+        // `weight_sum` here is ONLY the "any active channel" guard — it must NOT
+        // divide the power again (doing so understates loudness by ~10·log10(N)).
         if weight_sum > 0.0 {
-            power_sum / (weight_sum * frames as f64)
+            power_sum / frames as f64
         } else {
             0.0
         }
@@ -146,8 +152,11 @@ impl GatingProcessor {
             }
         }
 
+        // See `calculate_block_power`: the BS.1770 weighted channel-power sum
+        // already has the weights `Gi` in `power_sum`; the block mean is
+        // `power_sum / frames`. `weight_sum` is only the active-channel guard.
         if weight_sum > 0.0 {
-            power_sum / (weight_sum * frames as f64)
+            power_sum / frames as f64
         } else {
             0.0
         }

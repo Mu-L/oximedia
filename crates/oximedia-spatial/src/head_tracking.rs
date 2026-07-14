@@ -42,7 +42,7 @@ static ROTATION_CACHE: OnceLock<Mutex<HashMap<(i32, i32, i32), [[f32; 3]; 3]>>> 
 /// Return a 3×3 rotation matrix for the given Euler angles (ZYX convention),
 /// serving the result from an in-process LUT when the quantised key is cached.
 ///
-/// Angles are quantised to the nearest [`ROTATION_CACHE_STEP_DEG`] degree before
+/// Angles are quantised to the nearest `ROTATION_CACHE_STEP_DEG` degree before
 /// lookup so that repeated calls with nearby values share the same entry.
 ///
 /// # Example

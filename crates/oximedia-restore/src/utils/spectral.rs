@@ -18,6 +18,18 @@ pub enum WindowFunction {
     BlackmanHarris,
 }
 
+/// Precompute the window coefficients for a frame of length `n`.
+///
+/// Returns a vector `w` where `w[i] == window_factor(i, n, window)`.  This is
+/// useful for weighted overlap-add (WOLA) reconstruction where the same window
+/// is applied on both analysis and synthesis and the per-sample normalisation
+/// must divide by the accumulated `Σ w[i]²` (the window-overlap-squared sum),
+/// not by the raw frame count.
+#[must_use]
+pub fn window_coefficients(n: usize, window: WindowFunction) -> Vec<f32> {
+    (0..n).map(|i| window_factor(i, n, window)).collect()
+}
+
 /// Apply window function to samples.
 pub fn apply_window(samples: &mut [f32], window: WindowFunction) {
     let n = samples.len();

@@ -46,7 +46,10 @@ pub fn analyze_noise(image: &RgbImage) -> ForensicsResult<ForensicTest> {
     // Analyze noise consistency across regions
     let inconsistency = detect_noise_inconsistency(image)?;
 
-    if inconsistency.score > 0.3 {
+    // A localized manipulation only perturbs a small fraction of regions, so
+    // the score gate is well below a majority — a couple of anomalous regions
+    // in an otherwise consistent frame already indicate tampering.
+    if inconsistency.score > 0.03 {
         test.tampering_detected = true;
         test.add_finding(format!(
             "Noise inconsistency detected (score: {:.3})",
@@ -185,7 +188,7 @@ fn wiener_filter(channel: &FlatArray2<f64>) -> FlatArray2<f64> {
 /// Detect noise inconsistency across image regions
 fn detect_noise_inconsistency(image: &RgbImage) -> ForensicsResult<NoiseInconsistency> {
     let (width, height) = image.dimensions();
-    let region_size = 64;
+    let region_size = 32;
 
     // Extract noise from regions
     let mut region_noise_levels = Vec::new();
@@ -212,12 +215,19 @@ fn detect_noise_inconsistency(image: &RgbImage) -> ForensicsResult<NoiseInconsis
 
     let std_dev = variance.sqrt();
 
-    // Find regions with significantly different noise
-    let threshold = mean_noise + 2.0 * std_dev;
+    // Flag regions whose noise departs from the global level by a large
+    // scale-relative factor in either direction: anomalously low noise is the
+    // signature of localized denoising/retouching, anomalously high noise of a
+    // foreign high-noise splice. A scale-relative factor is used rather than a
+    // standard-deviation multiple because the per-region noise estimate carries
+    // its own sampling variance, so an absolute sigma test flags benign
+    // fluctuations on genuinely uniform frames.
     let mut inconsistent_regions = Vec::new();
 
     for (x, y, noise_level) in &region_noise_levels {
-        if (noise_level - mean_noise).abs() > threshold || *noise_level < mean_noise * 0.5 {
+        let anomalously_low = *noise_level < mean_noise * 0.5;
+        let anomalously_high = *noise_level > mean_noise * 2.0;
+        if anomalously_low || anomalously_high {
             inconsistent_regions.push((*x as usize, *y as usize, region_size, region_size));
         }
     }

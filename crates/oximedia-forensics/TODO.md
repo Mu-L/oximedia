@@ -40,10 +40,10 @@
 
 ## Testing
 - [ ] Add test suite with known tampered images (spliced, cloned, retouched) and ground truth masks
-- [ ] Test `ela.rs` detection accuracy with synthetic noise addition at various levels
+- [x] Test `ela.rs` detection accuracy with synthetic noise addition at various levels
 - [ ] Test `chain_of_custody.rs` with multi-step custody transfer scenarios
-- [ ] Add `hash_registry.rs` tests with collision detection and lookup performance
-- [ ] Test `steganalysis.rs` with LSB steganography embedded test images
+- [x] Add `hash_registry.rs` tests with collision detection and lookup performance — Wave 30, 2026-06-08: removed orphan `#![allow(dead_code)]` by wiring `pub mod hash_registry;` + `pub use hash_registry::{HashAlgorithm, HashRegistry, MediaHash};`; added perceptual `hamming_distance()` (64-bit XOR popcount, None on algo mismatch/non-perceptual/bad-hex) + `HashRegistry::nearest_perceptual()` near-dup search (sorted ascending, stable tie-break) backed by a per-asset perceptual index; 15 new tests incl. Hamming known-answers, sorted-threshold sets, and a 10k-N distinct-hash collision_count()==0 + lookup/nearest correctness check
+- [x] Test `steganalysis.rs` with LSB steganography embedded test images
 - [ ] Test `watermark_detect.rs` with various watermark embedding strengths
 - [ ] Add false positive rate measurement tests for each forensic test type
 

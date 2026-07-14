@@ -1,7 +1,7 @@
 //! Parser allocation optimizations: zero-copy header pre-scan and FCM
 //! multi-rate detection.
 //!
-//! The default [`EdlParser`] allocates a `String` for every comment and reel
+//! The default [`EdlParser`](crate::parser::EdlParser) allocates a `String` for every comment and reel
 //! name during parsing.  For large EDLs (10,000+ events) this can amount to
 //! hundreds of kilobytes of short-lived heap objects.  This module provides:
 //!
@@ -274,7 +274,7 @@ impl<'a> EdlHeaderScan<'a> {
 ///
 /// Stores byte offsets into the original source string rather than allocating
 /// copies of event data.  The event can be fully parsed on demand by extracting
-/// `source[byte_start..byte_end]` and passing it to [`EdlParser::parse`].
+/// `source[byte_start..byte_end]` and passing it to [`EdlParser::parse`](crate::parser::EdlParser::parse).
 ///
 /// Size: 16 bytes (two `u32` offsets + one `u32` event number + 4 bytes padding).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

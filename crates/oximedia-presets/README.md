@@ -1,6 +1,6 @@
 # oximedia-presets
 
-**Status: [Stable]** | Version: 0.1.8 | Tests: 612 | Updated: 2026-05-21
+**Status: [Stable]** | Version: 0.1.9 | Tests: extensively tested | Updated: 2026-07-08
 
 Advanced encoding preset library for OxiMedia. Provides 200+ professional encoding presets covering major platforms, broadcast standards, streaming protocols, and quality tiers, with auto-selection, validation, and import/export.
 
@@ -39,7 +39,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-presets = "0.1.8"
+oximedia-presets = "0.1.9"
 ```
 
 ```rust

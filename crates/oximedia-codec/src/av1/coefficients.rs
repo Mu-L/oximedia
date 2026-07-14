@@ -612,7 +612,7 @@ impl EobPt {
     /// (the index into the EOB-multi CDF, range 0..11), use
     /// [`EobPt::from_symbol`] instead. The two values are not interchangeable:
     /// symbol `s` corresponds to base position
-    /// [`EOB_GROUP_START`]`[s]`, which is `(1 << (s - 1)) + 1` for `s ≥ 2`.
+    /// `EOB_GROUP_START[s]`, which is `(1 << (s - 1)) + 1` for `s ≥ 2`.
     #[must_use]
     pub fn from_eob(eob: u16) -> Self {
         match eob {

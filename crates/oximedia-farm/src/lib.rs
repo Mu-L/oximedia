@@ -202,7 +202,7 @@ pub enum FarmError {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[error("Database error: {0}")]
-    Database(#[from] rusqlite::Error),
+    Database(String),
 
     #[error("Scheduling error: {0}")]
     Scheduling(String),

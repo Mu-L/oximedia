@@ -438,6 +438,21 @@ fn parse_param(
             params.onerror = Some(value.to_string());
         }
 
+        // Progressive JPEG output flag (inverse of the `progressive=` token
+        // emitted by `TransformParams::serialize`).
+        "progressive" => {
+            let opts = params.output_options.get_or_insert_with(Default::default);
+            opts.progressive_jpeg = parse_bool(value);
+        }
+
+        // Per-encoding output quality override (inverse of the `output_quality=`
+        // token emitted by `TransformParams::serialize`).
+        "output_quality" => {
+            let q = parse_u8(key, value)?;
+            let opts = params.output_options.get_or_insert_with(Default::default);
+            opts.quality = q;
+        }
+
         // Preset shorthand: applies width/height/quality from the named preset.
         "preset" => {
             if let Some(preset) = parse_preset(value) {
@@ -586,16 +601,32 @@ fn parse_bool(value: &str) -> bool {
     matches!(value.to_ascii_lowercase().as_str(), "true" | "1" | "yes")
 }
 
+/// Split a multi-side geometry value into its components.
+///
+/// Accepts both the comma form (`"10,5,10,5"`, used by query-string parsing
+/// where the comma is not a top-level delimiter) and the `x` form
+/// (`"10x5x10x5"`, emitted by [`TransformParams::serialize`] so the value
+/// survives the comma-separated top-level split). Empty segments are dropped.
+///
+/// [`TransformParams::serialize`]: crate::transform::TransformParams::serialize
+fn split_sides(value: &str) -> Vec<&str> {
+    value
+        .split(['x', ','])
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
 /// Parse a trim specification.
 ///
 /// Supports:
 /// - Single value: `"10"` -> uniform trim of 10px on all sides
-/// - Four values: `"10,5,10,5"` -> top, right, bottom, left
+/// - Four values: `"10,5,10,5"` or `"10x5x10x5"` -> top, right, bottom, left
 fn parse_trim(value: &str) -> Result<Trim, TransformParseError> {
     if value.is_empty() {
         return Ok(Trim::uniform(10)); // default threshold
     }
-    let parts: Vec<&str> = value.split(',').map(|p| p.trim()).collect();
+    let parts = split_sides(value);
     match parts.len() {
         1 => {
             let v = parse_u32("trim", parts[0])?;
@@ -622,7 +653,8 @@ fn parse_trim(value: &str) -> Result<Trim, TransformParseError> {
 
 /// Parse border specification.
 ///
-/// Format: `width:color` e.g. `"5:ff0000"` or `"top,right,bottom,left:color"`.
+/// Format: `width:color` e.g. `"5:ff0000"`, or `"top,right,bottom,left:color"`
+/// / `"topxrightxbottomxleft:color"` for per-side widths.
 fn parse_border(value: &str) -> Result<Border, TransformParseError> {
     let (dims_str, color_str) =
         value
@@ -633,7 +665,7 @@ fn parse_border(value: &str) -> Result<Border, TransformParseError> {
             })?;
 
     let color = Color::from_css(color_str)?;
-    let dim_parts: Vec<&str> = dims_str.split(',').map(|p| p.trim()).collect();
+    let dim_parts = split_sides(dims_str);
 
     match dim_parts.len() {
         1 => {
@@ -662,7 +694,8 @@ fn parse_border(value: &str) -> Result<Border, TransformParseError> {
 
 /// Parse padding specification.
 ///
-/// Format: `value` (uniform) or `top,right,bottom,left`.
+/// Format: `value` (uniform), `top,right,bottom,left`, or `topxrightxbottomxleft`.
+/// A two-value `vertical,horizontal` shorthand is also accepted.
 /// Values are fractional (0.0-1.0).
 /// An optional `:color` suffix is accepted and ignored (background is handled separately).
 fn parse_padding(value: &str) -> Result<Padding, TransformParseError> {
@@ -673,7 +706,7 @@ fn parse_padding(value: &str) -> Result<Padding, TransformParseError> {
         value
     };
 
-    let parts: Vec<&str> = dims_str.split(',').map(|p| p.trim()).collect();
+    let parts = split_sides(dims_str);
 
     match parts.len() {
         1 => {

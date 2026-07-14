@@ -6,8 +6,8 @@
 //!
 //! # Overview
 //!
-//! Given a set of [`VodSegment`] records produced from a completed catch-up
-//! recording, [`HlsManifestBuilder`] constructs:
+//! Given a set of [`VodSegment`](crate::hls_catchup::VodSegment) records produced from a completed catch-up
+//! recording, [`HlsManifestBuilder`](crate::hls_catchup::HlsManifestBuilder) constructs:
 //!
 //! - A **Media Playlist** (RFC 8216 §4.3.3) — a flat list of `#EXTINF` entries
 //!   pointing to individual MPEG-TS or CMAF segments.
@@ -17,8 +17,8 @@
 //!
 //! # Retention policy
 //!
-//! [`RetentionPolicy`] controls how long a finished VOD asset remains
-//! accessible before segments can be purged.  [`VodCatalogue`] enforces the
+//! [`RetentionPolicy`](crate::hls_catchup::RetentionPolicy) controls how long a finished VOD asset remains
+//! accessible before segments can be purged.  [`VodCatalogue`](crate::hls_catchup::VodCatalogue) enforces the
 //! policy: `purge_expired` removes assets whose age exceeds the configured
 //! window.
 //!

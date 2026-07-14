@@ -326,6 +326,11 @@ fn create_job_queue(
             threads: config.threads,
             overwrite: config.overwrite,
             resume: false,
+            // `BatchConfig` has no normalization knob today (batch TOML jobs
+            // are driven purely by codec/bitrate/scale/preset fields); keep
+            // batch transcodes byte-for-byte unchanged from before this flag
+            // existed. Out of scope for the `--normalize-audio` CLI fix.
+            normalize_audio: false,
             progress_format: ProgressFormat::Plain,
         };
 

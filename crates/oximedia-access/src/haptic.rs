@@ -8,7 +8,7 @@
 //!
 //! # Haptic Patterns
 //!
-//! Haptic feedback is described as a sequence of [`HapticPulse`] events,
+//! Haptic feedback is described as a sequence of [`crate::haptic::HapticPulse`] events,
 //! each specifying intensity, duration, and optional waveform classification.
 //!
 //! # Usage
@@ -145,7 +145,7 @@ impl HapticPattern {
         self.pulses.len()
     }
 
-    /// Scale all pulse intensities by a gain factor (clamped to [0,1]).
+    /// Scale all pulse intensities by a gain factor (clamped to `[0,1]`).
     pub fn scale_intensity(&mut self, gain: f32) {
         for pulse in &mut self.pulses {
             pulse.intensity = (pulse.intensity * gain).clamp(0.0, 1.0);

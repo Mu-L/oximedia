@@ -10,8 +10,8 @@
 //!   resolution, wasting pixels).
 //! - Non-compliant CMAF / HLS / DASH segment durations.
 //!
-//! This module provides [`LadderValidator`] which runs all checks on a
-//! [`EncodeLadder`] and returns a structured [`LadderReport`].
+//! This module provides [`crate::encode_ladder_validator::LadderValidator`] which runs all checks on a
+//! [`crate::encode_ladder_validator::EncodeLadder`] and returns a structured [`crate::encode_ladder_validator::LadderReport`].
 //!
 //! # Supported specifications
 //!

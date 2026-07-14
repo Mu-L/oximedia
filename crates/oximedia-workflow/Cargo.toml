@@ -17,12 +17,12 @@ workspace = true
 
 [features]
 default = []
-sqlite = ["rusqlite", "r2d2", "r2d2_sqlite"]
+sqlite = ["oxisql-core", "oxisql-sqlite-compat"]
 
 [dependencies]
 # Async runtime
 async-trait = { workspace = true }
-futures = "0.3"
+futures.workspace = true
 
 # Error handling
 thiserror = { workspace = true }
@@ -34,7 +34,7 @@ serde_yaml = "0.9"
 
 # Time and scheduling
 chrono = { workspace = true, features = ["serde"] }
-cron = "0.16"
+cron = "0.17"
 
 # Logging and tracing
 tracing = { workspace = true }
@@ -61,12 +61,11 @@ getrandom02 = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["full"] }
-rusqlite = { workspace = true, optional = true }
-r2d2 = { workspace = true, optional = true }
-r2d2_sqlite = { workspace = true, optional = true }
+oxisql-core = { workspace = true, optional = true }
+oxisql-sqlite-compat = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["full", "test-util"] }

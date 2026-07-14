@@ -303,6 +303,105 @@
 //! - ITU-R BS.1771 (2006): "Requirements for loudness and true-peak indicating meters"
 //! - EBU R 128 (2020): "Loudness normalisation and permitted maximum level of audio signals"
 //! - ATSC A/85:2013: "Techniques for Establishing and Maintaining Audio Loudness for Digital Television"
+//!
+//! # Pipeline Architecture
+//!
+//! The core loudness pipeline lives in [`ebu_r128_impl::EbuR128Meter`] (wrapped by the
+//! higher-level [`LoudnessMeter`] in this crate root). Every sample flows through four
+//! stages — **filter → LKFS → gating → LRA**:
+//!
+//! ```text
+//!  interleaved samples                K-weighting filter (per channel)
+//!  in [-1.0, 1.0]        ───────►     Stage 1: high-shelf (head effects, ITU-R BS.1770-4)
+//!                                     Stage 2: high-pass   (RLB, f_c ≈ 38 Hz)
+//!                                                   │
+//!                                                   ▼ squared, channel-weighted (Table 2)
+//!                                     100 ms hop accumulator (`complete_hop`)
+//!                                                   │
+//!                     ┌─────────────────────────────┼─────────────────────────────┐
+//!                     ▼                             ▼                             ▼
+//!            400 ms momentary window       3 s short-term window        400 ms gating block
+//!            (4 hops, updated /100ms)      (30 hops, updated /100ms)    (4 hops, updated /100ms)
+//!                     │                             │                             │
+//!                     ▼                             ▼                             ▼
+//!             Momentary LUFS                 Short-term LUFS               `gating_blocks[]`
+//!         (`momentary_lufs`)              (`short_term_lufs`)          (LUFS, power) history
+//!                                                                                  │
+//!                                          ┌───────────────────────────────────────┴──────────────────────────┐
+//!                                          ▼                                                                  ▼
+//!                          `integrated_lufs()` — 2-stage gate                        `loudness_range_lu()` — cascaded gate
+//!                          (ITU-R BS.1770-4 §3 / BS.1771)                              (EBU Tech 3342 §3.1)
+//!                            1. absolute gate  ≥ −70 LUFS                               1. absolute gate ≥ −70 LUFS
+//!                            2. relative gate  ≥ abs-mean − 10 LU                       2. relative gate ≥ abs-mean − 20 LU
+//!                                          │                                            3. LRA = p95 − p10 of survivors
+//!                                          ▼                                                                  ▼
+//!                                 Integrated Loudness (LUFS)                               Loudness Range (LU)
+//! ```
+//!
+//! In parallel — not gated, and independent of the K-weighting/LKFS chain above — raw
+//! samples also feed a 4×-oversampled windowed-sinc [`ebu_r128_impl::TruePeakDetector`]
+//! for inter-sample peak detection. [`ebu_r128_impl::LoudnessReport::from_meter`]
+//! combines Integrated Loudness, Loudness Range, and True Peak into a single compliance
+//! report checked against EBU R128, ATSC A/85, and ARIB TR-B32.
+//!
+//! # Complementary Metering Modules
+//!
+//! [`clip_counter`], [`rms_envelope`], and [`silence_detect`] are **not** wired into the
+//! `EbuR128Meter`/`LoudnessMeter` pipeline above — they are independent meters that a
+//! caller runs on the *same* audio stream, in parallel with loudness metering, for
+//! additional broadcast QC that BS.1770/EBU R128 loudness measurement does not cover:
+//!
+//! - [`clip_counter`] — counts and timestamps digital clipping events (samples at or
+//!   above a configurable threshold, default 0 dBFS) per channel. This complements True
+//!   Peak detection by catching *sustained* full-scale overs rather than the brief
+//!   inter-sample peaks the oversampled true-peak detector is designed for.
+//! - [`rms_envelope`] — an attack/release RMS envelope follower for level metering and
+//!   dynamics visualisation. Unlike the fixed 400 ms/3 s LKFS windows above, its time
+//!   constants are freely configurable, making it suited to VU-style ballistics rather
+//!   than standards-accurate loudness.
+//! - [`silence_detect`] — flags sustained silence/near-silence ("dead air") using a
+//!   configurable dBFS threshold and minimum duration, as a discrete *event*. This is
+//!   distinct from the −70 LUFS absolute gate used by `integrated_lufs()`/
+//!   `loudness_range_lu()`, which silently *excludes* low-level blocks from the
+//!   loudness statistics rather than reporting them.
+//!
+//! None of the three modules share state with `EbuR128Meter`; a typical integration
+//! feeds one buffer of samples to a `LoudnessMeter` *and* to whichever of these
+//! modules the application also needs.
+//!
+//! # Compliance Testing Guide (EBU R128 Verification)
+//!
+//! To verify a build against EBU R128, run the crate's conformance test suite
+//! (`cargo test -p oximedia-metering --lib`) and check the following, in order:
+//!
+//! 1. **Reference-signal test** — `test_ebu_r128_reference_signal` (`src/lib.rs`)
+//!    feeds a 997 Hz sine wave calibrated to −23 LUFS through [`LoudnessMeter`] and
+//!    asserts the reported Integrated Loudness is within ±0.5 LUFS of the EBU R128
+//!    target. This is the canonical "does the meter read the right number" check.
+//! 2. **Two-stage gating conformance** — `src/gating.rs` (e.g. `test_gating_constants`,
+//!    `test_gated_percentage`) together with the integrated-loudness tests in
+//!    `src/ebu_r128_impl.rs` exercise the ITU-R BS.1770-4 §3 absolute gate (−70 LUFS)
+//!    and relative gate (−10 LU below the absolute-gated mean).
+//! 3. **Loudness Range (LRA) conformance** — `src/ebu_r128_impl.rs`
+//!    `test_lra_ebu_tech3342_case1`..`case4` reproduce all four synthetic "minimum
+//!    requirements" test signals published in EBU Tech 3342 Table 1 (stereo, in-phase
+//!    sine segments at specified per-channel dBFS levels) and assert the measured LRA
+//!    is within the published ±1 LU tolerance of the reference value (10, 5, 20, and
+//!    15 LU respectively).
+//! 4. **True Peak conformance** — `test_tp_detector_full_scale_sine` and
+//!    `test_true_peak_detected_above_signal_peak` (`src/ebu_r128_impl.rs`) verify the
+//!    4× oversampled true-peak detector reports a finite, sane dBTP for full-scale
+//!    input.
+//! 5. **Target-signal / compliance check** — `test_ebu_compliance_for_target_signal`
+//!    (`src/ebu_r128_impl.rs`) calibrates a sine wave to ≈ −23 LUFS, feeds it through
+//!    the meter, and confirms `LoudnessReport::complies_ebu_r128` is `true` — i.e. that
+//!    a signal built to land on the target is actually reported as compliant.
+//!
+//! When adding a new conformance vector, follow the pattern used by the LRA tests
+//! (helper `stereo_sine_segments` in `ebu_r128_impl::tests`): build the signal exactly
+//! as specified by the publishing standard, run it through `EbuR128Meter`, and assert
+//! against the *published* expected value and tolerance — never loosen a tolerance
+//! just to make a test pass.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

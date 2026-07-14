@@ -216,7 +216,7 @@ impl RealtimeNormalizer {
     /// `input.len()`, subsequent calls with the same length will **not** grow `out.capacity()`,
     /// eliminating heap allocation on the hot path.
     ///
-    /// Returns an error under the same conditions as [`process_chunk`].
+    /// Returns an error under the same conditions as [`Self::process_chunk`].
     pub fn process_into(&mut self, input: &[f32], out: &mut Vec<f32>) -> NormalizeResult<()> {
         out.clear();
         // Ensure capacity without re-allocating on subsequent calls.

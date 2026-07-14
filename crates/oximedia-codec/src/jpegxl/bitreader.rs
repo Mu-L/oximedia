@@ -309,7 +309,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore]
     fn test_bitreader_basic() {
         let data = [0b1010_0110u8, 0b1100_0011];
         let mut reader = BitReader::new(&data);
@@ -323,7 +322,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_bitreader_cross_byte() {
         let data = [0xFF, 0x00];
         let mut reader = BitReader::new(&data);
@@ -335,7 +333,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_bitreader_bool() {
         let data = [0b0000_0101];
         let mut reader = BitReader::new(&data);
@@ -346,7 +343,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_bitreader_eof() {
         let data = [0xFF];
         let mut reader = BitReader::new(&data);
@@ -355,7 +351,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_bitreader_remaining() {
         let data = [0xFF, 0xFF];
         let mut reader = BitReader::new(&data);
@@ -365,7 +360,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_bitreader_align() {
         let data = [0xFF, 0xAA];
         let mut reader = BitReader::new(&data);
@@ -376,7 +370,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_bitwriter_basic() {
         let mut writer = BitWriter::new();
         writer.write_bits(0b0110, 4);
@@ -386,7 +379,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_bitwriter_cross_byte() {
         let mut writer = BitWriter::new();
         writer.write_bits(0xF, 4);
@@ -396,7 +388,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_bitwriter_bool() {
         let mut writer = BitWriter::new();
         writer.write_bool(true);
@@ -412,7 +403,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_roundtrip_bits() {
         let mut writer = BitWriter::new();
         writer.write_bits(42, 7);
@@ -429,7 +419,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_roundtrip_u64() {
         for value in [0u64, 1, 5, 16, 17, 100, 272, 273, 1000, 65535, 1_000_000] {
             let mut writer = BitWriter::new();
@@ -443,7 +432,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_bitwriter_align() {
         let mut writer = BitWriter::new();
         writer.write_bits(0b101, 3);

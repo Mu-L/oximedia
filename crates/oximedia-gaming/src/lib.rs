@@ -1064,10 +1064,9 @@ mod tests {
     #[test]
     fn test_wave13_scene_switch_no_dropped_frames() {
         use crate::scene::transition::{SceneTransition, TransitionEngine, TransitionType};
-        use std::path::PathBuf;
 
         // Use a Stinger transition with 5 steps (5 × 20 ms = 100 ms clip).
-        let path = PathBuf::from("/tmp/test_scene_switch_nodrops.webm");
+        let path = std::env::temp_dir().join("test_scene_switch_nodrops.webm");
         let t = SceneTransition::new(
             TransitionType::Stinger {
                 clip_path: path,

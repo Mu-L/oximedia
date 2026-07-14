@@ -60,7 +60,8 @@ impl std::fmt::Display for PlayerState {
 ///
 /// Each `ReplayFrame` represents a **discrete event transition** — the moment
 /// a `PlaybackEvent` changes the player state.  Optional interpolated frames
-/// (produced by [`ReplayReconstructor::interpolate`]) have `interpolated = true`
+/// (produced by [`ReplayReconstructor::reconstruct`] when
+/// [`ReplayConfig::interpolation_step_ms`] is set) have `interpolated = true`
 /// and carry no `event_kind`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReplayFrame {

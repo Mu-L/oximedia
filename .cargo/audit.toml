@@ -21,6 +21,24 @@
 #   Root cause: sqlx-macros-core always pulls sqlx-mysql which depends on rsa.
 #   OxiMedia uses SQLite only; the MySQL RSA handshake is never executed.
 #   No fixed version of rsa is available upstream.
+#
+# RUSTSEC-2026-0049 (rustls-webpki 0.102.8 CRL Distribution Point matching bug):
+#   Transitive via rustls-rustcrypto 0.0.2-alpha (pinned '^0.102.0') -> rustls-webpki
+#   0.102.8, reachable only through oximedia-drm's non-default widevine/playready/fairplay
+#   feature flags (default feature is 'clearkey' only). oximedia-drm never constructs a
+#   webpki::CertRevocationList or calls rustls's with_crls(..) — no TLS CRL checking occurs
+#   in widevine_rpc.rs, playready_rpc.rs, or fairplay_rpc.rs (verified via grep — zero
+#   matches), so the vulnerable code path is unreachable. No Cargo.toml-only fix exists:
+#   0.102.8 is the newest 0.102.x release (fix requires webpki >=0.103.10) and
+#   rustls-rustcrypto's latest published release hard-pins '^0.102.0'. Will resolve when
+#   rustls-rustcrypto publishes a release depending on rustls-webpki >=0.103.10.
+#
+# RUSTSEC-2026-0206 (rustybuzz unmaintained-crate notice, not a scored vulnerability):
+#   Same pattern as the ttf-parser RUSTSEC-2026-0192 notice in root audit.toml: rustybuzz
+#   is reachable only via font-shaping/rendering paths operating on application-supplied
+#   font assets (subtitle rendering, SVG overlays), never attacker-controlled network
+#   input. No maintained-fork migration available yet. Unmaintained notices don't fail
+#   cargo-audit by default; ignored here for hygiene so it doesn't show up as noise.
 
 [advisories]
 ignore = [
@@ -29,8 +47,10 @@ ignore = [
     "RUSTSEC-2024-0436",
     "RUSTSEC-2025-0124",
     "RUSTSEC-2025-0134",
+    "RUSTSEC-2026-0049",
     "RUSTSEC-2026-0097",
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0099",
     "RUSTSEC-2026-0104",
+    "RUSTSEC-2026-0206",
 ]

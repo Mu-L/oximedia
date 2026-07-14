@@ -5,8 +5,6 @@ use crate::database::RightsDatabase;
 use crate::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-#[cfg(not(target_arch = "wasm32"))]
-use sqlx::Row;
 use std::collections::HashMap;
 
 /// Usage statistics
@@ -45,32 +43,31 @@ impl UsageReport {
         start_date: DateTime<Utc>,
         end_date: DateTime<Utc>,
     ) -> Result<Self> {
-        let rows = sqlx::query(
-            r"
+        let rows = db
+            .pool()
+            .query(
+                r"
             SELECT usage_type, territory, platform
             FROM usage_logs
-            WHERE asset_id = ? AND usage_date >= ? AND usage_date <= ?
+            WHERE asset_id = $1 AND usage_date >= $2 AND usage_date <= $3
             ",
-        )
-        .bind(asset_id)
-        .bind(start_date.to_rfc3339())
-        .bind(end_date.to_rfc3339())
-        .fetch_all(db.pool())
-        .await?;
+                &[&asset_id, &start_date.to_rfc3339(), &end_date.to_rfc3339()],
+            )
+            .await?;
 
         let mut by_type: HashMap<String, u32> = HashMap::new();
         let mut by_territory: HashMap<String, u32> = HashMap::new();
         let mut by_platform: HashMap<String, u32> = HashMap::new();
 
         for row in &rows {
-            let usage_type: String = row.get("usage_type");
+            let usage_type: String = row.try_get("usage_type")?;
             *by_type.entry(usage_type).or_insert(0) += 1;
 
-            if let Some(territory) = row.get::<Option<String>, _>("territory") {
+            if let Some(territory) = row.try_get::<Option<String>>("territory")? {
                 *by_territory.entry(territory).or_insert(0) += 1;
             }
 
-            if let Some(platform) = row.get::<Option<String>, _>("platform") {
+            if let Some(platform) = row.try_get::<Option<String>>("platform")? {
                 *by_platform.entry(platform).or_insert(0) += 1;
             }
         }

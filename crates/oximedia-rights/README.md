@@ -6,7 +6,7 @@ Content rights and licensing management for OxiMedia. Provides comprehensive rig
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.8 | Tests: 998 — 2026-05-29
+Version: 0.1.9 | Tests: extensively tested — 2026-07-08
 
 ## Features
 
@@ -33,7 +33,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-rights = "0.1.8"
+oximedia-rights = "0.1.9"
 ```
 
 ```rust
@@ -48,7 +48,7 @@ let db = manager.database();
 
 ## API Overview
 
-- `RightsManager` — Main rights management system backed by SQLite
+- `RightsManager` — Main rights management system backed by SQLite (Pure-Rust engine via OxiSQL — no C/C++ compiled)
 - `RightsError` / `Result` — Error and result types
 - Modules: `audit`, `clearance`, `clearance_workflow`, `compliance`, `contract`, `database`, `distribution_rights`, `distribution_window`, `drm`, `embargo`, `embargo_policy`, `embargo_window`, `expiration`, `license`, `license_template`, `licensing_model`, `licensing_terms`, `registry`, `rights`, `rights_audit_trail`, `rights_bundle`, `rights_check`, `rights_conflict`, `rights_database`, `rights_holder`, `rights_negotiation`, `rights_timeline`, `royalty`, `royalty_calc`, `royalty_schedule`, `sync_rights`, `syndication`, `territory`, `usage`, `usage_report`, `usage_rights`, `watermark`
 

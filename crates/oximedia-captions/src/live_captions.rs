@@ -690,3 +690,109 @@ mod tests {
         assert_eq!(buf.partial_text(), "");
     }
 }
+
+/// Stress tests for live captioning under high-frequency update loads.
+///
+/// These tests verify that the streaming infrastructure does not panic,
+/// corrupt state, or lose words when ingesting 100+ caption updates per second.
+#[cfg(test)]
+mod live_caption_stress_tests {
+    use super::*;
+
+    /// Feed 100 words at 10 ms intervals (100 Hz) into a `StreamingCaptionBuffer`
+    /// and verify that no words are lost and no panics occur.
+    #[test]
+    fn test_streaming_buffer_high_frequency_updates() {
+        let max_latency_ms = 500;
+        let mut buf = StreamingCaptionBuffer::new(max_latency_ms);
+
+        let total_updates = 100usize;
+        for i in 0..total_updates {
+            let word_text = format!("word{i}");
+            let start_ms = (i as u64) * 10; // 10 ms apart = 100 Hz
+            buf.add_word(LiveWord::new(
+                word_text,
+                start_ms,
+                0.95_f32,
+                LiveCaptionMode::Word,
+            ));
+
+            // Every 20 words, flush old entries as if 200 ms has elapsed.
+            if i % 20 == 19 {
+                buf.flush_old(start_ms + u64::from(max_latency_ms) + 1);
+            }
+        }
+
+        // Drain remaining buffered words.
+        buf.commit();
+
+        let committed_words = buf.total_committed_words();
+        assert_eq!(
+            committed_words, total_updates,
+            "all {total_updates} words must be committed after high-frequency updates"
+        );
+    }
+
+    /// Feed 200 sentence-boundary words into a `LiveCaptionBuffer` at 5 ms
+    /// intervals and verify that all sentence-boundary flushes succeed without
+    /// panicking or producing empty segments.
+    #[test]
+    fn test_live_caption_buffer_high_frequency_sentences() {
+        let mut buf = LiveCaptionBuffer::new();
+        let confidence_min = 0.8_f32;
+        let mut segment_count = 0usize;
+
+        let total_words = 200usize;
+        for i in 0..total_words {
+            // Every 5th word ends a sentence; others do not.
+            let word_text = if i % 5 == 4 {
+                format!("end{}.", i)
+            } else {
+                format!("word{i}")
+            };
+            let start_ms = (i as u64) * 5;
+            let end_ms = start_ms + 4;
+            buf.add_word(CaptionWord::new(
+                word_text, 0.95_f32, start_ms, end_ms, None,
+            ));
+
+            if let Some(seg) = buf.flush_ready(confidence_min) {
+                assert!(
+                    !seg.text.is_empty(),
+                    "flushed segment at word {i} must not be empty"
+                );
+                assert!(seg.is_final, "flushed segment must be marked final");
+                segment_count += 1;
+            }
+        }
+
+        // Flush any remainder.
+        if let Some(seg) = buf.flush_all() {
+            assert!(!seg.text.is_empty());
+            segment_count += 1;
+        }
+
+        assert!(
+            segment_count > 0,
+            "at least one segment should have been flushed during 200-word stress run"
+        );
+    }
+
+    /// `LatencyMonitor` must remain accurate and not panic under a large
+    /// number of recorded measurements.
+    #[test]
+    fn test_latency_monitor_high_frequency_recordings() {
+        let mut monitor = LatencyMonitor::new(3000);
+        // Simulate 1000 back-to-back latency samples between 10 ms and 2000 ms.
+        for i in 0..1000u64 {
+            monitor.add(10 + (i % 2000));
+        }
+        assert_eq!(monitor.count(), 1000);
+        // p95 must be a sensible value (≤ max sample, ≥ min sample).
+        let p95 = monitor.p95_ms();
+        assert!(
+            p95 >= 10 && p95 <= 2009,
+            "p95 {p95} ms must lie within the sample range [10, 2009]"
+        );
+    }
+}

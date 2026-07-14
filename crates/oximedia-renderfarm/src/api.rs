@@ -192,9 +192,7 @@ async fn get_job(
     let job_id: JobId =
         serde_json::from_str(&format!("\"{id}\"")).map_err(|_| Error::JobNotFound(id.clone()))?;
 
-    let job_arc = coordinator
-        .get_job(job_id)
-        .ok_or_else(|| Error::JobNotFound(id))?;
+    let job_arc = coordinator.get_job(job_id).ok_or(Error::JobNotFound(id))?;
 
     let job = job_arc.read();
 
@@ -242,7 +240,7 @@ async fn get_worker(
 
     let worker_arc = coordinator
         .get_worker(worker_id)
-        .ok_or_else(|| Error::WorkerNotFound(id))?;
+        .ok_or(Error::WorkerNotFound(id))?;
 
     let worker = worker_arc.read();
 

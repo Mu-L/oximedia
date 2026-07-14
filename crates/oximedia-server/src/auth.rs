@@ -232,3 +232,84 @@ pub mod middleware {
         Ok(next.run(request).await)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mirrors `api::auth::refresh_token` without the DB/AppState layer: a token
+    /// is refreshed by validating the current one and minting a fresh token with
+    /// the same claims. Returns `Unauthorized`/`Jwt` for an invalid or expired
+    /// input token.
+    fn refresh(auth: &AuthManager, token: &str, new_ttl: i64) -> ServerResult<String> {
+        let claims = auth.validate_token(token)?;
+        auth.generate_token(claims.sub, claims.username, claims.role, new_ttl)
+    }
+
+    #[test]
+    fn test_refresh_with_valid_token_issues_new_token() {
+        let auth = AuthManager::new("super-secret-key");
+        // TTL of one hour → a comfortably valid token.
+        let original = auth
+            .generate_token("u-1".into(), "alice".into(), UserRole::User, 3600)
+            .expect("generate original token");
+
+        let refreshed = refresh(&auth, &original, 3600).expect("refresh should succeed");
+
+        // The new token is itself valid and preserves the original identity/role.
+        let claims = auth
+            .validate_token(&refreshed)
+            .expect("refreshed token must validate");
+        assert_eq!(claims.sub, "u-1");
+        assert_eq!(claims.username, "alice");
+        assert_eq!(claims.role, UserRole::User);
+        assert!(!claims.is_expired());
+    }
+
+    #[test]
+    fn test_refresh_with_expired_token_is_rejected() {
+        let auth = AuthManager::new("super-secret-key");
+        // Negative TTL ⇒ exp is in the past (well beyond JWT default leeway).
+        let expired = auth
+            .generate_token("u-2".into(), "bob".into(), UserRole::Admin, -3600)
+            .expect("generate (already-expired) token");
+
+        let err =
+            refresh(&auth, &expired, 3600).expect_err("refresh of an expired token must fail");
+
+        // The current decoder rejects the expired token at the JWT layer (the
+        // `Claims::is_expired` guard in `validate_token` is only reached when
+        // `decode` itself accepts the token). Either rejection path is acceptable
+        // here; both deny the refresh.
+        assert!(
+            matches!(err, ServerError::Jwt(_) | ServerError::Unauthorized(_)),
+            "expired-token refresh must be denied via Jwt/Unauthorized, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_expired_token_directly() {
+        let auth = AuthManager::new("k");
+        let expired = auth
+            .generate_token("u".into(), "x".into(), UserRole::Guest, -10)
+            .expect("token");
+        assert!(auth.validate_token(&expired).is_err());
+    }
+
+    #[test]
+    fn test_refresh_with_garbage_token_is_rejected() {
+        let auth = AuthManager::new("k");
+        assert!(refresh(&auth, "not-a-jwt", 3600).is_err());
+    }
+
+    #[test]
+    fn test_token_from_other_secret_is_rejected() {
+        let issuer = AuthManager::new("issuer-secret");
+        let verifier = AuthManager::new("different-secret");
+        let token = issuer
+            .generate_token("u".into(), "x".into(), UserRole::User, 3600)
+            .expect("token");
+        // A token signed by a different key must not validate (and so cannot refresh).
+        assert!(verifier.validate_token(&token).is_err());
+    }
+}

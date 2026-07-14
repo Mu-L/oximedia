@@ -60,8 +60,10 @@ strides, `_mm256_maddubs_epi16` reductions, and
 
 ### SSE4.2 fallback
 
-Pre-Haswell x86-64 (and WASM SIMD128, whose 128-bit width matches) falls
-to SSE4.2 paths in `x86.rs`.
+Pre-Haswell x86-64 falls to SSE4.2 paths in `x86.rs`. `x86.rs` is gated on
+`#[cfg(target_arch = "x86_64")]` (`core::arch::x86_64` intrinsics) and is
+never compiled on `wasm32`; see "WASM SIMD128" below for the unrelated,
+actual WASM SIMD paths.
 
 ### NEON tier
 
@@ -71,9 +73,39 @@ On aarch64 the `neon.rs` module provides NEON implementations.
 
 ### WASM SIMD128
 
-`wasm32-unknown-unknown` with the `simd128` feature uses 128-bit lanes
-equivalent to the SSE4.2 path; exercised by the `oximedia-codec` WASM
-test matrix.
+`oximedia-simd` itself has **no** wasm32-specific code path — there is no
+`wasm32` branch anywhere under `crates/oximedia-simd/src/`, and its
+`CpuFeatures::detect()` `x86_64`/`aarch64` `cfg` arms simply fall through to
+the "every flag `false`" default on `wasm32-unknown-unknown`. `oximedia-simd`
+also does not use WASM SIMD128 by way of another crate: `oximedia-codec`,
+the workspace's other SIMD-heavy crate, does **not** depend on
+`oximedia-simd` at all (`crates/oximedia-codec/Cargo.toml` has no such
+dependency). In other words, any WASM SIMD tier this document previously
+described as "reusing the SSE4.2 paths, exercised by an `oximedia-codec`
+WASM test matrix" does not exist; `oximedia-simd`'s wasm32 builds compile
+only the portable scalar fallbacks (`scalar.rs` / `scalar_fallback.rs`),
+selected because `detect_cpu_features()` reports no SIMD tier available.
+
+Two real, independent WASM SIMD paths exist elsewhere in the workspace:
+
+- **`oximedia-codec`** has its own hand-written WASM SIMD128 backend at
+  [`crates/oximedia-codec/src/simd/wasm.rs`](../crates/oximedia-codec/src/simd/wasm.rs),
+  gated on `#[cfg(target_arch = "wasm32")]` and
+  `#[target_feature(enable = "simd128")]`, using `core::arch::wasm32`
+  intrinsics directly (not anything from `oximedia-simd`). It implements the
+  crate's own `SimdOps`/`SimdOpsExt` traits and falls back to
+  `ScalarFallback` when `simd128` is unavailable or the target isn't
+  `wasm32`.
+- **The `web/` workspace** (`oximedia-web-core` and friends, see
+  [`web/README.md`](../web/README.md)) achieves WASM SIMD acceleration a
+  different way again: no hand-written `core::arch::wasm32` intrinsics at
+  all. Kernels are written as ordinary safe Rust over `chunks_exact` /
+  `chunks_exact_mut`, compiled with `-C target-feature=+simd128`
+  (`web/.cargo/config.toml`) so LLVM autovectorizes the inner loops into
+  SIMD128 instructions. This keeps every `web/crates/*` crate at
+  `#![forbid(unsafe_code)]` with zero `unsafe` blocks, at the cost of
+  depending on the autovectorizer doing a good job rather than hand-tuning
+  intrinsics.
 
 ## Dispatch module
 

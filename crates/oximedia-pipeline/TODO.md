@@ -34,7 +34,7 @@
 ## Testing
 - [x] Add property-based tests for topological sort correctness with random graph shapes (verified 2026-06-01; tests/wave15_tests.rs test_pipeline_topo_sort_random_graph: 5 seeded xorshift32 DAGs 8-12 nodes, forward-edge invariant)
 - [x] Test pipeline validation with malformed graphs (disconnected nodes, dangling pads) (verified 2026-06-01; tests/wave15_tests.rs test_pipeline_validation_disconnected_nodes + validation.rs existing tests)
-- [ ] Add benchmark tests for `ExecutionPlanner` with large pipeline graphs (1000+ nodes)
+- [x] Add benchmark tests for `ExecutionPlanner` with large pipeline graphs (1000+ nodes) (verified 2026-06-06; tests/wave15_tests.rs:387 test_planner_large_dag_valid_topo_order, :420 test_planner_large_dag_all_scheduled_once, :455 test_planner_fan_in_fan_out_heavy, :542 test_planner_chain_and_wide_layer_structure — 1000+ node layered/chain/wide/fan-in-out DAGs, valid topo order + every node scheduled once + level ordering)
 - [ ] Test `PipelineBuilder` chain correctness for all filter types (scale, flip, crop, etc.)
 
 ## Documentation

@@ -558,9 +558,9 @@ mod tests {
         let luma = (width as usize) * (height as usize);
         let chroma = ((width as usize + 1) / 2) * ((height as usize + 1) / 2);
         let mut frame = Vec::with_capacity(luma + 2 * chroma);
-        frame.extend(std::iter::repeat(y_val).take(luma));
-        frame.extend(std::iter::repeat(u_val).take(chroma));
-        frame.extend(std::iter::repeat(v_val).take(chroma));
+        frame.extend(std::iter::repeat_n(y_val, luma));
+        frame.extend(std::iter::repeat_n(u_val, chroma));
+        frame.extend(std::iter::repeat_n(v_val, chroma));
         frame
     }
 

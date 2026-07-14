@@ -1,9 +1,9 @@
 # oximedia-graphics
 
 ![Status: Stable](https://img.shields.io/badge/status-stable-green)
-![Version: 0.1.8](https://img.shields.io/badge/version-0.1.8-blue)
+![Version: 0.1.9](https://img.shields.io/badge/version-0.1.9-blue)
 ![Tests: 1014](https://img.shields.io/badge/tests-1014-brightgreen)
-![Updated: 2026-05-21](https://img.shields.io/badge/updated-2026--05--21-blue)
+![Updated: 2026-07-08](https://img.shields.io/badge/updated-2026--07--08-blue)
 
 Broadcast graphics engine for OxiMedia, providing 2D vector graphics, advanced typography, broadcast graphics elements, keyframe animation, and GPU-accelerated rendering.
 
@@ -36,9 +36,9 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-graphics = "0.1.8"
+oximedia-graphics = "0.1.9"
 # With GPU and server features (default):
-oximedia-graphics = { version = "0.1.8", features = ["gpu", "server"] }
+oximedia-graphics = { version = "0.1.9", features = ["gpu", "server"] }
 ```
 
 ## Feature Flags
@@ -108,7 +108,7 @@ oximedia-graphics = { version = "0.1.8", features = ["gpu", "server"] }
 
 ```toml
 [dependencies]
-oximedia-graphics = { version = "0.1.8", features = ["gpu"] }
+oximedia-graphics = { version = "0.1.9", features = ["gpu"] }
 ```
 
 See the `examples/` directory for broadcast graphics usage examples.

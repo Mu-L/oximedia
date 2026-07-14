@@ -39,7 +39,7 @@
 - [x] Add property-based tests for `sphere_to_equirect` / `equirect_to_sphere` inverse relationship (`sphere_equirect_roundtrip_error_near_zero`)
 - [x] Test `DualFisheyeStitcher` with synthetic checkerboard fisheye images (impl 2026-05-16: `checkerboard_fisheye_stitch_smoke` + `checkerboard_fisheye_equirect_roundtrip` in `src/fisheye.rs`)
 - [x] Add edge-case tests for polar singularities in equirectangular projection (`north_pole_elevation_clamped_at_half_pi`, `south_pole_elevation_clamped_at_neg_half_pi`, `pole_roundtrip_does_not_panic`, `antimeridian_roundtrip_stable`)
-- [ ] Benchmark cubemap face extraction at 4K and 8K resolutions (verified-open 2026-05-16: no criterion or bench tests for 4K/8K cubemap found in src/)
+- [x] Benchmark cubemap face extraction at 4K and 8K resolutions (impl 2026-06-06: `benches/cubemap_bench.rs` — 4K already present; added 8K to both tiled and parallel groups under reduced `sample_size(10)`; parallel group also gained 4K for parity)
 
 ## Documentation
 - [ ] Add visual diagrams showing coordinate system conventions (theta/phi orientation) (verified-open 2026-05-16: no diagrams found in src/)

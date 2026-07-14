@@ -21,4 +21,4 @@ oximedia-audio.workspace = true
 thiserror.workspace = true
 oxifft = { workspace = true }
 scirs2-core = { workspace = true }
-reed-solomon-erasure = "6"
+reed-solomon-erasure = { workspace = true }

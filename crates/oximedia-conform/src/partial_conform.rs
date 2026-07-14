@@ -1,13 +1,13 @@
 //! Partial conform: process only a selected subset of clips in a batch.
 //!
-//! The standard [`BatchProcessor`] always processes *all* clips in every job.
+//! The standard `BatchProcessor` always processes *all* clips in every job.
 //! In large episodic workflows it is common to re-conform only the clips that
 //! changed since the last session (e.g. after a colour-grade revision or a
 //! re-cut that touched only scenes 7–12).  Scanning and re-linking every clip
 //! would waste significant I/O.
 //!
 //! [`PartialConformSelector`] encodes the selection predicate and
-//! [`PartialBatchProcessor`] applies it to filter a [`BatchJob`]'s clip list
+//! [`PartialBatchProcessor`] applies it to filter a `BatchJob`'s clip list
 //! before processing.
 //!
 //! # Selection modes

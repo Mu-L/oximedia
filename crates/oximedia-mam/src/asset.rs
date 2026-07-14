@@ -469,42 +469,45 @@ impl AssetManager {
     ) -> Result<AssetList> {
         let mut query = String::from("SELECT * FROM assets WHERE status != 'deleted'");
         let mut count_query = String::from("SELECT COUNT(*) FROM assets WHERE status != 'deleted'");
-        let mut bindings: Vec<Box<dyn sqlx::Encode<'_, sqlx::Postgres> + Send>> = Vec::new();
         let mut param_num = 1;
 
-        // Build WHERE clause
-        if let Some(mime) = &filter.mime_type {
+        // Build WHERE clause. Every `field` name here is a hardcoded literal (never
+        // user-controlled), so the only concern is binding each value correctly —
+        // see the `bind_filters!` macro below, which mirrors this exact conditional
+        // order so each `$N` lines up with the right bound value. (The previous
+        // implementation collected values into a `Vec<Box<dyn sqlx::Encode<...>>>`
+        // but never actually called `.bind()` with them on either query — every
+        // filtered call would have failed at execution time with a bind-parameter
+        // count mismatch; this was a pre-existing bug unrelated to any dependency
+        // version, just newly surfaced by sqlx 0.9's `SqlSafeStr` audit gate forcing
+        // a look at this call site.)
+        if filter.mime_type.is_some() {
             query.push_str(&format!(" AND mime_type = ${param_num}"));
             count_query.push_str(&format!(" AND mime_type = ${param_num}"));
-            bindings.push(Box::new(mime.clone()));
             param_num += 1;
         }
 
-        if let Some(min_dur) = filter.min_duration {
+        if filter.min_duration.is_some() {
             query.push_str(&format!(" AND duration_ms >= ${param_num}"));
             count_query.push_str(&format!(" AND duration_ms >= ${param_num}"));
-            bindings.push(Box::new(min_dur));
             param_num += 1;
         }
 
-        if let Some(max_dur) = filter.max_duration {
+        if filter.max_duration.is_some() {
             query.push_str(&format!(" AND duration_ms <= ${param_num}"));
             count_query.push_str(&format!(" AND duration_ms <= ${param_num}"));
-            bindings.push(Box::new(max_dur));
             param_num += 1;
         }
 
-        if let Some(status) = &filter.status {
+        if filter.status.is_some() {
             query.push_str(&format!(" AND status = ${param_num}"));
             count_query.push_str(&format!(" AND status = ${param_num}"));
-            bindings.push(Box::new(status.clone()));
             param_num += 1;
         }
 
-        if let Some(created_by) = filter.created_by {
+        if filter.created_by.is_some() {
             query.push_str(&format!(" AND created_by = ${param_num}"));
             count_query.push_str(&format!(" AND created_by = ${param_num}"));
-            bindings.push(Box::new(created_by));
             param_num += 1;
         }
 
@@ -514,13 +517,38 @@ impl AssetManager {
             param_num + 1
         ));
 
-        // Execute count query
-        let total: i64 = sqlx::query_scalar(&count_query)
+        // Binds `filter`'s present fields in the SAME order the WHERE clause above
+        // appended them, onto whichever query expression is passed in.
+        macro_rules! bind_filters {
+            ($q:expr) => {{
+                let mut q = $q;
+                if let Some(ref mime) = filter.mime_type {
+                    q = q.bind(mime.clone());
+                }
+                if let Some(min_dur) = filter.min_duration {
+                    q = q.bind(min_dur);
+                }
+                if let Some(max_dur) = filter.max_duration {
+                    q = q.bind(max_dur);
+                }
+                if let Some(ref status) = filter.status {
+                    q = q.bind(status.clone());
+                }
+                if let Some(created_by) = filter.created_by {
+                    q = q.bind(created_by);
+                }
+                q
+            }};
+        }
+
+        // Execute count query. `count_query`'s only dynamic parts are the `$N`
+        // placeholders bound above; audited safe for sqlx 0.9's `SqlSafeStr` gate.
+        let total: i64 = bind_filters!(sqlx::query_scalar(sqlx::AssertSqlSafe(count_query)))
             .fetch_one(self.db.pool())
             .await?;
 
-        // Execute main query
-        let assets = sqlx::query_as::<_, Asset>(&query)
+        // Execute main query (same audit as `count_query` above).
+        let assets = bind_filters!(sqlx::query_as::<_, Asset>(sqlx::AssertSqlSafe(query)))
             .bind(pagination.limit)
             .bind(pagination.offset)
             .fetch_all(self.db.pool())

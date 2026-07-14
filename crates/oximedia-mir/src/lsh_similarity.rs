@@ -15,7 +15,7 @@
 //!
 //! ## Index
 //!
-//! [`LshSimilarityIndex`] partitions the 64-hash signature into **bands of 8
+//! [`LshSimilarityIndex`](crate::lsh_similarity::LshSimilarityIndex) partitions the 64-hash signature into **bands of 8
 //! hashes** (8 bands × 8 hashes = 64).  Items that share at least one full band
 //! are placed into the same bucket.  A query collects candidates from all
 //! matching buckets and re-ranks them by estimated Jaccard similarity.

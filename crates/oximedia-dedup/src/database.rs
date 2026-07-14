@@ -69,13 +69,18 @@
 //! This is an additive-only, forward-only strategy — no DDL `ALTER TABLE` or
 //! schema version table is maintained in v0.1.x.  A proper `schema_version` table
 //! with up/down migrations will be added before the first stable release.
+//!
+//! # Backend
+//!
+//! Backed by [`oxisql_sqlite_compat::SqliteConnection`] — a Pure-Rust,
+//! C/C++-free SQLite-compatible engine (wraps `oxisqlite`, a C-free fork of
+//! Limbo).  No `libsqlite3-sys` / `rusqlite` / `sqlx-sqlite` dependency is
+//! pulled in, keeping the opt-in `sqlite` feature Pure Rust as well.
 
-use crate::DedupResult;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
-use sqlx::Row;
+use crate::{DedupError, DedupResult};
+use oxisql_core::Connection;
 use std::collections::HashMap;
 use std::path::Path;
-use std::str::FromStr;
 
 /// A single entry for bulk insertion via [`DedupDatabase::insert_batch`].
 ///
@@ -91,8 +96,56 @@ pub struct BatchFileEntry {
 
 /// SQLite database for deduplication.
 pub struct DedupDatabase {
-    pool: SqlitePool,
+    pool: oxisql_sqlite_compat::SqliteConnection,
 }
+
+/// Pure DDL schema — `CREATE TABLE` / `CREATE INDEX` only, no PRAGMA/VACUUM,
+/// so it can be issued in a single `execute_batch` call.
+const SCHEMA_DDL: &str = r#"
+    CREATE TABLE IF NOT EXISTS files (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        path TEXT NOT NULL UNIQUE,
+        size INTEGER NOT NULL,
+        hash TEXT NOT NULL,
+        created_at INTEGER DEFAULT (strftime('%s', 'now')),
+        updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_files_hash ON files(hash);
+    CREATE TABLE IF NOT EXISTS fingerprints (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_id INTEGER NOT NULL,
+        type TEXT NOT NULL,
+        data TEXT NOT NULL,
+        created_at INTEGER DEFAULT (strftime('%s', 'now')),
+        FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_fingerprints_type ON fingerprints(type);
+    CREATE INDEX IF NOT EXISTS idx_fingerprints_data ON fingerprints(data);
+    CREATE TABLE IF NOT EXISTS metadata (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_id INTEGER NOT NULL,
+        duration REAL,
+        width INTEGER,
+        height INTEGER,
+        bitrate INTEGER,
+        framerate REAL,
+        sample_rate INTEGER,
+        channels INTEGER,
+        video_codec TEXT,
+        audio_codec TEXT,
+        container TEXT,
+        FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS chunks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_id INTEGER NOT NULL,
+        offset INTEGER NOT NULL,
+        size INTEGER NOT NULL,
+        hash TEXT NOT NULL,
+        FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_chunks_hash ON chunks(hash);
+"#;
 
 impl DedupDatabase {
     /// Open or create a database.
@@ -110,13 +163,10 @@ impl DedupDatabase {
             }
         }
 
-        let options = SqliteConnectOptions::from_str(&format!("sqlite:{}", path.display()))?
-            .create_if_missing(true);
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(5)
-            .connect_with(options)
-            .await?;
+        let path_str = path.to_string_lossy().to_string();
+        let pool = oxisql_sqlite_compat::SqliteConnection::open(&path_str)
+            .await
+            .map_err(DedupError::Database)?;
 
         let db = Self { pool };
         db.initialize().await?;
@@ -130,12 +180,9 @@ impl DedupDatabase {
     ///
     /// Returns an error if the database cannot be created.
     pub async fn open_memory() -> DedupResult<Self> {
-        let options = SqliteConnectOptions::from_str("sqlite::memory:")?.create_if_missing(true);
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await?;
+        let pool = oxisql_sqlite_compat::SqliteConnection::open_memory()
+            .await
+            .map_err(DedupError::Database)?;
 
         let db = Self { pool };
         db.initialize().await?;
@@ -145,113 +192,10 @@ impl DedupDatabase {
 
     /// Initialize database schema.
     async fn initialize(&self) -> DedupResult<()> {
-        // Files table
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS files (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                path TEXT NOT NULL UNIQUE,
-                size INTEGER NOT NULL,
-                hash TEXT NOT NULL,
-                created_at INTEGER DEFAULT (strftime('%s', 'now')),
-                updated_at INTEGER DEFAULT (strftime('%s', 'now'))
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Create index on hash for fast duplicate lookup
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_files_hash ON files(hash)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Fingerprints table (for perceptual hashes, audio fingerprints, etc.)
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS fingerprints (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                file_id INTEGER NOT NULL,
-                type TEXT NOT NULL,
-                data TEXT NOT NULL,
-                created_at INTEGER DEFAULT (strftime('%s', 'now')),
-                FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Create index on fingerprint type for fast lookup
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_fingerprints_type ON fingerprints(type)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Create index on fingerprint data for fast lookup
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_fingerprints_data ON fingerprints(data)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Metadata table
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS metadata (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                file_id INTEGER NOT NULL,
-                duration REAL,
-                width INTEGER,
-                height INTEGER,
-                bitrate INTEGER,
-                framerate REAL,
-                sample_rate INTEGER,
-                channels INTEGER,
-                video_codec TEXT,
-                audio_codec TEXT,
-                container TEXT,
-                FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Chunks table (for content-based deduplication)
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS chunks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                file_id INTEGER NOT NULL,
-                offset INTEGER NOT NULL,
-                size INTEGER NOT NULL,
-                hash TEXT NOT NULL,
-                FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Create index on chunk hash
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_chunks_hash ON chunks(hash)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
+        self.pool
+            .execute_batch(SCHEMA_DDL)
+            .await
+            .map_err(DedupError::Database)?;
         Ok(())
     }
 
@@ -260,28 +204,46 @@ impl DedupDatabase {
     /// # Errors
     ///
     /// Returns an error if the insertion fails.
+    ///
+    /// # Implementation note
+    ///
+    /// The underlying Pure-Rust `oxisqlite` engine (`oxisql-sqlite-compat`
+    /// 0.3.x) parses `RETURNING` but does not yet execute it (a silent
+    /// no-op — see upstream `translate/insert.rs`'s unused `_returning`
+    /// parameter), and `last_insert_rowid()` is not reliable here because
+    /// this is an upsert (`ON CONFLICT … DO UPDATE`): on the update path no
+    /// new row is inserted, so it would not reflect the conflicting row's
+    /// id. A follow-up `SELECT id … WHERE path = $1` is used instead, which
+    /// is correct on both the insert and update-on-conflict paths.
     pub async fn insert_file(&self, path: impl AsRef<Path>, hash: &str) -> DedupResult<i64> {
         let path = path.as_ref().to_string_lossy().to_string();
         let size = std::fs::metadata(path.as_str())?.len() as i64;
 
-        let result = sqlx::query(
-            r#"
+        self.pool
+            .execute(
+                r"
             INSERT INTO files (path, size, hash)
-            VALUES (?, ?, ?)
+            VALUES ($1, $2, $3)
             ON CONFLICT(path) DO UPDATE SET
                 size = excluded.size,
                 hash = excluded.hash,
                 updated_at = strftime('%s', 'now')
-            RETURNING id
-            "#,
-        )
-        .bind(&path)
-        .bind(size)
-        .bind(hash)
-        .fetch_one(&self.pool)
-        .await?;
+            ",
+                &[&path, &size, &hash],
+            )
+            .await
+            .map_err(DedupError::Database)?;
 
-        Ok(result.get(0))
+        let rows = self
+            .pool
+            .query("SELECT id FROM files WHERE path = $1", &[&path])
+            .await
+            .map_err(DedupError::Database)?;
+
+        rows.first()
+            .ok_or_else(|| DedupError::Other("insert_file: row not found after upsert".into()))?
+            .try_get_by_index(0)
+            .map_err(DedupError::Database)
     }
 
     /// Get file ID by path.
@@ -292,16 +254,15 @@ impl DedupDatabase {
     pub async fn get_file_id(&self, path: impl AsRef<Path>) -> DedupResult<Option<i64>> {
         let path = path.as_ref().to_string_lossy().to_string();
 
-        let result = sqlx::query(
-            r#"
-            SELECT id FROM files WHERE path = ?
-            "#,
-        )
-        .bind(&path)
-        .fetch_optional(&self.pool)
-        .await?;
+        let rows = self
+            .pool
+            .query("SELECT id FROM files WHERE path = $1", &[&path])
+            .await
+            .map_err(DedupError::Database)?;
 
-        Ok(result.map(|row| row.get(0)))
+        rows.first()
+            .map(|row| row.try_get_by_index(0).map_err(DedupError::Database))
+            .transpose()
     }
 
     /// Insert a fingerprint.
@@ -315,20 +276,18 @@ impl DedupDatabase {
         fingerprint_type: &str,
         data: &str,
     ) -> DedupResult<i64> {
-        let result = sqlx::query(
-            r#"
+        self.pool
+            .execute(
+                r"
             INSERT INTO fingerprints (file_id, type, data)
-            VALUES (?, ?, ?)
-            RETURNING id
-            "#,
-        )
-        .bind(file_id)
-        .bind(fingerprint_type)
-        .bind(data)
-        .fetch_one(&self.pool)
-        .await?;
+            VALUES ($1, $2, $3)
+            ",
+                &[&file_id, &fingerprint_type, &data],
+            )
+            .await
+            .map_err(DedupError::Database)?;
 
-        Ok(result.get(0))
+        self.last_insert_rowid().await
     }
 
     /// Insert metadata.
@@ -347,24 +306,26 @@ impl DedupDatabase {
         audio_codec: Option<&str>,
         container: Option<&str>,
     ) -> DedupResult<i64> {
-        let result = sqlx::query(
-            r#"
+        self.pool
+            .execute(
+                r"
             INSERT INTO metadata (file_id, duration, width, height, video_codec, audio_codec, container)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            RETURNING id
-            "#,
-        )
-        .bind(file_id)
-        .bind(duration)
-        .bind(width)
-        .bind(height)
-        .bind(video_codec)
-        .bind(audio_codec)
-        .bind(container)
-        .fetch_one(&self.pool)
-        .await?;
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ",
+                &[
+                    &file_id,
+                    &duration,
+                    &width,
+                    &height,
+                    &video_codec,
+                    &audio_codec,
+                    &container,
+                ],
+            )
+            .await
+            .map_err(DedupError::Database)?;
 
-        Ok(result.get(0))
+        self.last_insert_rowid().await
     }
 
     /// Insert a chunk.
@@ -379,21 +340,36 @@ impl DedupDatabase {
         size: i64,
         hash: &str,
     ) -> DedupResult<i64> {
-        let result = sqlx::query(
-            r#"
+        self.pool
+            .execute(
+                r"
             INSERT INTO chunks (file_id, offset, size, hash)
-            VALUES (?, ?, ?, ?)
-            RETURNING id
-            "#,
-        )
-        .bind(file_id)
-        .bind(offset)
-        .bind(size)
-        .bind(hash)
-        .fetch_one(&self.pool)
-        .await?;
+            VALUES ($1, $2, $3, $4)
+            ",
+                &[&file_id, &offset, &size, &hash],
+            )
+            .await
+            .map_err(DedupError::Database)?;
 
-        Ok(result.get(0))
+        self.last_insert_rowid().await
+    }
+
+    /// Fetch the rowid of the most recently successful `INSERT` on this
+    /// connection via SQLite's `last_insert_rowid()` scalar function.
+    ///
+    /// Must only be called immediately after an `INSERT` that is known to
+    /// have inserted a new row (not an `ON CONFLICT … DO UPDATE` that may
+    /// have taken the update path — see [`Self::insert_file`]).
+    async fn last_insert_rowid(&self) -> DedupResult<i64> {
+        let rows = self
+            .pool
+            .query("SELECT last_insert_rowid()", &[])
+            .await
+            .map_err(DedupError::Database)?;
+        rows.first()
+            .ok_or_else(|| DedupError::Other("last_insert_rowid(): no row returned".into()))?
+            .try_get_by_index(0)
+            .map_err(DedupError::Database)
     }
 
     /// Find files with duplicate hashes.
@@ -402,8 +378,10 @@ impl DedupDatabase {
     ///
     /// Returns an error if the query fails.
     pub async fn find_duplicate_hashes(&self) -> DedupResult<HashMap<String, Vec<String>>> {
-        let rows = sqlx::query(
-            r#"
+        let rows = self
+            .pool
+            .query(
+                r"
             SELECT hash, path
             FROM files
             WHERE hash IN (
@@ -413,16 +391,17 @@ impl DedupDatabase {
                 HAVING COUNT(*) > 1
             )
             ORDER BY hash, path
-            "#,
-        )
-        .fetch_all(&self.pool)
-        .await?;
+            ",
+                &[],
+            )
+            .await
+            .map_err(DedupError::Database)?;
 
         let mut duplicates: HashMap<String, Vec<String>> = HashMap::new();
 
         for row in rows {
-            let hash: String = row.get(0);
-            let path: String = row.get(1);
+            let hash: String = row.try_get_by_index(0).map_err(DedupError::Database)?;
+            let path: String = row.try_get_by_index(1).map_err(DedupError::Database)?;
 
             duplicates.entry(hash).or_insert_with(Vec::new).push(path);
         }
@@ -439,24 +418,26 @@ impl DedupDatabase {
         &self,
         fingerprint_type: &str,
     ) -> DedupResult<HashMap<String, Vec<String>>> {
-        let rows = sqlx::query(
-            r#"
+        let rows = self
+            .pool
+            .query(
+                r"
             SELECT f.data, fi.path
             FROM fingerprints f
             JOIN files fi ON f.file_id = fi.id
-            WHERE f.type = ?
+            WHERE f.type = $1
             ORDER BY f.data
-            "#,
-        )
-        .bind(fingerprint_type)
-        .fetch_all(&self.pool)
-        .await?;
+            ",
+                &[&fingerprint_type],
+            )
+            .await
+            .map_err(DedupError::Database)?;
 
         let mut groups: HashMap<String, Vec<String>> = HashMap::new();
 
         for row in rows {
-            let data: String = row.get(0);
-            let path: String = row.get(1);
+            let data: String = row.try_get_by_index(0).map_err(DedupError::Database)?;
+            let path: String = row.try_get_by_index(1).map_err(DedupError::Database)?;
 
             groups.entry(data).or_insert_with(Vec::new).push(path);
         }
@@ -474,8 +455,10 @@ impl DedupDatabase {
     ///
     /// Returns an error if the query fails.
     pub async fn find_duplicate_chunks(&self) -> DedupResult<HashMap<String, Vec<String>>> {
-        let rows = sqlx::query(
-            r#"
+        let rows = self
+            .pool
+            .query(
+                r"
             SELECT c.hash, f.path
             FROM chunks c
             JOIN files f ON c.file_id = f.id
@@ -486,16 +469,17 @@ impl DedupDatabase {
                 HAVING COUNT(*) > 1
             )
             ORDER BY c.hash
-            "#,
-        )
-        .fetch_all(&self.pool)
-        .await?;
+            ",
+                &[],
+            )
+            .await
+            .map_err(DedupError::Database)?;
 
         let mut duplicates: HashMap<String, Vec<String>> = HashMap::new();
 
         for row in rows {
-            let hash: String = row.get(0);
-            let path: String = row.get(1);
+            let hash: String = row.try_get_by_index(0).map_err(DedupError::Database)?;
+            let path: String = row.try_get_by_index(1).map_err(DedupError::Database)?;
 
             let paths = duplicates.entry(hash).or_insert_with(Vec::new);
             if !paths.contains(&path) {
@@ -512,22 +496,19 @@ impl DedupDatabase {
     ///
     /// Returns an error if the query fails.
     pub async fn get_all_files(&self) -> DedupResult<Vec<(String, String)>> {
-        let rows = sqlx::query(
-            r#"
-            SELECT path, hash FROM files ORDER BY path
-            "#,
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = self
+            .pool
+            .query("SELECT path, hash FROM files ORDER BY path", &[])
+            .await
+            .map_err(DedupError::Database)?;
 
-        Ok(rows
-            .iter()
+        rows.iter()
             .map(|row| {
-                let path: String = row.get(0);
-                let hash: String = row.get(1);
-                (path, hash)
+                let path: String = row.try_get_by_index(0).map_err(DedupError::Database)?;
+                let hash: String = row.try_get_by_index(1).map_err(DedupError::Database)?;
+                Ok((path, hash))
             })
-            .collect())
+            .collect()
     }
 
     /// Count total files.
@@ -536,15 +517,17 @@ impl DedupDatabase {
     ///
     /// Returns an error if the query fails.
     pub async fn count_files(&self) -> DedupResult<usize> {
-        let row = sqlx::query(
-            r#"
-            SELECT COUNT(*) FROM files
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await?;
+        let rows = self
+            .pool
+            .query("SELECT COUNT(*) FROM files", &[])
+            .await
+            .map_err(DedupError::Database)?;
 
-        let count: i64 = row.get(0);
+        let count: i64 = rows
+            .first()
+            .ok_or_else(|| DedupError::Other("count_files: no row returned".into()))?
+            .try_get_by_index(0)
+            .map_err(DedupError::Database)?;
         Ok(count as usize)
     }
 
@@ -554,15 +537,17 @@ impl DedupDatabase {
     ///
     /// Returns an error if the query fails.
     pub async fn count_unique_hashes(&self) -> DedupResult<usize> {
-        let row = sqlx::query(
-            r#"
-            SELECT COUNT(DISTINCT hash) FROM files
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await?;
+        let rows = self
+            .pool
+            .query("SELECT COUNT(DISTINCT hash) FROM files", &[])
+            .await
+            .map_err(DedupError::Database)?;
 
-        let count: i64 = row.get(0);
+        let count: i64 = rows
+            .first()
+            .ok_or_else(|| DedupError::Other("count_unique_hashes: no row returned".into()))?
+            .try_get_by_index(0)
+            .map_err(DedupError::Database)?;
         Ok(count as usize)
     }
 
@@ -574,14 +559,10 @@ impl DedupDatabase {
     pub async fn delete_file(&self, path: impl AsRef<Path>) -> DedupResult<()> {
         let path = path.as_ref().to_string_lossy().to_string();
 
-        sqlx::query(
-            r#"
-            DELETE FROM files WHERE path = ?
-            "#,
-        )
-        .bind(&path)
-        .execute(&self.pool)
-        .await?;
+        self.pool
+            .execute("DELETE FROM files WHERE path = $1", &[&path])
+            .await
+            .map_err(DedupError::Database)?;
 
         Ok(())
     }
@@ -592,26 +573,32 @@ impl DedupDatabase {
     ///
     /// Returns an error if the deletion fails.
     pub async fn delete_by_hash(&self, hash: &str) -> DedupResult<usize> {
-        let result = sqlx::query(
-            r#"
-            DELETE FROM files WHERE hash = ?
-            "#,
-        )
-        .bind(hash)
-        .execute(&self.pool)
-        .await?;
+        let affected = self
+            .pool
+            .execute("DELETE FROM files WHERE hash = $1", &[&hash])
+            .await
+            .map_err(DedupError::Database)?;
 
-        Ok(result.rows_affected() as usize)
+        Ok(affected as usize)
     }
 
     /// Optimize database (vacuum and analyze).
     ///
+    /// `VACUUM` is not yet implemented by the underlying Pure-Rust `oxisqlite`
+    /// engine (`oxisql-sqlite-compat` 0.3.x); the call is therefore
+    /// best-effort and its error is swallowed so that `ANALYZE` — which *is*
+    /// supported and rebuilds query-planner statistics — still runs.
+    ///
     /// # Errors
     ///
-    /// Returns an error if optimization fails.
+    /// Returns an error if `ANALYZE` fails.
     pub async fn optimize(&self) -> DedupResult<()> {
-        sqlx::query("VACUUM").execute(&self.pool).await?;
-        sqlx::query("ANALYZE").execute(&self.pool).await?;
+        // Best-effort: not yet supported by the Pure-Rust SQLite engine.
+        let _ = self.pool.execute("VACUUM", &[]).await;
+        self.pool
+            .execute("ANALYZE", &[])
+            .await
+            .map_err(DedupError::Database)?;
         Ok(())
     }
 
@@ -624,32 +611,38 @@ impl DedupDatabase {
         let total_files = self.count_files().await?;
         let unique_hashes = self.count_unique_hashes().await?;
 
-        let row = sqlx::query(
-            r#"
-            SELECT COUNT(*) FROM fingerprints
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await?;
-        let total_fingerprints: i64 = row.get(0);
+        let rows = self
+            .pool
+            .query("SELECT COUNT(*) FROM fingerprints", &[])
+            .await
+            .map_err(DedupError::Database)?;
+        let total_fingerprints: i64 = rows
+            .first()
+            .ok_or_else(|| DedupError::Other("get_stats: no fingerprint count row".into()))?
+            .try_get_by_index(0)
+            .map_err(DedupError::Database)?;
 
-        let row = sqlx::query(
-            r#"
-            SELECT COUNT(*) FROM chunks
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await?;
-        let total_chunks: i64 = row.get(0);
+        let rows = self
+            .pool
+            .query("SELECT COUNT(*) FROM chunks", &[])
+            .await
+            .map_err(DedupError::Database)?;
+        let total_chunks: i64 = rows
+            .first()
+            .ok_or_else(|| DedupError::Other("get_stats: no chunk count row".into()))?
+            .try_get_by_index(0)
+            .map_err(DedupError::Database)?;
 
-        let row = sqlx::query(
-            r#"
-            SELECT SUM(size) FROM files
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await?;
-        let total_size: Option<i64> = row.get(0);
+        let rows = self
+            .pool
+            .query("SELECT SUM(size) FROM files", &[])
+            .await
+            .map_err(DedupError::Database)?;
+        let total_size: Option<i64> = rows
+            .first()
+            .ok_or_else(|| DedupError::Other("get_stats: no size sum row".into()))?
+            .try_get_by_index(0)
+            .map_err(DedupError::Database)?;
 
         Ok(DatabaseStats {
             total_files,
@@ -681,8 +674,10 @@ impl DedupDatabase {
             Option<String>,
         )>,
     > {
-        let rows = sqlx::query(
-            r#"
+        let rows = self
+            .pool
+            .query(
+                r"
             SELECT f.path,
                    m.duration,
                    m.width,
@@ -693,20 +688,24 @@ impl DedupDatabase {
             FROM files f
             LEFT JOIN metadata m ON m.file_id = f.id
             ORDER BY f.path
-            "#,
-        )
-        .fetch_all(&self.pool)
-        .await?;
+            ",
+                &[],
+            )
+            .await
+            .map_err(DedupError::Database)?;
 
         let mut result = Vec::with_capacity(rows.len());
         for row in rows {
-            let path: String = row.get(0);
-            let duration: Option<f64> = row.get(1);
-            let width: Option<i32> = row.get(2);
-            let height: Option<i32> = row.get(3);
-            let video_codec: Option<String> = row.get(4);
-            let audio_codec: Option<String> = row.get(5);
-            let container: Option<String> = row.get(6);
+            let path: String = row.try_get_by_index(0).map_err(DedupError::Database)?;
+            let duration: Option<f64> = row.try_get_by_index(1).map_err(DedupError::Database)?;
+            let width: Option<i32> = row.try_get_by_index(2).map_err(DedupError::Database)?;
+            let height: Option<i32> = row.try_get_by_index(3).map_err(DedupError::Database)?;
+            let video_codec: Option<String> =
+                row.try_get_by_index(4).map_err(DedupError::Database)?;
+            let audio_codec: Option<String> =
+                row.try_get_by_index(5).map_err(DedupError::Database)?;
+            let container: Option<String> =
+                row.try_get_by_index(6).map_err(DedupError::Database)?;
             result.push((
                 path,
                 duration,
@@ -732,33 +731,34 @@ impl DedupDatabase {
         &self,
         fingerprint_type: &str,
     ) -> DedupResult<Vec<(String, String)>> {
-        let rows = sqlx::query(
-            r#"
+        let rows = self
+            .pool
+            .query(
+                r"
             SELECT f.path, fp.data
             FROM fingerprints fp
             JOIN files f ON fp.file_id = f.id
-            WHERE fp.type = ?
+            WHERE fp.type = $1
             ORDER BY f.path
-            "#,
-        )
-        .bind(fingerprint_type)
-        .fetch_all(&self.pool)
-        .await?;
+            ",
+                &[&fingerprint_type],
+            )
+            .await
+            .map_err(DedupError::Database)?;
 
-        Ok(rows
-            .into_iter()
+        rows.into_iter()
             .map(|row| {
-                let path: String = row.get(0);
-                let data: String = row.get(1);
-                (path, data)
+                let path: String = row.try_get_by_index(0).map_err(DedupError::Database)?;
+                let data: String = row.try_get_by_index(1).map_err(DedupError::Database)?;
+                Ok((path, data))
             })
-            .collect())
+            .collect()
     }
 
     /// Insert multiple files in a single atomic transaction for throughput.
     ///
-    /// All entries are wrapped in a single `BEGIN IMMEDIATE … COMMIT` transaction.
-    /// If any row fails the whole batch is rolled back and the error is returned.
+    /// All entries are wrapped in a single transaction. If any row fails the
+    /// whole batch is rolled back and the error is returned.
     ///
     /// Each file referenced by [`BatchFileEntry::path`] **must exist on disk** because
     /// the method reads `std::fs::metadata` to determine file size.
@@ -770,32 +770,39 @@ impl DedupDatabase {
     /// Returns an error if the transaction cannot be started, if any file's metadata
     /// cannot be read from disk, or if any SQL statement fails.
     pub async fn insert_batch(&self, entries: &[BatchFileEntry]) -> DedupResult<usize> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self
+            .pool
+            .transaction()
+            .await
+            .map_err(DedupError::Database)?;
         let mut count = 0usize;
 
         for entry in entries {
             let size = std::fs::metadata(entry.path.as_str())?.len() as i64;
 
-            sqlx::query(
-                r#"
+            let result = tx
+                .execute(
+                    r"
                 INSERT INTO files (path, size, hash)
-                VALUES (?, ?, ?)
+                VALUES ($1, $2, $3)
                 ON CONFLICT(path) DO UPDATE SET
                     size = excluded.size,
                     hash = excluded.hash,
                     updated_at = strftime('%s', 'now')
-                "#,
-            )
-            .bind(&entry.path)
-            .bind(size)
-            .bind(&entry.hash)
-            .execute(&mut *tx)
-            .await?;
+                ",
+                    &[&entry.path, &size, &entry.hash],
+                )
+                .await;
+
+            if let Err(e) = result {
+                let _ = tx.rollback().await;
+                return Err(DedupError::Database(e));
+            }
 
             count += 1;
         }
 
-        tx.commit().await?;
+        tx.commit().await.map_err(DedupError::Database)?;
         Ok(count)
     }
 
@@ -804,17 +811,20 @@ impl DedupDatabase {
     /// # Errors
     ///
     /// Returns an error if transaction cannot be started.
-    pub async fn begin_transaction(&self) -> DedupResult<sqlx::Transaction<'_, sqlx::Sqlite>> {
-        Ok(self.pool.begin().await?)
+    pub async fn begin_transaction(&self) -> DedupResult<Box<dyn oxisql_core::Transaction + '_>> {
+        self.pool.transaction().await.map_err(DedupError::Database)
     }
 
     /// Close the database.
     ///
     /// # Errors
     ///
-    /// Returns an error if closing fails.
+    /// Never fails; `SqliteConnection` has no explicit close handle — the
+    /// connection is released when the last clone is dropped. Kept as an
+    /// `async fn` returning `Result` for API compatibility with callers that
+    /// treat closing as fallible.
     pub async fn close(self) -> DedupResult<()> {
-        self.pool.close().await;
+        drop(self.pool);
         Ok(())
     }
 }

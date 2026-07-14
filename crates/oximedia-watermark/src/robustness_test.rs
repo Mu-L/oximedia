@@ -10,8 +10,8 @@
 //!
 //! | Name | Description |
 //! |------|-------------|
-//! | [`WatermarkRobustness::simulate_compression`] | Round-trip through coarse 8×8 block quantisation + noise |
-//! | [`WatermarkRobustness::add_awgn`] | Additive White Gaussian Noise at a given SNR |
+//! | [`crate::robustness_test::WatermarkRobustness::simulate_compression`] | Round-trip through coarse 8×8 block quantisation + noise |
+//! | [`crate::robustness_test::WatermarkRobustness::add_awgn`] | Additive White Gaussian Noise at a given SNR |
 
 /// Watermark robustness test utilities.
 pub struct WatermarkRobustness;

@@ -188,7 +188,7 @@ pub struct MergeResult {
     pub conflicts: Vec<MergeConflict>,
     /// Number of segments from the base CPL.
     pub base_segments: usize,
-    /// Number of segments from the supplemental CPL.
+    /// Total number of segments in the supplemental CPL (including any whose `id` overlapped a base segment).
     pub supplemental_segments: usize,
 }
 
@@ -389,29 +389,35 @@ pub fn merge_cpls(
     }
 
     // Add supplemental-only segments
-    let supp_only_count = supplemental
-        .segments
-        .iter()
-        .filter(|s| !used_supp_ids.contains(s.id.as_str()))
-        .count();
-
     for supp_seg in &supplemental.segments {
         if !used_supp_ids.contains(supp_seg.id.as_str()) {
             merged_segments.push(supp_seg.clone());
         }
     }
 
+    // Edit-rate selection honors the conflict strategy. `KeepSupplemental` adopts the
+    // supplemental rate; every other strategy keeps the base rate. (A `MergeConflict` is still
+    // pushed above when the rates differ, so the mismatch stays visible regardless.)
+    let (merged_rate_num, merged_rate_den) = match strategy {
+        ConflictStrategy::KeepSupplemental => {
+            (supplemental.edit_rate_num, supplemental.edit_rate_den)
+        }
+        ConflictStrategy::KeepBase | ConflictStrategy::Fail | ConflictStrategy::Concatenate => {
+            (base.edit_rate_num, base.edit_rate_den)
+        }
+    };
+
     let merged = MergeCpl {
         id: base.id.clone(),
         title: base.title.clone(),
-        edit_rate_num: base.edit_rate_num,
-        edit_rate_den: base.edit_rate_den,
+        edit_rate_num: merged_rate_num,
+        edit_rate_den: merged_rate_den,
         segments: merged_segments,
     };
 
     MergeResult {
         base_segments: base.segments.len(),
-        supplemental_segments: supp_only_count,
+        supplemental_segments: supplemental.segments.len(),
         merged,
         conflicts,
     }

@@ -22,7 +22,7 @@ const PITCH_NAMES: [&str; 12] = [
 /// A single chroma vector (12 pitch class energies).
 #[derive(Debug, Clone)]
 pub struct ChromaVector {
-    /// Energy per pitch class [C, C#, D, D#, E, F, F#, G, G#, A, A#, B].
+    /// Energy per pitch class `[C, C#, D, D#, E, F, F#, G, G#, A, A#, B]`.
     pub bins: [f64; CHROMA_BINS],
 }
 

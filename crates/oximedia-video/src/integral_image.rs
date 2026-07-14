@@ -14,7 +14,7 @@
 //! ```
 //!
 //! Both `sum` and `sum_sq` tables are stored in the same layout so that
-//! variance can be derived from E[X²] – E[X]².
+//! variance can be derived from `E[X²] – E[X]²`.
 
 // -----------------------------------------------------------------------
 // Public struct

@@ -30,7 +30,7 @@
 - [x] Use connection pooling for SQLite database access in `database` module (completed 2026-05-15 — `DatabasePool::new(path, max_connections)` added to `src/database/mod.rs` wrapping `r2d2::Pool<SqliteConnectionManager>`; WAL-mode concurrent test `test_pool_concurrent_access` (4 threads × 10 inserts = 40 rows verified); existing `Database::new` retains backward-compatible default pool)
 - [x] Implement work-stealing scheduler in `execution` for better load balancing across workers
 - [x] Add memory-mapped file I/O for large batch input files in `operations` (completed 2026-05-15 — `MmapReader` and `open_smart` in `src/operations/mmap_reader.rs`; 4 MiB threshold, falls back to `BufReader` for small files; `unsafe` block isolated with SAFETY comment; 4 tests including large-file mmap path verification)
-- [ ] Cache template parsing results in `template` to avoid re-parsing on repeated job submissions (verified-open 2026-05-16: not yet implemented)
+- [x] Cache template parsing results in `template` to avoid re-parsing on repeated job submissions (completed 2026-06-05: `parse_template_to_segments` + `parsed_cache: Mutex<HashMap<String, Arc<Vec<Segment>>>>` in engine.rs; 6 new cache-correctness tests; 974 tests pass, 0 warnings)
 - [ ] Use zero-copy deserialization for job payloads in `queue` using serde `borrow` (verified-open 2026-05-16: not yet implemented)
 
 ## Testing

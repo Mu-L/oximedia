@@ -281,7 +281,18 @@ impl AutoEditorConfig {
         self
     }
 
-    /// Create a configuration for a specific use case.
+    /// Create a configuration optimised for a named use case.
+    ///
+    /// # Use-case Presets
+    ///
+    /// | Use case | Assembly type | Target duration | Pacing |
+    /// |----------|---------------|-----------------|--------|
+    /// | `"trailer"` | [`AssemblyType::Trailer`] | 60–150 s | Fast, dramatic arc |
+    /// | `"highlights"` | [`AssemblyType::HighlightReel`] | 30–120 s | Medium |
+    /// | `"social"` | [`AssemblyType::SocialClip`] | 15–60 s, 9:16 aspect | Fast |
+    ///
+    /// Any other string returns a default configuration without altering the
+    /// assembly type.
     #[must_use]
     pub fn for_use_case(use_case: &str) -> Self {
         let rules = EditRules::for_use_case(use_case);
@@ -362,14 +373,18 @@ impl AutoEditor {
         Self::new(AutoEditorConfig::default())
     }
 
-    /// Create an auto editor for a specific use case.
+    /// Create an auto editor optimised for a named use case.
     ///
-    /// Supported use cases:
-    /// - "trailer" - Movie trailer preset
-    /// - "highlights" - Highlight reel preset
-    /// - "social" - Social media preset
-    /// - "documentary" - Documentary preset
-    /// - "`music_video`" - Music video preset
+    /// Delegates to [`AutoEditorConfig::for_use_case`].  Recognised values:
+    ///
+    /// - `"trailer"` — cinematic trailer (60–150 s, dramatic arc, fast pacing,
+    ///   [`AssemblyType::Trailer`]).
+    /// - `"highlights"` — highlight reel (30–120 s, medium pacing,
+    ///   [`AssemblyType::HighlightReel`]).
+    /// - `"social"` — short-form social clip (15–60 s, vertical 9:16,
+    ///   [`AssemblyType::SocialClip`]).
+    ///
+    /// Any unrecognised string returns a default editor.
     #[must_use]
     pub fn for_use_case(use_case: &str) -> Self {
         Self::new(AutoEditorConfig::for_use_case(use_case))
@@ -516,6 +531,22 @@ impl AutoEditor {
 
     /// Complete automated workflow: detect, score, cut, and assemble.
     ///
+    /// # Pipeline
+    ///
+    /// 1. **Detect video highlights** — [`HighlightDetector::detect_highlights`] over `frames`.
+    /// 2. **Detect audio highlights** — [`HighlightDetector::detect_audio_highlights`] when `audio_samples` is `Some`.
+    /// 3. **Combine highlights** — merge video and audio highlight lists.
+    /// 4. **Build scored scenes** — convert each [`Highlight`] into a [`ScoredScene`].
+    /// 5. **Generate interest curve** — [`SceneScorer::generate_interest_curve`] over the scenes.
+    /// 6. **Detect beats** — [`CutDetector::detect_beats`] when audio is provided (optional).
+    /// 7. **Detect dialogue** — [`CutDetector::detect_dialogue`] when audio is provided (optional).
+    /// 8. **Detect cuts** — [`CutDetector::detect_cuts`] using `scene_changes`, beats, and dialogue.
+    /// 9. **Apply rules** — [`RulesEngine::apply_rules`] enforces shot-duration and pacing constraints.
+    /// 10. **Assemble** — [`AutoAssembler::assemble_from_scenes`] selects and orders final clips.
+    ///
+    /// For a version that defers steps 5 and 10 until their values are
+    /// accessed, see [`Self::auto_edit_lazy`].
+    ///
     /// # Errors
     ///
     /// Returns an error if any step fails.
@@ -597,6 +628,104 @@ impl AutoEditor {
         })
     }
 
+    /// Complete automated workflow with lazy evaluation of expensive derived fields.
+    ///
+    /// Identical to [`Self::auto_edit()`] for the eagerly computed steps —
+    /// highlight detection (steps 1-4), beat/dialogue detection (steps 6-7),
+    /// cut detection (step 8), and rule application (step 9) — but **defers**:
+    ///
+    /// - Step 5 (`generate_interest_curve`) until
+    ///   [`LazyAutoEditResult::interest_curve()`] is called.
+    /// - Step 10 (`assemble_from_scenes`) until
+    ///   [`LazyAutoEditResult::try_assembled()`] is called.
+    ///
+    /// Use this variant when the caller may not need both outputs (e.g. a
+    /// pipeline that only inspects `cuts` can skip assembly entirely).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if highlight detection, cut detection, or rule
+    /// application fails.  Assembly errors are deferred and only surfaced when
+    /// [`LazyAutoEditResult::try_assembled()`] is called.
+    pub fn auto_edit_lazy(
+        &self,
+        frames: &[VideoFrame],
+        audio_samples: Option<&[f32]>,
+        sample_rate: Option<u32>,
+        scene_changes: &[oximedia_cv::scene::SceneChange],
+    ) -> AutoResult<LazyAutoEditResult> {
+        self.config.validate()?;
+
+        // Step 1: Detect video highlights
+        let video_highlights = self.detect_highlights(frames)?;
+
+        // Step 2: Detect audio highlights
+        let audio_highlights = if let (Some(audio), Some(sr)) = (audio_samples, sample_rate) {
+            self.detect_audio_highlights(audio, sr)?
+        } else {
+            Vec::new()
+        };
+
+        // Step 3: Combine highlights
+        let mut all_highlights = video_highlights;
+        all_highlights.extend(audio_highlights);
+
+        // Step 4: Convert highlights to scored scenes
+        let scenes: Vec<ScoredScene> = all_highlights
+            .iter()
+            .map(|h| {
+                let mut scene = ScoredScene::new(
+                    h.start,
+                    h.end,
+                    h.weighted_score(),
+                    ContentType::Unknown,
+                    Sentiment::Neutral,
+                );
+                scene.features = h.features.clone();
+                scene.suggested_title = Some(h.description.clone());
+                scene
+            })
+            .collect();
+
+        // Steps 6-7: Detect beats and dialogue (lightweight; use unwrap_or_default
+        // so audio-analysis failures don't abort the whole pipeline).
+        let beats = if let (Some(audio), Some(sr)) = (audio_samples, sample_rate) {
+            self.detect_beats(audio, sr).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let dialogue = if let (Some(audio), Some(sr)) = (audio_samples, sample_rate) {
+            self.detect_dialogue(audio, sr).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        // Step 8: Detect cuts
+        let beats_ref: Option<&[Beat]> = if beats.is_empty() { None } else { Some(&beats) };
+        let dialogue_ref: Option<&[DialogueSegment]> = if dialogue.is_empty() {
+            None
+        } else {
+            Some(&dialogue)
+        };
+        let mut cuts = self.detect_cuts(scene_changes, beats_ref, dialogue_ref)?;
+
+        // Step 9: Apply rules
+        self.apply_rules(&mut cuts)?;
+
+        // Steps 5 and 10 are deferred to LazyAutoEditResult accessors.
+        Ok(LazyAutoEditResult {
+            highlights: all_highlights,
+            scenes,
+            beats,
+            dialogue,
+            cuts,
+            scorer: SceneScorer::new(self.config.scoring_config.clone()),
+            assembler: AutoAssembler::new(self.config.assembly_config.clone()),
+            interest_curve_cell: std::sync::OnceLock::new(),
+            assembled_cell: std::sync::OnceLock::new(),
+        })
+    }
+
     /// Get the current configuration.
     #[must_use]
     pub const fn config(&self) -> &AutoEditorConfig {
@@ -674,6 +803,155 @@ impl AutoEditResult {
     }
 }
 
+/// Lazy-evaluated result of the automated editing workflow.
+///
+/// Unlike [`AutoEditResult`], which computes all seven fields eagerly inside
+/// [`AutoEditor::auto_edit()`], `LazyAutoEditResult` defers the two most
+/// expensive derived fields until they are first accessed:
+///
+/// - **[`interest_curve()`][Self::interest_curve]** — the temporal engagement
+///   curve over all scored scenes (O(n) in scene count).
+/// - **[`try_assembled()`][Self::try_assembled]** — the final assembled clip
+///   sequence, which involves sorting, scoring, and duration-packing
+///   (O(n log n)) and can fail if no scenes meet the importance threshold.
+///
+/// Both values are computed **at most once** per `LazyAutoEditResult` instance
+/// and cached via [`std::sync::OnceLock`].  All other fields — `highlights`,
+/// `scenes`, `beats`, `dialogue`, and `cuts` — are computed eagerly by
+/// [`AutoEditor::auto_edit_lazy()`].
+///
+/// # Example
+///
+/// ```no_run
+/// use oximedia_auto::{AutoEditor, AutoEditorConfig};
+///
+/// let editor = AutoEditor::default_editor();
+/// // let lazy = editor.auto_edit_lazy(&frames, None, None, &[])?;
+/// //
+/// // Only access what you need:
+/// // let cuts  = &lazy.cuts;            // already computed
+/// // let curve = lazy.interest_curve(); // computed here, cached
+/// // let clips = lazy.try_assembled()?; // computed here, cached
+/// ```
+pub struct LazyAutoEditResult {
+    /// Detected highlights.
+    pub highlights: Vec<Highlight>,
+    /// Scored scenes derived from detected highlights.
+    pub scenes: Vec<ScoredScene>,
+    /// Detected beat timestamps; empty when no audio was supplied.
+    pub beats: Vec<Beat>,
+    /// Detected dialogue segments; empty when no audio was supplied.
+    pub dialogue: Vec<DialogueSegment>,
+    /// Cut points after rule application.
+    pub cuts: Vec<CutPoint>,
+    // ---- stored for lazy computation ----
+    scorer: SceneScorer,
+    assembler: AutoAssembler,
+    // ---- lazy-cached values ----
+    interest_curve_cell: std::sync::OnceLock<InterestCurve>,
+    assembled_cell: std::sync::OnceLock<Result<Vec<AssembledClip>, String>>,
+}
+
+impl std::fmt::Debug for LazyAutoEditResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LazyAutoEditResult")
+            .field("highlights_count", &self.highlights.len())
+            .field("scenes_count", &self.scenes.len())
+            .field("beats_count", &self.beats.len())
+            .field("dialogue_count", &self.dialogue.len())
+            .field("cuts_count", &self.cuts.len())
+            .field(
+                "interest_curve_computed",
+                &self.interest_curve_cell.get().is_some(),
+            )
+            .field("assembled_computed", &self.assembled_cell.get().is_some())
+            .finish()
+    }
+}
+
+impl LazyAutoEditResult {
+    /// Returns a reference to the interest curve, computing it on first access.
+    ///
+    /// The curve maps each scene's start and end timestamps to its adjusted
+    /// importance score.  Computation is O(n) in `self.scenes.len()` and
+    /// happens exactly once; subsequent calls return the cached reference.
+    #[must_use]
+    pub fn interest_curve(&self) -> &InterestCurve {
+        self.interest_curve_cell
+            .get_or_init(|| self.scorer.generate_interest_curve(&self.scenes))
+    }
+
+    /// Attempts to assemble the final clip sequence, computing it on first access.
+    ///
+    /// Requires at least one scene that meets the configured importance
+    /// threshold.  On success the result is cached; on failure the error
+    /// message is cached and re-returned on every subsequent call as a new
+    /// [`AutoError::AssemblyFailed`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no scenes meet the importance threshold or if the
+    /// assembly pipeline otherwise fails.
+    pub fn try_assembled(&self) -> AutoResult<&[AssembledClip]> {
+        let result = self.assembled_cell.get_or_init(|| {
+            self.assembler
+                .assemble_from_scenes(&self.scenes)
+                .map_err(|e| e.to_string())
+        });
+        match result {
+            Ok(v) => Ok(v.as_slice()),
+            Err(s) => Err(AutoError::assembly_failed(s.as_str())),
+        }
+    }
+
+    /// Returns the assembled clip sequence, or an empty slice if assembly failed.
+    ///
+    /// Convenience wrapper around [`Self::try_assembled()`] for callers that
+    /// treat assembly failure as "no clips" rather than an error condition.
+    #[must_use]
+    pub fn assembled_or_empty(&self) -> &[AssembledClip] {
+        self.try_assembled().unwrap_or(&[])
+    }
+
+    /// Convert this lazy result into a fully-eager [`AutoEditResult`].
+    ///
+    /// Forces computation of both the interest curve and the assembled clips.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the assembly step fails (same as
+    /// [`Self::try_assembled()`]).
+    pub fn into_eager(self) -> AutoResult<AutoEditResult> {
+        let interest_curve = self.interest_curve().clone();
+        let assembled = self.try_assembled()?.to_vec();
+        Ok(AutoEditResult {
+            highlights: self.highlights,
+            scenes: self.scenes,
+            interest_curve,
+            beats: self.beats,
+            dialogue: self.dialogue,
+            cuts: self.cuts,
+            assembled,
+        })
+    }
+
+    /// Get the number of detected highlights.
+    #[must_use]
+    pub fn highlight_count(&self) -> usize {
+        self.highlights.len()
+    }
+
+    /// Get the total duration of the assembled edit in milliseconds.
+    ///
+    /// Returns `0` if assembly has not been triggered yet or if it failed.
+    #[must_use]
+    pub fn total_duration_ms(&self) -> i64 {
+        self.assembled_or_empty()
+            .last()
+            .map_or(0, |clip| clip.output_end.pts)
+    }
+}
+
 /// Prelude module for convenient imports.
 pub mod prelude {
     //! Prelude module for convenient imports.
@@ -686,5 +964,169 @@ pub mod prelude {
     pub use crate::scoring::{
         ContentType, InterestCurve, SceneFeatures, SceneScorer, ScoredScene, ScoringConfig,
     };
-    pub use crate::{AutoEditResult, AutoEditor, AutoEditorConfig};
+    pub use crate::{AutoEditResult, AutoEditor, AutoEditorConfig, LazyAutoEditResult};
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::assembly::AssemblyConfig;
+    use crate::highlights::{HighlightConfig, MotionConfig};
+    use oximedia_codec::VideoFrame;
+    use oximedia_core::{PixelFormat, Rational, Timestamp};
+
+    /// Build a minimal 16×16 `Yuv420p` frame at `pts_ms` milliseconds.
+    fn make_frame(pts_ms: i64) -> VideoFrame {
+        let timebase = Rational::new(1, 1000);
+        let mut frame = VideoFrame::new(PixelFormat::Yuv420p, 16, 16);
+        frame.timestamp = Timestamp::new(pts_ms, timebase);
+        frame.allocate();
+        frame
+    }
+
+    /// Build a test `AutoEditorConfig` that lowers thresholds so the stub
+    /// `estimate_motion` value of `0.5` is accepted and scenes pass assembly.
+    fn test_config() -> AutoEditorConfig {
+        AutoEditorConfig {
+            highlight_config: HighlightConfig {
+                motion: MotionConfig {
+                    threshold: 0.3, // 0.5 (stub value) > 0.3 → motion detected
+                    min_duration_ms: 100,
+                    ..MotionConfig::default()
+                },
+                min_score: 0.2,
+                min_confidence: 0.5,
+                parallel: false, // deterministic for tests
+                ..HighlightConfig::default()
+            },
+            assembly_config: AssemblyConfig {
+                min_importance: 0.1, // accept all scenes regardless of score
+                min_clip_duration_ms: 100,
+                max_clip_duration_ms: 10_000,
+                target_duration_ms: 5_000,
+                ..AssemblyConfig::default()
+            },
+            ..AutoEditorConfig::default()
+        }
+    }
+
+    /// Three frames spanning 2000 ms — the stub motion estimator returns 0.5
+    /// for every consecutive pair, so frames 0 & 1 form a highlight region.
+    fn test_frames() -> Vec<VideoFrame> {
+        vec![make_frame(0), make_frame(1000), make_frame(2000)]
+    }
+
+    // ---- end-to-end auto_edit() tests ----
+
+    #[test]
+    fn test_auto_edit_end_to_end_synthetic() {
+        let editor = AutoEditor::new(test_config());
+        let result = editor
+            .auto_edit(&test_frames(), None, None, &[])
+            .expect("auto_edit should succeed with synthetic frames");
+
+        assert!(
+            !result.highlights.is_empty(),
+            "expected at least one detected highlight"
+        );
+        assert!(
+            !result.scenes.is_empty(),
+            "expected at least one scored scene"
+        );
+        assert!(
+            !result.assembled.is_empty(),
+            "expected at least one assembled clip"
+        );
+        // No scene_changes → cuts list should be empty
+        assert!(
+            result.cuts.is_empty(),
+            "expected no cuts from empty scene_changes"
+        );
+        // Interest curve should have points (two per scene: start and end)
+        assert!(
+            !result.interest_curve.points.is_empty(),
+            "interest curve must have at least one point"
+        );
+    }
+
+    // ---- lazy auto_edit tests ----
+
+    #[test]
+    fn test_lazy_auto_edit_defers_assembly() {
+        let editor = AutoEditor::new(test_config());
+        let lazy = editor
+            .auto_edit_lazy(&test_frames(), None, None, &[])
+            .expect("auto_edit_lazy should succeed");
+
+        // Eager fields populated immediately
+        assert!(
+            !lazy.highlights.is_empty(),
+            "highlights should be populated eagerly"
+        );
+        assert!(
+            !lazy.scenes.is_empty(),
+            "scenes should be populated eagerly"
+        );
+        // Lazy fields deferred — cells still empty before access
+        assert!(
+            lazy.interest_curve_cell.get().is_none(),
+            "interest_curve must not be computed before first access"
+        );
+        assert!(
+            lazy.assembled_cell.get().is_none(),
+            "assembled must not be computed before first access"
+        );
+
+        // Accessing interest_curve triggers computation
+        let curve = lazy.interest_curve();
+        assert!(
+            !curve.points.is_empty(),
+            "interest curve should have points after first access"
+        );
+        assert!(
+            lazy.interest_curve_cell.get().is_some(),
+            "interest_curve_cell must be populated after first access"
+        );
+
+        // Accessing try_assembled triggers assembly
+        let clips = lazy
+            .try_assembled()
+            .expect("assembly should succeed with test config");
+        assert!(!clips.is_empty(), "assembled clips should be non-empty");
+        assert!(
+            lazy.assembled_cell.get().is_some(),
+            "assembled_cell must be populated after try_assembled"
+        );
+    }
+
+    #[test]
+    fn test_lazy_into_eager_matches_eager() {
+        let config = test_config();
+        let editor = AutoEditor::new(config);
+        let frames = test_frames();
+
+        let eager = editor
+            .auto_edit(&frames, None, None, &[])
+            .expect("auto_edit should succeed");
+        let lazy_result = editor
+            .auto_edit_lazy(&frames, None, None, &[])
+            .expect("auto_edit_lazy should succeed");
+        let from_lazy = lazy_result.into_eager().expect("into_eager should succeed");
+
+        assert_eq!(
+            eager.highlights.len(),
+            from_lazy.highlights.len(),
+            "highlight counts must match between eager and lazy→eager"
+        );
+        assert_eq!(
+            eager.assembled.len(),
+            from_lazy.assembled.len(),
+            "assembled clip counts must match between eager and lazy→eager"
+        );
+        assert_eq!(
+            eager.interest_curve.points.len(),
+            from_lazy.interest_curve.points.len(),
+            "interest curve point counts must match"
+        );
+    }
 }

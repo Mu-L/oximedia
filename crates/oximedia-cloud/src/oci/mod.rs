@@ -510,6 +510,7 @@ impl OciObjectStorage {
     ///
     /// Returns [`CloudError::InvalidConfig`] if the configuration is invalid.
     pub fn new(config: OciObjectStorageConfig) -> Result<Self> {
+        crate::tls_provider::install_default_crypto_provider();
         config.validate()?;
         let mut builder = Client::builder();
         if let Some(secs) = config.request_timeout_secs {

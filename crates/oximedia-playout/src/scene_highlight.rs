@@ -8,24 +8,24 @@
 //!
 //! | Detector | Signal used | Typical use |
 //! |----------|-------------|-------------|
-//! | [`MotionEnergyDetector`] | Mean absolute frame difference | Sports action, live events |
-//! | [`LuminanceJumpDetector`] | Inter-frame mean luminance delta | Flash events, lighting changes |
-//! | [`SceneCutDetector`] | Histogram correlation | Hard cuts, transitions |
-//! | [`CompositeSceneAnalyser`] | Weighted combination | General-purpose highlight detection |
+//! | [`MotionEnergyDetector`](crate::scene_highlight::MotionEnergyDetector) | Mean absolute frame difference | Sports action, live events |
+//! | [`LuminanceJumpDetector`](crate::scene_highlight::LuminanceJumpDetector) | Inter-frame mean luminance delta | Flash events, lighting changes |
+//! | [`SceneCutDetector`](crate::scene_highlight::SceneCutDetector) | Histogram correlation | Hard cuts, transitions |
+//! | [`CompositeSceneAnalyser`](crate::scene_highlight::CompositeSceneAnalyser) | Weighted combination | General-purpose highlight detection |
 //!
 //! # Pipeline
 //!
-//! 1. Each decoded frame is submitted to [`CompositeSceneAnalyser::submit`].
+//! 1. Each decoded frame is submitted to [`CompositeSceneAnalyser::submit`](crate::scene_highlight::CompositeSceneAnalyser::submit).
 //! 2. The analyser internally runs all configured sub-detectors.
 //! 3. When the composite score exceeds a configurable threshold, a
-//!    [`SceneHighlight`] is emitted describing the highlight window.
-//! 4. Callers collect highlights via [`CompositeSceneAnalyser::take_highlights`].
+//!    [`SceneHighlight`](crate::scene_highlight::SceneHighlight) is emitted describing the highlight window.
+//! 4. Callers collect highlights via [`CompositeSceneAnalyser::take_highlights`](crate::scene_highlight::CompositeSceneAnalyser::take_highlights).
 //!
 //! # Design notes
 //!
-//! All detectors operate on [`GreyscaleFrame`] — an 8-bit per-pixel luma
+//! All detectors operate on [`GreyscaleFrame`](crate::scene_highlight::GreyscaleFrame) — an 8-bit per-pixel luma
 //! representation.  Colour frames must be converted before submission.  The
-//! conversion function [`rgb_to_luma`] is provided for convenience.
+//! conversion function [`rgb_to_luma`](crate::scene_highlight::rgb_to_luma) is provided for convenience.
 
 use std::collections::VecDeque;
 

@@ -1,8 +1,8 @@
 //! Plugin hosting API for external audio effects.
 //!
 //! Defines a VST3-style pure-Rust interface for hosting audio effect plugins.
-//! Plugins implement the [`AudioPlugin`] trait and are managed by a
-//! [`PluginHost`] that handles lifecycle, parameter management, and processing.
+//! Plugins implement the [`AudioPlugin`](crate::plugin::AudioPlugin) trait and are managed by a
+//! [`PluginHost`](crate::plugin::PluginHost) that handles lifecycle, parameter management, and processing.
 //!
 //! # Architecture
 //!
@@ -18,7 +18,7 @@
 //! # Example
 //!
 //! ```rust
-//! use oximedia_mixer::plugin::{AudioPlugin, PluginDescriptor, PluginCategory, PluginHost};
+//! use oximedia_mixer::plugin::{AudioPlugin, ParameterInfo, PluginCategory, PluginDescriptor, PluginHost};
 //!
 //! struct MyGain;
 //!

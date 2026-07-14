@@ -2,7 +2,7 @@
 //!
 //! [`VisualIndex`] stores `(Uuid, Vec<f32>)` feature vectors and routes
 //! similarity queries through a [`FloatVpTree`] whenever the index contains
-//! at least [`TREE_THRESHOLD`] entries.  Below that threshold a brute-force
+//! at least `TREE_THRESHOLD` entries.  Below that threshold a brute-force
 //! linear scan is cheaper due to the constant overhead of VP-tree traversal.
 //!
 //! # Interior mutability
@@ -17,7 +17,7 @@
 //!
 //! Any mutation (insert, delete) sets `tree_dirty = true`.  The next call to
 //! [`VisualIndex::search_similar`] on a collection with at least
-//! [`TREE_THRESHOLD`] entries will call [`VisualIndex::rebuild_tree`] and
+//! `TREE_THRESHOLD` entries will call `VisualIndex::rebuild_tree` and
 //! clear the flag before dispatching to the VP-tree.
 //!
 //! # Example
@@ -108,7 +108,7 @@ impl VisualIndex {
 
     /// Search for images similar to `query_data`.
     ///
-    /// Routes through the VP-tree for N >= [`TREE_THRESHOLD`]; falls back to a
+    /// Routes through the VP-tree for N >= `TREE_THRESHOLD`; falls back to a
     /// linear scan for smaller collections.  The tree is rebuilt lazily when
     /// dirty (using interior mutability).
     ///
@@ -188,7 +188,7 @@ impl VisualIndex {
 
     /// Brute-force linear similarity search over normalised f32 features.
     ///
-    /// Used when the collection is below [`TREE_THRESHOLD`] or as a fallback.
+    /// Used when the collection is below `TREE_THRESHOLD` or as a fallback.
     pub fn linear_search_f32(&self, query_features: &[f32], limit: usize) -> Vec<SearchResultItem> {
         let features = self.features.borrow();
         let mut scored: Vec<SearchResultItem> = features

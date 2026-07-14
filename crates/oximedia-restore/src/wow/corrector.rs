@@ -36,7 +36,25 @@ impl WowFlutterCorrector {
         }
         let hop = window_size / 2;
 
-        // Compute pitch track (dominant autocorrelation lag per frame)
+        // Compute pitch track (dominant autocorrelation lag per frame).
+        //
+        // A frame contributes a real pitch estimate only when it is BOTH
+        // non-silent AND convincingly periodic.  Periodicity is measured with a
+        // properly *normalised* autocorrelation
+        // `r(lag) = Σ a·b / sqrt(Σ a² · Σ b²)` (bounded in [-1, 1]): a strongly
+        // tonal frame peaks near 1.0 while white noise stays well below the
+        // gate.  Frames that fail either test get the neutral sentinel `1.0`
+        // (treated like silence: excluded from the mean-lag estimate and
+        // assigned unity resampling rate).
+        //
+        // The fundamental lag is selected with the original energy-biased score
+        // (so the lag chosen for genuinely periodic frames is unchanged), while
+        // the scale-invariant normalised correlation at that lag drives the
+        // periodicity gate.  This prevents a noisy / aperiodic lead-in from
+        // poisoning `mean_lag` with spurious lags — which would otherwise drive
+        // the program-material resampling rate away from unity and grossly
+        // time-warp an otherwise steady tone.
+        const PERIODICITY_GATE: f32 = 0.5;
         let mut pitch_track: Vec<f32> = Vec::new();
         let search_min = 20usize; // ~2 kHz upper pitch limit at 44 100 Hz
         let search_max = (window_size / 2).min(1000);
@@ -51,19 +69,42 @@ impl WowFlutterCorrector {
             }
 
             let mut best_lag = search_min;
-            let mut best_corr = -1.0f32;
+            let mut best_score = f32::NEG_INFINITY;
+            let mut best_norm = 0.0f32;
 
             for lag in search_min..search_max {
                 let n = window_size - lag;
-                let corr: f32 = (0..n).map(|i| frame[i] * frame[i + lag]).sum::<f32>()
-                    / (energy * n as f32).sqrt();
-                if corr > best_corr {
-                    best_corr = corr;
+                let mut dot = 0.0f32;
+                let mut e0 = 0.0f32;
+                let mut e1 = 0.0f32;
+                for i in 0..n {
+                    let a = frame[i];
+                    let b = frame[i + lag];
+                    dot += a * b;
+                    e0 += a * a;
+                    e1 += b * b;
+                }
+                // Original selection score (favours the fundamental period).
+                let score = dot / (energy * n as f32).sqrt();
+                if score > best_score {
+                    best_score = score;
                     best_lag = lag;
+                    // Normalised cross-correlation in [-1, 1] at this lag.
+                    let denom = (e0 * e1).sqrt();
+                    best_norm = if denom > f32::EPSILON {
+                        dot / denom
+                    } else {
+                        0.0
+                    };
                 }
             }
 
-            pitch_track.push(best_lag as f32);
+            // Only trust the lag when the frame is convincingly periodic.
+            if best_norm >= PERIODICITY_GATE {
+                pitch_track.push(best_lag as f32);
+            } else {
+                pitch_track.push(1.0); // neutral rate – aperiodic / noisy frame
+            }
         }
 
         // Compute mean pitch period from frames with a valid pitch detection

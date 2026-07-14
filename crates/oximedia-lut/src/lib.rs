@@ -162,6 +162,7 @@ mod error;
 
 pub use colorspace::{ColorSpace, TransferFunction};
 pub use error::{LutError, LutResult};
+pub use formats::cube::{parse_cube_any, CubeLut};
 pub use hdr_metadata::{
     ContentLightLevel, HdrColorSpace, HdrStandard, HdrTransferFunction, MasteringDisplayMetadata,
 };

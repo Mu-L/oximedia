@@ -70,6 +70,7 @@ pub mod color;
 pub mod duplicate_detection;
 pub mod embedding_search;
 pub mod error;
+pub mod eval;
 pub mod face;
 pub mod facet;
 pub mod facet_multi_value;
@@ -122,6 +123,7 @@ pub mod vp_tree;
 
 // Re-export commonly used items
 pub use error::{SearchError, SearchResult};
+pub use eval::{average_precision, mean_average_precision, precision_at_k, recall_at_k};
 
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "search-engine")]
@@ -497,12 +499,100 @@ impl SearchEngine {
         results
     }
 
-    /// Index a new document
+    /// Index a new document.
+    ///
+    /// This buffers the document in every relevant sub-index but does **not**
+    /// commit; call [`Self::commit`] (or use [`Self::index_documents_batch`])
+    /// to make the document visible to search.
     ///
     /// # Errors
     ///
     /// Returns an error if indexing fails
     pub fn index_document(&mut self, doc: &index::builder::IndexDocument) -> SearchResult<()> {
+        self.index_into_indices(doc)
+    }
+
+    /// Bulk-index many documents, committing the sub-indices **once** at the end.
+    ///
+    /// Unlike calling [`Self::index_document`] in a loop followed by a manual
+    /// [`Self::commit`], this method routes the documents through the
+    /// [`batch_index::BatchIndexer`] buffering machinery via an
+    /// [`batch_index::EngineBackend`] adapter, so the (expensive) commit of the
+    /// six sub-indices happens exactly once for the whole batch. This is the
+    /// high-throughput path for bulk import.
+    ///
+    /// Returns the number of documents indexed (which equals `docs.len()` on
+    /// success). An empty slice is a no-op that returns `Ok(0)` **without**
+    /// touching the indices or issuing a commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any document fails to index, or if the final commit
+    /// fails. On error the indices may hold partially-written, uncommitted data.
+    pub fn index_documents_batch(
+        &mut self,
+        docs: &[index::builder::IndexDocument],
+    ) -> SearchResult<usize> {
+        if docs.is_empty() {
+            // No work, no commit side effects.
+            return Ok(0);
+        }
+
+        // Project each rich document to its searchable text so the generic
+        // BatchIndexer buffers over real content; the doc_id encodes the slice
+        // index so EngineBackend can recover full fidelity when writing.
+        let batch_docs = batch_index::build_batch_documents(docs, Self::batch_text_of);
+
+        // Choose a flush capacity that amortises commits without unbounded
+        // memory: write in chunks of up to 256, then a single commit at flush().
+        // `docs` is non-empty here, so `len()` is at least 1 (BatchIndexer requires
+        // a positive capacity).
+        let capacity = docs.len().min(256);
+
+        let backend = batch_index::EngineBackend::new(self, docs);
+        let mut indexer = batch_index::BatchIndexer::with_capacity(backend, capacity);
+
+        for bd in batch_docs {
+            // Strict mode: propagate the first indexing error immediately.
+            indexer.push(bd)?;
+        }
+        // Drain remaining buffered docs and commit the sub-indices ONCE. Both the
+        // intermediate auto-flushes (above) and this final flush write through the
+        // EngineBackend; the single commit happens here, inside `flush`.
+        indexer.flush()?;
+
+        // Every document was pushed and the flush+commit succeeded, so the full
+        // batch is now durable.
+        Ok(docs.len())
+    }
+
+    /// Project an [`IndexDocument`](index::builder::IndexDocument) to the text
+    /// payload used to drive the [`batch_index::BatchIndexer`] buffer.
+    ///
+    /// The exact text is immaterial to correctness (full-fidelity indexing is
+    /// done from the original document by [`batch_index::EngineBackend`]); it
+    /// only needs to be representative so the batching path is genuinely
+    /// exercised.
+    fn batch_text_of(doc: &index::builder::IndexDocument) -> String {
+        let mut parts: Vec<&str> = Vec::new();
+        if let Some(ref title) = doc.title {
+            parts.push(title);
+        }
+        if let Some(ref description) = doc.description {
+            parts.push(description);
+        }
+        if let Some(ref transcript) = doc.transcript {
+            parts.push(transcript);
+        }
+        for kw in &doc.keywords {
+            parts.push(kw);
+        }
+        parts.join(" ")
+    }
+
+    /// Shared per-document indexing body (no commit) used by both
+    /// [`Self::index_document`] and the [`batch_index::DocIndexSink`] impl.
+    fn index_into_indices(&mut self, doc: &index::builder::IndexDocument) -> SearchResult<()> {
         // Index in text index
         self.text_index.add_document(doc)?;
 
@@ -564,6 +654,21 @@ impl SearchEngine {
         self.ocr_index.delete(asset_id)?;
         self.color_index.delete(asset_id)?;
         Ok(())
+    }
+}
+
+/// Bridge so the generic [`batch_index::BatchIndexer`] can drive the rich
+/// six-sub-index [`SearchEngine`] while committing exactly once per batch.
+#[cfg(feature = "search-engine")]
+impl batch_index::DocIndexSink for SearchEngine {
+    type Doc = index::builder::IndexDocument;
+
+    fn index_one(&mut self, doc: &Self::Doc) -> SearchResult<()> {
+        self.index_into_indices(doc)
+    }
+
+    fn commit_all(&mut self) -> SearchResult<()> {
+        self.commit()
     }
 }
 
@@ -714,5 +819,169 @@ mod tests {
         assert!(json.contains("file_size"));
         assert!(json.contains("2000"));
         assert!(json.contains("5000000"));
+    }
+}
+
+#[cfg(all(test, feature = "search-engine"))]
+mod engine_batch_tests {
+    use super::*;
+    use index::builder::IndexDocument;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Allocate a unique temp directory for an isolated engine instance.
+    fn unique_index_dir(tag: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        std::env::temp_dir().join(format!("oximedia-search-batch-{tag}-{pid}-{n}"))
+    }
+
+    /// Build a minimal text-bearing document with the given title/description.
+    fn doc(title: &str, description: &str, keywords: &[&str]) -> IndexDocument {
+        IndexDocument {
+            asset_id: Uuid::new_v4(),
+            file_path: format!("/media/{title}.mp4"),
+            title: Some(title.to_string()),
+            description: Some(description.to_string()),
+            keywords: keywords.iter().map(|s| (*s).to_string()).collect(),
+            categories: vec![],
+            mime_type: Some("video/mp4".to_string()),
+            format: Some("mp4".to_string()),
+            codec: Some("h264".to_string()),
+            resolution: Some("1920x1080".to_string()),
+            duration_ms: Some(60_000),
+            file_size: Some(10_000_000),
+            bitrate: Some(5_000_000),
+            framerate: Some(30.0),
+            created_at: 1_700_000_000,
+            modified_at: 1_700_000_000,
+            transcript: None,
+            ocr_text: None,
+            visual_features: None,
+            audio_fingerprint: None,
+            faces: None,
+            dominant_colors: None,
+            scene_tags: vec![],
+            detected_objects: vec![],
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    fn text_query(text: &str) -> SearchQuery {
+        SearchQuery {
+            text: Some(text.to_string()),
+            visual: None,
+            audio: None,
+            filters: SearchFilters::default(),
+            limit: 1000,
+            offset: 0,
+            sort: SortOptions::default(),
+        }
+    }
+
+    #[test]
+    fn test_batch_matches_repeated_single_index() {
+        // Same N docs, two engines: one via batch, one via repeated single calls.
+        let docs: Vec<IndexDocument> = (0..12)
+            .map(|i| {
+                doc(
+                    &format!("rainforest-{i}"),
+                    "a documentary about the rainforest canopy",
+                    &["nature", "wildlife"],
+                )
+            })
+            .collect();
+
+        let mut batch_engine =
+            SearchEngine::new(&unique_index_dir("eq-batch")).expect("create batch engine");
+        let n = batch_engine
+            .index_documents_batch(&docs)
+            .expect("batch index ok");
+        assert_eq!(n, docs.len());
+
+        let mut single_engine =
+            SearchEngine::new(&unique_index_dir("eq-single")).expect("create single engine");
+        for d in &docs {
+            single_engine.index_document(d).expect("single index ok");
+        }
+        single_engine.commit().expect("single commit ok");
+
+        let query = text_query("rainforest");
+        let batch_results = batch_engine.search(&query).expect("batch search ok");
+        let single_results = single_engine.search(&query).expect("single search ok");
+
+        // Identical hit counts for a query that hits all docs.
+        assert_eq!(batch_results.total, single_results.total);
+        assert_eq!(batch_results.total, docs.len());
+
+        // The asset_id sets must be identical.
+        let batch_ids: std::collections::BTreeSet<Uuid> =
+            batch_results.results.iter().map(|r| r.asset_id).collect();
+        let single_ids: std::collections::BTreeSet<Uuid> =
+            single_results.results.iter().map(|r| r.asset_id).collect();
+        assert_eq!(batch_ids, single_ids);
+    }
+
+    #[test]
+    fn test_empty_batch_returns_zero_no_side_effects() {
+        let mut engine = SearchEngine::new(&unique_index_dir("empty")).expect("create engine");
+        let n = engine.index_documents_batch(&[]).expect("empty batch ok");
+        assert_eq!(n, 0);
+
+        // Nothing was committed, so a search finds nothing.
+        let results = engine.search(&text_query("anything")).expect("search ok");
+        assert_eq!(results.total, 0);
+    }
+
+    #[test]
+    fn test_large_batch_count_and_findable() {
+        let docs: Vec<IndexDocument> = (0..500)
+            .map(|i| {
+                doc(
+                    &format!("clip-{i}"),
+                    "synthetic searchable corpus entry zebibyte",
+                    &["bulk"],
+                )
+            })
+            .collect();
+
+        let mut engine = SearchEngine::new(&unique_index_dir("large")).expect("create engine");
+        let n = engine.index_documents_batch(&docs).expect("large batch ok");
+        assert_eq!(n, 500);
+
+        // Every doc shares the unique token "zebibyte" — all should be findable.
+        let results = engine.search(&text_query("zebibyte")).expect("search ok");
+        assert_eq!(results.total, 500);
+    }
+
+    #[test]
+    fn test_batch_then_single_coexist() {
+        let batch_docs: Vec<IndexDocument> = (0..8)
+            .map(|i| doc(&format!("ocean-{i}"), "deep blue ocean footage", &["sea"]))
+            .collect();
+
+        let mut engine = SearchEngine::new(&unique_index_dir("coexist")).expect("create engine");
+        let n = engine.index_documents_batch(&batch_docs).expect("batch ok");
+        assert_eq!(n, 8);
+
+        // Add one more via the single path, then commit.
+        let extra = doc("desert-dunes", "windswept desert dunes at dawn", &["sand"]);
+        let extra_id = extra.asset_id;
+        engine.index_document(&extra).expect("single index ok");
+        engine.commit().expect("commit ok");
+
+        // Batch docs still findable.
+        let ocean = engine
+            .search(&text_query("ocean"))
+            .expect("ocean search ok");
+        assert_eq!(ocean.total, 8);
+
+        // The single doc is findable too.
+        let desert = engine
+            .search(&text_query("desert"))
+            .expect("desert search ok");
+        assert_eq!(desert.total, 1);
+        assert_eq!(desert.results[0].asset_id, extra_id);
     }
 }

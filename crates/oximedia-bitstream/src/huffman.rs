@@ -1,10 +1,10 @@
 // Copyright 2017 Brian Langenberger
 //
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+// Originally dual-licensed "MIT OR Apache-2.0" as part of `bitstream-io`
+// 4.9.0 by Brian Langenberger. Redistributed here, per the terms of that
+// upstream license, under the Apache License, Version 2.0
+// <http://www.apache.org/licenses/LICENSE-2.0> only. This file may not be
+// copied, modified, or distributed except according to those terms.
 
 //! Traits and implementations for reading or writing Huffman codes
 //! from or to a stream.

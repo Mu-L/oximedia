@@ -1,6 +1,6 @@
 //! In-memory [`InMemoryRightsManager`] alternative for wasm32 targets.
 //!
-//! On non-wasm32 targets, `RightsManager` uses SQLite via `sqlx`.  On wasm32
+//! On non-wasm32 targets, `RightsManager` uses Pure-Rust SQLite via OxiSQL.  On wasm32
 //! no file-system or async runtime is available, so this module provides a
 //! fully in-memory, synchronous alternative backed by `HashMap`.
 //!

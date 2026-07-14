@@ -1,17 +1,102 @@
-//! Rights database storage implementation
+//! Rights database storage implementation.
+//!
+//! Backed by Pure-Rust SQLite via OxiSQL (`oxisql-sqlite-compat`) — no C, C++,
+//! or Fortran is compiled anywhere in this storage layer (COOLJAPAN Pure Rust
+//! Policy).  The on-disk format is standard SQLite, so databases created here
+//! remain readable by any SQLite tooling.
 
-use crate::Result;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
-use std::str::FromStr;
-use std::time::Duration;
+use crate::{Result, RightsError};
+use oxisql_core::{Connection as _, Row, ToSqlValue};
+use oxisql_sqlite_compat::SqliteConnection;
 
-/// Rights database using SQLite
+/// Cloneable handle to the rights SQLite database.
+///
+/// OxiSQL connections are internally reference-counted and safe to share
+/// across async tasks, so this handle plays the role the connection pool used
+/// to: clone it freely and issue queries concurrently.  Statements are cached
+/// per connection, giving pool-like prepared-statement reuse.
+#[derive(Clone)]
+pub struct RightsPool {
+    conn: SqliteConnection,
+}
+
+impl std::fmt::Debug for RightsPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RightsPool")
+            .field("path", &self.conn.path())
+            .finish()
+    }
+}
+
+impl RightsPool {
+    /// Open (creating if missing) the SQLite database at `path`.
+    ///
+    /// Accepts plain filesystem paths as well as `sqlite://…` / `sqlite:…`
+    /// connection URLs for drop-in compatibility with the previous pool-based
+    /// API.  Pass `":memory:"` (or an empty path) for an in-memory database.
+    pub async fn open(path: &str) -> Result<Self> {
+        let normalized = normalize_sqlite_path(path);
+        let conn = SqliteConnection::open(normalized).await?;
+        Ok(Self { conn })
+    }
+
+    /// Execute a DML/DDL statement, returning the number of rows affected.
+    ///
+    /// Positional parameters use `$1`, `$2`, … numbering.
+    pub async fn execute(&self, sql: &str, params: &[&dyn ToSqlValue]) -> Result<u64> {
+        Ok(self.conn.execute(sql, params).await?)
+    }
+
+    /// Run a `SELECT` and return all result rows.
+    pub async fn query(&self, sql: &str, params: &[&dyn ToSqlValue]) -> Result<Vec<Row>> {
+        Ok(self.conn.query(sql, params).await?)
+    }
+
+    /// Run a `SELECT` expected to return at most one row.
+    pub async fn query_optional(
+        &self,
+        sql: &str,
+        params: &[&dyn ToSqlValue],
+    ) -> Result<Option<Row>> {
+        let mut rows = self.conn.query(sql, params).await?;
+        if rows.len() > 1 {
+            return Err(RightsError::Database(format!(
+                "expected at most one row, got {}",
+                rows.len()
+            )));
+        }
+        Ok(rows.pop())
+    }
+
+    /// Run a `SELECT` expected to return exactly one row.
+    pub async fn query_one(&self, sql: &str, params: &[&dyn ToSqlValue]) -> Result<Row> {
+        self.query_optional(sql, params)
+            .await?
+            .ok_or_else(|| RightsError::Database("expected one row, got none".to_string()))
+    }
+}
+
+/// Strip `sqlite://` / `sqlite:` URL prefixes so both plain paths and
+/// pool-style connection URLs keep working after the OxiSQL migration.
+fn normalize_sqlite_path(path: &str) -> &str {
+    let stripped = path
+        .strip_prefix("sqlite://")
+        .or_else(|| path.strip_prefix("sqlite:"))
+        .unwrap_or(path);
+    if stripped.is_empty() {
+        ":memory:"
+    } else {
+        stripped
+    }
+}
+
+/// Rights database using Pure-Rust SQLite (OxiSQL).
 pub struct RightsDatabase {
-    pool: SqlitePool,
+    pool: RightsPool,
 }
 
 impl RightsDatabase {
-    /// Create a new rights database with default pool settings (max 5 connections).
+    /// Create a new rights database with default settings.
     pub async fn new(path: &str) -> Result<Self> {
         Self::new_with_pool(path, 5, 5).await
     }
@@ -19,37 +104,33 @@ impl RightsDatabase {
     /// Create a new rights database with explicit pool configuration.
     ///
     /// # Parameters
-    /// - `path` — SQLite connection URL (e.g. `sqlite:///tmp/rights.db`)
-    /// - `max_connections` — maximum pool connections
-    /// - `connect_timeout_secs` — seconds to wait for an available connection
+    /// - `path` — SQLite path or connection URL (e.g. `sqlite:///tmp/rights.db`)
+    /// - `_max_connections` — retained for API compatibility; OxiSQL shares a
+    ///   single clone-safe connection handle with an internal statement cache,
+    ///   so no fixed-size pool is required
+    /// - `_connect_timeout_secs` — retained for API compatibility
     pub async fn new_with_pool(
         path: &str,
-        max_connections: u32,
-        connect_timeout_secs: u64,
+        _max_connections: u32,
+        _connect_timeout_secs: u64,
     ) -> Result<Self> {
-        let options = SqliteConnectOptions::from_str(path)?.create_if_missing(true);
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(max_connections)
-            .acquire_timeout(Duration::from_secs(connect_timeout_secs))
-            .connect_with(options)
-            .await?;
-
+        let pool = RightsPool::open(path).await?;
         let db = Self { pool };
         db.initialize_schema().await?;
         Ok(db)
     }
 
-    /// Get a reference to the connection pool
-    pub fn pool(&self) -> &SqlitePool {
+    /// Get a reference to the database handle ("pool").
+    pub fn pool(&self) -> &RightsPool {
         &self.pool
     }
 
     /// Initialize the database schema
     async fn initialize_schema(&self) -> Result<()> {
         // Rights owners table
-        sqlx::query(
-            r"
+        self.pool
+            .execute(
+                r"
             CREATE TABLE IF NOT EXISTS rights_owners (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -58,13 +139,14 @@ impl RightsDatabase {
                 updated_at TEXT NOT NULL
             )
             ",
-        )
-        .execute(&self.pool)
-        .await?;
+                &[],
+            )
+            .await?;
 
         // Assets table
-        sqlx::query(
-            r"
+        self.pool
+            .execute(
+                r"
             CREATE TABLE IF NOT EXISTS assets (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -74,13 +156,14 @@ impl RightsDatabase {
                 updated_at TEXT NOT NULL
             )
             ",
-        )
-        .execute(&self.pool)
-        .await?;
+                &[],
+            )
+            .await?;
 
         // Rights grants table
-        sqlx::query(
-            r"
+        self.pool
+            .execute(
+                r"
             CREATE TABLE IF NOT EXISTS rights_grants (
                 id TEXT PRIMARY KEY,
                 asset_id TEXT NOT NULL,
@@ -97,13 +180,14 @@ impl RightsDatabase {
                 FOREIGN KEY (owner_id) REFERENCES rights_owners(id)
             )
             ",
-        )
-        .execute(&self.pool)
-        .await?;
+                &[],
+            )
+            .await?;
 
         // License agreements table
-        sqlx::query(
-            r"
+        self.pool
+            .execute(
+                r"
             CREATE TABLE IF NOT EXISTS license_agreements (
                 id TEXT PRIMARY KEY,
                 grant_id TEXT NOT NULL,
@@ -116,13 +200,14 @@ impl RightsDatabase {
                 FOREIGN KEY (grant_id) REFERENCES rights_grants(id)
             )
             ",
-        )
-        .execute(&self.pool)
-        .await?;
+                &[],
+            )
+            .await?;
 
         // Usage logs table
-        sqlx::query(
-            r"
+        self.pool
+            .execute(
+                r"
             CREATE TABLE IF NOT EXISTS usage_logs (
                 id TEXT PRIMARY KEY,
                 asset_id TEXT NOT NULL,
@@ -137,13 +222,14 @@ impl RightsDatabase {
                 FOREIGN KEY (grant_id) REFERENCES rights_grants(id)
             )
             ",
-        )
-        .execute(&self.pool)
-        .await?;
+                &[],
+            )
+            .await?;
 
         // Clearances table
-        sqlx::query(
-            r"
+        self.pool
+            .execute(
+                r"
             CREATE TABLE IF NOT EXISTS clearances (
                 id TEXT PRIMARY KEY,
                 asset_id TEXT NOT NULL,
@@ -161,13 +247,14 @@ impl RightsDatabase {
                 FOREIGN KEY (asset_id) REFERENCES assets(id)
             )
             ",
-        )
-        .execute(&self.pool)
-        .await?;
+                &[],
+            )
+            .await?;
 
         // Royalty payments table
-        sqlx::query(
-            r"
+        self.pool
+            .execute(
+                r"
             CREATE TABLE IF NOT EXISTS royalty_payments (
                 id TEXT PRIMARY KEY,
                 grant_id TEXT NOT NULL,
@@ -185,13 +272,14 @@ impl RightsDatabase {
                 FOREIGN KEY (owner_id) REFERENCES rights_owners(id)
             )
             ",
-        )
-        .execute(&self.pool)
-        .await?;
+                &[],
+            )
+            .await?;
 
         // Audit trail table
-        sqlx::query(
-            r"
+        self.pool
+            .execute(
+                r"
             CREATE TABLE IF NOT EXISTS audit_trail (
                 id TEXT PRIMARY KEY,
                 entity_type TEXT NOT NULL,
@@ -203,13 +291,14 @@ impl RightsDatabase {
                 ip_address TEXT
             )
             ",
-        )
-        .execute(&self.pool)
-        .await?;
+                &[],
+            )
+            .await?;
 
         // Expiration alerts table
-        sqlx::query(
-            r"
+        self.pool
+            .execute(
+                r"
             CREATE TABLE IF NOT EXISTS expiration_alerts (
                 id TEXT PRIMARY KEY,
                 grant_id TEXT NOT NULL,
@@ -220,13 +309,14 @@ impl RightsDatabase {
                 FOREIGN KEY (grant_id) REFERENCES rights_grants(id)
             )
             ",
-        )
-        .execute(&self.pool)
-        .await?;
+                &[],
+            )
+            .await?;
 
         // Watermark configurations table
-        sqlx::query(
-            r"
+        self.pool
+            .execute(
+                r"
             CREATE TABLE IF NOT EXISTS watermark_configs (
                 id TEXT PRIMARY KEY,
                 asset_id TEXT NOT NULL,
@@ -237,13 +327,14 @@ impl RightsDatabase {
                 FOREIGN KEY (asset_id) REFERENCES assets(id)
             )
             ",
-        )
-        .execute(&self.pool)
-        .await?;
+                &[],
+            )
+            .await?;
 
         // DRM metadata table
-        sqlx::query(
-            r"
+        self.pool
+            .execute(
+                r"
             CREATE TABLE IF NOT EXISTS drm_metadata (
                 id TEXT PRIMARY KEY,
                 asset_id TEXT NOT NULL,
@@ -257,48 +348,61 @@ impl RightsDatabase {
                 FOREIGN KEY (asset_id) REFERENCES assets(id)
             )
             ",
-        )
-        .execute(&self.pool)
-        .await?;
+                &[],
+            )
+            .await?;
 
         // Create indices for better query performance
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_rights_grants_asset ON rights_grants(asset_id)",
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_rights_grants_owner ON rights_grants(owner_id)",
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_usage_logs_asset ON usage_logs(asset_id)")
-            .execute(&self.pool)
+        self.pool
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_rights_grants_asset ON rights_grants(asset_id)",
+                &[],
+            )
             .await?;
 
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_clearances_asset ON clearances(asset_id)")
-            .execute(&self.pool)
+        self.pool
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_rights_grants_owner ON rights_grants(owner_id)",
+                &[],
+            )
             .await?;
 
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_audit_trail_entity ON audit_trail(entity_type, entity_id)")
-            .execute(&self.pool)
+        self.pool
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_usage_logs_asset ON usage_logs(asset_id)",
+                &[],
+            )
+            .await?;
+
+        self.pool
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_clearances_asset ON clearances(asset_id)",
+                &[],
+            )
+            .await?;
+
+        self.pool
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_audit_trail_entity ON audit_trail(entity_type, entity_id)",
+                &[],
+            )
             .await?;
 
         // Performance: index on territory_json (text prefix) and end_date for
         // faster filtered queries in rights_grants.
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_rights_grants_territory ON rights_grants(territory_json)",
-        )
-        .execute(&self.pool)
-        .await?;
+        self.pool
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_rights_grants_territory ON rights_grants(territory_json)",
+                &[],
+            )
+            .await?;
 
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_rights_grants_end_date ON rights_grants(end_date)",
-        )
-        .execute(&self.pool)
-        .await?;
+        self.pool
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_rights_grants_end_date ON rights_grants(end_date)",
+                &[],
+            )
+            .await?;
 
         Ok(())
     }
@@ -307,6 +411,15 @@ impl RightsDatabase {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_normalize_sqlite_path() {
+        assert_eq!(normalize_sqlite_path("/tmp/a.db"), "/tmp/a.db");
+        assert_eq!(normalize_sqlite_path("sqlite:///tmp/a.db"), "/tmp/a.db");
+        assert_eq!(normalize_sqlite_path("sqlite:/tmp/a.db"), "/tmp/a.db");
+        assert_eq!(normalize_sqlite_path(":memory:"), ":memory:");
+        assert_eq!(normalize_sqlite_path("sqlite://"), ":memory:");
+    }
 
     #[tokio::test]
     async fn test_database_creation() {
@@ -325,11 +438,13 @@ mod tests {
             .expect("rights test operation should succeed");
 
         // Verify tables exist by querying sqlite_master
-        let result = sqlx::query(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='rights_owners'",
-        )
-        .fetch_one(db.pool())
-        .await;
+        let result = db
+            .pool()
+            .query_one(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='rights_owners'",
+                &[],
+            )
+            .await;
         assert!(result.is_ok());
     }
 }

@@ -1108,17 +1108,182 @@ mod tests {
         );
     }
 
-    /// Decoder-consistency invariant (compile-time check):
+    /// Encoder<->decoder NSQ consistency: bit-exact where the math is shared, and
+    /// ULP-tight on the one float-reassociation-sensitive step.
     ///
-    /// The trellis emits `float_exc = pulse / E_RAW_SCALE` which feeds into
-    /// `encode_excitation` exactly as the greedy path does.  The SILK decoder
-    /// reconstructs `output[t] = float_exc * gain + ltp_value + lpc_synthesis`.
-    /// This is tested end-to-end in `test_nsq_snr_1khz_tone` and
-    /// `test_nsq_roundtrip_white_noise_snr_positive`.
+    /// This is the test that was previously deferred. It exercises the
+    /// closed-loop invariant directly — that the gain-normalised excitation the
+    /// encoder emits is reconstructed identically by the decoder's §4.2.7.9
+    /// synthesis math — without going through the shell-coded bitstream (which
+    /// re-introduces the LCG dither and the ±20 / quantisation-offset bias that
+    /// `E_RAW_SCALE` deliberately approximates, and which is already covered by
+    /// the end-to-end SNR round-trips above).
     ///
+    /// A fixed `(excitation, LPC, gain, LTP)` configuration is pushed through
+    /// the encoder's [`process_subframe`] (default trellis mode); the resulting
+    /// `float_exc` stream is replayed through the decoder hook
+    /// [`super::super::silk_decoder::reconstruct_subframe_from_excitation`]
+    /// (the exact inner loop of `silk_decoder::synthesise`). Three properties
+    /// are asserted:
+    ///
+    /// 1. **Excitation — bit-exact.** Every `float_exc[i]` equals
+    ///    `pulse[i] / E_RAW_SCALE` to the bit, and the decoder's pure-pulse
+    ///    mapping `(pulse << 8) / 2^23` reproduces the same `f32` bit pattern —
+    ///    proving the `E_RAW_SCALE = 32768` documentation
+    ///    (`float_exc = e_raw·256 / 2^23 = e_raw / 2^15`).
+    /// 2. **LPC residual — bit-exact.** The encoder's committed residual history
+    ///    (`state.sltp`, the `exc + ltp` it fed its own long-term predictor)
+    ///    equals the decoder's reconstructed residual sample-for-sample. The
+    ///    gain application and the 5-tap LTP synthesis agree to the last bit.
+    /// 3. **LPC-synthesis output — ULP-tight.** The encoder's committed output
+    ///    history (`state.slpc`) matches the decoder's synthesised samples to a
+    ///    few `f32` ULPs. The only residual gap is IEEE-754 re-association: the
+    ///    encoder accumulates the LPC prediction into a separate `p_lpc_neg`
+    ///    then adds the residual last, while `synthesise` folds the residual in
+    ///    first. The two expressions are algebraically identical.
+    #[test]
+    fn test_nsq_decoder_bitexact_consistency() {
+        use super::super::silk_decoder::reconstruct_subframe_from_excitation;
+
+        const ORDER: usize = 10; // NB/MB LPC order
+        const N: usize = 80; // 5 ms subframe at 16 kHz
+        const LTP_MAX_LAG: usize = 100;
+        const LAG: usize = 24; // engages the LTP loop within the subframe
+
+        // Fixed Q-domain filter parameters (deterministic; no RNG).
+        //
+        // The LPC set is a *stable* synthesis filter: `sum |a_k| = 1597 < 4096`
+        // in Q12 (i.e. `sum |a_k| < 1`), so every pole of `1 / A(z)` lies
+        // strictly inside the unit circle (Rouché). Stability matters for
+        // property (3): the encoder and decoder run the *same* recursive LPC
+        // synthesis, so a stable filter keeps the IEEE-754 fold-order
+        // perturbation bounded instead of amplifying it. (Real SILK is always
+        // stable — `silk_decoder::limit_and_quantise_lpc` guarantees it.)
+        let gain_q16: i32 = 8192; // gain = 0.125
+        let gain = gain_q16 as f32 / 65536.0;
+        let lpc_q12: [i32; ORDER] = [800, -400, 200, -100, 50, -25, 12, -6, 3, -1];
+        let ltp_q7: [i32; 5] = [2, 12, 28, 12, 2];
+
+        // f32 coefficients exactly equal to the decoder's Q->f32 conversions
+        // (division by a power of two is exact in IEEE-754, so the encoder and
+        // decoder multiply by bit-identical operands).
+        let lpc_f32: Vec<f32> = lpc_q12.iter().map(|&c| c as f32 / 4096.0).collect();
+        let mut ltp_f32 = [0.0f32; 5];
+        for (slot, &q7) in ltp_f32.iter_mut().zip(ltp_q7.iter()) {
+            *slot = q7 as f32 / 128.0;
+        }
+
+        // Fixed excitation-domain input via a deterministic LCG (~+/-1.5e-4),
+        // scaled so the quantiser produces a spread of non-trivial pulses.
+        let mut seed: u32 = 0x1234_5678;
+        let input: Vec<f32> = (0..N)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let centred = (seed >> 9) as i32 - (1 << 22);
+                (centred as f32 / (1i32 << 22) as f32) * 1.5e-4
+            })
+            .collect();
+
+        // --- Canonical pulses straight from the trellis. ---
+        let mut st_pulses = NsqState::new(ORDER, LTP_MAX_LAG);
+        st_pulses.mode = NsqMode::TrellisDelDec;
+        let pulses = trellis_process_subframe(
+            &input,
+            &lpc_f32,
+            &ltp_f32,
+            LAG,
+            gain,
+            SilkSignalType::Voiced,
+            &mut st_pulses,
+        );
+
+        // --- The same run via process_subframe: returns pulse/E_RAW_SCALE. ---
+        let mut st_exc = NsqState::new(ORDER, LTP_MAX_LAG);
+        st_exc.mode = NsqMode::TrellisDelDec;
+        let float_exc = process_subframe(
+            &input,
+            &lpc_f32,
+            &ltp_f32,
+            LAG,
+            gain,
+            SilkSignalType::Voiced,
+            &mut st_exc,
+        );
+        assert_eq!(float_exc.len(), N);
+        assert_eq!(pulses.len(), N);
+
+        // (1) Excitation bit-exactness.
+        let mut saw_nonzero_pulse = false;
+        for i in 0..N {
+            assert!(
+                pulses[i].abs() <= 2047,
+                "pulse {} out of shell-coder range at {i}",
+                pulses[i]
+            );
+            saw_nonzero_pulse |= pulses[i] != 0;
+            let expected = (pulses[i] as f32 / E_RAW_SCALE).clamp(-1.0, 1.0);
+            assert_eq!(
+                float_exc[i].to_bits(),
+                expected.to_bits(),
+                "process_subframe must return pulse/E_RAW_SCALE bit-for-bit at {i}"
+            );
+            // The decoder's pure-pulse Q23 mapping reproduces the same bits.
+            let dec_pure = ((pulses[i] << 8) as f32) / ((1i32 << 23) as f32);
+            assert_eq!(
+                dec_pure.to_bits(),
+                expected.to_bits(),
+                "decoder (e_raw<<8)/2^23 must equal e_raw/E_RAW_SCALE at {i}"
+            );
+        }
+        assert!(
+            saw_nonzero_pulse,
+            "test configuration produced an all-zero excitation; nothing exercised"
+        );
+
+        // --- Replay the excitation through the decoder synthesis math. ---
+        let (out_dec, res_dec) =
+            reconstruct_subframe_from_excitation(&float_exc, gain, &lpc_q12, &ltp_q7, LAG);
+        assert_eq!(out_dec.len(), N);
+        assert_eq!(res_dec.len(), N);
+
+        // (2) LPC residual bit-exactness. After N shifts, the encoder's residual
+        // delay line holds `state.sltp[k] == residual[N-1-k]`.
+        for k in 0..N {
+            assert_eq!(
+                st_exc.sltp[k].to_bits(),
+                res_dec[N - 1 - k].to_bits(),
+                "LPC residual history must be bit-exact at sltp[{k}]"
+            );
+        }
+
+        // (3) LPC-synthesis output: ULP-tight. After N samples the encoder's LPC
+        // delay line holds `state.slpc[k] == output[N-1-k]`.
+        let mut max_abs = 0.0f32;
+        for &v in out_dec.iter().chain(st_exc.slpc.iter()) {
+            max_abs = max_abs.max(v.abs());
+        }
+        // Bound: the LPC fold accumulates `order` subtractions, each contributing
+        // at most ~0.5 ULP of the running partial sum; `8 * order` ULPs is a
+        // comfortable, still-tight envelope (relative error < 1e-5).
+        let tol = 8.0 * (ORDER as f32) * f32::EPSILON * max_abs + f32::MIN_POSITIVE;
+        let mut max_diff = 0.0f32;
+        for k in 0..ORDER {
+            let enc = st_exc.slpc[k];
+            let dec = out_dec[N - 1 - k];
+            let diff = (enc - dec).abs();
+            max_diff = max_diff.max(diff);
+            assert!(
+                diff <= tol,
+                "LPC output history slpc[{k}]: enc={enc:e} dec={dec:e} diff={diff:e} tol={tol:e}"
+            );
+        }
+        println!(
+            "NSQ enc<->dec consistency: residual bit-exact, output max|diff| = {max_diff:e} \
+             (tol {tol:e}, max|x| {max_abs:e})"
+        );
+    }
+
     /// `NsqMode` must be `Copy` so the diversity selector can use `#[derive(Copy)]`.
-    // TODO: add a bit-exact consistency test once the SilkDecoder exposes a
-    // direct `process_subframe` entry point.
     #[test]
     fn test_nsq_mode_is_copy() {
         // Verifies NsqMode implements Copy (required for TrellisPath inline use).

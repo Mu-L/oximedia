@@ -941,10 +941,10 @@ mod tests {
         for _ in 0..3 {
             data.extend_from_slice(b"FRAME\n");
             // Y plane: 64*64 = 4096 bytes (black = 16 in studio swing)
-            data.extend(std::iter::repeat(16u8).take(64 * 64));
+            data.extend(std::iter::repeat_n(16u8, 64 * 64));
             // U and V planes: 32*32 = 1024 bytes each (neutral = 128)
-            data.extend(std::iter::repeat(128u8).take(32 * 32));
-            data.extend(std::iter::repeat(128u8).take(32 * 32));
+            data.extend(std::iter::repeat_n(128u8, 32 * 32));
+            data.extend(std::iter::repeat_n(128u8, 32 * 32));
         }
         std::fs::write(&path, &data).expect("failed to write Y4M temp file");
         path

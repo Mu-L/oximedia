@@ -412,7 +412,7 @@ impl DrcMetadataFrame {
         ]
     }
 
-    /// Deserialise from an 8-byte payload produced by [`to_bytes`].
+    /// Deserialise from an 8-byte payload produced by [`Self::to_bytes`].
     pub fn from_bytes(bytes: &[u8; 8]) -> NormalizeResult<Self> {
         let profile_id = bytes[0];
         let profile = match profile_id {

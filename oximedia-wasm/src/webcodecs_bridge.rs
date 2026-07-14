@@ -8,13 +8,20 @@
 //!
 //! 1. **OxiMedia → WebCodecs (encoding side)**
 //!    - `WasmWebCodecsBridge::get_video_decoder_config` — converts OxiMedia
-//!      codec parameters to a `VideoDecoderConfig`-compatible JSON string.
+//!      codec parameters to a [`WasmVideoDecoderConfig`] with typed getters
+//!      matching the WebCodecs `VideoDecoderConfig` dictionary.
 //!    - `WasmWebCodecsBridge::oximedia_packet_to_encoded_chunk` — converts an
-//!      OxiMedia compressed packet to `EncodedVideoChunk`-compatible bytes.
+//!      OxiMedia compressed packet to a [`WasmEncodedChunkInfo`] with typed
+//!      getters matching `EncodedVideoChunkInit`.
 //!
 //! 2. **WebCodecs → OxiMedia (decoding side)**
 //!    - `WasmWebCodecsBridge::webcodecs_frame_to_yuv` — accepts an RGBA pixel
 //!      buffer from a `VideoFrame.copyTo()` call and converts it to YUV420p.
+//!
+//! These accessors are deliberately typed getters rather than JSON strings:
+//! this is a per-packet hot path (potentially called once per frame), and
+//! `JSON.parse` allocation/parsing overhead on every frame is avoided by
+//! exposing plain wasm-bindgen structs instead.
 //!
 //! # JavaScript Example
 //!
@@ -24,16 +31,20 @@
 //! const bridge = new oximedia.WasmWebCodecsBridge();
 //!
 //! // Convert OxiMedia codec params to WebCodecs config
-//! const config = JSON.parse(bridge.get_video_decoder_config(codecParamsBytes));
+//! const config = bridge.get_video_decoder_config(codecParamsBytes);
 //! const webDecoder = new VideoDecoder({ ... });
-//! webDecoder.configure(config);
+//! webDecoder.configure({
+//!     codec: config.codec,
+//!     codedWidth: config.coded_width,
+//!     codedHeight: config.coded_height,
+//!     optimizeForLatency: config.optimize_for_latency,
+//!     description: config.description, // Uint8Array | undefined
+//! });
 //!
 //! // Convert OxiMedia packet to EncodedVideoChunk args
-//! const chunk = JSON.parse(
-//!     bridge.oximedia_packet_to_encoded_chunk(packetBytes, pts, dts, isKey)
-//! );
+//! const chunk = bridge.oximedia_packet_to_encoded_chunk(packetBytes, pts, dts, isKey);
 //! webDecoder.decode(new EncodedVideoChunk({
-//!     type: chunk.type,
+//!     type: chunk.chunk_type,
 //!     timestamp: chunk.timestamp,
 //!     duration: chunk.duration,
 //!     data: packetBytes,
@@ -44,6 +55,113 @@
 //! ```
 
 use wasm_bindgen::prelude::*;
+
+// ---------------------------------------------------------------------------
+// WasmVideoDecoderConfig — typed WebCodecs VideoDecoderConfig result
+// ---------------------------------------------------------------------------
+
+/// Typed equivalent of the WebCodecs `VideoDecoderConfig` dictionary.
+///
+/// Returned by [`WasmWebCodecsBridge::get_video_decoder_config`] instead of a
+/// hand-formatted JSON string, so per-frame/per-configuration calls avoid
+/// `JSON.parse` overhead entirely.
+#[wasm_bindgen]
+pub struct WasmVideoDecoderConfig {
+    codec: String,
+    coded_width: u32,
+    coded_height: u32,
+    optimize_for_latency: bool,
+    description: Option<Vec<u8>>,
+}
+
+#[wasm_bindgen]
+impl WasmVideoDecoderConfig {
+    /// WebCodecs codec string, e.g. `"av01.0.00M.08"`.
+    #[wasm_bindgen(getter)]
+    pub fn codec(&self) -> String {
+        self.codec.clone()
+    }
+
+    /// Coded frame width in pixels.
+    #[wasm_bindgen(getter)]
+    pub fn coded_width(&self) -> u32 {
+        self.coded_width
+    }
+
+    /// Coded frame height in pixels.
+    #[wasm_bindgen(getter)]
+    pub fn coded_height(&self) -> u32 {
+        self.coded_height
+    }
+
+    /// Whether the decoder should be configured to optimize for latency.
+    #[wasm_bindgen(getter)]
+    pub fn optimize_for_latency(&self) -> bool {
+        self.optimize_for_latency
+    }
+
+    /// Raw codec extradata (sequence header etc.), if any, as a `Uint8Array`.
+    ///
+    /// Returns an empty array when no description bytes were present in the
+    /// source codec parameters.
+    #[wasm_bindgen(getter)]
+    pub fn description(&self) -> js_sys::Uint8Array {
+        match &self.description {
+            Some(bytes) => js_sys::Uint8Array::from(bytes.as_slice()),
+            None => js_sys::Uint8Array::new_with_length(0),
+        }
+    }
+
+    /// Whether a non-empty `description` (extradata) is present.
+    #[wasm_bindgen(getter)]
+    pub fn has_description(&self) -> bool {
+        self.description.is_some()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WasmEncodedChunkInfo — typed WebCodecs EncodedVideoChunkInit result
+// ---------------------------------------------------------------------------
+
+/// Typed equivalent of the WebCodecs `EncodedVideoChunkInit` dictionary
+/// (minus the raw packet bytes, which the caller already owns).
+///
+/// Returned by [`WasmWebCodecsBridge::oximedia_packet_to_encoded_chunk`]
+/// instead of a hand-formatted JSON string.
+#[wasm_bindgen]
+pub struct WasmEncodedChunkInfo {
+    chunk_type: String,
+    timestamp: f64,
+    duration: f64,
+    byte_length: u32,
+}
+
+#[wasm_bindgen]
+impl WasmEncodedChunkInfo {
+    /// Chunk type: `"key"` or `"delta"`.
+    #[wasm_bindgen(getter)]
+    pub fn chunk_type(&self) -> String {
+        self.chunk_type.clone()
+    }
+
+    /// Presentation timestamp in microseconds (WebCodecs convention).
+    #[wasm_bindgen(getter)]
+    pub fn timestamp(&self) -> f64 {
+        self.timestamp
+    }
+
+    /// Duration in microseconds.
+    #[wasm_bindgen(getter)]
+    pub fn duration(&self) -> f64 {
+        self.duration
+    }
+
+    /// Length of the associated packet payload in bytes.
+    #[wasm_bindgen(getter)]
+    pub fn byte_length(&self) -> u32 {
+        self.byte_length
+    }
+}
 
 /// WebCodecs API bridge for OxiMedia WASM.
 ///
@@ -74,7 +192,7 @@ impl WasmWebCodecsBridge {
         }
     }
 
-    /// Convert OxiMedia codec parameters to a WebCodecs `VideoDecoderConfig` JSON string.
+    /// Convert OxiMedia codec parameters to a typed WebCodecs `VideoDecoderConfig`.
     ///
     /// The `codec_params_bytes` parameter is interpreted as an OxiMedia codec
     /// parameter blob.  The method inspects the first bytes to detect the codec:
@@ -83,8 +201,9 @@ impl WasmWebCodecsBridge {
     /// - Starts with `0x56 0x50 0x38` (`"VP8"`) → VP8 (`vp8`)
     /// - Otherwise defaults to AV1.
     ///
-    /// Returns a JSON string compatible with the WebCodecs `VideoDecoderConfig`
-    /// dictionary.
+    /// Returns a [`WasmVideoDecoderConfig`] with typed getters; the raw
+    /// `codec_params_bytes` are carried through verbatim as `description`
+    /// (no JSON, no base64 -- a plain byte buffer for `Uint8Array`).
     ///
     /// # Errors
     ///
@@ -92,7 +211,7 @@ impl WasmWebCodecsBridge {
     pub fn get_video_decoder_config(
         &mut self,
         codec_params_bytes: &[u8],
-    ) -> Result<String, JsValue> {
+    ) -> Result<WasmVideoDecoderConfig, JsValue> {
         let (codec_str, width, height) = Self::parse_codec_params(codec_params_bytes);
 
         self.codec_string = codec_str.clone();
@@ -100,32 +219,26 @@ impl WasmWebCodecsBridge {
         self.height = height;
         self.configured = true;
 
-        // Build a WebCodecs VideoDecoderConfig JSON
-        // description field is base64 of raw extradata when non-empty
-        let description_field = if codec_params_bytes.len() > 4 {
-            let b64 = base64_encode(codec_params_bytes);
-            format!(r#","description":"{}""#, b64)
+        let description = if codec_params_bytes.len() > 4 {
+            Some(codec_params_bytes.to_vec())
         } else {
-            String::new()
+            None
         };
 
-        let json = format!(
-            r#"{{"codec":"{codec_str}","codedWidth":{width},"codedHeight":{height},"optimizeForLatency":true{description_field}}}"#
-        );
-        Ok(json)
+        Ok(WasmVideoDecoderConfig {
+            codec: codec_str,
+            coded_width: width,
+            coded_height: height,
+            optimize_for_latency: true,
+            description,
+        })
     }
 
-    /// Convert an OxiMedia compressed packet to an `EncodedVideoChunk` descriptor JSON.
+    /// Convert an OxiMedia compressed packet to a typed `EncodedVideoChunk` descriptor.
     ///
-    /// Returns a JSON string with fields:
-    /// ```json
-    /// {
-    ///   "type": "key" | "delta",
-    ///   "timestamp": <microseconds>,
-    ///   "duration": <microseconds>,
-    ///   "byteLength": <bytes>
-    /// }
-    /// ```
+    /// Returns a [`WasmEncodedChunkInfo`] with `chunk_type`, `timestamp`,
+    /// `duration`, and `byte_length` getters -- no JSON parsing needed on
+    /// this per-packet hot path.
     ///
     /// The `pts` and `dts` parameters are in milliseconds; they are converted
     /// to microseconds (×1000) for WebCodecs compatibility.
@@ -146,14 +259,14 @@ impl WasmWebCodecsBridge {
         pts: i64,
         dts: i64,
         is_key: bool,
-    ) -> Result<String, JsValue> {
+    ) -> Result<WasmEncodedChunkInfo, JsValue> {
         if packet_bytes.is_empty() {
             return Err(crate::utils::js_err(
                 "WebCodecsBridge: packet_bytes must not be empty",
             ));
         }
 
-        let chunk_type = if is_key { "key" } else { "delta" };
+        let chunk_type = if is_key { "key" } else { "delta" }.to_string();
         // WebCodecs timestamps are in microseconds
         let timestamp_us = pts * 1000;
         let dts_us = dts * 1000;
@@ -164,11 +277,12 @@ impl WasmWebCodecsBridge {
             33_333i64
         };
 
-        let json = format!(
-            r#"{{"type":"{chunk_type}","timestamp":{timestamp_us},"duration":{duration_us},"byteLength":{}}}"#,
-            packet_bytes.len()
-        );
-        Ok(json)
+        Ok(WasmEncodedChunkInfo {
+            chunk_type,
+            timestamp: timestamp_us as f64,
+            duration: duration_us as f64,
+            byte_length: packet_bytes.len() as u32,
+        })
     }
 
     /// Convert an RGBA pixel buffer (from `VideoFrame.copyTo()`) to YUV420p.
@@ -282,45 +396,6 @@ impl WasmWebCodecsBridge {
     }
 }
 
-/// Encode a byte slice as an unpadded Base64 string (standard alphabet).
-///
-/// This minimal implementation avoids pulling in a `base64` crate.
-fn base64_encode(input: &[u8]) -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
-    let mut i = 0;
-    while i + 2 < input.len() {
-        let a = input[i] as u32;
-        let b = input[i + 1] as u32;
-        let c = input[i + 2] as u32;
-        let triple = (a << 16) | (b << 8) | c;
-        out.push(ALPHABET[(triple >> 18) as usize] as char);
-        out.push(ALPHABET[((triple >> 12) & 0x3F) as usize] as char);
-        out.push(ALPHABET[((triple >> 6) & 0x3F) as usize] as char);
-        out.push(ALPHABET[(triple & 0x3F) as usize] as char);
-        i += 3;
-    }
-    let remaining = input.len() - i;
-    if remaining == 1 {
-        let a = input[i] as u32;
-        let triple = a << 16;
-        out.push(ALPHABET[(triple >> 18) as usize] as char);
-        out.push(ALPHABET[((triple >> 12) & 0x3F) as usize] as char);
-        out.push('=');
-        out.push('=');
-    } else if remaining == 2 {
-        let a = input[i] as u32;
-        let b = input[i + 1] as u32;
-        let triple = (a << 16) | (b << 8);
-        out.push(ALPHABET[(triple >> 18) as usize] as char);
-        out.push(ALPHABET[((triple >> 12) & 0x3F) as usize] as char);
-        out.push(ALPHABET[((triple >> 6) & 0x3F) as usize] as char);
-        out.push('=');
-    }
-    out
-}
-
 /// Convert an interleaved RGBA buffer to YUV420p planar using BT.709 coefficients.
 ///
 /// Output layout: `[Y (W*H)] [U (W/2 * H/2)] [V (W/2 * H/2)]`.
@@ -423,8 +498,9 @@ mod tests {
         let mut bridge = WasmWebCodecsBridge::new();
         let result = bridge.get_video_decoder_config(&[]);
         assert!(result.is_ok());
-        let json = result.expect("bridge result should succeed");
-        assert!(json.contains("av01"));
+        let config = result.expect("bridge result should succeed");
+        assert_eq!(config.codec(), "av01.0.00M.08");
+        assert!(!config.has_description());
         assert!(bridge.is_configured());
     }
 
@@ -438,13 +514,11 @@ mod tests {
         params.extend_from_slice(&720u32.to_le_bytes());
         let result = bridge.get_video_decoder_config(&params);
         assert!(result.is_ok());
-        let json = result.expect("bridge result should succeed");
-        assert!(
-            json.contains("vp09"),
-            "Expected vp09 codec string in: {json}"
-        );
-        assert!(json.contains("1280"));
-        assert!(json.contains("720"));
+        let config = result.expect("bridge result should succeed");
+        assert_eq!(config.codec(), "vp09.00.10.08");
+        assert_eq!(config.coded_width(), 1280);
+        assert_eq!(config.coded_height(), 720);
+        assert!(config.has_description());
     }
 
     #[test]
@@ -453,9 +527,10 @@ mod tests {
         let data = vec![0u8; 100];
         let result = bridge.oximedia_packet_to_encoded_chunk(&data, 1000, 1000, true);
         assert!(result.is_ok());
-        let json = result.expect("bridge result should succeed");
-        assert!(json.contains("\"key\""));
-        assert!(json.contains("1000000")); // 1000 ms → 1_000_000 μs
+        let chunk = result.expect("bridge result should succeed");
+        assert_eq!(chunk.chunk_type(), "key");
+        assert!((chunk.timestamp() - 1_000_000.0).abs() < f64::EPSILON); // 1000 ms → 1_000_000 μs
+        assert_eq!(chunk.byte_length(), 100);
     }
 
     #[test]
@@ -494,16 +569,6 @@ mod tests {
             "Expected high luma for white frame, got {}",
             yuv[0]
         );
-    }
-
-    #[test]
-    fn test_base64_encode_basic() {
-        // "Man" → "TWFu"
-        assert_eq!(base64_encode(b"Man"), "TWFu");
-        // empty → ""
-        assert_eq!(base64_encode(b""), "");
-        // "Ma" → "TWE="
-        assert_eq!(base64_encode(b"Ma"), "TWE=");
     }
 
     #[test]

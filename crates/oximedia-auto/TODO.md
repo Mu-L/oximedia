@@ -35,17 +35,17 @@
   - `DetectCutsOptions { target_duration_ms, max_cuts }` added; `CutDetector::detect_cuts_with_options` selects prefix after full sort to guarantee consistency with full scan. 4 new tests.
 - [x] Use downscaled frames for initial `smart_crop` pass, refine on full resolution only for final crops (completed 2026-06-01)
   - `SmartCropConfig.coarse_scale: f32` (default 0.25); `suggest_crop_from_frame(frame, w, h, ch)` with box-average downscale, variance-based synthetic saliency, ±10 % margin fine pass; `extract_saliency_regions` 4×4 luma-variance grid. 3 new tests.
-- [ ] Implement lazy evaluation for `AutoEditResult` fields that may not be needed by caller
+- [x] Implement lazy evaluation for `AutoEditResult` fields that may not be needed by caller (completed 2026-06-24; `LazyAutoEditResult` with `OnceLock`-cached `interest_curve()` + `try_assembled()`; `auto_edit_lazy()` defers steps 5 & 10; `into_eager()` forces both)
 
 ## Testing
-- [ ] Add test for `auto_edit()` end-to-end with synthetic video frames and audio
-- [ ] Test `rules::RulesEngine::apply_rules()` enforces minimum shot duration constraints
-- [ ] Add regression test for `assembly::generate_social_clip()` ensuring output within duration tolerance
-- [ ] Test `smart_trim` preserves dialogue boundaries when trimming
-- [ ] Add benchmark comparing `scoring` performance across different `ScoringConfig` settings
-- [ ] Test `color_match` produces consistent results for identical input pairs
+- [x] Add test for `auto_edit()` end-to-end with synthetic video frames and audio (completed 2026-06-24; 3 tests in `src/lib.rs`: `test_auto_edit_end_to_end_synthetic`, `test_lazy_auto_edit_defers_assembly`, `test_lazy_into_eager_matches_eager`)
+- [x] Test `rules::RulesEngine::apply_rules()` enforces minimum shot duration constraints (already implemented: `test_enforce_min_shot_duration` in `src/rules.rs`)
+- [x] Add regression test for `assembly::generate_social_clip()` ensuring output within duration tolerance (already implemented: `test_generate_social_clip_15s` / `test_generate_social_clip_30s` in `src/assembly.rs`)
+- [x] Test `smart_trim` preserves dialogue boundaries when trimming (completed 2026-06-24; `test_trim_preserves_dialogue_boundaries` in `src/smart_trim.rs`)
+- [x] Add benchmark comparing `scoring` performance across different `ScoringConfig` settings (already implemented: `benches/scoring_bench.rs` — `bench_score_scene_configs` with 6 config variants)
+- [x] Test `color_match` produces consistent results for identical input pairs (completed 2026-06-24; `test_color_transfer_identical_inputs_deterministic` in `src/color_match.rs`)
 
 ## Documentation
-- [ ] Document use-case presets ("trailer", "highlights", "social") with expected behavior
-- [ ] Add flowchart for `auto_edit()` pipeline showing data flow between stages
-- [ ] Document `scoring::FeatureWeights` tuning guidelines for different content types
+- [x] Document use-case presets ("trailer", "highlights", "social") with expected behavior (completed 2026-06-24; expanded doc on `AutoEditorConfig::for_use_case` and `AutoEditor::for_use_case` with preset table)
+- [x] Add flowchart for `auto_edit()` pipeline showing data flow between stages (completed 2026-06-24; numbered 10-step pipeline doc added to `auto_edit()` method)
+- [x] Document `scoring::FeatureWeights` tuning guidelines for different content types (completed 2026-06-24; added `# Tuning Guidelines` section with 4 content-type presets: sports, interview, music video, nature/B-roll)

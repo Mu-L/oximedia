@@ -5,8 +5,6 @@ use crate::database::RightsDatabase;
 use crate::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-#[cfg(not(target_arch = "wasm32"))]
-use sqlx::Row;
 use uuid::Uuid;
 
 /// Type of expiration alert
@@ -82,28 +80,52 @@ impl ExpirationAlert {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Decode an `expiration_alerts` row into an [`ExpirationAlert`].
+    fn from_row(r: &oxisql_core::Row) -> Result<Self> {
+        let alert_date_s: String = r.try_get("alert_date")?;
+        let alert_date = DateTime::parse_from_rfc3339(&alert_date_s)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| crate::RightsError::Serialization(e.to_string()))?;
+        let created_at_s: String = r.try_get("created_at")?;
+        let created_at = DateTime::parse_from_rfc3339(&created_at_s)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| crate::RightsError::Serialization(e.to_string()))?;
+        let alert_type_s: String = r.try_get("alert_type")?;
+        Ok(ExpirationAlert {
+            id: r.try_get("id")?,
+            grant_id: r.try_get("grant_id")?,
+            alert_type: AlertType::from_str(&alert_type_s),
+            alert_date,
+            notification_sent: r.try_get::<i64>("notification_sent")? != 0,
+            created_at,
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     /// Save alert to database
     pub async fn save(&self, db: &RightsDatabase) -> Result<()> {
-        sqlx::query(
-            r"
+        db.pool()
+            .execute(
+                r"
             INSERT INTO expiration_alerts
             (id, grant_id, alert_type, alert_date, notification_sent, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT(id) DO UPDATE SET
                 grant_id = excluded.grant_id,
                 alert_type = excluded.alert_type,
                 alert_date = excluded.alert_date,
                 notification_sent = excluded.notification_sent
             ",
-        )
-        .bind(&self.id)
-        .bind(&self.grant_id)
-        .bind(self.alert_type.as_str())
-        .bind(self.alert_date.to_rfc3339())
-        .bind(self.notification_sent as i32)
-        .bind(self.created_at.to_rfc3339())
-        .execute(db.pool())
-        .await?;
+                &[
+                    &self.id,
+                    &self.grant_id,
+                    &self.alert_type.as_str(),
+                    &self.alert_date.to_rfc3339(),
+                    &i64::from(self.notification_sent),
+                    &self.created_at.to_rfc3339(),
+                ],
+            )
+            .await?;
 
         Ok(())
     }
@@ -111,37 +133,18 @@ impl ExpirationAlert {
     #[cfg(not(target_arch = "wasm32"))]
     /// Load alert from database by ID
     pub async fn load(db: &RightsDatabase, id: &str) -> Result<Option<Self>> {
-        let row = sqlx::query(
-            r"
+        let row = db
+            .pool()
+            .query_optional(
+                r"
             SELECT id, grant_id, alert_type, alert_date, notification_sent, created_at
-            FROM expiration_alerts WHERE id = ?
+            FROM expiration_alerts WHERE id = $1
             ",
-        )
-        .bind(id)
-        .fetch_optional(db.pool())
-        .await?;
+                &[&id],
+            )
+            .await?;
 
-        let alert = match row {
-            None => return Ok(None),
-            Some(r) => {
-                let alert_date = DateTime::parse_from_rfc3339(r.get("alert_date"))
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .map_err(|e| crate::RightsError::Serialization(e.to_string()))?;
-                let created_at = DateTime::parse_from_rfc3339(r.get("created_at"))
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .map_err(|e| crate::RightsError::Serialization(e.to_string()))?;
-                ExpirationAlert {
-                    id: r.get("id"),
-                    grant_id: r.get("grant_id"),
-                    alert_type: AlertType::from_str(r.get("alert_type")),
-                    alert_date,
-                    notification_sent: r.get::<i32, _>("notification_sent") != 0,
-                    created_at,
-                }
-            }
-        };
-
-        Ok(Some(alert))
+        row.map(|r| Self::from_row(&r)).transpose()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -149,78 +152,45 @@ impl ExpirationAlert {
     pub async fn get_pending_alerts(db: &RightsDatabase) -> Result<Vec<Self>> {
         let now = Utc::now();
 
-        let rows = sqlx::query(
-            r"
+        let rows = db
+            .pool()
+            .query(
+                r"
             SELECT id, grant_id, alert_type, alert_date, notification_sent, created_at
             FROM expiration_alerts
-            WHERE notification_sent = 0 AND alert_date <= ?
+            WHERE notification_sent = 0 AND alert_date <= $1
             ORDER BY alert_date ASC
             ",
-        )
-        .bind(now.to_rfc3339())
-        .fetch_all(db.pool())
-        .await?;
+                &[&now.to_rfc3339()],
+            )
+            .await?;
 
-        rows.into_iter()
-            .map(|r| {
-                let alert_date = DateTime::parse_from_rfc3339(r.get("alert_date"))
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .map_err(|e| crate::RightsError::Serialization(e.to_string()))?;
-                let created_at = DateTime::parse_from_rfc3339(r.get("created_at"))
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .map_err(|e| crate::RightsError::Serialization(e.to_string()))?;
-                Ok(ExpirationAlert {
-                    id: r.get("id"),
-                    grant_id: r.get("grant_id"),
-                    alert_type: AlertType::from_str(r.get("alert_type")),
-                    alert_date,
-                    notification_sent: r.get::<i32, _>("notification_sent") != 0,
-                    created_at,
-                })
-            })
-            .collect()
+        rows.iter().map(Self::from_row).collect()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     /// Get all alerts for a grant
     pub async fn list_for_grant(db: &RightsDatabase, grant_id: &str) -> Result<Vec<Self>> {
-        let rows = sqlx::query(
-            r"
+        let rows = db
+            .pool()
+            .query(
+                r"
             SELECT id, grant_id, alert_type, alert_date, notification_sent, created_at
-            FROM expiration_alerts WHERE grant_id = ?
+            FROM expiration_alerts WHERE grant_id = $1
             ORDER BY alert_date DESC
             ",
-        )
-        .bind(grant_id)
-        .fetch_all(db.pool())
-        .await?;
+                &[&grant_id],
+            )
+            .await?;
 
-        rows.into_iter()
-            .map(|r| {
-                let alert_date = DateTime::parse_from_rfc3339(r.get("alert_date"))
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .map_err(|e| crate::RightsError::Serialization(e.to_string()))?;
-                let created_at = DateTime::parse_from_rfc3339(r.get("created_at"))
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .map_err(|e| crate::RightsError::Serialization(e.to_string()))?;
-                Ok(ExpirationAlert {
-                    id: r.get("id"),
-                    grant_id: r.get("grant_id"),
-                    alert_type: AlertType::from_str(r.get("alert_type")),
-                    alert_date,
-                    notification_sent: r.get::<i32, _>("notification_sent") != 0,
-                    created_at,
-                })
-            })
-            .collect()
+        rows.iter().map(Self::from_row).collect()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     /// Delete alert from database
     pub async fn delete(db: &RightsDatabase, id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM expiration_alerts WHERE id = ?")
-            .bind(id)
-            .execute(db.pool())
+        db.pool()
+            .execute("DELETE FROM expiration_alerts WHERE id = $1", &[&id])
             .await?;
         Ok(())
     }

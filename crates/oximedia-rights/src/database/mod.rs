@@ -3,4 +3,4 @@
 pub mod query;
 pub mod storage;
 
-pub use storage::RightsDatabase;
+pub use storage::{RightsDatabase, RightsPool};

@@ -15,7 +15,7 @@ pub type ServerResult<T> = Result<T, ServerError>;
 pub enum ServerError {
     /// Database error
     #[error("Database error: {0}")]
-    Database(#[from] sqlx::Error),
+    Database(#[from] crate::db::Error),
 
     /// I/O error
     #[error("I/O error: {0}")]

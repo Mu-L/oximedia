@@ -8,7 +8,7 @@
 //!
 //! - [`PreRollConfig`] — describes the pre-roll/bumper segment to inject.
 //! - [`BumperConfig`] — describes an end bumper.
-//! - [`InjectionPoint`] — either a pre-roll or bumper position.
+//! - [`InjectionTag`] — either a pre-roll or bumper position.
 //! - [`PreRollInjector`] — builds an ordered segment list with injections applied.
 //!
 //! # Segment ordering

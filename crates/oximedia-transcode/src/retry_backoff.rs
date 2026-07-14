@@ -1,6 +1,6 @@
 //! Exponential back-off retry scheduling for failed transcode jobs.
 //!
-//! Provides [`BackoffPolicy`], [`RetryState`], and [`RetryScheduler`] for
+//! Provides [`crate::retry_backoff::BackoffPolicy`], [`crate::retry_backoff::RetryState`], and [`crate::retry_backoff::RetryScheduler`] for
 //! computing per-attempt delays with optional full-jitter randomisation.
 //!
 //! The delay formula is:

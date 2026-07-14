@@ -20,11 +20,11 @@ oximedia-core.workspace = true
 oximedia-audio.workspace = true
 oximedia-graph.workspace = true
 thiserror.workspace = true
-nalgebra = "0.34"
+nalgebra = "0.35"
 rayon.workspace = true
 serde.workspace = true
 oxifft.workspace = true
 rand.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["full"] }

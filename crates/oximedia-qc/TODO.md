@@ -25,7 +25,7 @@
 - [x] Add QC comparison mode — diff two files and highlight quality differences (verified 2026-05-16; src/qc_compare.rs:69 RuleCompareResult, QcComparator, is_regression:52, 589 lines)
 - [x] Implement `caption_qc_checker` with timing gap/overlap detection and reading speed validation
 - [x] Add network stream QC — validate live RTMP/SRT/HLS streams in real-time (verified 2026-05-16; src/stream_qc.rs:58 StreamSample, RTMP/SRT/HLS:29-44, 703 lines)
-- [ ] Implement PDF report generation in `report` module (feature-gated) (verified-open 2026-05-16: report.rs exists; pdf feature gate listed in Cargo.toml but no PDF generation implemented)
+- [x] Implement PDF report generation in `report` module (feature-gated) (done 2026-06-04: hand-emitted PDF 1.4 in report.rs; PdfExportError, ReportFormat::Pdf variant, QcReport::to_pdf(), report_to_pdf() free fn; 6 tests)
 
 ## Performance
 - [x] Use SIMD for pixel-level analysis in video_quality_metrics (black frame, freeze frame detection) (done 2026-06-01)

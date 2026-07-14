@@ -12,7 +12,6 @@ use crate::{
 };
 use axum::{extract::State, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -290,7 +289,7 @@ async fn delete_single_media(
     media_id: &str,
 ) -> ServerResult<()> {
     // Fetch the media row to get the file path and check ownership.
-    let row = sqlx::query("SELECT user_id, filename FROM media WHERE id = ?")
+    let row = crate::db::query("SELECT user_id, filename FROM media WHERE id = ?")
         .bind(media_id)
         .fetch_optional(state.db.pool())
         .await?
@@ -305,7 +304,7 @@ async fn delete_single_media(
     }
 
     // Delete from the database (cascades to metadata, collection_items, jobs).
-    sqlx::query("DELETE FROM media WHERE id = ?")
+    crate::db::query("DELETE FROM media WHERE id = ?")
         .bind(media_id)
         .execute(state.db.pool())
         .await?;
@@ -331,7 +330,7 @@ async fn submit_transcode_job(
     now: i64,
 ) -> ServerResult<String> {
     // Verify the media item exists and is accessible.
-    let row = sqlx::query("SELECT user_id, status FROM media WHERE id = ?")
+    let row = crate::db::query("SELECT user_id, status FROM media WHERE id = ?")
         .bind(media_id)
         .fetch_optional(state.db.pool())
         .await?
@@ -355,7 +354,7 @@ async fn submit_transcode_job(
 
     let job_id = Uuid::new_v4().to_string();
 
-    sqlx::query(
+    crate::db::query(
         r"
         INSERT INTO transcode_jobs
             (id, user_id, media_id, status, progress,
@@ -393,7 +392,7 @@ async fn apply_metadata_update(
     update: &MetadataUpdate,
 ) -> ServerResult<()> {
     // Ownership check.
-    let row = sqlx::query("SELECT user_id FROM media WHERE id = ?")
+    let row = crate::db::query("SELECT user_id FROM media WHERE id = ?")
         .bind(&update.media_id)
         .fetch_optional(state.db.pool())
         .await?
@@ -409,7 +408,7 @@ async fn apply_metadata_update(
 
     // Upsert each key-value pair.
     for (key, value) in &update.fields {
-        sqlx::query(
+        crate::db::query(
             r"
             INSERT INTO media_metadata (media_id, key, value)
             VALUES (?, ?, ?)
@@ -539,5 +538,94 @@ mod tests {
     #[test]
     fn test_batch_limit_constant() {
         assert_eq!(BATCH_LIMIT, 100);
+    }
+
+    // ── Partial-completion / multi-status semantics ───────────────────────────
+
+    /// Drives a mixed batch through the same accumulate-per-item control flow
+    /// that the route handlers use (`Ok => add_success`, `Err => add_failure`),
+    /// without the DB/AppState layer. The fake per-item op fails for a fixed set
+    /// of IDs so we can assert exact partial state.
+    fn run_mixed_batch(ids: &[String], fails: &[&str]) -> BatchResult {
+        let mut result = BatchResult::new();
+        for id in ids {
+            // Simulated per-item operation: error for IDs in `fails`.
+            let outcome: Result<(), String> = if fails.contains(&id.as_str()) {
+                Err(format!("Media '{id}' not found"))
+            } else {
+                Ok(())
+            };
+            match outcome {
+                Ok(()) => result.add_success(id),
+                Err(e) => result.add_failure(id, e),
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn test_batch_partial_completion_ten_items_three_fail() {
+        let ids: Vec<String> = (0..10).map(|i| format!("m{i}")).collect();
+        // Fail items 2, 5, 8 — a non-contiguous mix, including last region.
+        let fails = ["m2", "m5", "m8"];
+
+        let result = run_mixed_batch(&ids, &fails);
+
+        // Counts are exactly right.
+        assert_eq!(result.succeeded.len(), 7);
+        assert_eq!(result.failed.len(), 3);
+        assert!(!result.all_succeeded());
+
+        // The batch is NOT aborted on the first failure: every input item is
+        // accounted for in exactly one bucket (multi-status coherence).
+        assert_eq!(result.succeeded.len() + result.failed.len(), ids.len());
+
+        // Failed bucket holds precisely the intended IDs (order preserved).
+        let failed_ids: Vec<&str> = result.failed.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(failed_ids, vec!["m2", "m5", "m8"]);
+
+        // Succeeded bucket holds the complement, in original order.
+        assert_eq!(
+            result.succeeded,
+            vec!["m0", "m1", "m3", "m4", "m6", "m7", "m9"]
+        );
+
+        // No ID appears in both buckets.
+        for f in &result.failed {
+            assert!(
+                !result.succeeded.contains(&f.id),
+                "id {} must not be in both buckets",
+                f.id
+            );
+        }
+
+        // Each failure carries a descriptive, item-specific message.
+        assert!(result.failed.iter().all(|e| e.error.contains(&e.id)));
+    }
+
+    #[test]
+    fn test_batch_all_fail_yields_empty_success_set() {
+        let ids: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
+        let result = run_mixed_batch(&ids, &["a", "b", "c"]);
+        assert!(result.succeeded.is_empty());
+        assert_eq!(result.failed.len(), 3);
+        assert!(!result.all_succeeded());
+    }
+
+    #[test]
+    fn test_batch_partial_serializes_to_multi_status_shape() {
+        let ids: Vec<String> = vec!["x".into(), "y".into(), "z".into()];
+        let result = run_mixed_batch(&ids, &["y"]);
+        let j = serde_json::to_value(&result).expect("serialize");
+
+        // Multi-status JSON: a succeeded array and a failed array of {id,error}.
+        assert_eq!(
+            j["succeeded"],
+            serde_json::json!(["x", "z"]),
+            "succeeded list mismatch"
+        );
+        assert_eq!(j["failed"][0]["id"], "y");
+        assert!(j["failed"][0]["error"].as_str().is_some());
+        assert_eq!(j["failed"].as_array().expect("failed array").len(), 1);
     }
 }

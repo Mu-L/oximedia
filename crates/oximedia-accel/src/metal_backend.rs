@@ -27,7 +27,9 @@
 #![allow(dead_code)]
 
 use crate::cpu_fallback::CpuAccel;
-use crate::error::{AccelError, AccelResult};
+#[cfg(all(target_os = "macos", feature = "metal-backend"))]
+use crate::error::AccelError;
+use crate::error::AccelResult;
 use crate::traits::{HardwareAccel, ScaleFilter};
 use oximedia_core::PixelFormat;
 

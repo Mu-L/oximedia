@@ -45,11 +45,14 @@
 - [x] Optimize `click::ClickRemover` interpolation to avoid full-buffer copies per click (verified 2026-06-01; src/click/remover.rs `remove_in_place(&mut [f32], &[Click])` with smoothstep Hermite interpolation, single small allocation for sorted click index)
 
 ## Testing
-- [ ] Add tests for `RestoreChain` with all step types combined in a realistic vinyl restoration pipeline
-- [ ] Test `process_stereo` with asymmetric corruption (clicks on left channel only)
-- [ ] Add golden-file tests comparing restored output against known-good reference for each restoration type
+- [x] Add tests for `RestoreChain` with all step types combined in a realistic vinyl restoration pipeline (verified 2026-06-06; tests/vinyl_pipeline.rs full DC→click→crackle→hum→spectral-sub→hiss chain + archival-preset all-step run; surfaced & fixed 2 real DSP bugs — see below)
+- [x] Test `process_stereo` with asymmetric corruption (clicks on left channel only) (verified 2026-06-06; tests/asymmetric_stereo.rs left-only clicks, right channel bit-preserved <1e-6, no cross-channel bleed)
+- [x] Add golden-file tests comparing restored output against known-good reference for each restoration type (verified 2026-06-06; tests/golden_generated.rs computed-expectation single-click golden: residual<1e-3 in click window, untouched <1e-6 outside)
+  - **Real bugs fixed at root (surfaced by these tests):**
+    - `noise/subtract.rs` (`SpectralSubtraction` + `AdaptiveSpectralSubtraction`) & `hiss/remover.rs` (`HissRemover`): the STFT overlap-add reconstructed real signals at ~0.19× gain. Two compounding errors: (1) normalised by raw frame **count** instead of the window-overlap-squared sum (WOLA) — now divides by `Σ w[i]²` via new `utils::spectral::window_coefficients`; (2) only the lower half `[0, N/2]` of the Hermitian full-FFT spectrum was processed (subtraction zipped against the half-length noise profile; hiss gating ran over `[hp, N)` asymmetrically), corrupting the conjugate bins and **halving** the IFFT real output — now the gain is computed on `[0, N/2]` and **mirrored onto `N-k`** to preserve Hermitian symmetry. A zero/empty-profile pass-through is now unity-gain (interior ratio 1.000).
+    - `wow/corrector.rs` (`WowFlutterCorrector`): a noisy/aperiodic lead-in poisoned the mean-pitch-lag estimate (white-noise frames reported spurious short lags), driving the program resampling rate far from unity and time-warping a steady tone to corr≈0 (buffer expanded 1.6×). Added a scale-invariant **normalised-autocorrelation periodicity gate** (`r = Σab/√(Σa²·Σb²) ≥ 0.5`); aperiodic frames now get neutral rate 1.0 and are excluded from the mean-lag. WowFlutter on a pure/degraded tone is now ~identity (archival preset corr 0.86).
 - [ ] Test `AzimuthCorrection` and `PhaseCorrection` skip behavior in mono mode
-- [ ] Add stress tests for `WienerFilter` with very short (<100 sample) and very long (>10M sample) inputs
+- [x] Add stress tests for `WienerFilter` with very short (<100 sample) and very long (>10M sample) inputs (Wave 30, 2026-06-08: extreme-length stress suite in `tests/wiener_filter_stress.rs` — short {1,2,3,64,100,256}<block pass-through, block-boundary {2047,2048,2049}, 10M one-shot path `#[ignore]` release-only; asserts finite/no-panic, no-amplify & no-annihilate energy bound [WOLA window-squared design ⇒ not ±5% RMS], O(N) one-shot peak memory by design, bit-exact determinism + reset; 7 tests, no bug surfaced)
 
 ## Documentation
 - [ ] Document recommended step ordering for each preset type (vinyl, tape, broadcast)

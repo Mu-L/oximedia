@@ -10,7 +10,7 @@
 //!
 //! 1. Generate proxy clips for large source media files.
 //! 2. Edit the timeline using proxy clips (fast playback, low memory).
-//! 3. Call [`ProxyManager::conform`] to relink all proxy clips back to the
+//! 3. Call [`ProxyManager::conform_all`] to relink all proxy clips back to the
 //!    original high-resolution sources for final render.
 
 use std::collections::HashMap;

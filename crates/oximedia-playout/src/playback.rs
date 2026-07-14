@@ -811,6 +811,45 @@ impl PlaybackEngine {
         StdDuration::from_secs_f64(1.0 / fps)
     }
 
+    /// Deterministic presentation time of frame `frame_index`.
+    ///
+    /// Returns the modeled, wall-clock-free time at which frame `frame_index`
+    /// should be presented, measured from the start of playback (frame 0 at
+    /// `Duration::ZERO`). This is `frame_index * frame_timing()` adjusted by the
+    /// engine's modeled per-frame clock drift (`ClockState::drift_us`, the same
+    /// drift applied by the private `ClockState::next_frame_time` scheduler).
+    ///
+    /// The result is pure and reproducible: it never reads `Instant::now()` and
+    /// depends only on the frame index, the configured frame rate, and the
+    /// accumulated drift correction. With the default zero drift it yields exact
+    /// integer multiples of `frame_timing()`, giving jitter-free, monotonically
+    /// increasing presentation timestamps suitable for offline scheduling and
+    /// frame-pacing calculations.
+    pub fn presentation_time(&self, frame_index: u64) -> StdDuration {
+        // Base presentation offset: exact multiple of the frame period. Scale
+        // the frame period in nanoseconds using 128-bit arithmetic so the
+        // result neither truncates the u64 index nor overflows for large frame
+        // counts. Working from `frame_timing()` (rather than truncated integer
+        // microseconds) avoids per-frame rounding drift for non-integer frame
+        // rates such as 29.97 fps, matching `frame_timing()` exactly on every
+        // interval with no accumulated jitter.
+        let period_nanos = self.frame_timing().as_nanos();
+        let base_nanos = period_nanos.saturating_mul(frame_index as u128);
+
+        // Apply the engine's modeled clock drift, mirroring the per-frame drift
+        // term used by `ClockState::next_frame_time`. Drift defaults to zero
+        // when no drift input has been supplied via `apply_clock_correction`.
+        let drift_us = self.state.read().clock.drift_us;
+        let drift_nanos = (drift_us as i128) * 1_000;
+
+        let total_nanos = base_nanos
+            .saturating_add_signed(drift_nanos)
+            .min(u128::from(u64::MAX));
+
+        // total_nanos is now guaranteed to fit in u64.
+        StdDuration::from_nanos(total_nanos as u64)
+    }
+
     /// Check for clock drift
     pub fn check_clock_drift(&self) -> i64 {
         let state = self.state.read();

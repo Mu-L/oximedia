@@ -14,11 +14,11 @@
 //! be faithfully preserved by **passing through** the compressed bitstream without
 //! decoding.  This module models the three legal operations:
 //!
-//! 1. [`PassthroughMode::Copy`] — write the bitstream bytes as-is into the output
+//! 1. [`crate::spatial_audio_passthrough::PassthroughMode::Copy`] — write the bitstream bytes as-is into the output
 //!    container (same codec, same parameters).
-//! 2. [`PassthroughMode::Rewrap`] — demux from one container format and remux
+//! 2. [`crate::spatial_audio_passthrough::PassthroughMode::Rewrap`] — demux from one container format and remux
 //!    into another without touching the elementary stream.
-//! 3. [`PassthroughMode::Downmix`] — decode spatial audio and mix down to a
+//! 3. [`crate::spatial_audio_passthrough::PassthroughMode::Downmix`] — decode spatial audio and mix down to a
 //!    conventional stereo or surround channel bed (lossy, last resort).
 //!
 //! # Patent-free note

@@ -597,3 +597,241 @@ async fn test_round_trip_preserves_100_packets() {
         assert_eq!(pts, i as i64, "packet {i} PTS should be {i}, got {pts}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// EBML conformance: Matroska DocType + spec-level hard-coded fixture tests
+// ---------------------------------------------------------------------------
+
+/// Build the standard EBML header for DocType = "matroska" (native MKV).
+fn build_matroska_ebml_header() -> Vec<u8> {
+    let body = [
+        ebml_uint(&[0x42, 0x86], 1),            // EBMLVersion
+        ebml_uint(&[0x42, 0xF7], 1),            // EBMLReadVersion
+        ebml_uint(&[0x42, 0xF2], 4),            // EBMLMaxIDLength
+        ebml_uint(&[0x42, 0xF3], 8),            // EBMLMaxSizeLength
+        ebml_string(&[0x42, 0x82], "matroska"), // DocType
+        ebml_uint(&[0x42, 0x87], 4),            // DocTypeVersion
+        ebml_uint(&[0x42, 0x85], 2),            // DocTypeReadVersion
+    ]
+    .concat();
+    ebml_elem(&[0x1A, 0x45, 0xDF, 0xA3], &body)
+}
+
+/// Build a minimal Matroska (.mkv) file with `n` SimpleBlocks using
+/// DocType = "matroska".  This mirrors the byte layout in the official
+/// Matroska test suite.
+fn build_matroska_simple_block_file(n: usize) -> Vec<u8> {
+    let info = build_info(n as f64);
+    let tracks = build_tracks(vec![build_track_entry(1, 1)]);
+    let mut block_bytes = Vec::new();
+    for i in 0..n {
+        block_bytes.extend_from_slice(&simple_block(1, i as i16, &[i as u8; 4]));
+    }
+    let cluster = build_cluster_unbounded(block_bytes);
+
+    let mut seg_body = Vec::new();
+    seg_body.extend_from_slice(&info);
+    seg_body.extend_from_slice(&tracks);
+    seg_body.extend_from_slice(&cluster);
+
+    let mut out = build_matroska_ebml_header();
+    out.extend_from_slice(&build_segment(seg_body));
+    out
+}
+
+/// T9: Matroska DocType probe — the demuxer must correctly identify DocType
+/// "matroska" and expose it as `ContainerFormat::Matroska` (not WebM).
+#[tokio::test]
+async fn test_matroska_doctype_probe() {
+    let data = build_matroska_simple_block_file(3);
+    let source = MemorySource::new(Bytes::from(data));
+    let mut demuxer = MatroskaDemuxer::new(source);
+
+    let result = demuxer
+        .probe()
+        .await
+        .expect("probe must succeed for matroska doctype");
+    assert_eq!(
+        result.format,
+        oximedia_container::ContainerFormat::Matroska,
+        "DocType 'matroska' must probe as ContainerFormat::Matroska"
+    );
+    assert!(result.confidence > 0.9, "probe confidence must be high");
+    assert!(
+        !demuxer.streams().is_empty(),
+        "must expose at least one stream"
+    );
+}
+
+/// T10: Matroska DocType round-trip — packets from a "matroska" DocType stream
+/// are readable with correct PTS ordering.
+#[tokio::test]
+async fn test_matroska_doctype_packet_roundtrip() {
+    const N: usize = 5;
+    let data = build_matroska_simple_block_file(N);
+    let source = MemorySource::new(Bytes::from(data));
+    let mut demuxer = MatroskaDemuxer::new(source);
+    demuxer.probe().await.expect("probe must succeed");
+
+    let mut pts_values = Vec::new();
+    loop {
+        match demuxer.read_packet().await {
+            Ok(pkt) => pts_values.push(pkt.timestamp.pts),
+            Err(OxiError::Eof) => break,
+            Err(e) => panic!("unexpected error reading Matroska packets: {e:?}"),
+        }
+    }
+
+    assert_eq!(
+        pts_values.len(),
+        N,
+        "should read {N} packets from matroska stream"
+    );
+    for (i, &pts) in pts_values.iter().enumerate() {
+        assert_eq!(pts, i as i64, "packet {i} PTS mismatch in matroska stream");
+    }
+}
+
+/// T11: Hard-coded minimal MKV fixture — a spec-conformant minimal byte array
+/// built from the Matroska EBML spec (EBML header + Segment + Cluster with
+/// Timestamp=0).  The demuxer must parse the EBML header gracefully and either
+/// succeed or fail with a typed error (never panic).
+///
+/// Byte layout (from the Matroska specification):
+///   EBML Header: 1A 45 DF A3 (ID) + 9F (size=31) + children
+///   Segment:     18 53 80 67 (ID) + 01 FF FF FF FF FF FF FF (unknown size)
+///   Cluster:     1F 43 B6 75 (ID) + 83 (size=3) + Timestamp E7 81 00
+#[tokio::test]
+async fn test_minimal_mkv_hard_coded_fixture() {
+    // A minimal, spec-conformant MKV with only EBML header + Segment + Cluster.
+    // No Tracks element — the demuxer must handle this gracefully.
+    let minimal_mkv: Vec<u8> = vec![
+        // EBML Header (ID = 1A 45 DF A3)
+        0x1A, 0x45, 0xDF, 0xA3, 0x9F, // VINT size = 31
+        // EBMLVersion = 1
+        0x42, 0x86, 0x81, 0x01, // EBMLReadVersion = 1
+        0x42, 0xF7, 0x81, 0x01, // EBMLMaxIDLength = 4
+        0x42, 0xF2, 0x81, 0x04, // EBMLMaxSizeLength = 8
+        0x42, 0xF3, 0x81, 0x08, // DocType = "matroska" (8 bytes)
+        0x42, 0x82, 0x88, b'm', b'a', b't', b'r', b'o', b's', b'k', b'a',
+        // DocTypeVersion = 4
+        0x42, 0x87, 0x81, 0x04, // DocTypeReadVersion = 2
+        0x42, 0x85, 0x81, 0x02, // Segment element (ID = 18 53 80 67, unknown size)
+        0x18, 0x53, 0x80, 0x67, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        // Minimal Cluster (ID = 1F 43 B6 75)
+        0x1F, 0x43, 0xB6, 0x75, 0x83, // VINT size = 3
+        // Timestamp = 0
+        0xE7, 0x81, 0x00,
+    ];
+
+    let source = MemorySource::new(Bytes::from(minimal_mkv));
+    let mut demuxer = MatroskaDemuxer::new(source);
+
+    // The probe may succeed or fail gracefully (no Tracks).  Must NOT panic.
+    match demuxer.probe().await {
+        Ok(_) => {
+            // Graceful success: probe finished but streams may be empty.
+        }
+        Err(e) => {
+            let msg = format!("{e:?}");
+            assert!(
+                !msg.contains("called `Option::unwrap()` on a `None` value")
+                    && !msg.contains("index out of bounds")
+                    && !msg.contains("arithmetic operation overflowed"),
+                "demuxer must fail gracefully, not with a Rust panic: {msg}"
+            );
+        }
+    }
+}
+
+/// T12: Malformed EBML — a garbage byte stream must return an error, not panic.
+#[tokio::test]
+async fn test_malformed_ebml_returns_error() {
+    let garbage: Vec<u8> = vec![0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07];
+    let source = MemorySource::new(Bytes::from(garbage));
+    let mut demuxer = MatroskaDemuxer::new(source);
+
+    let result = demuxer.probe().await;
+    assert!(
+        result.is_err(),
+        "demuxing a garbage byte stream must return an error"
+    );
+}
+
+/// T13: Truncated EBML header — a stream truncated mid-header must return an
+/// error, not panic or hang.
+#[tokio::test]
+async fn test_truncated_ebml_header_returns_error() {
+    // Only the first 3 bytes of the EBML element ID — not enough to parse.
+    let truncated: Vec<u8> = vec![0x1A, 0x45, 0xDF];
+    let source = MemorySource::new(Bytes::from(truncated));
+    let mut demuxer = MatroskaDemuxer::new(source);
+
+    let result = demuxer.probe().await;
+    assert!(result.is_err(), "truncated EBML input must return an error");
+}
+
+/// T14: EBML header only (no Segment) — a well-formed EBML header with no
+/// following Segment element must fail gracefully rather than panic.
+#[tokio::test]
+async fn test_ebml_header_only_no_segment() {
+    let header_only = build_matroska_ebml_header();
+    let source = MemorySource::new(Bytes::from(header_only));
+    let mut demuxer = MatroskaDemuxer::new(source);
+
+    match demuxer.probe().await {
+        Ok(_) => {
+            assert!(
+                demuxer.streams().is_empty(),
+                "no streams expected when only EBML header is present"
+            );
+        }
+        Err(e) => {
+            let msg = format!("{e:?}");
+            assert!(
+                !msg.contains("called `Option::unwrap()` on a `None` value")
+                    && !msg.contains("index out of bounds"),
+                "must fail gracefully, not with a panic: {msg}"
+            );
+        }
+    }
+}
+
+/// T15: EBML with wrong DocType — a well-formed EBML structure with an
+/// unsupported DocType (e.g. "avi") should return an error or gracefully
+/// expose zero streams.
+#[tokio::test]
+async fn test_ebml_wrong_doctype_graceful() {
+    let body = [
+        ebml_uint(&[0x42, 0x86], 1),
+        ebml_uint(&[0x42, 0xF7], 1),
+        ebml_uint(&[0x42, 0xF2], 4),
+        ebml_uint(&[0x42, 0xF3], 8),
+        ebml_string(&[0x42, 0x82], "avi"), // unsupported DocType
+        ebml_uint(&[0x42, 0x87], 1),
+        ebml_uint(&[0x42, 0x85], 1),
+    ]
+    .concat();
+    let wrong_doctype_header = ebml_elem(&[0x1A, 0x45, 0xDF, 0xA3], &body);
+
+    // Append an empty Segment with unknown size.
+    let mut data = wrong_doctype_header;
+    data.extend_from_slice(&[0x18, 0x53, 0x80, 0x67]);
+    data.extend_from_slice(&[0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+
+    let source = MemorySource::new(Bytes::from(data));
+    let mut demuxer = MatroskaDemuxer::new(source);
+
+    // Either an error or an Ok with empty streams is acceptable; no panic.
+    match demuxer.probe().await {
+        Ok(_) => {}
+        Err(e) => {
+            let msg = format!("{e:?}");
+            assert!(
+                !msg.contains("called `Option::unwrap()` on a `None` value")
+                    && !msg.contains("index out of bounds"),
+                "wrong-doctype must fail gracefully, not with a Rust panic: {msg}"
+            );
+        }
+    }
+}

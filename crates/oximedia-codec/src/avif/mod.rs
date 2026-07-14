@@ -1,9 +1,26 @@
-//! AVIF (AV1 Image File Format) encoder and decoder.
+//! AVIF (AV1 Image File Format) encoder, prober, and payload extractor.
 //!
 //! AVIF stores still images using AV1 intra-frame compression inside an
 //! ISOBMFF (ISO Base Media File Format) container.  This implementation
 //! writes and reads a structurally valid AVIF file, with a minimal AV1
 //! Sequence Header OBU as the bitstream payload.
+//!
+//! # Honest status: pixel decode is NOT implemented
+//!
+//! Per `docs/codec_status.md`, decoding an AVIF file to pixels requires AV1
+//! pixel reconstruction, which is not yet implemented in this workspace
+//! (the AV1 decoder is bitstream-parsing only; deferred to 0.2.0+, tracked
+//! by GitHub issue #9). Accordingly:
+//!
+//! - [`AvifDecoder::probe`] — **works**: parses the container and returns
+//!   dimensions, bit depth, colour metadata, and alpha presence.
+//! - [`AvifDecoder::extract_av1_payload`] — **works**: parses the container
+//!   and returns the raw AV1 OBU bitstream(s), honestly labelled as
+//!   bitstream data (for handoff to an external AV1 decoder).
+//! - [`AvifDecoder::decode`] — returns an honest
+//!   [`CodecError::UnsupportedFeature`] error. An earlier revision returned
+//!   the raw AV1 bitstream in the `y_plane` field of an [`AvifImage`] as if
+//!   it were decoded pixels; that misleading behaviour has been removed.
 //!
 //! # Container structure
 //!
@@ -96,6 +113,19 @@ pub struct AvifImage {
     pub alpha_plane: Option<Vec<u8>>,
 }
 
+/// Raw AV1 item payloads extracted from an AVIF container by
+/// [`AvifDecoder::extract_av1_payload`].
+///
+/// These are **encoded AV1 OBU bitstreams**, not decoded pixels — they are
+/// suitable for handing off to an AV1 decoder.
+#[derive(Debug, Clone)]
+pub struct AvifPayload {
+    /// Raw AV1 OBU bitstream of the primary (colour) image item.
+    pub color_obu: Vec<u8>,
+    /// Raw AV1 OBU bitstream of the alpha auxiliary image item, if present.
+    pub alpha_obu: Option<Vec<u8>>,
+}
+
 /// Lightweight metadata returned by [`AvifDecoder::probe`].
 #[derive(Debug, Clone)]
 pub struct AvifProbeResult {
@@ -178,7 +208,10 @@ impl AvifEncoder {
 
 // ─── Decoder ─────────────────────────────────────────────────────────────────
 
-/// Decodes AVIF container bytes to [`AvifImage`].
+/// Probes AVIF container bytes and extracts raw AV1 payloads.
+///
+/// Full pixel decode is **not implemented** — see the module docs and
+/// [`AvifDecoder::decode`].
 #[derive(Debug, Default, Clone)]
 pub struct AvifDecoder;
 
@@ -188,29 +221,63 @@ impl AvifDecoder {
         Self
     }
 
-    /// Decode a complete AVIF byte stream.
+    /// Decode a complete AVIF byte stream to pixels.
     ///
-    /// This parses the ISOBMFF container, extracts spatial/colour metadata
-    /// from the `iprp` boxes, and returns the raw AV1 bitstream in the
-    /// `y_plane` field (full decode of AV1 frames is out of scope for this
-    /// implementation; the bitstream is available for further processing).
+    /// # Honest limitation
+    ///
+    /// **This always fails** with [`CodecError::UnsupportedFeature`] after
+    /// validating the container: producing an [`AvifImage`] with real pixel
+    /// planes requires AV1 pixel reconstruction, which is not yet
+    /// implemented in this workspace (the AV1 decoder is bitstream-parsing
+    /// only; deferred to 0.2.0+). An earlier revision returned the raw AV1
+    /// bitstream in `y_plane` as if it were decoded luma — that misleading
+    /// pass-through has been removed.
+    ///
+    /// Use [`Self::probe`] for metadata and [`Self::extract_av1_payload`]
+    /// for the raw AV1 OBU bitstream(s).
+    ///
+    /// # Errors
+    ///
+    /// Returns `CodecError::InvalidBitstream` if the container is
+    /// malformed, otherwise `CodecError::UnsupportedFeature` as described
+    /// above.
     pub fn decode(data: &[u8]) -> Result<AvifImage, CodecError> {
+        // Validate the container first so malformed input is still
+        // reported as such (signature, meta/iloc structure, mdat extents).
+        let _payload = Self::extract_av1_payload(data)?;
+
+        Err(CodecError::UnsupportedFeature(
+            "AVIF decode requires AV1 pixel reconstruction, not yet implemented \
+             (deferred to 0.2.0+; see docs/codec_status.md). Use \
+             AvifDecoder::extract_av1_payload for the raw AV1 OBU bitstream, or \
+             AvifDecoder::probe for container metadata"
+                .to_string(),
+        ))
+    }
+
+    /// Parse the ISOBMFF container and return the raw AV1 OBU bitstream(s).
+    ///
+    /// The returned [`AvifPayload`] holds **encoded AV1 bitstream data**
+    /// (honestly labelled — not decoded pixels), suitable for handoff to an
+    /// AV1 decoder.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CodecError::InvalidBitstream` if the container is malformed
+    /// or the `iloc` extents point outside the file.
+    pub fn extract_av1_payload(data: &[u8]) -> Result<AvifPayload, CodecError> {
         let probe = Self::probe(data)?;
         let (color_offset, color_len, alpha_offset, alpha_len) =
             locate_mdat_items(data, probe.has_alpha)?;
 
-        // For a complete implementation the AV1 OBU would be decoded into
-        // YUV planes.  Here we surface the raw bitstream in y_plane so
-        // callers can hand it off to an AV1 decoder.
-        let y_plane = data
+        let color_obu = data
             .get(color_offset..color_offset + color_len)
             .ok_or_else(|| CodecError::InvalidBitstream("mdat color extent out of range".into()))?
             .to_vec();
 
-        let alpha_plane = if probe.has_alpha {
-            let (ao, al) = (alpha_offset, alpha_len);
+        let alpha_obu = if probe.has_alpha {
             let slice = data
-                .get(ao..ao + al)
+                .get(alpha_offset..alpha_offset + alpha_len)
                 .ok_or_else(|| {
                     CodecError::InvalidBitstream("mdat alpha extent out of range".into())
                 })?
@@ -220,15 +287,9 @@ impl AvifDecoder {
             None
         };
 
-        Ok(AvifImage {
-            width: probe.width,
-            height: probe.height,
-            depth: probe.bit_depth,
-            yuv_format: YuvFormat::Yuv420,
-            y_plane,
-            u_plane: Vec::new(),
-            v_plane: Vec::new(),
-            alpha_plane,
+        Ok(AvifPayload {
+            color_obu,
+            alpha_obu,
         })
     }
 
@@ -1300,18 +1361,43 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_roundtrip_color_payload() {
+    fn test_decode_returns_honest_unsupported_error() {
         let image = make_test_image(64, 48, 8, YuvFormat::Yuv420);
         let encoder = AvifEncoder::new(AvifConfig::default());
         let bytes = encoder.encode(&image).expect("encode failed");
-        let decoded = AvifDecoder::decode(&bytes).expect("decode failed");
-        assert_eq!(decoded.width, 64);
-        assert_eq!(decoded.height, 48);
-        // The raw AV1 OBU should be non-empty
+
+        // decode() must not pass raw AV1 bytes off as pixels — it reports
+        // the missing AV1 pixel-reconstruction stage honestly.
+        let result = AvifDecoder::decode(&bytes);
+        match result {
+            Err(CodecError::UnsupportedFeature(msg)) => {
+                assert!(
+                    msg.contains("not yet implemented"),
+                    "error must state the limitation clearly, got: {msg}"
+                );
+            }
+            other => panic!("expected honest UnsupportedFeature error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_extract_av1_payload_color_roundtrip() {
+        let image = make_test_image(64, 48, 8, YuvFormat::Yuv420);
+        let encoder = AvifEncoder::new(AvifConfig::default());
+        let bytes = encoder.encode(&image).expect("encode failed");
+
+        // The honestly-labelled extraction API returns the raw AV1 OBU.
+        let payload = AvifDecoder::extract_av1_payload(&bytes).expect("payload extraction failed");
         assert!(
-            !decoded.y_plane.is_empty(),
-            "decoded y_plane (AV1 OBU) should not be empty"
+            !payload.color_obu.is_empty(),
+            "extracted colour AV1 OBU should not be empty"
         );
+        assert!(payload.alpha_obu.is_none(), "no alpha item was encoded");
+
+        // Metadata is still available via probe().
+        let probe = AvifDecoder::probe(&bytes).expect("probe failed");
+        assert_eq!(probe.width, 64);
+        assert_eq!(probe.height, 48);
     }
 
     #[test]
@@ -1329,7 +1415,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_with_alpha() {
+    fn test_extract_av1_payload_with_alpha() {
         let mut image = make_test_image(64, 64, 8, YuvFormat::Yuv420);
         image.alpha_plane = Some(vec![200u8; 64 * 64]);
         let config = AvifConfig {
@@ -1338,15 +1424,20 @@ mod tests {
         };
         let encoder = AvifEncoder::new(config);
         let bytes = encoder.encode(&image).expect("encode failed");
-        let decoded = AvifDecoder::decode(&bytes).expect("decode failed");
+
+        // decode() reports the pixel-reconstruction gap honestly …
         assert!(
-            decoded.alpha_plane.is_some(),
-            "decoded image should have alpha"
+            matches!(
+                AvifDecoder::decode(&bytes),
+                Err(CodecError::UnsupportedFeature(_))
+            ),
+            "decode must be an honest UnsupportedFeature error"
         );
-        assert!(!decoded
-            .alpha_plane
-            .expect("alpha plane should exist")
-            .is_empty());
+
+        // … while the raw alpha AV1 OBU stays available via extraction.
+        let payload = AvifDecoder::extract_av1_payload(&bytes).expect("payload extraction failed");
+        let alpha_obu = payload.alpha_obu.expect("alpha OBU should be present");
+        assert!(!alpha_obu.is_empty());
     }
 
     #[test]

@@ -16,6 +16,11 @@ pub struct DriftSample {
     pub observed_frames: u64,
     /// Expected frame count from the reference clock.
     pub expected_frames: u64,
+    /// Optional exact (sub-frame) observed frame count. When present, drift computations use this
+    /// instead of the rounded [`Self::observed_frames`], avoiding ±0.5-frame quantization error.
+    pub observed_frames_exact: Option<f64>,
+    /// Optional exact (sub-frame) expected frame count. Paired with [`Self::observed_frames_exact`].
+    pub expected_frames_exact: Option<f64>,
 }
 
 impl DriftSample {
@@ -25,6 +30,24 @@ impl DriftSample {
             wall_time_secs,
             observed_frames,
             expected_frames,
+            observed_frames_exact: None,
+            expected_frames_exact: None,
+        }
+    }
+
+    /// Creates a drift sample carrying exact sub-frame counts. The integer accessors are set to the
+    /// rounded values; the exact `f64` values are retained for sub-frame-accurate drift.
+    pub fn new_subframe(
+        wall_time_secs: f64,
+        observed_frames_exact: f64,
+        expected_frames_exact: f64,
+    ) -> Self {
+        Self {
+            wall_time_secs,
+            observed_frames: observed_frames_exact.round() as u64,
+            expected_frames: expected_frames_exact.round() as u64,
+            observed_frames_exact: Some(observed_frames_exact),
+            expected_frames_exact: Some(expected_frames_exact),
         }
     }
 
@@ -32,6 +55,15 @@ impl DriftSample {
     #[allow(clippy::cast_precision_loss)]
     pub fn drift_frames(&self) -> i64 {
         self.observed_frames as i64 - self.expected_frames as i64
+    }
+
+    /// Returns the exact sub-frame drift (observed − expected) when exact counts are present, else
+    /// falls back to the integer drift.
+    pub fn drift_frames_exact(&self) -> f64 {
+        match (self.observed_frames_exact, self.expected_frames_exact) {
+            (Some(o), Some(e)) => o - e,
+            _ => self.drift_frames() as f64,
+        }
     }
 
     /// Returns the drift as a fraction of the expected frames.
@@ -166,11 +198,15 @@ impl DriftDetector {
 
         // Calculate drift rate via linear regression (drift vs wall time)
         let sum_t: f64 = self.samples.iter().map(|s| s.wall_time_secs).sum();
-        let sum_d: f64 = self.samples.iter().map(|s| s.drift_frames() as f64).sum();
+        let sum_d: f64 = self
+            .samples
+            .iter()
+            .map(DriftSample::drift_frames_exact)
+            .sum();
         let sum_td: f64 = self
             .samples
             .iter()
-            .map(|s| s.wall_time_secs * s.drift_frames() as f64)
+            .map(|s| s.wall_time_secs * s.drift_frames_exact())
             .sum();
         let sum_t2: f64 = self
             .samples

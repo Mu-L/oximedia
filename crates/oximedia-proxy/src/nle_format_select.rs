@@ -10,6 +10,37 @@
 //! This module detects the target NLE (by name, project file extension, or
 //! environment hints) and recommends the optimal proxy codec, container,
 //! resolution, and bitrate.
+//!
+//! # Proxy format recommendations by NLE
+//!
+//! [`NleFormatSelector::recommend`] returns these defaults (see
+//! `NleFormatSelector::recommend` for the exact match arms); all bitrates are
+//! for a 1080p-scaled proxy and scale roughly linearly with
+//! [`SourceResolution::proxy_resolution`]'s chosen target:
+//!
+//! | NLE | Primary codec | Container | Bitrate (kbps) | Fallback |
+//! |---|---|---|---|---|
+//! | Adobe Premiere Pro | `prores_proxy` | `.mov` | 4,500 | `h264` |
+//! | DaVinci Resolve | `dnxhr_lb` | `.mxf` | 3,600 | `prores_proxy` |
+//! | Final Cut Pro | `prores_proxy` | `.mov` | 4,500 | — |
+//! | Avid Media Composer | `dnxhd` | `.mxf` | 3,600 | `dnxhr_lb` |
+//! | Vegas Pro | `h264` | `.mp4` | 5,000 | `prores_proxy` |
+//! | HitFilm | `h264` | `.mp4` | 5,000 | — |
+//! | Generic / patent-free preference | `vp9` | `.webm` | 4,000 | `av1` |
+//!
+//! **Storage-constrained environments** (laptop editing, remote/cloud
+//! workstations, or projects with thousands of clips): prefer the
+//! patent-free VP9/WebM recommendation
+//! (via [`NleFormatSelector::with_patent_free_preference`]) or the smallest
+//! resolution bucket in [`SourceResolution::proxy_resolution`]
+//! (SD sources -> 640x360, HD -> 960x540) rather than the NLE's native
+//! preference — ProRes and DNxHR proxies are visually excellent but 2-3x
+//! larger per second than an equivalent-quality H.264/VP9 proxy, which adds
+//! up quickly across a multi-terabyte project. Conversely, for **shared
+//! storage / high-bandwidth edit-suite environments** where scrub
+//! performance and multi-cam sync matter more than footprint, prefer each
+//! NLE's native intra-frame codec (ProRes/DNxHR) since these decode more
+//! cheaply per frame during real-time scrubbing than long-GOP H.264/VP9.
 
 use std::collections::HashMap;
 

@@ -20,6 +20,7 @@ default = []
 
 [dependencies]
 thiserror.workspace = true
+hashbrown = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -28,4 +29,8 @@ proptest.workspace = true
 
 [[bench]]
 name = "tinylfu"
+harness = false
+
+[[bench]]
+name = "lru_bench"
 harness = false

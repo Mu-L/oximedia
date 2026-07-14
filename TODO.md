@@ -1,12 +1,12 @@
 # OxiMedia — The Sovereign Media Framework: Development Roadmap
 
-**Version: 0.1.8 (active) / 0.1.7 (stable)**
-**Status as of: 2026-06-02**
-**Total SLOC: ~2,752,381 (Rust)**
-**Total Tests: 100,278 passing (cargo nextest run --workspace --all-features)**
-**Total Crates: 109**
-**Crate Status: 109 Stable / 0 Alpha / 0 Partial**
-**Current Branch: 0.1.8 — Waves 1–20 complete; algorithmic depth, codec improvements, entropy coding**
+**Version: 0.1.9 (active, dev branch `0.1.9`) / 0.1.8 (stable, `master`)**
+**Status as of: 2026-07-14**
+**Total SLOC: ~2,951,319 lines of code (Rust, measured via `tokei .` this session; 3,603,734 total lines / 9,309 files / 181,073 comments)**
+**Total Tests: 101,814 passing with `--all-features` / 100,160 with default features (0 failed, 0 warnings — `cargo nextest run --workspace`, genuine full run this session, verified 2026-07-13)**
+**Total Crates: 114 (measured via `cargo metadata --no-deps` this session; root workspace only — `web/` is a separate, excluded nested workspace, see below)**
+**Crate Status: 110 Stable library crates under `crates/` + facade `oximedia` + `oximedia-cli` + `oximedia-wasm` + internal bench harness = 114 workspace members; 0 Alpha / 0 Partial**
+**Current Branch: 0.1.9 — production-readiness release landed 2026-07-08 (100% Pure Rust default build); Waves 21–30 + `oximedia-web` (browser modules) in progress since**
 
 ---
 
@@ -14,7 +14,7 @@
 
 | Category | Count | Notes |
 |----------|-------|-------|
-| Stable crates | 109 | All crates fully stabilized; no `todo!()`/`unimplemented!()` stubs |
+| Stable crates | 110 | Library crates under `crates/`; no `todo!()`/`unimplemented!()` stubs. (+ facade `oximedia`, `oximedia-cli`, `oximedia-wasm`, internal bench harness = 114 workspace members total) |
 | Alpha crates | 0 | All former alpha crates promoted to stable |
 | Partial crates | 0 | All former partial crates completed and promoted to stable |
 
@@ -256,6 +256,7 @@ All 22 former alpha crates have been audited, documented, tested, and promoted t
 
 | Priority | Crate | Issue | Status |
 |----------|-------|-------|--------|
+| None/Resolved | `oxiarc-archive` (dep) | Bumped to 0.3.6 (2026-07-13, "bump oxiarc" commit) while sibling crates `oxiarc-brotli`/`oxiarc-bzip2`/`oxiarc-lzma`/`oxiarc-snappy` stayed at 0.3.5; `oxiarc-archive` 0.3.6's source calls `decompress_with_limit`/`decompress_frame_with_limit`/`DICT_SIZE_ALLOC_CAP`/`with_max_output`/`with_max_output_size` APIs that don't exist in the 0.3.5 siblings — 11 compile errors. Breaks `oxiarc-archive` itself and transitively `oximedia-archive-pro`, `oximedia-batch`, `oximedia-convert`, `oximedia-cli`, `oximedia-py`, `oximedia-wasm` (all in workspace `default-members` except `oximedia-py`) — a plain `cargo build` currently fails. `oximedia` facade unaffected under default (no-feature) build (these three deps are optional there). Pure-Rust API mismatch only, not a C/C++/Fortran regression. | Resolved (2026-07-14 — cargo check --workspace --all-features passes clean; oxiarc-brotli/bzip2/lzma/snappy republished at 0.3.6 matching oxiarc-archive) |
 | None/Resolved | `oximedia-net` | `todo!()` confirmed in documentation comment only in ABR controller — not executable code, no runtime impact | Resolved |
 
 ---
@@ -535,6 +536,7 @@ Progress tracking for 0.1.6 items. `[~]` = in progress, `[x]` = complete.
 | No `bincode` | Enforced; OxiCode used for serialization |
 | No `rustfft` | Enforced; OxiFFT used |
 | No `zip` crate | Enforced; `oxiarc-archive` used |
+| No `lz4_flex` crate | Enforced; `oxiarc-lz4` used (last direct holdout removed 2026-06-05; only a transitive `tantivy` pull remains) |
 | Workspace dependency management | All crate versions via workspace `[dependencies]` |
 | COOLJAPAN ecosystem alignment | SciRS2-Core for numeric/statistical ops |
 | `unwrap()` free | Enforced across ALL crates; 1,386 unwrap() calls eliminated in 0.1.2 session; only doc-comment examples remain |
@@ -546,6 +548,14 @@ Progress tracking for 0.1.6 items. `[~]` = in progress, `[x]` = complete.
 | AVX-512 SIMD paths | Implemented with runtime detection in `oximedia-simd` (`CpuFeatures`) |
 | Criterion benchmarks | 4 benchmark suites in `benches/` crate |
 | Comprehensive CLI | `oximedia-cli` with probe/info/transcode/loudness/quality/dedup/timecode commands |
+
+---
+
+## Pure Rust Migration (COOLJAPAN Policy)
+
+Tracking removal of non-OxiARC compression/foreign dependencies. `[x]` = complete.
+
+- [x] `lz4_flex` → `oxiarc-lz4` in `oximedia-renderfarm` storage (`compress_data`/`decompress_data` in `crates/oximedia-renderfarm/src/storage.rs` now use the `oxiarc_lz4::compress` / `oxiarc_lz4::decompress` LZ4 frame format; added `test_compress_decompress_roundtrip`). Removed dead `lz4_flex` declaration from `oximedia-collab/Cargo.toml` (zero call sites; it uses `oxiarc-deflate`) and dropped `lz4_flex` from the workspace `[dependencies]`. This removes the last direct non-OxiARC compression holdout in OxiMedia. Verified: `oximedia-renderfarm` 1031 tests pass, clippy clean (`-D warnings`), no `lz4_flex` in the renderfarm/collab dependency trees (only a transitive `tantivy` pull remains). — 2026-06-05
 
 ---
 
@@ -572,10 +582,10 @@ cargo doc --all --no-deps
 cargo fmt --check
 
 # SLOC count
-tokei /Users/kitasan/work/oximedia
+tokei .
 
 # COCOMO estimate
-cocomo /Users/kitasan/work/oximedia
+cocomo .
 
 # Find refactoring targets (files > 2000 lines)
 rslines 50
@@ -760,3 +770,134 @@ Singleton fixes (`oximedia-monitor/cardinality.rs`, `oximedia-bitstream/integer.
 - [ ] Vorbis I spec-compliant encoder rewrite — current Vorbis encoder is an OxiMedia-internal format wrapper; full spec compliance requires psychoacoustic flooring + residue codebook design. Gated to 0.2.0+. File: crates/oximedia-codec/src/audio/vorbis/
 - [ ] LARSCH pure O(n) line-breaking proof — existing LARSCH is O(n log n) two-pass; strict O(n) requires KP cost function is strictly totally-Monge (formal proof needed). Research-grade. File: crates/oximedia-caption-gen/src/line_breaking/larsch.rs
 - [x] Motion blur Wiener deconvolution ≥3 dB — spatial-domain RL diverged in Wave 4; FFT-Wiener via oxifft::rfft2d/irfft2d implemented in Wave 5 β₁ (8/15 corpus ≥3 dB). File: crates/oximedia-cv/src/motion_blur/deconvolve.rs (verified 2026-05-29)
+
+## 0.1.9 Wave 27 (in progress)
+
+- [x] `oximedia-audio-analysis` emotion synthetic-signal pins — added in-file tests `test_emotion_scores_high_arousal_vs_calm_ordinal` (ordinal: aroused>calm for angry/happy, calm>aroused for sad/neutral; dominant-emotion direction) and `test_emotion_scores_monotone_in_f0` (angry non-decreasing, sad non-increasing as F0 sweeps 100→260 Hz); directions verified against the `detect_emotion_scores` scoring math. File: crates/oximedia-audio-analysis/src/voice/emotion.rs
+- [x] `oximedia-audio-analysis` forensics splice end-to-end — new `tests/forensics_splice.rs`: `spliced_audio_detected_near_boundary` (300→3000 Hz splice at 0.5 s detected within ±0.05 s), `continuous_sine_no_splice` (clean 440 Hz → 0 edits), `authenticity_verifier_scores_spliced_lower_than_clean`. **Surfaced + fixed a REAL bug:** `lib.rs::hann_window` used `cos(PI·i/(N−1))` instead of `cos(2·PI·i/(N−1))`, degenerating into a half-cosine ramp. The broken window leaked a pure tone across the whole spectrum (440 Hz tone reported a ~2237 Hz centroid swinging 607→3068 Hz), producing **57 false-positive splices on a clean sine**. Fixed Hann → centroid 444.8 Hz (stable 440–449), false positives → 0. File: crates/oximedia-audio-analysis/src/lib.rs (also tightened `test_window_generation` to assert symmetric taper)
+- [x] `oximedia-audio-analysis` vocal separation direction + energy — new `tests/vocal_separation.rs`: `harmonic_output_correlates_more_with_vocal_than_instrumental` (r_voc>r_ins, r_voc>0.3 on steady middle segment) and `separation_preserves_energy_order` (rms(harmonic) > 0.01·rms(mix)). **Surfaced + fixed a REAL bug:** `sources.rs::synthesize` divided IFFT output by `window_size` even though `oxifft::ifft` already normalizes by 1/N, attenuating separated sources by ~2048×. Removed the redundant `/window_size`; harmonic energy restored. File: crates/oximedia-audio-analysis/src/separate/sources.rs
+- [x] Per-crate gate: 677/678 tests pass + 0 clippy warnings. The one remaining failure (`formant::analyze::tests::test_lpc_all_pole_synthetic`) is **pre-existing and out of this slice's scope** — a sign-convention mismatch in another slice's test assertion (production `compute_lpc` stores prediction-polynomial-sign coefficients, i.e. `a[1]≈−a1_true`; the test asserts `≈+a1_true`). The production LPC is internally consistent. File (for the owning slice): crates/oximedia-audio-analysis/src/formant/analyze.rs:643
+
+## Stubs to implement (added 2026-06-12 by /cooljapan-stub-check) — ALL RESOLVED 2026-06-22 (/ultra Wave 28)
+
+All 10 stub/placeholder items resolved. Three were stale-label false-positives (already implemented); the rest received real, honest implementations. Each crate verified green (`cargo test -p <crate>` + `cargo clippy ... -D warnings`). Two pre-existing broken doctests (never run because `nextest` skips doctests) were fixed as a bonus.
+
+- [x] `oximedia-graphics`: `svg_overlay.rs` — FALSE-POSITIVE: module was already registered in `lib.rs` (line 125) and `resvg = "0.47"` already a dependency; only a stale "orphan/requires deps not yet listed" header comment remained. Removed the misleading header; 18 doctests + crate tests green. (2026-06-22)
+- [x] `oximedia-net`: `rtsp/server/connection.rs` — Real fix: RTP-over-TCP-interleaved transport split via `TcpStream::into_split()` with `Arc<Mutex<OwnedWriteHalf>>`; dedicated `rtp_writer_loop` task (AtomicBool stop + `Notify`, biased `select!`, hard-abort on drop) now delivers RTP concurrently after PLAY without waiting for the next request. Removed stale `let _ = rtp_rx;` workaround + 2 dead helpers. +1 test (`test_rtp_delivered_after_play_without_further_requests`); 71 rtsp + 21 smoke tests pass. (2026-06-22)
+- [x] `oximedia-dedup`: `dedup_policy.rs` — Real fix: new `quality.rs` with `quality_score(path)` from real file-header reads (image dims for PNG/JPEG/GIF/BMP/WebP; ISO-BMFF `tkhd` resolution + `mvhd` duration → effective bitrate; bit depth). Log2-weighted (resolution primary, bitrate secondary, depth tie-break) so a tiny 4K beats a huge SD; honest size-only fallback when unparseable (documented). +15 tests; 930 lib tests pass. (2026-06-22)
+- [x] `oximedia-analytics`: `engagement.rs` — Real fix: killed hardcoded `0.5`. New `SocialSignals { views, likes, shares, comments }` with saturating `engagement_score()` (zero views → 0.0); `compute_engagement_with_social()` entry point; `EngagementWeights::redistribute_social()` so absent social data redistributes its weight (no fabricated midpoint) and is distinguished from measured-zero. +14 tests; 376 lib tests pass. (2026-06-22)
+- [x] `oximedia-audio`: `click_remove.rs` — Real fix: `magnitude` (was `1.0`) now `region_magnitude()` = region peak-abs ÷ RMS of adjacent clean context (peak fallback when no context). 1430+ tests pass. (2026-06-22)
+- [x] `oximedia-container`: `mux/mp4/facade.rs` — FALSE-POSITIVE: the `:8` reference is a doc-comment cross-link, not a stub; the facade muxer is fully implemented (ftyp+moov+mdat, all boxes) with 8 passing tests. Verified green; crate TODO already marks mp4-muxer `[x]`. (2026-06-22)
+- [x] `oximedia-convert`: `pipeline/job.rs` — Real fix: added `total_frames: Option<u64>` field (`#[serde(default)]` for forward-compat with persisted queues), `set_total_frames`/`with_total_frames`; checkpoint now records the real probed total (0 = honestly unknown, not fake `1_000`) and derives `frames_processed` from it. Restored in `resume_from_checkpoint`. +2 tests; 941 lib tests pass. (2026-06-22)
+- [x] `oximedia-image`: `dng/writer.rs` — FALSE-POSITIVE: the deferred camera-model/software tag offsets ARE back-patched by the deferred-offset loop (`writer.rs:232-235`); the `// placeholder` comments describe construction-time zeros filled later. Verified green (1439 tests). (2026-06-22)
+- [x] `oximedia-codec`: `opus/silk_nsq.rs` — Real fix: added test-only decoder hook `reconstruct_subframe_from_excitation` and `test_nsq_decoder_bitexact_consistency` proving excitation **bit-exact**, LPC residual **bit-exact**, and LPC-synthesis output **<1 ULP** (sub-ULP gap honestly documented as IEEE-754 reassociation). Note: `silk_nsq` is behind the non-default `opus` feature → verify with `--features opus`. 13 + 99 silk tests pass, clippy clean. (2026-06-22)
+- [x] `oximedia-playout`: `catchup.rs` — Real fix: `StartoverSession::new` now sets `started_at = SystemTime::now()`; added `new_at(...)` ctor to anchor to an explicit EPG/schedule start time. 929 tests pass. (2026-06-22)
+
+### Bonus — pre-existing broken doctests fixed (latent: `nextest` skips doctests; `cargo test` runs them)
+- [x] `oximedia-graphics`: `bitmap_font.rs` doctest — `let font` → `let mut font` (`render_text` takes `&mut self`). (2026-06-22)
+- [x] `oximedia-dedup`: `lib.rs` crate-level doctest — used `sqlite`-gated `DuplicateDetector` under default features; marked the example ```ignore``` with a feature note. (2026-06-22)
+
+## Stubs to implement (added 2026-06-22 by /cooljapan-stub-check)
+
+> Merge note (2026-06-23): the dedup + codec items below duplicate stubs already resolved in /ultra Wave 28 (see the RESOLVED section above) — marked done here for cross-reference. The `oximedia-bitstream` item is genuinely new and remains open.
+
+- [x] `oximedia-dedup`: `crates/oximedia-dedup/src/dedup_policy.rs:441` — codec-aware quality scoring. RESOLVED in Wave 28 (new `quality.rs::quality_score` ranks by real header-derived resolution/bitrate/depth; size fallback). (2026-06-22)
+- [x] `oximedia-codec`: `crates/oximedia-codec/src/opus/silk_nsq.rs:1120` — bit-exact SilkDecoder consistency test. RESOLVED in Wave 28 (`#[cfg(test)] pub(crate)` `reconstruct_subframe_from_excitation` hook + `test_nsq_decoder_bitexact_consistency`). (2026-06-22)
+- [ ] **oximedia** `oximedia-bitstream`: `crates/oximedia-bitstream/src/integer.rs:510` — `TODO`: `enable these in the future` (commented-out `shl_default`/`shr_default` unbounded-shift methods)
+  - **Priority:** P2  **Scope:** trivial  **Cross-project:** none
+  - **Approach:** Un-comment the `shl_default`/`shr_default` arms (backed by `unbounded_shl`/`unbounded_shr`) once the MSRV provides the stabilized API, and add round-trip cases exercising shift ≥ BITS.
+  - **Risk:** `unbounded_shl`/`unbounded_shr` MSRV gating — guard or bump MSRV before enabling to avoid breaking the build.
+
+## 0.1.9 oximedia-web phase (2026-07-12)
+
+New nested workspace `web/` (excluded from the root workspace via root
+`Cargo.toml`'s `exclude = ["fuzz", "web"]`), plus the `oximedia-wasm`
+defect-fix and root-tokio-fix work that unblocked it. Full detail in
+[`web/TODO.md`](web/TODO.md); summary here for cross-reference.
+
+- [x] **M0** — gates + skeleton: 5-crate nested Cargo workspace
+  (`oximedia-web-core` + `scopes`/`color`/`scale`/`quality`), 4 bash-3.2
+  gate scripts (`build.sh`/`size-gate.sh`/`dep-gate.sh`/`serve.sh`),
+  `allowed-deps.txt` (23 crates, generated from a real `cargo tree`),
+  `deny.toml` licenses check green, `package.json`. All 10 requested
+  verification steps passed.
+- [x] **M1** — `oximedia-web-scopes`: waveform/vectorscope/histogram/
+  false-colour ported from `oximedia-scopes`, allocation-free after
+  warm-up, three known upstream bugs fixed in the port. 39 tests pass;
+  wasm 21,669 B gzip (14% of soft budget).
+- [x] **M2** — OxiScope demo (`web/demo/`): grading + all four scopes fed
+  from graded output, `.cube` export, verified end-to-end in headless
+  Chrome (tone-map roll-off provable on the waveform).
+- [x] **M3** — `oximedia-web-color`: exposure/contrast/saturation, 6
+  tone-map operators (incl. Narkowicz `aces` and RRT/ODT-shaped
+  `aces-odt`), gamut mapping, `.cube` load/export. 106 tests pass; wasm
+  59,389 B gzip (29% of soft budget). Known shortfall: 6 ms/1080p wasm
+  perf target not met (~44 ms measured; documented safe-scalar-wasm
+  limitation).
+- [x] **M4** — ship-prep: bench harness (`web/bench/`, headless-Chrome
+  driven, zero committed numbers), patent-paragraph README, npm packaging
+  prepared — **publish deliberately withheld**, pending explicit user
+  instruction.
+- [x] **M5** — `oximedia-web-scale` (Lanczos3/Catmull-Rom/Mitchell/
+  bilinear, corrected an upstream Catmull-Rom/Bicubic naming bug) +
+  `oximedia-web-quality` (windowed single-scale SSIM, PSNR, VMAF
+  explicitly deferred). 33 + 32 tests pass; wasm 17,439 B / 15,485 B gzip.
+- [~] **X1** — `oximedia-wasm` defect fixes: all 7 documented defects
+  fixed (f64→f32/u8 data plane, JSON hot path→typed getters, dishonest
+  VP8/AV1/Vorbis decoder classes removed, dead deps pruned, orphaned
+  hdr/lut/spatial modules wired in, `wasm-opt` re-enabled, npm/README
+  honesty corrected) plus one extra `&[f64]` violation found and fixed
+  (`audiopost_wasm::wasm_mix_audio`). Marked partial only because
+  `--target wasm32-unknown-unknown` remains blocked by a pre-existing,
+  out-of-scope `wgpu` API mismatch in `crates/oximedia-gpu` (via
+  `oximedia-colormgmt`'s default `gpu-accel` feature) — flagged to the
+  owning team, not fixed here.
+- [x] **X2** — root workspace tokio feature-unification fix: root
+  `Cargo.toml` pin lowered to `default-features = false` with an explicit
+  per-member feature list, eliminating the `mio` (via `tokio "full"` →
+  `"net"`) wasm32 build blocker in `oximedia-graph` with zero behavioural
+  change to other members.
+- [x] **X3** — docs honesty pass: `docs/simd_dispatch.md`'s WASM SIMD128
+  section (falsely claimed a working `oximedia-simd` WASM tier reusing
+  SSE4.2 paths "exercised by an `oximedia-codec` WASM test matrix" — untrue
+  on both counts) rewritten to document the two WASM SIMD paths that
+  actually exist (`oximedia-codec`'s own `core::arch::wasm32` module; the
+  new `web/` crates' autovectorization-over-`chunks_exact` approach).
+  `docs/codec_status.md` gained a browser-surface note. `oximedia-wasm/README.md`
+  reviewed, already honest.
+
+---
+
+## 0.1.9 Doctest & Rustdoc Hardening Pass (2026-07-13)
+
+- [x] 7 genuine doctest bugs fixed workspace-wide (real doc-comment/API
+  drift, distinct from the two bonus doctest fixes already recorded under
+  2026-06-22 above).
+- [x] All 68 crates that previously failed strict rustdoc
+  (`-D warnings -D rustdoc::broken_intra_doc_links
+  -D rustdoc::missing_crate_level_docs -D rustdoc::private_intra_doc_links`)
+  now pass it — **except** the crates that briefly could not compile at all
+  during the `oxiarc-archive` regression (see immediately below, resolved
+  2026-07-14), which could not run rustdoc until they built again.
+- [x] Zero clippy warnings workspace-wide (`--all-features --all-targets
+  -D warnings`); zero `cargo fmt --check` diffs.
+- [x] `cargo nextest run --workspace` (default features): 100,160 tests,
+  100,160 passed, 0 failed, 128 skipped. Same with `--all-features`:
+  101,814 tests, 101,814 passed, 0 failed, 138 skipped. Both genuine full
+  runs, fully clean, verified 2026-07-13.
+- [x] **Regression confirmed open during this pass, since resolved
+  (2026-07-14):** the subsequent "bump oxiarc" commit (root `Cargo.toml`
+  `oxiarc-archive` 0.3.6, sibling `oxiarc-brotli`/`oxiarc-bzip2`/`oxiarc-lzma`/
+  `oxiarc-snappy` left at 0.3.5) landed *after* the clean test run above
+  and broke compilation for six crates. This pass re-ran the affected
+  build (`cargo check -p oximedia-archive-pro -p oximedia-batch
+  -p oximedia-convert`, 2026-07-13) and confirmed it was still broken, and
+  found the true blast radius was wider than first scoped: `oximedia-cli`
+  and `oximedia-wasm` (both unconditional dependents, both in workspace
+  `default-members`) and `oximedia-py` also failed to compile, not just
+  the three archive/batch/convert library crates. See Known Issues above
+  for full detail. Not fixed in that pass (out of scope — that was a
+  documentation-refresh task, not a dependency fix). **Resolved
+  2026-07-14:** sibling `oxiarc-brotli`/`oxiarc-bzip2`/`oxiarc-lzma`/
+  `oxiarc-snappy` published matching 0.3.6 releases; `cargo check
+  --workspace --all-features` now passes clean.

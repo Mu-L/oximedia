@@ -547,7 +547,7 @@ mod tests {
         assert!(backoff3.num_seconds() == 240);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_job_queue_service() {
         let worker_config = WorkerConfig::default();
         let executor = Arc::new(DefaultExecutor);

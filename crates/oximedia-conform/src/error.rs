@@ -26,11 +26,7 @@ pub enum ConformError {
 
     /// Database error.
     #[error("Database error: {0}")]
-    Database(#[from] rusqlite::Error),
-
-    /// Database pool error.
-    #[error("Database pool error: {0}")]
-    DatabasePool(#[from] r2d2::Error),
+    Database(String),
 
     /// Missing source file.
     #[error("Missing source file: {0}")]

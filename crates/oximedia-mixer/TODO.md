@@ -13,7 +13,7 @@
 - ProcessingEngine: bus routing, RuntimeEffectsChain, aux send/return, VCA groups, PDC delay compensation
 
 ## Enhancements
-- [ ] Replace `unwrap_or` in `package_both` path conversion with proper error propagation (verified-open 2026-05-16: not yet fixed)
+- [x] Replace `unwrap_or` in `package_both` path conversion with proper error propagation — (obsolete: `package_both` does not exist in this crate; grep of crates/oximedia-mixer/ found no such function 2026-06-06)
 - [x] Make `process()` use bus routing -- channels route to group/aux buses via ProcessingEngine
 - [x] Implement actual effect processing in the channel strip -- RuntimeEffectsChain with AudioEffect trait integration
 - [x] Add send/return routing in process() -- aux sends (pre/post-fader) wired into DSP path with bus accumulation

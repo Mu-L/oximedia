@@ -1,6 +1,10 @@
 //! Motion estimation compute shaders.
 
 /// Block-based motion estimation using Sum of Absolute Differences (SAD).
+///
+/// Only compiled with the `vulkan-backend` feature: the `vulkano_shaders::shader!`
+/// proc-macro compiles this GLSL to SPIR-V at build time via `shaderc-sys`.
+#[cfg(feature = "vulkan-backend")]
 #[allow(missing_docs)]
 pub mod block_sad {
     vulkano_shaders::shader! {

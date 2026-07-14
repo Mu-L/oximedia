@@ -50,11 +50,11 @@
   - **Risk:** tie-breaking at exact half-`delta` — assert output identity vs original on exhaustive value sweep.
 
 ## Testing
-- [ ] Add round-trip embed/detect tests for all 6 algorithms with various payload sizes (1 byte, 32 bytes, 256 bytes)
+- [x] Add round-trip embed/detect tests for all 6 algorithms with various payload sizes (1 byte, 32 bytes, 256 bytes)
 - [x] Test robustness of each algorithm against MP3 compression, resampling, low-pass filtering, and time stretching (`robustness_suite.rs`)
-- [ ] Add capacity limit tests verifying that embedding beyond capacity returns proper error
+- [x] Add capacity limit tests verifying that embedding beyond capacity returns proper error
 - [ ] Test `chain_of_custody` with multi-hop watermark tracking (embed A, embed B, detect both)
-- [ ] Add perceptual quality tests verifying SNR > 30dB and ODG > -1.0 for all algorithms at default strength
+- [x] Add perceptual quality tests verifying SNR > 30dB and ODG > -1.0 for all algorithms at default strength
 - [ ] Test `forensic_watermark` with simulated collusion attack (averaging multiple watermarked copies)
 - [ ] Benchmark embed/detect throughput for each algorithm at 44.1kHz and 96kHz sample rates
 

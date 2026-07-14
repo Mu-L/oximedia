@@ -228,7 +228,7 @@ impl WorkflowExecutor {
 
     /// Override the batch-flush threshold (number of buffered updates that
     /// trigger an automatic flush to persistence).  Default is
-    /// [`DEFAULT_FLUSH_THRESHOLD`].
+    /// `DEFAULT_FLUSH_THRESHOLD`.
     #[must_use]
     pub fn with_flush_threshold(mut self, threshold: usize) -> Self {
         self.buffer_flush_threshold = threshold.max(1);

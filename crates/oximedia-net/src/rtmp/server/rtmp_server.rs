@@ -109,7 +109,7 @@ impl RtmpServer {
                 }
 
                 if let Err(e) = result {
-                    eprintln!("Connection {connection_id} error: {e}");
+                    tracing::warn!(connection_id = %connection_id, error = %e, "RTMP connection error");
                 }
             });
         }

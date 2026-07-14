@@ -2,10 +2,10 @@
 //!
 //! Provides:
 //!
-//! - [`RetentionPolicy`] — resolution + retention duration pair.
-//! - [`DownsampledPoint`] — aggregated (mean/min/max/count/sum) for one window.
-//! - [`downsample_points`] — group raw `(timestamp_ms, value)` pairs into windows.
-//! - [`MetricTierStorage`] — multi-tier in-memory storage with automatic pruning.
+//! - [`RetentionPolicy`](crate::metric_downsample::RetentionPolicy) — resolution + retention duration pair.
+//! - [`DownsampledPoint`](crate::metric_downsample::DownsampledPoint) — aggregated (mean/min/max/count/sum) for one window.
+//! - [`downsample_points`](crate::metric_downsample::downsample_points) — group raw `(timestamp_ms, value)` pairs into windows.
+//! - [`MetricTierStorage`](crate::metric_downsample::MetricTierStorage) — multi-tier in-memory storage with automatic pruning.
 
 #![allow(dead_code)]
 

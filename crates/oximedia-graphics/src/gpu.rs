@@ -89,6 +89,8 @@ impl GpuRenderer {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None,
                 force_fallback_adapter: false,
+                // native/trusted context; limit-bucketing is only a browser-fingerprinting mitigation
+                apply_limit_buckets: false,
             })
             .await
             .map_err(|_| GraphicsError::GpuError("Failed to find adapter".to_string()))?;
@@ -122,7 +124,7 @@ impl GpuRenderer {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[Vertex::desc()],
+                buffers: &[Some(Vertex::desc())],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -279,7 +281,9 @@ impl GpuRenderer {
 
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
 
-        let data = buffer_slice.get_mapped_range();
+        let data = buffer_slice
+            .get_mapped_range()
+            .map_err(|e| GraphicsError::GpuError(format!("Failed to map buffer: {e}")))?;
         let result = data.to_vec();
 
         drop(data);

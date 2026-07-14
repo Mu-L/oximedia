@@ -156,7 +156,7 @@ impl Default for ConverterConfig {
 
 /// Stateful frame-rate converter.
 ///
-/// Call [`push`] to feed input frames and [`pull`] / [`pull_all`] to retrieve
+/// Call [`FrameRateConverter::push`] to feed input frames and [`FrameRateConverter::pull`] / [`FrameRateConverter::pull_all`] to retrieve
 /// output frames at the target rate.
 #[derive(Debug)]
 pub struct FrameRateConverter {

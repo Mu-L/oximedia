@@ -109,6 +109,87 @@ pub enum ConditionOperator {
     NotIn,
 }
 
+/// Columns on `assets` that a smart-collection [`QueryCondition::field`] or
+/// [`SmartQuery::sort_by`] may reference. Column/table identifiers can never be SQL
+/// bind parameters (`$N` placeholders only substitute *values*), so this allowlist —
+/// not escaping — is what makes it safe to interpolate a user-supplied field name
+/// into the query text in [`CollectionManager::build_condition_sql`] and
+/// [`CollectionManager::execute_smart_query`]. Deliberately excludes JSONB/array
+/// columns (`custom_metadata`, `keywords`, `categories`, which need different
+/// comparison operators than the scalar ones supported here) and identifiers with no
+/// legitimate end-user filtering use (`file_path`, `checksum`). Mirrors the `assets`
+/// table definition in `migrations/20240101000000_initial_schema.sql`.
+const ALLOWED_ASSET_COLUMNS: &[&str] = &[
+    "id",
+    "filename",
+    "file_size",
+    "mime_type",
+    "duration_ms",
+    "width",
+    "height",
+    "frame_rate",
+    "video_codec",
+    "audio_codec",
+    "bit_rate",
+    "title",
+    "description",
+    "copyright",
+    "license",
+    "creator",
+    "status",
+    "created_by",
+    "created_at",
+    "updated_at",
+];
+
+/// Validates `field` against [`ALLOWED_ASSET_COLUMNS`], returning it unchanged (an
+/// allowlisted identifier, not attacker-controlled data) on success.
+fn validate_asset_column(field: &str) -> Result<&str> {
+    ALLOWED_ASSET_COLUMNS
+        .iter()
+        .find(|&&allowed| allowed == field)
+        .copied()
+        .ok_or_else(|| {
+            MamError::InvalidInput(format!(
+                "smart query references an unknown or disallowed column: {field}"
+            ))
+        })
+}
+
+/// A smart-query condition/sort value, ready to be bound as a real SQL parameter via
+/// `sqlx::Query::bind` instead of interpolated into the query text.
+/// [`QueryCondition::value`] arrives as an untyped `serde_json::Value` (deserialized
+/// from user-authored smart-collection JSON — see
+/// [`CollectionManager::execute_smart_query`]'s doc comment), so each condition's
+/// value is converted to one of these variants up front via [`BindValue::from_json`].
+enum BindValue {
+    Text(String),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+}
+
+impl BindValue {
+    fn from_json(value: &serde_json::Value) -> Result<Self> {
+        match value {
+            serde_json::Value::String(s) => Ok(Self::Text(s.clone())),
+            serde_json::Value::Bool(b) => Ok(Self::Bool(*b)),
+            serde_json::Value::Number(n) => n
+                .as_i64()
+                .map(Self::Int)
+                .or_else(|| n.as_f64().map(Self::Float))
+                .ok_or_else(|| {
+                    MamError::InvalidInput(format!(
+                        "smart query condition value is not a representable number: {n}"
+                    ))
+                }),
+            other => Err(MamError::InvalidInput(format!(
+                "smart query condition value must be a string, number, or boolean, not: {other}"
+            ))),
+        }
+    }
+}
+
 /// Collection with item count
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollectionWithCount {
@@ -447,6 +528,15 @@ impl CollectionManager {
     }
 
     /// Execute smart collection query
+    ///
+    /// `query` (deserialized from `collection.smart_query`) is USER-AUTHORED data —
+    /// an API caller creates a smart collection by supplying its own filter
+    /// conditions, sort column, and sort order, all stored as JSON and replayed here
+    /// every time the collection is viewed. Every identifier (`field`, `sort_by`) is
+    /// therefore validated against [`ALLOWED_ASSET_COLUMNS`] before being interpolated
+    /// (identifiers can never be bind parameters), and every condition *value* is
+    /// routed through [`BindValue`]/`.bind()` rather than string interpolation. See
+    /// [`Self::build_condition_sql`] for the per-condition detail.
     async fn execute_smart_query(
         &self,
         collection_id: Uuid,
@@ -461,8 +551,10 @@ impl CollectionManager {
 
         let query: SmartQuery = serde_json::from_value(smart_query)?;
 
-        // Build SQL query from conditions
+        // Build SQL query from conditions.
         let mut sql = String::from("SELECT id FROM assets WHERE status != 'deleted'");
+        let mut binds: Vec<BindValue> = Vec::new();
+        let mut param_num: i32 = 1;
 
         for (i, condition) in query.conditions.iter().enumerate() {
             if i > 0 {
@@ -474,62 +566,147 @@ impl CollectionManager {
                 sql.push_str(" AND ");
             }
 
-            let condition_sql = self.build_condition_sql(condition);
+            let (condition_sql, condition_binds) =
+                self.build_condition_sql(condition, &mut param_num)?;
             sql.push_str(&condition_sql);
+            binds.extend(condition_binds);
         }
 
         if let Some(sort_by) = &query.sort_by {
-            let order = query.sort_order.as_deref().unwrap_or("ASC");
-            sql.push_str(&format!(" ORDER BY {sort_by} {order}"));
+            let column = validate_asset_column(sort_by)?;
+            // Only ASC/DESC are meaningful SQL keywords here; anything else falls
+            // back to ASC rather than being interpolated verbatim.
+            let order = match query.sort_order.as_deref() {
+                Some(o) if o.eq_ignore_ascii_case("desc") => "DESC",
+                _ => "ASC",
+            };
+            sql.push_str(&format!(" ORDER BY {column} {order}"));
         }
 
-        sql.push_str(&format!(" LIMIT {limit} OFFSET {offset}"));
+        sql.push_str(&format!(" LIMIT ${param_num} OFFSET ${}", param_num + 1));
+        binds.push(BindValue::Int(limit));
+        binds.push(BindValue::Int(offset));
 
-        // Execute query
-        let rows = sqlx::query_scalar::<_, Uuid>(&sql)
-            .fetch_all(self.db.pool())
-            .await?;
+        // Execute query, binding every collected value in the exact order its
+        // placeholder was appended above. `sql` now contains only allowlisted
+        // column identifiers and `$N` placeholders -- audited safe for sqlx 0.9's
+        // `SqlSafeStr` gate (see the doc comment above and on `build_condition_sql`).
+        let mut q = sqlx::query_scalar::<_, Uuid>(sqlx::AssertSqlSafe(sql));
+        for bind in binds {
+            q = match bind {
+                BindValue::Text(s) => q.bind(s),
+                BindValue::Int(i) => q.bind(i),
+                BindValue::Float(f) => q.bind(f),
+                BindValue::Bool(b) => q.bind(b),
+            };
+        }
+        let rows = q.fetch_all(self.db.pool()).await?;
 
         Ok(rows)
     }
 
-    /// Build SQL condition from query condition
-    fn build_condition_sql(&self, condition: &QueryCondition) -> String {
-        let field = &condition.field;
+    /// Builds one condition's SQL fragment (using `$N` placeholders numbered from
+    /// `*param_num` onward) plus the values to bind for it.
+    ///
+    /// `condition.field`/`condition.value` are user-authored (see
+    /// [`Self::execute_smart_query`]'s doc comment) — `field` is validated against
+    /// [`ALLOWED_ASSET_COLUMNS`] (the previous implementation interpolated it
+    /// completely unchecked, allowing an arbitrary column/expression to be injected),
+    /// and `value` is converted to a [`BindValue`] and returned for the caller to
+    /// `.bind()` rather than being spliced into the SQL text via `format!` (the
+    /// previous implementation interpolated the raw JSON value directly into the
+    /// query, including inside a hand-rolled `'...'` string literal for
+    /// Equals/NotEquals/Contains/StartsWith/EndsWith with no escaping — a SQL
+    /// injection vulnerability: any `value` containing a `'` could break out of the
+    /// literal and inject arbitrary SQL).
+    fn build_condition_sql(
+        &self,
+        condition: &QueryCondition,
+        param_num: &mut i32,
+    ) -> Result<(String, Vec<BindValue>)> {
+        let field = validate_asset_column(&condition.field)?;
+        let mut next_placeholder = || {
+            let p = *param_num;
+            *param_num += 1;
+            format!("${p}")
+        };
 
         match condition.operator {
             ConditionOperator::Equals => {
-                format!("{field} = '{}'", condition.value)
+                let v = BindValue::from_json(&condition.value)?;
+                Ok((format!("{field} = {}", next_placeholder()), vec![v]))
             }
             ConditionOperator::NotEquals => {
-                format!("{field} != '{}'", condition.value)
+                let v = BindValue::from_json(&condition.value)?;
+                Ok((format!("{field} != {}", next_placeholder()), vec![v]))
             }
             ConditionOperator::Contains => {
-                format!("{field} ILIKE '%{}%'", condition.value)
+                let text = condition.value.as_str().ok_or_else(|| {
+                    MamError::InvalidInput("Contains requires a string value".to_string())
+                })?;
+                Ok((
+                    format!("{field} ILIKE {}", next_placeholder()),
+                    vec![BindValue::Text(format!("%{text}%"))],
+                ))
             }
             ConditionOperator::StartsWith => {
-                format!("{field} ILIKE '{}%'", condition.value)
+                let text = condition.value.as_str().ok_or_else(|| {
+                    MamError::InvalidInput("StartsWith requires a string value".to_string())
+                })?;
+                Ok((
+                    format!("{field} ILIKE {}", next_placeholder()),
+                    vec![BindValue::Text(format!("{text}%"))],
+                ))
             }
             ConditionOperator::EndsWith => {
-                format!("{field} ILIKE '%{}'", condition.value)
+                let text = condition.value.as_str().ok_or_else(|| {
+                    MamError::InvalidInput("EndsWith requires a string value".to_string())
+                })?;
+                Ok((
+                    format!("{field} ILIKE {}", next_placeholder()),
+                    vec![BindValue::Text(format!("%{text}"))],
+                ))
             }
             ConditionOperator::GreaterThan => {
-                format!("{field} > {}", condition.value)
+                let v = BindValue::from_json(&condition.value)?;
+                Ok((format!("{field} > {}", next_placeholder()), vec![v]))
             }
             ConditionOperator::LessThan => {
-                format!("{field} < {}", condition.value)
+                let v = BindValue::from_json(&condition.value)?;
+                Ok((format!("{field} < {}", next_placeholder()), vec![v]))
             }
             ConditionOperator::GreaterOrEqual => {
-                format!("{field} >= {}", condition.value)
+                let v = BindValue::from_json(&condition.value)?;
+                Ok((format!("{field} >= {}", next_placeholder()), vec![v]))
             }
             ConditionOperator::LessOrEqual => {
-                format!("{field} <= {}", condition.value)
+                let v = BindValue::from_json(&condition.value)?;
+                Ok((format!("{field} <= {}", next_placeholder()), vec![v]))
             }
-            ConditionOperator::In => {
-                format!("{field} IN ({})", condition.value)
-            }
-            ConditionOperator::NotIn => {
-                format!("{field} NOT IN ({})", condition.value)
+            ConditionOperator::In | ConditionOperator::NotIn => {
+                let items = condition.value.as_array().ok_or_else(|| {
+                    MamError::InvalidInput("In/NotIn requires an array value".to_string())
+                })?;
+                if items.is_empty() {
+                    return Err(MamError::InvalidInput(
+                        "In/NotIn requires a non-empty array value".to_string(),
+                    ));
+                }
+                let mut binds = Vec::with_capacity(items.len());
+                let mut placeholders = Vec::with_capacity(items.len());
+                for item in items {
+                    binds.push(BindValue::from_json(item)?);
+                    placeholders.push(next_placeholder());
+                }
+                let keyword = if matches!(condition.operator, ConditionOperator::In) {
+                    "IN"
+                } else {
+                    "NOT IN"
+                };
+                Ok((
+                    format!("{field} {keyword} ({})", placeholders.join(", ")),
+                    binds,
+                ))
             }
         }
     }

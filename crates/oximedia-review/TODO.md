@@ -27,8 +27,8 @@
 
 ## Performance
 - [x] Add pagination to `comment` listing for sessions with 1000+ comments (verified 2026-05-16; src/comment.rs:14 paginate_comments, CommentPage, PageRequest)
-- [ ] Implement delta-based `realtime` sync instead of full-state broadcast for annotation updates (verified-open 2026-05-16: no delta/incremental sync in realtime.rs)
-- [ ] Cache rendered `drawing` overlays in `compare` to avoid recomputation on scrub (verified-open 2026-05-16: no rendered overlay cache in compare.rs)
+- [x] Implement delta-based `realtime` sync instead of full-state broadcast for annotation updates (wired 2026-06-05: diff/apply bridge in src/realtime_delta.rs:457 diff_annotations / :510 try_diff_annotations / :571 apply_delta / :644 apply_message + DeltaMessage:369; src/realtime.rs:58 RealtimeEvent::AnnotationDelta variant, :206 broadcast_annotation_delta (incremental, snapshot fallback on serialize error), :264 broadcast_annotation_snapshot — reuses REALTIME_REGISTRY fan-out; 13 tests)
+- [x] Cache rendered `drawing` overlays in `compare` to avoid recomputation on scrub (verified-open 2026-05-16: no rendered overlay cache in compare.rs)
 - [x] Add lazy loading for `version` history to avoid fetching all versions on session open (verified 2026-05-16; src/version_lazy.rs:139 LazyVersionHistory, paginated provider:79)
 
 ## Testing

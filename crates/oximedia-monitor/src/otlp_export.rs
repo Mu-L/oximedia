@@ -31,6 +31,10 @@
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// `MonitorError`/`MonitorResult` are only used by `export()` below, which
+// performs a real HTTP POST via `reqwest` and is therefore gated out on
+// `wasm32` (no blocking-friendly HTTP client there).
+#[cfg(not(target_arch = "wasm32"))]
 use crate::error::{MonitorError, MonitorResult};
 use crate::metric_export::{MetricBatch, MetricType};
 

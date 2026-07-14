@@ -536,4 +536,79 @@ mod tests {
         let out = apply_simd(&src, w, h, 0.5, 10.0);
         assert_eq!(out.len(), 64);
     }
+
+    // ----- Edge-preservation metric tests -----
+
+    /// Compute variance of a subslice of a pixel buffer.
+    fn compute_variance(buf: &[u8], start: usize, len: usize) -> f64 {
+        let slice = &buf[start..start + len];
+        let mean = slice.iter().map(|&v| v as f64).sum::<f64>() / len as f64;
+        slice
+            .iter()
+            .map(|&v| (v as f64 - mean).powi(2))
+            .sum::<f64>()
+            / len as f64
+    }
+
+    /// Build a 64×64 grayscale buffer: left half = 50, right half = 200,
+    /// with deterministic noise applied using a simple index-based pattern.
+    fn build_edge_noisy_buffer() -> Vec<u8> {
+        let w = 64usize;
+        let h = 64usize;
+        let mut buf = vec![0u8; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let idx = y * w + x;
+                let base: u8 = if x < 32 { 50 } else { 200 };
+                // Deterministic noise: add 10 when (idx % 7 < 3), else 0
+                buf[idx] = if idx % 7 < 3 {
+                    base.saturating_add(10)
+                } else {
+                    base
+                };
+            }
+        }
+        buf
+    }
+
+    #[test]
+    fn test_bilateral_preserves_hard_edge() {
+        let w = 64u32;
+        let h = 64u32;
+        let noisy = build_edge_noisy_buffer();
+        let output = apply_simd(&noisy, w, h, 3.0, 30.0);
+
+        // Check that the edge at x=31→32 retains significant contrast for at least 50% of rows.
+        let total_rows = h as usize;
+        let mut preserved_count = 0usize;
+        for y in 0..total_rows {
+            let left_px = output[y * 64 + 31] as i32;
+            let right_px = output[y * 64 + 32] as i32;
+            let contrast = (right_px - left_px).unsigned_abs();
+            if contrast > 100 {
+                preserved_count += 1;
+            }
+        }
+        assert!(
+            preserved_count * 2 >= total_rows,
+            "edge contrast > 100 for only {preserved_count}/{total_rows} rows; bilateral should preserve the hard edge for ≥50% of rows"
+        );
+    }
+
+    #[test]
+    fn test_bilateral_reduces_flat_region_variance() {
+        let w = 64u32;
+        let h = 64u32;
+        let noisy = build_edge_noisy_buffer();
+        let output = apply_simd(&noisy, w, h, 3.0, 30.0);
+
+        // The left patch (first 20 rows, left half) is a flat region (base = 50) with noise.
+        // Bilateral should reduce variance there.
+        let noisy_var = compute_variance(&noisy, 0, 20 * 64);
+        let output_var = compute_variance(&output, 0, 20 * 64);
+        assert!(
+            output_var < noisy_var,
+            "bilateral should reduce variance in flat region: noisy={noisy_var:.4} output={output_var:.4}"
+        );
+    }
 }

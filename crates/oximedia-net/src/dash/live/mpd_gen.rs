@@ -687,4 +687,90 @@ mod tests {
         let xml = generator.generate_xml();
         assert!(xml.contains("UTCTiming"));
     }
+
+    #[test]
+    fn test_mpd_generation_structural_validation() {
+        // Structural validation: checks required MPEG-DASH elements and attributes.
+        // Not validated against the official DASH-MPD XML Schema (would require an external XSD validator).
+        let mut generator = DynamicMpdGenerator::new(MpdConfig::default());
+
+        let period_id = generator.add_period(None, None);
+
+        let template = SegmentTemplate::new(90000)
+            .with_media("seg_$Number$.m4s")
+            .with_initialization("init.mp4");
+
+        let representation = RepresentationBuilder::new("720p", 1_500_000)
+            .codecs("avc1.4d401f")
+            .resolution(1280, 720)
+            .build();
+
+        let adaptation_set = AdaptationSetBuilder::new()
+            .id(0)
+            .content_type("video")
+            .mime_type("video/mp4")
+            .segment_alignment(true)
+            .segment_template(template)
+            .representation(representation)
+            .build();
+
+        generator.add_adaptation_set(&period_id, adaptation_set);
+
+        let xml = generator.generate_xml();
+
+        assert!(xml.contains("<?xml"), "must have XML declaration");
+        assert!(xml.contains("<MPD"), "must have MPD element");
+        assert!(xml.contains("type=\"dynamic\""), "must be dynamic type");
+        assert!(
+            xml.contains("profiles=\"urn:mpeg:dash:profile:isoff-live:2011\""),
+            "must have DASH live profile"
+        );
+        assert!(xml.contains("minBufferTime="), "must have minBufferTime");
+        assert!(
+            xml.contains("availabilityStartTime="),
+            "must have availabilityStartTime"
+        );
+        assert!(xml.contains("<Period"), "must have Period element");
+        assert!(
+            xml.contains("<AdaptationSet"),
+            "must have AdaptationSet element"
+        );
+        assert!(
+            xml.contains("contentType=\"video\""),
+            "must have contentType"
+        );
+        assert!(xml.contains("mimeType=\"video/mp4\""), "must have mimeType");
+        assert!(
+            xml.contains("segmentAlignment=\"true\""),
+            "must have segmentAlignment"
+        );
+        assert!(
+            xml.contains("<SegmentTemplate"),
+            "must have SegmentTemplate"
+        );
+        assert!(xml.contains("timescale=\"90000\""), "must have timescale");
+        assert!(
+            xml.contains("media=\"seg_$Number$.m4s\""),
+            "must have media template"
+        );
+        assert!(
+            xml.contains("initialization=\"init.mp4\""),
+            "must have initialization"
+        );
+        assert!(xml.contains("<Representation"), "must have Representation");
+        assert!(xml.contains("id=\"720p\""), "must have representation id");
+        assert!(xml.contains("bandwidth=\"1500000\""), "must have bandwidth");
+        assert!(xml.contains("codecs=\"avc1.4d401f\""), "must have codecs");
+        assert!(xml.contains("width=\"1280\""), "must have width");
+        assert!(xml.contains("height=\"720\""), "must have height");
+        assert!(xml.contains("</MPD>"), "must have closing MPD tag");
+
+        // Well-formedness: exactly one MPD root element
+        assert_eq!(xml.matches("<MPD").count(), 1, "must have exactly one <MPD");
+        assert_eq!(
+            xml.matches("</MPD>").count(),
+            1,
+            "must have exactly one </MPD>"
+        );
+    }
 }

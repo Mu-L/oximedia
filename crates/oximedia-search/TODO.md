@@ -33,11 +33,11 @@
 - [x] Implement Bloom filter pre-check in shards — counting Bloom filter with 3 FNV hash functions supports add/remove
 - [x] Add result caching in `search_pipeline` with TTL-based invalidation on index updates
 - [x] Optimize `visual::index::VisualIndex` with VP-tree or ball-tree for sub-linear similarity search — VisualIndex now routes through FloatVpTree for N >= 8
-- [ ] Add batch indexing in `SearchEngine::index_document` for bulk import throughput
+- [x] Add batch indexing in `SearchEngine::index_document` for bulk import throughput — `SearchEngine::index_documents_batch` (src/lib.rs:530) routes docs through `batch_index::BatchIndexer` + `EngineBackend` adapter (src/batch_index.rs:466) so the six sub-indices commit ONCE per batch instead of per document
 
 ## Testing
-- [ ] Add precision/recall benchmarks for `text::search` with standard IR test collections
-- [ ] Test `bool_query` with complex nested AND/OR/NOT expressions
+- [x] Add precision/recall benchmarks for `text::search` with standard IR test collections — Wave 30, 2026-06-08: new reusable `eval.rs` (set-based `precision_at_k`/`recall_at_k`/`average_precision`/`mean_average_precision`, generic over `Id: Eq+Hash`, re-exported from lib.rs) + golden `tests/ir_eval.rs` (hand-computed AP/P@k/R@k/MAP known answers to 1e-9 + 20-doc 4-cluster in-test corpus run through the real `SearchEngine` text search computing P@10/R@20/MAP against calibrated thresholds; note: Tantivy returns only matching docs so cluster P@10 clamps to 1.0)
+- [x] Test `bool_query` with complex nested AND/OR/NOT expressions — Wave 30, 2026-06-08: `tests/bool_query_nested.rs`, 13 cases over a 10-doc term-set corpus with exact match counts ((A OR B) AND (C OR D), …NOT E, all-NOT NOT A AND NOT B, phrase-AND, 3-level nesting, double-negation, OR-of-NOTs, and empty-result queries) via the real `BoolQuery::matches` evaluator
 - [ ] Add tests for `facet::aggregation` with multi-value faceted fields
 - [ ] Test `search_federation` merging results from multiple remote indices
 - [ ] Add tests for `SearchEngine` full lifecycle: create index, add documents, search, delete, re-search

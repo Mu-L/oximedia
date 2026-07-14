@@ -1,7 +1,6 @@
 //! GPU device management and enumeration
 
-use crate::{GpuError, Result};
-use std::sync::Arc;
+use crate::{GpuError, Result, Shared};
 use wgpu::{
     Adapter, Device, DeviceDescriptor, Features, Instance, Limits, PowerPreference, Queue,
     RequestAdapterOptions,
@@ -27,8 +26,8 @@ pub struct GpuDeviceInfo {
 /// This structure manages the WGPU device and queue, providing a safe
 /// interface for GPU operations.
 pub struct GpuDevice {
-    device: Arc<Device>,
-    queue: Arc<Queue>,
+    device: Shared<Device>,
+    queue: Shared<Queue>,
     info: GpuDeviceInfo,
     #[allow(dead_code)]
     adapter: Adapter,
@@ -56,8 +55,8 @@ impl GpuDevice {
         let (device, queue) = pollster::block_on(Self::request_device(&adapter))?;
 
         Ok(Self {
-            device: Arc::new(device),
-            queue: Arc::new(queue),
+            device: Shared::new(device),
+            queue: Shared::new(queue),
             info,
             adapter,
             is_fallback: false,
@@ -85,14 +84,16 @@ impl GpuDevice {
             power_preference: PowerPreference::None,
             compatible_surface: None,
             force_fallback_adapter: true,
+            // native/trusted context; limit-bucketing is only a browser-fingerprinting mitigation
+            apply_limit_buckets: false,
         }));
 
         if let Ok(adapter) = maybe_adapter {
             let info = Self::adapter_info(&adapter);
             if let Ok((device, queue)) = pollster::block_on(Self::request_device(&adapter)) {
                 return Ok(Self {
-                    device: Arc::new(device),
-                    queue: Arc::new(queue),
+                    device: Shared::new(device),
+                    queue: Shared::new(queue),
                     info,
                     adapter,
                     is_fallback: true,
@@ -124,8 +125,8 @@ impl GpuDevice {
         fn try_adapter(adapter: Adapter, info: GpuDeviceInfo) -> Option<GpuDevice> {
             match pollster::block_on(GpuDevice::request_device(&adapter)) {
                 Ok((device, queue)) => Some(GpuDevice {
-                    device: Arc::new(device),
-                    queue: Arc::new(queue),
+                    device: Shared::new(device),
+                    queue: Shared::new(queue),
                     info,
                     adapter,
                     is_fallback: true,
@@ -143,6 +144,8 @@ impl GpuDevice {
                 power_preference: PowerPreference::None,
                 compatible_surface: None,
                 force_fallback_adapter: true,
+                // native/trusted context; limit-bucketing is only a browser-fingerprinting mitigation
+                apply_limit_buckets: false,
             }))
         {
             let info = Self::adapter_info(&adapter);
@@ -168,6 +171,8 @@ impl GpuDevice {
                 power_preference: PowerPreference::None,
                 compatible_surface: None,
                 force_fallback_adapter: true,
+                // native/trusted context; limit-bucketing is only a browser-fingerprinting mitigation
+                apply_limit_buckets: false,
             }))
         {
             let info = Self::adapter_info(&adapter);
@@ -208,6 +213,12 @@ impl GpuDevice {
                 power_preference: PowerPreference::HighPerformance,
                 compatible_surface: None,
                 force_fallback_adapter: false,
+                // Limit bucketing exists to reduce adapter-fingerprinting risk when a
+                // trusted host exposes wgpu access to *untrusted* content (e.g. a
+                // browser exposing GPU control to arbitrary web pages). OxiMedia's own
+                // wasm bindings are trusted, first-party callers, not untrusted content,
+                // so this matches the native (non-wasm) semantics below.
+                apply_limit_buckets: false,
             }));
             match adapter {
                 Ok(a) => Ok(vec![Self::adapter_info(&a)]),
@@ -224,13 +235,13 @@ impl GpuDevice {
 
     /// Get the WGPU device
     #[must_use]
-    pub fn device(&self) -> &Arc<Device> {
+    pub fn device(&self) -> &Shared<Device> {
         &self.device
     }
 
     /// Get the WGPU queue
     #[must_use]
-    pub fn queue(&self) -> &Arc<Queue> {
+    pub fn queue(&self) -> &Shared<Queue> {
         &self.queue
     }
 
@@ -262,6 +273,9 @@ impl GpuDevice {
                         power_preference: PowerPreference::HighPerformance,
                         compatible_surface: None,
                         force_fallback_adapter: false,
+                        // See the comment on the equivalent option in `list_devices`:
+                        // this is a trusted, first-party caller, so match native semantics.
+                        apply_limit_buckets: false,
                     })
                     .await
                     .map_err(|_| GpuError::NoAdapter);
@@ -273,6 +287,8 @@ impl GpuDevice {
                     power_preference: PowerPreference::HighPerformance,
                     compatible_surface: None,
                     force_fallback_adapter: false,
+                    // native/trusted context; limit-bucketing is only a browser-fingerprinting mitigation
+                    apply_limit_buckets: false,
                 })
                 .await
                 .map_err(|_| GpuError::NoAdapter)
