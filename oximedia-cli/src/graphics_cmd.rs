@@ -607,7 +607,9 @@ async fn render_template(
         println!("{:20} {}x{}", "Dimensions:", width, height);
         println!("{:20} {} bytes", "Size:", rgba_data.len());
         if !params.is_empty() {
-            println!("{:20} {:?}", "Parameters:", params);
+            let mut pairs: Vec<String> = params.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            pairs.sort();
+            println!("{:20} {}", "Parameters:", pairs.join(", "));
         }
     }
 

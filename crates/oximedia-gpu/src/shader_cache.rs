@@ -120,8 +120,16 @@ pub struct GpuShaderCache {
     policy: EvictionPolicy,
     /// Accumulated statistics.
     stats: ShaderCacheStats,
-    /// Last-access timestamps (version → instant-as-duration-since-epoch).
-    last_access: HashMap<ShaderVersion, SystemTime>,
+    /// Monotonic clock for LRU tracking (incremented on each insert/touch).
+    ///
+    /// A wall-clock `SystemTime` is deliberately *not* used here: two
+    /// inserts/touches issued back-to-back can land on the same timestamp
+    /// under coarse or paravirtualised clock sources, which would make
+    /// eviction order depend on `HashMap` iteration order instead of actual
+    /// recency. A per-cache counter is always strictly ordered.
+    access_clock: u64,
+    /// Last-access sequence numbers (version → `access_clock` value).
+    last_access: HashMap<ShaderVersion, u64>,
 }
 
 impl GpuShaderCache {
@@ -139,6 +147,7 @@ impl GpuShaderCache {
             max_entries,
             policy,
             stats: ShaderCacheStats::default(),
+            access_clock: 0,
             last_access: HashMap::new(),
         }
     }
@@ -158,8 +167,9 @@ impl GpuShaderCache {
 
         self.stats.total_bytes += shader.size_bytes;
         self.stats.entry_count += 1;
+        self.access_clock += 1;
         self.last_access
-            .insert(shader.version.clone(), SystemTime::now());
+            .insert(shader.version.clone(), self.access_clock);
         self.entries.insert(shader.version.clone(), shader);
     }
 
@@ -171,7 +181,8 @@ impl GpuShaderCache {
         if self.entries.contains_key(version) {
             self.stats.hits += 1;
             // Update access time and hit count.
-            self.last_access.insert(version.clone(), SystemTime::now());
+            self.access_clock += 1;
+            self.last_access.insert(version.clone(), self.access_clock);
             if let Some(e) = self.entries.get_mut(version) {
                 e.hit_count += 1;
             }

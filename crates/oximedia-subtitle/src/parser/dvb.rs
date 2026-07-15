@@ -371,6 +371,14 @@ fn decode_8bit_rle(data: &[u8], width: u16) -> Vec<u8> {
 // DvbDecoder implementation
 // ---------------------------------------------------------------------------
 
+/// Maximum plausible DVB subtitle region dimension, in pixels, along either
+/// axis. Real DVB subtitle regions are always display-sized — even 4K UHD
+/// broadcast profiles top out at 3840x2160 — so this ceiling is generous
+/// while still rejecting the implausible values a corrupted or malicious
+/// `Region Composition` segment (ETSI EN 300 743 §7.2.3) could declare via
+/// its raw 16-bit width/height fields (up to 65535x65535 each).
+const MAX_REGION_DIMENSION_PX: u16 = 4096;
+
 impl DvbDecoder {
     /// Create a new DVB subtitle decoder.
     #[must_use]
@@ -486,6 +494,23 @@ impl DvbDecoder {
         let _fill_flag = (data[1] & 0x08) != 0;
         let region_width = u16::from_be_bytes([data[2], data[3]]);
         let region_height = u16::from_be_bytes([data[4], data[5]]);
+
+        // Guard: reject implausible region dimensions before they are stored
+        // and later used (in `render_page`) to size an RGBA bitmap
+        // allocation of `width * height * 4` bytes. `region_width` and
+        // `region_height` are raw 16-bit fields straight from the segment,
+        // so a corrupted or malicious segment can declare up to
+        // 65535x65535 — a ~17 GiB allocation attempt from a payload as
+        // small as 10 bytes. Real DVB subtitle regions are always
+        // display-sized (even 4K UHD tops out at 3840x2160), so anything
+        // beyond `MAX_REGION_DIMENSION_PX` on either axis cannot be
+        // legitimate content.
+        if region_width > MAX_REGION_DIMENSION_PX || region_height > MAX_REGION_DIMENSION_PX {
+            return Err(SubtitleError::ParseError(format!(
+                "DVB region composition declares implausible dimensions {region_width}x{region_height} px (max {MAX_REGION_DIMENSION_PX}x{MAX_REGION_DIMENSION_PX})"
+            )));
+        }
+
         let _region_level_of_compatibility = (data[6] >> 5) & 0x07;
         let region_depth = (data[6] >> 2) & 0x07;
         let clut_id = data[7];
@@ -1274,5 +1299,80 @@ mod tests {
         let data = [0x0F, 0x10, 0x00, 0x01, 0x00, 0x02, 0x05, 0x10];
         dec.decode_segment(&data, 1000).expect("decode");
         assert!(dec.pages.contains_key(&1));
+    }
+
+    // --- Region Composition dimension guard (OOM defense) ---
+
+    /// Build a full DVB segment wrapping a Region Composition (type 0x11)
+    /// payload with the given region_id/width/height, leaving the
+    /// remaining fields (version, depth, clut_id, padding) zeroed.
+    fn make_region_composition_segment(region_id: u8, width: u16, height: u16) -> Vec<u8> {
+        let wb = width.to_be_bytes();
+        let hb = height.to_be_bytes();
+        let payload: [u8; 10] = [
+            region_id, 0x00, wb[0], wb[1], hb[0], hb[1], 0x00, 0x00, 0x00, 0x00,
+        ];
+        let mut data = vec![0x0F, 0x11, 0x00, 0x01, 0x00, payload.len() as u8];
+        data.extend_from_slice(&payload);
+        data
+    }
+
+    #[test]
+    fn test_decode_segment_region_composition_rejects_huge_dimensions() {
+        let mut dec = DvbDecoder::new();
+        // Region Composition segment declaring 65535x65535 — if it reached
+        // `render_page` unchecked this would drive a `width * height * 4`
+        // RGBA allocation of ~17 GiB from a 10-byte payload. Must be
+        // rejected with a clean Err, not panic or attempt the allocation.
+        let data = make_region_composition_segment(1, 0xFFFF, 0xFFFF);
+
+        let result = dec.decode_segment(&data, 0);
+        assert!(
+            result.is_err(),
+            "region declaring 65535x65535 must be rejected, not silently accepted"
+        );
+        assert!(
+            !dec.regions.contains_key(&1),
+            "rejected region must not be stored for later rendering"
+        );
+    }
+
+    #[test]
+    fn test_decode_segment_region_composition_accepts_valid_dimensions() {
+        let mut dec = DvbDecoder::new();
+        // A normal, display-sized region (100x50) must still decode and be
+        // stored — the OOM guard must not reject legitimate content.
+        let data = make_region_composition_segment(2, 100, 50);
+
+        dec.decode_segment(&data, 0)
+            .expect("valid region composition must decode successfully");
+        assert!(dec.regions.contains_key(&2));
+    }
+
+    #[test]
+    fn test_decode_segment_region_composition_boundary_at_cap() {
+        let mut dec = DvbDecoder::new();
+        // Exactly at the cap (4096x4096) must be accepted — the guard uses
+        // a strict `>` comparison, not `>=`.
+        let data =
+            make_region_composition_segment(3, MAX_REGION_DIMENSION_PX, MAX_REGION_DIMENSION_PX);
+
+        dec.decode_segment(&data, 0)
+            .expect("dimensions exactly at the cap must be accepted");
+        assert!(dec.regions.contains_key(&3));
+    }
+
+    #[test]
+    fn test_decode_segment_region_composition_boundary_over_cap() {
+        let mut dec = DvbDecoder::new();
+        // One pixel over the cap on the width axis alone must be rejected.
+        let data = make_region_composition_segment(4, MAX_REGION_DIMENSION_PX + 1, 100);
+
+        let result = dec.decode_segment(&data, 0);
+        assert!(
+            result.is_err(),
+            "width one pixel over the cap must be rejected"
+        );
+        assert!(!dec.regions.contains_key(&4));
     }
 }

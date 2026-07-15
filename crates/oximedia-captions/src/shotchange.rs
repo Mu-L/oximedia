@@ -1,6 +1,6 @@
 //! Shot change detection for caption timing
 
-use crate::error::Result;
+use crate::error::{CaptionError, Result};
 use crate::types::{Caption, CaptionTrack, Duration, Timestamp};
 
 /// Shot change detector
@@ -26,11 +26,33 @@ impl ShotChangeDetector {
         self.min_shot_duration = frames;
     }
 
-    /// Detect shot changes from video frames (placeholder for actual implementation)
+    /// Detect shot changes from video frames.
+    ///
+    /// # Honesty note
+    ///
+    /// This is **not implemented**. A real implementation needs to decode
+    /// `_video_data` into frames and diff consecutive frames (e.g.
+    /// histogram or pixel-difference thresholding) to locate cuts — an L
+    /// (large) effort this crate does not currently perform. An earlier
+    /// revision ignored `_video_data` entirely and returned `Ok(Vec::new())`,
+    /// which callers of [`Self::snap_to_shots`] could misread as "shot
+    /// detection ran and found zero shot changes" rather than "shot
+    /// detection did not run at all" — silently turning caption
+    /// shot-snapping into a no-op. This fails honestly instead.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`CaptionError::Other`]: real scene-cut detection is
+    /// not implemented.
+    // TODO(0.2.x): real scene-cut detection (frame-diff threshold) — decode
+    // `_video_data` into frames and flag cuts where consecutive-frame
+    // histogram/pixel difference exceeds a threshold.
     pub fn detect_shot_changes(&self, _video_data: &[u8]) -> Result<Vec<Timestamp>> {
-        // This would integrate with video analysis
-        // Placeholder implementation
-        Ok(Vec::new())
+        Err(CaptionError::Other(
+            "shot-change detection is not implemented: real scene-cut analysis requires \
+             frame decode + frame-diff thresholding, which this function does not perform"
+                .to_string(),
+        ))
     }
 
     /// Snap caption boundaries to shot changes
@@ -287,6 +309,25 @@ mod tests {
         let detector = ShotChangeDetector::new(25.0);
         assert_eq!(detector.fps, 25.0);
         assert_eq!(detector.min_shot_duration, 12);
+    }
+
+    #[test]
+    fn test_detect_shot_changes_is_honest_err_not_fabricated_empty_ok() {
+        // CHANGED: detect_shot_changes() previously ignored the input bytes
+        // and returned `Ok(Vec::new())` unconditionally, which looked
+        // identical to "analysis ran and found no cuts". Real scene-cut
+        // detection (decode + frame-diff) is not implemented, so it must
+        // report that honestly via `Err` instead.
+        let detector = ShotChangeDetector::new(25.0);
+        let fake_video_bytes = vec![0u8; 128];
+
+        let result = detector.detect_shot_changes(&fake_video_bytes);
+
+        assert!(
+            result.is_err(),
+            "detect_shot_changes must not fabricate an empty-but-Ok result"
+        );
+        assert!(matches!(result.unwrap_err(), CaptionError::Other(_)));
     }
 
     #[test]

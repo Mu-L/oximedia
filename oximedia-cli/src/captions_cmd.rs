@@ -802,9 +802,32 @@ pub async fn run_captions_convert(opts: CaptionsConvertOptions, json_output: boo
 }
 
 /// Run the `captions burn` subcommand.
+///
+/// Validates the input video and caption file for real (the video must
+/// exist, the caption file must actually parse, and the track must be
+/// non-empty), then returns an honest error rather than a rendered video.
+///
+/// Burning captions into video pixels needs a decode -> rasterize-glyphs ->
+/// composite -> re-encode pipeline. `oximedia-graph` has a real, working,
+/// `fontdue`-backed rasterizer (`oximedia_graph::filters::video::timecode::TimecodeFilter`,
+/// used for timecode burn-in), and `oximedia_captions::caption_renderer`
+/// provides caption layout math -- but neither is wired into any
+/// CLI-reachable execution path: `oximedia-cli`'s real `-vf`/`-af` transcode
+/// filters are limited to `scale=`/`volume=` (see `transcode.rs`), and there
+/// is no decode/encode round trip callable from this handler. Copying the
+/// input to the output (the previous behaviour) would silently ship an
+/// un-captioned video while claiming success, so we refuse instead.
+// TODO(0.2.x): wire a real burn-in pipeline once a CLI-reachable
+// decode -> composite -> encode path exists. `oximedia-graph`'s
+// `TimecodeFilter` is the closest existing font-rasterization building
+// block to model a `CaptionFilter` node on.
 pub async fn run_captions_burn(opts: CaptionsBurnOptions, json_output: bool) -> Result<()> {
-    let _video_data = std::fs::read(&opts.video)
-        .with_context(|| format!("Failed to read video: {}", opts.video.display()))?;
+    if !opts.video.exists() {
+        return Err(anyhow::anyhow!(
+            "Input video not found: {}",
+            opts.video.display()
+        ));
+    }
 
     let caption_data = std::fs::read(&opts.captions)
         .with_context(|| format!("Failed to read captions: {}", opts.captions.display()))?;
@@ -813,43 +836,209 @@ pub async fn run_captions_burn(opts: CaptionsBurnOptions, json_output: bool) -> 
         .map_err(|e| anyhow::anyhow!("Failed to parse captions: {e}"))?;
 
     let caption_count = track.count();
-
-    // Placeholder: real burn would render captions onto video frames
-    std::fs::copy(&opts.video, &opts.output)
-        .with_context(|| format!("Failed to write output: {}", opts.output.display()))?;
+    if caption_count == 0 {
+        return Err(anyhow::anyhow!(
+            "Caption file '{}' contains no captions to burn",
+            opts.captions.display()
+        ));
+    }
 
     if json_output {
-        let obj = serde_json::json!({
+        let diag = serde_json::json!({
             "video": opts.video.to_string_lossy(),
             "captions": opts.captions.to_string_lossy(),
             "output": opts.output.to_string_lossy(),
             "font_size": opts.font_size,
             "font_color": opts.font_color,
-            "captions_burned": caption_count,
+            "captions_parsed": caption_count,
+            "status": "error",
+            "error": "caption burn-in pixel rendering is not implemented",
         });
-        println!("{}", serde_json::to_string_pretty(&obj)?);
-    } else {
-        println!("{}", "Caption Burn Complete".green().bold());
-        println!("  Video:    {}", opts.video.display());
-        println!("  Captions: {}", opts.captions.display());
-        println!("  Output:   {}", opts.output.display());
-        println!("  Font:     {}px, #{}", opts.font_size, opts.font_color);
-        println!("  Burned:   {} captions", caption_count);
+        eprintln!(
+            "{}",
+            serde_json::to_string_pretty(&diag).unwrap_or_else(|_| diag.to_string())
+        );
     }
 
-    Ok(())
+    Err(anyhow::anyhow!(
+        "Caption burn-in is not yet implemented: parsed {caption_count} caption(s) from '{}' \
+         successfully (requested {}px, #{}), but oximedia-cli has no reachable video decode -> \
+         text-rasterize -> re-encode pipeline to composite them onto '{}'. Refusing to fabricate \
+         '{}' by copying the input.",
+        opts.captions.display(),
+        opts.font_size,
+        opts.font_color,
+        opts.video.display(),
+        opts.output.display()
+    ))
 }
 
 /// Run the `captions extract` subcommand.
+///
+/// Extracts a real embedded subtitle track from a Matroska/WebM container
+/// using `oximedia-container`'s Matroska demuxer (which genuinely parses
+/// EBML tracks/clusters/blocks -- see
+/// `oximedia_container::demux::MatroskaDemuxer`). Only text-based subtitle
+/// codecs (WebVTT, SRT/`S_TEXT-UTF8`) are supported today; unsupported
+/// containers, missing tracks, or a track with zero decodable cues all
+/// return an honest error instead of emitting an empty caption track as if
+/// extraction had succeeded.
+// TODO(0.2.x): extend to MP4 (tx3g) and ASS/SSA-in-Matroska once those
+// demux/parsing paths are worth the added complexity. Matroska's
+// `BlockDuration` is parsed internally by the demuxer but not yet
+// propagated through `Packet::timestamp.duration`, so trailing-cue/exact
+// per-cue duration is approximated here (see `DEFAULT_LAST_CUE_MS` below);
+// revisit once that's threaded through.
 pub async fn run_captions_extract(opts: CaptionsExtractOptions, json_output: bool) -> Result<()> {
-    let _data = std::fs::read(&opts.input)
+    let raw = std::fs::read(&opts.input)
         .with_context(|| format!("Failed to read input: {}", opts.input.display()))?;
 
     let format = parse_caption_format(&opts.format)?;
 
-    // Placeholder: real extraction would parse embedded caption tracks
-    let language = oximedia_captions::Language::english();
-    let track = oximedia_captions::CaptionTrack::new(language);
+    // Both "format couldn't even be detected" and "format detected but isn't
+    // Matroska/WebM" land in the same honest, actionable message: only
+    // Matroska/WebM embedded subtitle tracks are supported by this build.
+    let probe = match oximedia_container::probe_format(&raw) {
+        Ok(p)
+            if matches!(
+                p.format,
+                oximedia_container::ContainerFormat::Matroska
+                    | oximedia_container::ContainerFormat::WebM
+            ) =>
+        {
+            p
+        }
+        Ok(p) => {
+            return Err(anyhow::anyhow!(
+                "Caption extraction currently supports embedded subtitle tracks in Matroska/WebM \
+                 (.mkv/.webm) containers only; '{}' was detected as {:?}. No subtitle-track \
+                 demuxer is wired for this container in this build.",
+                opts.input.display(),
+                p.format
+            ));
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "Caption extraction currently supports embedded subtitle tracks in Matroska/WebM \
+                 (.mkv/.webm) containers only; the container format of '{}' could not be \
+                 detected at all: {e}",
+                opts.input.display()
+            ));
+        }
+    };
+
+    use oximedia_container::demux::MatroskaDemuxer;
+    use oximedia_container::Demuxer;
+    use oximedia_core::{CodecId, OxiError};
+    use oximedia_io::source::MemorySource;
+
+    let source = MemorySource::from_vec(raw);
+    let mut demuxer = MatroskaDemuxer::new(source);
+    demuxer
+        .probe()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to probe '{}': {e}", opts.input.display()))?;
+
+    let subtitle_positions: Vec<usize> = demuxer
+        .streams()
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.is_subtitle())
+        .map(|(i, _)| i)
+        .collect();
+
+    if subtitle_positions.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No subtitle tracks found in '{}'",
+            opts.input.display()
+        ));
+    }
+
+    let target_stream = *subtitle_positions.get(opts.track).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Subtitle track index {} out of range; '{}' has {} subtitle track(s) (valid indices: 0..{})",
+            opts.track,
+            opts.input.display(),
+            subtitle_positions.len(),
+            subtitle_positions.len()
+        )
+    })?;
+
+    let stream_codec = demuxer.streams()[target_stream].codec;
+    if !matches!(stream_codec, CodecId::WebVtt | CodecId::Srt) {
+        return Err(anyhow::anyhow!(
+            "Subtitle track {} in '{}' uses codec {:?}, which is not yet supported for text \
+             extraction in this build (supported: WebVTT, SRT/S_TEXT-UTF8).",
+            opts.track,
+            opts.input.display(),
+            stream_codec
+        ));
+    }
+
+    let language = demuxer.streams()[target_stream]
+        .metadata
+        .entries
+        .iter()
+        .find(|(k, _)| k == "language")
+        .map(|(_, v)| oximedia_captions::Language::new(v.clone(), v.clone(), false))
+        .unwrap_or_else(oximedia_captions::Language::english);
+
+    // Display duration applied to the *final* cue only. Matroska's
+    // `BlockDuration` (parsed internally by this demuxer) is not currently
+    // propagated through `Packet::timestamp.duration`, so exact per-cue
+    // durations aren't available at this layer -- see the module TODO
+    // above. Interior cues instead run until the next cue's real start
+    // time, which matches genuine subtitle timing.
+    const DEFAULT_LAST_CUE_MS: i64 = 4_000;
+
+    let mut cues: Vec<(i64, String)> = Vec::new();
+    loop {
+        match demuxer.read_packet().await {
+            Ok(packet) => {
+                if packet.stream_index != target_stream {
+                    continue;
+                }
+                let start_ms = (packet.timestamp.to_seconds() * 1000.0).round() as i64;
+                let text = String::from_utf8_lossy(&packet.data).trim().to_string();
+                if !text.is_empty() {
+                    cues.push((start_ms, text));
+                }
+            }
+            Err(OxiError::Eof) => break,
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Error reading packets from '{}': {e}",
+                    opts.input.display()
+                ));
+            }
+        }
+    }
+
+    if cues.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Subtitle track {} in '{}' contains no decodable cues",
+            opts.track,
+            opts.input.display()
+        ));
+    }
+
+    let mut track = oximedia_captions::CaptionTrack::new(language);
+    let n = cues.len();
+    for (i, (start_ms, text)) in cues.iter().enumerate() {
+        let end_ms = if i + 1 < n {
+            cues[i + 1].0.max(start_ms + 1)
+        } else {
+            start_ms + DEFAULT_LAST_CUE_MS
+        };
+        let caption = oximedia_captions::Caption::new(
+            oximedia_captions::Timestamp::from_millis(*start_ms),
+            oximedia_captions::Timestamp::from_millis(end_ms),
+            text.clone(),
+        );
+        track
+            .add_caption(caption)
+            .map_err(|e| anyhow::anyhow!("Failed to add caption: {e}"))?;
+    }
 
     let output_bytes = oximedia_captions::export::Exporter::export(&track, format)
         .map_err(|e| anyhow::anyhow!("Export failed: {e}"))?;
@@ -857,13 +1046,15 @@ pub async fn run_captions_extract(opts: CaptionsExtractOptions, json_output: boo
     std::fs::write(&opts.output, &output_bytes)
         .with_context(|| format!("Failed to write output: {}", opts.output.display()))?;
 
+    let caption_count = track.count();
     if json_output {
         let obj = serde_json::json!({
             "input": opts.input.to_string_lossy(),
             "output": opts.output.to_string_lossy(),
             "format": opts.format,
             "track": opts.track,
-            "captions_extracted": track.count(),
+            "container": format!("{:?}", probe.format),
+            "captions_extracted": caption_count,
         });
         println!("{}", serde_json::to_string_pretty(&obj)?);
     } else {
@@ -872,7 +1063,7 @@ pub async fn run_captions_extract(opts: CaptionsExtractOptions, json_output: boo
         println!("  Output:    {}", opts.output.display());
         println!("  Format:    {}", opts.format);
         println!("  Track:     {}", opts.track);
-        println!("  Extracted: {} captions", track.count());
+        println!("  Extracted: {} captions", caption_count);
     }
 
     Ok(())
@@ -1145,5 +1336,275 @@ mod tests {
         assert!(text.contains("Caption Validation Report"));
         assert!(text.contains("fcc"));
         assert!(text.contains("Passed: true"));
+    }
+
+    // ── captions extract: real Matroska/WebM demux, honest-Err otherwise ────
+
+    /// Encode `n` (0..=127) as a 1-byte EBML VINT size marker.
+    fn ebml_size1(n: usize) -> u8 {
+        assert!(
+            n <= 0x7F,
+            "test fixture value too large for 1-byte EBML VINT: {n}"
+        );
+        0x80 | (n as u8)
+    }
+
+    /// Build a minimal, valid WebM byte buffer with a single subtitle track
+    /// (`codec_id`, e.g. `"S_TEXT/UTF8"`) carrying `cues` (cluster-relative
+    /// timecode in ms, cue text) inside one cluster.
+    ///
+    /// Mirrors the byte-for-byte EBML structure of `oximedia_container`'s
+    /// own `MatroskaDemuxer` test fixture (`create_webm_header` in
+    /// `demux/matroska/mod.rs`) -- same EBML/Segment/Info header, just a
+    /// subtitle `TrackEntry` (`TrackType` 0x11) instead of a video one, and
+    /// real cue text as the `SimpleBlock` payload instead of opaque bytes.
+    fn build_test_webm_subtitle(codec_id: &str, cues: &[(i16, &str)]) -> Vec<u8> {
+        let mut data = Vec::new();
+
+        // EBML header (DocType "webm"), identical to the crate's own fixture.
+        data.extend_from_slice(&[0x1A, 0x45, 0xDF, 0xA3, 0x9F]);
+        data.extend_from_slice(&[0x42, 0x86, 0x81, 0x01]); // EBMLVersion
+        data.extend_from_slice(&[0x42, 0xF7, 0x81, 0x01]); // EBMLReadVersion
+        data.extend_from_slice(&[0x42, 0xF2, 0x81, 0x04]); // EBMLMaxIDLength
+        data.extend_from_slice(&[0x42, 0xF3, 0x81, 0x08]); // EBMLMaxSizeLength
+        data.extend_from_slice(&[0x42, 0x82, 0x84, b'w', b'e', b'b', b'm']); // DocType
+        data.extend_from_slice(&[0x42, 0x87, 0x81, 0x04]); // DocTypeVersion
+        data.extend_from_slice(&[0x42, 0x85, 0x81, 0x02]); // DocTypeReadVersion
+
+        // Segment (unknown/unbounded size).
+        data.extend_from_slice(&[
+            0x18, 0x53, 0x80, 0x67, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        ]);
+
+        // Info: TimecodeScale = 1_000_000 ns (1 ms per unit).
+        data.extend_from_slice(&[0x15, 0x49, 0xA9, 0x66, ebml_size1(7)]);
+        data.extend_from_slice(&[0x2A, 0xD7, 0xB1, ebml_size1(3), 0x0F, 0x42, 0x40]);
+
+        // Tracks -> one subtitle TrackEntry.
+        let codec_bytes = codec_id.as_bytes();
+        assert!(codec_bytes.len() <= 0x7F);
+        let codec_id_elem_len = 2 + codec_bytes.len();
+        let track_entry_content_len = 3 + 5 + 3 + codec_id_elem_len;
+
+        let mut track_entry = Vec::new();
+        track_entry.push(0xAE); // TrackEntry ID
+        track_entry.push(ebml_size1(track_entry_content_len));
+        track_entry.extend_from_slice(&[0xD7, 0x81, 0x01]); // TrackNumber: 1
+        track_entry.extend_from_slice(&[0x73, 0xC5, 0x82, 0x30, 0x39]); // TrackUID
+        track_entry.extend_from_slice(&[0x83, 0x81, 0x11]); // TrackType: subtitle (0x11)
+        track_entry.push(0x86); // CodecID ID
+        track_entry.push(ebml_size1(codec_bytes.len()));
+        track_entry.extend_from_slice(codec_bytes);
+
+        data.extend_from_slice(&[0x16, 0x54, 0xAE, 0x6B]); // Tracks ID
+        data.push(ebml_size1(track_entry.len()));
+        data.extend_from_slice(&track_entry);
+
+        // Cluster (unbounded) + Timestamp(0) + one SimpleBlock per cue.
+        data.extend_from_slice(&[
+            0x1F, 0x43, 0xB6, 0x75, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        ]);
+        data.extend_from_slice(&[0xE7, 0x81, 0x00]); // Cluster Timestamp: 0
+
+        for &(timecode, text) in cues {
+            let text_bytes = text.as_bytes();
+            let block_content_len = 1 + 2 + 1 + text_bytes.len();
+            assert!(
+                block_content_len <= 0x7F,
+                "test cue too long for 1-byte EBML VINT"
+            );
+            data.push(0xA3); // SimpleBlock ID
+            data.push(ebml_size1(block_content_len));
+            data.push(0x81); // track number VINT = 1
+            data.extend_from_slice(&timecode.to_be_bytes());
+            data.push(0x80); // flags: keyframe
+            data.extend_from_slice(text_bytes);
+        }
+
+        data
+    }
+
+    #[tokio::test]
+    async fn test_run_captions_extract_non_matroska_input_errors() {
+        let tmp = std::env::temp_dir();
+        let input = tmp.join("oximedia_cli_test_extract_not_mkv.bin");
+        let output = tmp.join("oximedia_cli_test_extract_not_mkv_out.srt");
+        std::fs::write(&input, b"this is not a media container, just text").expect("write fixture");
+        let _ = std::fs::remove_file(&output);
+
+        let opts = CaptionsExtractOptions {
+            input: input.clone(),
+            output: output.clone(),
+            format: "srt".to_string(),
+            track: 0,
+        };
+        let err = run_captions_extract(opts, false)
+            .await
+            .expect_err("non-Matroska input must fail honestly");
+        assert!(
+            err.to_string().contains("Matroska/WebM"),
+            "error should name the supported containers, got: {err}"
+        );
+        assert!(!output.exists(), "no output file should be fabricated");
+
+        std::fs::remove_file(&input).ok();
+    }
+
+    #[tokio::test]
+    async fn test_run_captions_extract_real_matroska_subtitle_track() {
+        let tmp = std::env::temp_dir();
+        let input = tmp.join("oximedia_cli_test_extract_real.webm");
+        let output = tmp.join("oximedia_cli_test_extract_real_out.srt");
+        let data =
+            build_test_webm_subtitle("S_TEXT/UTF8", &[(0, "Hello world"), (2000, "Second cue")]);
+        std::fs::write(&input, &data).expect("write webm fixture");
+        let _ = std::fs::remove_file(&output);
+
+        let opts = CaptionsExtractOptions {
+            input: input.clone(),
+            output: output.clone(),
+            format: "srt".to_string(),
+            track: 0,
+        };
+        run_captions_extract(opts, false)
+            .await
+            .expect("extraction from a real embedded subtitle track should succeed");
+
+        let exported = std::fs::read_to_string(&output).expect("read exported SRT");
+        assert!(
+            exported.contains("Hello world"),
+            "must contain the first real cue, got:\n{exported}"
+        );
+        assert!(
+            exported.contains("Second cue"),
+            "must contain the second real cue, got:\n{exported}"
+        );
+        assert!(
+            exported.contains("00:00:02,000"),
+            "must encode the real second-cue start timestamp, got:\n{exported}"
+        );
+
+        std::fs::remove_file(&input).ok();
+        std::fs::remove_file(&output).ok();
+    }
+
+    #[tokio::test]
+    async fn test_run_captions_extract_track_out_of_range() {
+        let tmp = std::env::temp_dir();
+        let input = tmp.join("oximedia_cli_test_extract_range.webm");
+        let output = tmp.join("oximedia_cli_test_extract_range_out.srt");
+        let data = build_test_webm_subtitle("S_TEXT/UTF8", &[(0, "Only cue")]);
+        std::fs::write(&input, &data).expect("write webm fixture");
+        let _ = std::fs::remove_file(&output);
+
+        let opts = CaptionsExtractOptions {
+            input: input.clone(),
+            output: output.clone(),
+            format: "srt".to_string(),
+            track: 1, // only track 0 exists in this fixture
+        };
+        let err = run_captions_extract(opts, false)
+            .await
+            .expect_err("out-of-range track index must fail");
+        assert!(err.to_string().contains("out of range"));
+        assert!(!output.exists());
+
+        std::fs::remove_file(&input).ok();
+    }
+
+    #[tokio::test]
+    async fn test_run_captions_extract_unsupported_codec_errors() {
+        let tmp = std::env::temp_dir();
+        let input = tmp.join("oximedia_cli_test_extract_ass.webm");
+        let output = tmp.join("oximedia_cli_test_extract_ass_out.srt");
+        let data = build_test_webm_subtitle("S_TEXT/ASS", &[(0, "0,0,Default,,0,0,0,,Hello")]);
+        std::fs::write(&input, &data).expect("write webm fixture");
+        let _ = std::fs::remove_file(&output);
+
+        let opts = CaptionsExtractOptions {
+            input: input.clone(),
+            output: output.clone(),
+            format: "srt".to_string(),
+            track: 0,
+        };
+        let err = run_captions_extract(opts, false)
+            .await
+            .expect_err("unsupported subtitle codec must fail honestly");
+        assert!(err.to_string().contains("not yet supported"));
+        assert!(!output.exists());
+
+        std::fs::remove_file(&input).ok();
+    }
+
+    // ── captions burn: honest-Err, never a fabricated copy ──────────────────
+
+    #[tokio::test]
+    async fn test_run_captions_burn_missing_video_errors() {
+        let tmp = std::env::temp_dir();
+        let video = tmp.join("oximedia_cli_test_burn_missing_video.mkv");
+        let captions = tmp.join("oximedia_cli_test_burn_missing_video.srt");
+        let output = tmp.join("oximedia_cli_test_burn_missing_video_out.mkv");
+        let _ = std::fs::remove_file(&video);
+        std::fs::write(&captions, "1\n00:00:00,000 --> 00:00:02,000\nHello\n\n")
+            .expect("write srt fixture");
+        let _ = std::fs::remove_file(&output);
+
+        let opts = CaptionsBurnOptions {
+            video: video.clone(),
+            captions: captions.clone(),
+            output: output.clone(),
+            font_size: 24,
+            font_color: "FFFFFF".to_string(),
+        };
+        let err = run_captions_burn(opts, false)
+            .await
+            .expect_err("missing video must fail");
+        assert!(err.to_string().contains("Input video not found"));
+        assert!(!output.exists());
+
+        std::fs::remove_file(&captions).ok();
+    }
+
+    #[tokio::test]
+    async fn test_run_captions_burn_real_captions_returns_honest_err_no_output_file() {
+        let tmp = std::env::temp_dir();
+        let video = tmp.join("oximedia_cli_test_burn_video.mkv");
+        let captions = tmp.join("oximedia_cli_test_burn_captions.srt");
+        let output = tmp.join("oximedia_cli_test_burn_output.mkv");
+        std::fs::write(&video, b"not a real video, just bytes for existence checks")
+            .expect("write video fixture");
+        std::fs::write(
+            &captions,
+            "1\n00:00:00,000 --> 00:00:02,000\nHello world\n\n",
+        )
+        .expect("write srt fixture");
+        let _ = std::fs::remove_file(&output);
+
+        let opts = CaptionsBurnOptions {
+            video: video.clone(),
+            captions: captions.clone(),
+            output: output.clone(),
+            font_size: 32,
+            font_color: "FFFFFF".to_string(),
+        };
+        let err = run_captions_burn(opts, false)
+            .await
+            .expect_err("burn-in must not fabricate success");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not yet implemented"),
+            "error should be honest about the missing pipeline, got: {msg}"
+        );
+        assert!(
+            !msg.contains("Caption Burn Complete"),
+            "must not resurrect the old fabricated success banner text"
+        );
+        assert!(
+            !output.exists(),
+            "must NOT copy the input to the output and call it burned-in"
+        );
+
+        std::fs::remove_file(&video).ok();
+        std::fs::remove_file(&captions).ok();
     }
 }

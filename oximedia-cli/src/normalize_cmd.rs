@@ -280,16 +280,32 @@ async fn cmd_process(
         return Err(anyhow::anyhow!("Input file not found: {}", input.display()));
     }
 
-    // Check output extension: TranscodePipeline only supports mkv/webm and ogg outputs.
-    // For other extensions (e.g. .wav), fall back to byte copy with a reported gain.
     let out_ext = output
         .extension()
         .and_then(|e| e.to_str())
         .map(str::to_lowercase)
         .unwrap_or_default();
-    let pipeline_supported = matches!(out_ext.as_str(), "mkv" | "webm" | "ogg" | "oga" | "opus");
 
-    // Compute recommended gain for reporting: decode real audio when possible.
+    // WAV output: decode → real two-pass normalization → 16-bit PCM WAV.
+    // This applies the measured gain to every sample and writes a real file.
+    if matches!(out_ext.as_str(), "wav" | "wave") {
+        return cmd_process_wav(input, output, target_lufs, true_peak, output_format).await;
+    }
+
+    // The in-band transcode pipeline supports Matroska/WebM/Ogg containers only.
+    // Any other output format is an honest error — we do NOT copy the input and
+    // claim it was normalized.
+    let pipeline_supported = matches!(out_ext.as_str(), "mkv" | "webm" | "ogg" | "oga" | "opus");
+    if !pipeline_supported {
+        return Err(anyhow::anyhow!(
+            "normalize process: output format '.{}' is not supported. Use '.wav' for a real \
+             PCM gain pass, or '.mkv'/'.webm'/'.ogg' for in-band container normalization. \
+             No output written.",
+            out_ext
+        ));
+    }
+
+    // Report the recommended gain from a real analysis when the input is WAV.
     let analysis = match crate::decode_helper::decode_wav_f32(input).await {
         Ok(audio) => {
             let norm_config_light = oximedia_normalize::NormalizerConfig::new(
@@ -304,85 +320,49 @@ async fn cmd_process(
             let mut normalizer = oximedia_normalize::Normalizer::new(norm_config_light)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             normalizer.analyze_f32(&audio.samples);
-            normalizer.get_analysis()
+            Some(normalizer.get_analysis())
         }
         Err(e) => {
+            // Non-WAV input: the pipeline runs its own internal EBU-R128 analysis,
+            // so we simply omit the pre-analysis figures rather than fabricating them.
             tracing::warn!(
-                "could not decode audio from {}: {}; using silent fallback",
+                "pre-analysis skipped for {} ({}); pipeline performs its own measurement",
                 input.display(),
                 e
             );
-            let norm_config_light = oximedia_normalize::NormalizerConfig::new(
-                oximedia_metering::Standard::Custom {
-                    target_lufs,
-                    max_peak_dbtp: true_peak,
-                    tolerance_lu: 1.0,
-                },
-                48000.0,
-                2,
-            );
-            let mut normalizer = oximedia_normalize::Normalizer::new(norm_config_light)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let silent = vec![0.0_f32; 9600 * 2];
-            normalizer.analyze_f32(&silent);
-            normalizer.get_analysis()
+            None
         }
     };
 
-    // Build the normalization target for display.
     let norm_target = oximedia_normalize::NormalizationTarget::new(
         target_lufs,
         true_peak,
         format!("Custom ({target_lufs:.1} LUFS / {true_peak:.1} dBTP)"),
     );
 
-    let (output_size, pipeline_used) = if pipeline_supported {
-        // Build a custom loudness standard as close to the requested target as possible.
-        let lufs_i32 = target_lufs.round() as i32;
-        let loudness_standard = LoudnessStandard::Custom(lufs_i32);
+    // Build and execute the real transcode pipeline with normalization enabled.
+    // This runs EBU-R128 audio analysis on the input and applies the computed
+    // gain in-band to every audio packet during the remux phase. On failure we
+    // return the error — no byte-copy masquerading as a normalized output.
+    let lufs_i32 = target_lufs.round() as i32;
+    let loudness_standard = LoudnessStandard::Custom(lufs_i32);
+    let norm_config = NormalizationConfig::new(loudness_standard);
+    let mut pipeline = TranscodePipeline::builder()
+        .input(input.clone())
+        .output(output.clone())
+        .normalization(norm_config)
+        .track_progress(false)
+        .build()
+        .context("Failed to build normalization pipeline")?;
 
-        // Build and execute the real transcode pipeline with normalization enabled.
-        // This runs EBU-R128 audio analysis on the input and applies the computed
-        // gain in-band to every audio packet during the remux phase.
-        let norm_config = NormalizationConfig::new(loudness_standard);
-        let mut pipeline = TranscodePipeline::builder()
-            .input(input.clone())
-            .output(output.clone())
-            .normalization(norm_config)
-            .track_progress(false)
-            .build()
-            .context("Failed to build normalization pipeline")?;
+    let result = pipeline
+        .execute()
+        .await
+        .context("Normalization pipeline failed")?;
+    let output_size = result.file_size;
 
-        match pipeline.execute().await {
-            Ok(result) => (result.file_size, true),
-            Err(e) => {
-                // Pipeline failed; fall back to byte copy with warning.
-                if output_format != "json" {
-                    println!(
-                        "  Note: normalization pipeline failed ({}); byte copy used.",
-                        e
-                    );
-                }
-                let sz = std::fs::copy(input, output)
-                    .with_context(|| format!("Cannot copy to output: {}", output.display()))?;
-                (sz, false)
-            }
-        }
-    } else {
-        // Output format not supported by the pipeline; copy the input and report
-        // the gain that would be applied so the caller can act on the information.
-        if output_format != "json" {
-            println!(
-                "  Note: output format '.{}' is not supported by the normalization pipeline \
-                 (use .mkv or .webm for in-band gain application). Copying input; \
-                 apply the reported gain externally.",
-                out_ext
-            );
-        }
-        let sz = std::fs::copy(input, output)
-            .with_context(|| format!("Cannot copy to output: {}", output.display()))?;
-        (sz, false)
-    };
+    let analysis_integrated = analysis.as_ref().map(|a| a.integrated_lufs);
+    let analysis_gain = analysis.as_ref().map(|a| a.recommended_gain_db);
 
     if output_format == "json" {
         let obj = serde_json::json!({
@@ -392,12 +372,11 @@ async fn cmd_process(
             "target_lufs": norm_target.target_lufs,
             "max_true_peak_dbtp": norm_target.max_peak_dbtp,
             "analysis": {
-                "integrated_lufs": analysis.integrated_lufs,
-                "recommended_gain_db": analysis.recommended_gain_db,
+                "integrated_lufs": analysis_integrated,
+                "recommended_gain_db": analysis_gain,
             },
-            "applied_gain_db": analysis.recommended_gain_db,
             "output_size_bytes": output_size,
-            "pipeline_applied": pipeline_used,
+            "pipeline_applied": true,
             "status": "ok",
         });
         println!(
@@ -416,24 +395,152 @@ async fn cmd_process(
         "{:25} {:.1} dBTP",
         "Max true peak:", norm_target.max_peak_dbtp
     );
-    println!(
-        "{:25} {:+.1} dB",
-        "Applied gain:", analysis.recommended_gain_db
-    );
+    if let Some(gain) = analysis_gain {
+        println!("{:25} {:+.1} dB", "Recommended gain:", gain);
+    }
     println!("{:25} {} bytes", "Output size:", output_size);
-    println!(
-        "{:25} {}",
-        "Pipeline applied:",
-        if pipeline_used {
-            "yes"
-        } else {
-            "no (byte copy)"
-        }
-    );
+    println!("{:25} yes (in-band)", "Pipeline applied:");
     println!("{}", "Status:".green().bold());
     println!("  Processing complete.");
 
     Ok(())
+}
+
+/// Real WAV normalization: decode → two-pass gain → 16-bit PCM WAV output.
+async fn cmd_process_wav(
+    input: &PathBuf,
+    output: &PathBuf,
+    target_lufs: f64,
+    true_peak: f64,
+    output_format: &str,
+) -> Result<()> {
+    let audio = crate::decode_helper::decode_wav_f32(input)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "normalize process: WAV output requires WAV/PCM input; could not decode {}: {}. \
+             No output written.",
+                input.display(),
+                e
+            )
+        })?;
+
+    let standard = oximedia_metering::Standard::Custom {
+        target_lufs,
+        max_peak_dbtp: true_peak,
+        tolerance_lu: 1.0,
+    };
+    // Keep the default true-peak limiter enabled so the requested peak ceiling is
+    // respected; gain is still applied linearly to reach the target loudness.
+    let config = oximedia_normalize::NormalizerConfig::new(
+        standard,
+        f64::from(audio.sample_rate),
+        (audio.channels as usize).max(1),
+    );
+    let max_gain_db = config.max_gain_db;
+
+    let mut normalizer =
+        oximedia_normalize::Normalizer::new(config).map_err(|e| anyhow::anyhow!("{e}"))?;
+    normalizer.analyze_f32(&audio.samples);
+    let analysis = normalizer.get_analysis();
+    let mut out_samples = vec![0.0_f32; audio.samples.len()];
+    normalizer
+        .process_f32(&audio.samples, &mut out_samples)
+        .map_err(|e| anyhow::anyhow!("Normalization processing failed: {}", e))?;
+
+    let applied_gain_db = analysis.recommended_gain_db.clamp(-60.0, max_gain_db);
+    let output_size = write_wav_pcm16(
+        output,
+        &out_samples,
+        (audio.channels as u16).max(1),
+        audio.sample_rate,
+    )?;
+
+    if output_format == "json" {
+        let obj = serde_json::json!({
+            "command": "normalize process",
+            "input": input.display().to_string(),
+            "output": output.display().to_string(),
+            "target_lufs": target_lufs,
+            "max_true_peak_dbtp": true_peak,
+            "analysis": {
+                "integrated_lufs": analysis.integrated_lufs,
+                "recommended_gain_db": analysis.recommended_gain_db,
+            },
+            "applied_gain_db": applied_gain_db,
+            "output_size_bytes": output_size,
+            "pipeline_applied": true,
+            "status": "ok",
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&obj).context("JSON serialization failed")?
+        );
+        return Ok(());
+    }
+
+    println!("{}", "Normalization Processing".green().bold());
+    println!("{}", "=".repeat(60));
+    println!("{:25} {}", "Input:", input.display());
+    println!("{:25} {}", "Output:", output.display());
+    println!("{:25} {:.1} LUFS", "Target:", target_lufs);
+    println!("{:25} {:.1} dBTP", "Max true peak:", true_peak);
+    println!("{:25} {:.1} LUFS", "Measured:", analysis.integrated_lufs);
+    println!("{:25} {:+.1} dB", "Applied gain:", applied_gain_db);
+    println!("{:25} {} bytes", "Output size:", output_size);
+    println!("{:25} yes (PCM gain)", "Pipeline applied:");
+    println!("{}", "Status:".green().bold());
+    println!("  Processing complete.");
+
+    Ok(())
+}
+
+/// Write interleaved f32 samples (`±1.0`) to a 16-bit PCM WAV file.
+///
+/// Produces a standard RIFF/WAVE PCM container that round-trips through
+/// [`crate::decode_helper::decode_wav_f32`]. Returns the number of bytes written.
+fn write_wav_pcm16(
+    path: &std::path::Path,
+    samples: &[f32],
+    channels: u16,
+    sample_rate: u32,
+) -> Result<u64> {
+    use std::io::Write;
+
+    let channels = channels.max(1);
+    let bits_per_sample: u16 = 16;
+    let bytes_per_sample = u32::from(bits_per_sample / 8);
+    let num_channels = u32::from(channels);
+    let byte_rate = sample_rate * num_channels * bytes_per_sample;
+    let block_align = channels * (bits_per_sample / 8);
+    let data_size = (samples.len() as u32).saturating_mul(bytes_per_sample);
+    let riff_size = 36u32.saturating_add(data_size);
+
+    let mut buf = Vec::with_capacity(44 + samples.len() * 2);
+    buf.extend_from_slice(b"RIFF");
+    buf.extend_from_slice(&riff_size.to_le_bytes());
+    buf.extend_from_slice(b"WAVE");
+    buf.extend_from_slice(b"fmt ");
+    buf.extend_from_slice(&16u32.to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    buf.extend_from_slice(&channels.to_le_bytes());
+    buf.extend_from_slice(&sample_rate.to_le_bytes());
+    buf.extend_from_slice(&byte_rate.to_le_bytes());
+    buf.extend_from_slice(&block_align.to_le_bytes());
+    buf.extend_from_slice(&bits_per_sample.to_le_bytes());
+    buf.extend_from_slice(b"data");
+    buf.extend_from_slice(&data_size.to_le_bytes());
+
+    for &s in samples {
+        let v = (s.clamp(-1.0, 1.0) * 32767.0).round() as i16;
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    let mut f = std::fs::File::create(path)
+        .with_context(|| format!("Cannot create output file: {}", path.display()))?;
+    f.write_all(&buf)
+        .with_context(|| format!("Cannot write WAV data: {}", path.display()))?;
+    Ok(buf.len() as u64)
 }
 
 // ---------------------------------------------------------------------------
@@ -665,15 +772,78 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Generate an interleaved mono sine at the given amplitude.
+    fn sine_samples(amplitude: f32, freq_hz: f32, sample_rate: u32, secs: f32) -> Vec<f32> {
+        let n = (sample_rate as f32 * secs) as usize;
+        (0..n)
+            .map(|i| {
+                let t = i as f32 / sample_rate as f32;
+                amplitude * (2.0 * std::f32::consts::PI * freq_hz * t).sin()
+            })
+            .collect()
+    }
+
+    fn peak(samples: &[f32]) -> f32 {
+        samples.iter().fold(0.0_f32, |m, &s| m.max(s.abs()))
+    }
+
     #[tokio::test]
-    async fn test_cmd_process_existing_input() {
+    async fn test_cmd_process_wav_applies_real_gain() {
         let dir = std::env::temp_dir();
-        let input = dir.join("oximedia_normalize_proc_in.wav");
-        let output = dir.join("oximedia_normalize_proc_out.wav");
-        std::fs::write(&input, b"RIFF").expect("write stub");
-        let result = cmd_process(&input, &output, -23.0, -1.0, "json").await;
+        let input = dir.join("oximedia_normalize_proc_real_in.wav");
+        let output = dir.join("oximedia_normalize_proc_real_out.wav");
+
+        // Quiet sine, well below -14 LUFS → positive gain expected.
+        let samples = sine_samples(0.05, 1000.0, 48_000, 1.0);
+        write_wav_pcm16(&input, &samples, 1, 48_000).expect("write input WAV");
+
+        let result = cmd_process(&input, &output, -14.0, -1.0, "json").await;
         assert!(result.is_ok(), "unexpected error: {result:?}");
+        assert!(output.exists(), "a real output file must be written");
+
+        let decoded = crate::decode_helper::decode_wav_f32(&output)
+            .await
+            .expect("output must be a valid WAV");
+        assert_eq!(decoded.sample_rate, 48_000);
+        assert!(
+            peak(&decoded.samples) > peak(&samples) * 1.5,
+            "gain must actually be applied to the output samples"
+        );
+
         std::fs::remove_file(&input).ok();
         std::fs::remove_file(&output).ok();
+    }
+
+    #[tokio::test]
+    async fn test_cmd_process_unsupported_output_is_honest_error() {
+        let dir = std::env::temp_dir();
+        let input = dir.join("oximedia_normalize_proc_unsupp_in.wav");
+        let output = dir.join("oximedia_normalize_proc_unsupp_out.mp3");
+        std::fs::remove_file(&output).ok();
+
+        let samples = sine_samples(0.2, 440.0, 48_000, 0.25);
+        write_wav_pcm16(&input, &samples, 1, 48_000).expect("write input WAV");
+
+        let result = cmd_process(&input, &output, -23.0, -1.0, "text").await;
+        assert!(result.is_err(), "unsupported output format must error");
+        assert!(!output.exists(), "no output may be written on honest error");
+
+        std::fs::remove_file(&input).ok();
+    }
+
+    #[tokio::test]
+    async fn test_cmd_process_wav_bad_input_errors_no_output() {
+        let dir = std::env::temp_dir();
+        let input = dir.join("oximedia_normalize_proc_bad_in.wav");
+        let output = dir.join("oximedia_normalize_proc_bad_out.wav");
+        std::fs::remove_file(&output).ok();
+        // 4-byte non-WAV stub: decode must fail, output must not be created.
+        std::fs::write(&input, b"RIFF").expect("write stub");
+
+        let result = cmd_process(&input, &output, -23.0, -1.0, "json").await;
+        assert!(result.is_err(), "undecodable WAV input must error");
+        assert!(!output.exists(), "no output may be written on honest error");
+
+        std::fs::remove_file(&input).ok();
     }
 }

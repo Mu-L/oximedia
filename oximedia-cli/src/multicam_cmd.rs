@@ -409,6 +409,21 @@ async fn composite_cameras(
 }
 
 /// Match colors across camera angles.
+///
+/// Real color matching needs per-angle pixel statistics (mean/stddev RGB --
+/// see [`oximedia_multicam::color::ColorStats`], consumed by
+/// [`oximedia_multicam::color::ColorMatcher::calculate_corrections`]) derived
+/// from *decoded* video frames. `oximedia-cli` has no video decode pipeline
+/// reachable from this handler (the same gap documented on `captions burn`
+/// in `captions_cmd.rs`), so there is no way to compute real statistics here.
+///
+/// Calling `ColorMatcher` with default-constructed `ColorStats` would just
+/// reproduce the original bug (its defaults are `mean_rgb: [0.5, 0.5, 0.5]`,
+/// `temperature: 6500.0` -- i.e. exactly the fabricated "neutral" values this
+/// fix is removing), so we validate real inputs and then refuse honestly
+/// instead.
+// TODO(0.2.x): wire real per-angle `ColorStats` once a CLI-reachable video
+// decode pipeline exists to compute them from actual frames.
 async fn color_match(
     reference: &PathBuf,
     inputs: &[PathBuf],
@@ -427,49 +442,216 @@ async fn color_match(
         }
     }
 
-    tokio::fs::create_dir_all(output_dir)
-        .await
-        .context("Failed to create output directory")?;
-
-    let match_result = serde_json::json!({
-        "reference": reference.display().to_string(),
-        "cameras": inputs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
-        "output_dir": output_dir.display().to_string(),
-        "status": "color_match_ready",
-        "adjustments": inputs.iter().enumerate().map(|(i, _)| {
-            serde_json::json!({
-                "camera": i,
-                "white_balance_shift": [0.0, 0.0, 0.0],
-                "exposure_offset": 0.0,
-                "saturation_factor": 1.0,
-            })
-        }).collect::<Vec<_>>(),
-        "message": "Color matching configured. Frame decoding pipeline needed for analysis.",
-    });
-
-    let json_str = serde_json::to_string_pretty(&match_result)
-        .context("Failed to serialize color match result")?;
-
     if json_output {
-        println!("{}", json_str);
-    } else {
-        println!("{}", "Multi-Camera Color Match".green().bold());
-        println!("{}", "=".repeat(60));
-        println!("{:20} {}", "Reference:", reference.display());
-        println!("{:20} {}", "Cameras:", inputs.len());
-        println!("{:20} {}", "Output dir:", output_dir.display());
-        println!();
-        for (i, input) in inputs.iter().enumerate() {
-            println!("  Camera {}: {}", i, input.display());
-        }
-        println!();
-        println!(
+        let diag = serde_json::json!({
+            "reference": reference.display().to_string(),
+            "cameras": inputs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+            "output_dir": output_dir.display().to_string(),
+            "status": "error",
+            "error": "color matching requires decoded video frames; no decode pipeline is \
+                      reachable from oximedia-cli in this build",
+        });
+        eprintln!(
             "{}",
-            "Color matching requires frame decoding pipeline for analysis.".yellow()
+            serde_json::to_string_pretty(&diag).unwrap_or_else(|_| diag.to_string())
         );
     }
 
-    Ok(())
+    Err(anyhow::anyhow!(
+        "Color matching across {} camera(s) against reference '{}' is not yet implemented: \
+         real corrections require per-angle color statistics (mean/stddev RGB) computed from \
+         decoded video frames via oximedia_multicam::color::ColorMatcher, and oximedia-cli has \
+         no video decode pipeline reachable from this handler to produce them. Refusing to \
+         report \"color_match_ready\" with fabricated neutral (identity) adjustments and no \
+         matched files written to '{}'.",
+        inputs.len(),
+        reference.display(),
+        output_dir.display()
+    ))
+}
+
+/// Build a CMX3600-style multi-camera EDL from a parsed timeline JSON value.
+///
+/// Only real fields already present in the timeline (`cameras`,
+/// `switch_points`, optionally `frame_rate`) are read; nothing here is
+/// fabricated placeholder data. Returns an error if the JSON doesn't look
+/// like a timeline this command (or `multicam sync`/`multicam switch`)
+/// produced.
+fn build_multicam_edl(timeline: &serde_json::Value) -> Result<String> {
+    let cameras = timeline
+        .get("cameras")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Timeline JSON has no 'cameras' array; expected the output of \
+                 'oximedia multicam sync' or 'oximedia multicam switch'"
+            )
+        })?;
+
+    let fps = timeline
+        .get("frame_rate")
+        .and_then(serde_json::Value::as_f64)
+        .filter(|f| *f > 0.0)
+        .unwrap_or(25.0);
+
+    let mut out = String::new();
+    out.push_str("TITLE: OxiMedia Multi-Camera Export\n");
+    out.push_str("FCM: NON-DROP FRAME\n\n");
+
+    for (i, cam) in cameras.iter().enumerate() {
+        let path = cam.as_str().unwrap_or("(unknown)");
+        out.push_str(&format!(
+            "* CAM {i}: {} <- {path}\n",
+            reel_name_from_path(path, i)
+        ));
+    }
+    out.push('\n');
+
+    let switch_points = timeline
+        .get("switch_points")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    if switch_points.is_empty() {
+        out.push_str("* No switch points defined in this timeline (no cuts to list)\n");
+    } else {
+        for (i, sp) in switch_points.iter().enumerate() {
+            let time = sp
+                .get("time")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0);
+            let cam_idx = sp
+                .get("camera")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as usize;
+            let reel = cameras.get(cam_idx).and_then(|c| c.as_str()).map_or_else(
+                || format!("CAM{cam_idx}"),
+                |p| reel_name_from_path(p, cam_idx),
+            );
+            let tc = seconds_to_edl_timecode(time, fps);
+            out.push_str(&format!(
+                "{:03}  {:<8} V     C        {tc} {tc} {tc} {tc}\n",
+                i + 1,
+                reel
+            ));
+        }
+    }
+
+    Ok(out)
+}
+
+/// Build a minimal real XML export from a parsed timeline JSON value.
+///
+/// Mirrors [`build_multicam_edl`]: only actual timeline fields are encoded,
+/// no synthetic placeholder content.
+fn build_multicam_xml(
+    timeline: &serde_json::Value,
+    timeline_path: &std::path::Path,
+) -> Result<String> {
+    let cameras = timeline
+        .get("cameras")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Timeline JSON has no 'cameras' array; expected the output of \
+                 'oximedia multicam sync' or 'oximedia multicam switch'"
+            )
+        })?;
+
+    let mut out = String::new();
+    out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    out.push_str("<multicam>\n");
+    out.push_str("  <source>OxiMedia</source>\n");
+    out.push_str(&format!(
+        "  <timeline_file>{}</timeline_file>\n",
+        xml_escape(&timeline_path.display().to_string())
+    ));
+
+    out.push_str("  <cameras>\n");
+    for (i, cam) in cameras.iter().enumerate() {
+        let path = cam.as_str().unwrap_or("");
+        out.push_str(&format!(
+            "    <camera index=\"{i}\" path=\"{}\"/>\n",
+            xml_escape(path)
+        ));
+    }
+    out.push_str("  </cameras>\n");
+
+    let switch_points = timeline
+        .get("switch_points")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    out.push_str("  <switch_points>\n");
+    for sp in &switch_points {
+        let time = sp
+            .get("time")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
+        let cam_idx = sp
+            .get("camera")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        out.push_str(&format!(
+            "    <switch time=\"{time}\" camera=\"{cam_idx}\"/>\n"
+        ));
+    }
+    out.push_str("  </switch_points>\n");
+    out.push_str("</multicam>\n");
+
+    Ok(out)
+}
+
+/// Escape the five predefined XML entities in `s`.
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+/// Derive a short reel-style label from a camera file path, e.g.
+/// `/media/cam_a.mov` -> `CAM_A`. Falls back to `CAM{index}` for paths with
+/// no usable file stem.
+fn reel_name_from_path(path: &str, index: usize) -> String {
+    std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .map_or_else(
+            || format!("CAM{index}"),
+            |stem| {
+                stem.chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() {
+                            c.to_ascii_uppercase()
+                        } else {
+                            '_'
+                        }
+                    })
+                    .take(8)
+                    .collect()
+            },
+        )
+}
+
+/// Convert a time in seconds to an `HH:MM:SS:FF` EDL timecode at `fps`.
+///
+/// `fps` is clamped to a sane positive value (defaulting to 25) so the same
+/// effective rate is used consistently for both the frame-count and the
+/// frames-per-second modulus below.
+fn seconds_to_edl_timecode(total_secs: f64, fps: f64) -> String {
+    let effective_fps = if fps > 0.0 { fps } else { 25.0 };
+    let fps_int = effective_fps.round().max(1.0) as u64;
+    let total_frames = (total_secs.max(0.0) * effective_fps).round() as u64;
+    let frames = total_frames % fps_int;
+    let total_whole_secs = total_frames / fps_int;
+    let s = total_whole_secs % 60;
+    let m = (total_whole_secs / 60) % 60;
+    let h = total_whole_secs / 3600;
+    format!("{h:02}:{m:02}:{s:02}:{frames:02}")
 }
 
 /// Export multi-camera timeline.
@@ -500,22 +682,29 @@ async fn export_timeline(
         .await
         .context("Failed to read timeline file")?;
 
-    // For now, write through or convert format
+    // For "json" the timeline is already in the target format: pass it
+    // through verbatim. For "multicam_edl"/"xml" we parse the *real*
+    // timeline JSON and re-encode its actual camera list and switch points
+    // -- previously these branches ignored `timeline_data` entirely and
+    // wrote a fixed boilerplate string naming only the input file path.
     let export_data = match format {
         "json" => timeline_data,
-        "multicam_edl" => {
-            format!(
-                "TITLE: OxiMedia Multi-Camera Export\nFCM: NON-DROP FRAME\n\n{}\n",
-                "* Exported from OxiMedia multicam timeline"
-            )
+        "multicam_edl" | "xml" => {
+            let parsed: serde_json::Value = serde_json::from_str(&timeline_data)
+                .with_context(|| {
+                    format!(
+                        "Timeline file '{}' is not valid JSON; cannot export its real contents to {}",
+                        timeline.display(),
+                        format
+                    )
+                })?;
+            if format == "multicam_edl" {
+                build_multicam_edl(&parsed)?
+            } else {
+                build_multicam_xml(&parsed, timeline)?
+            }
         }
-        "xml" => {
-            format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<multicam>\n  <source>OxiMedia</source>\n  <timeline>{}</timeline>\n</multicam>\n",
-                timeline.display()
-            )
-        }
-        _ => timeline_data,
+        _ => unreachable!("format already validated above"),
     };
 
     tokio::fs::write(output, export_data.as_bytes())
@@ -614,5 +803,198 @@ mod tests {
     fn test_layout_description_pip() {
         let desc = layout_description("pip").expect("valid layout");
         assert!(desc.contains("Picture"));
+    }
+
+    // ── color_match: honest-Err, no fabricated output ───────────────────────
+
+    #[tokio::test]
+    async fn test_color_match_missing_reference_errors() {
+        let dir = std::env::temp_dir();
+        let reference = dir.join("oximedia_mc_test_missing_reference.mov");
+        let output_dir = dir.join("oximedia_mc_test_color_match_out_1");
+        let _ = std::fs::remove_file(&reference);
+        let _ = std::fs::remove_dir_all(&output_dir);
+
+        let err = color_match(&reference, &[], &output_dir, false)
+            .await
+            .expect_err("missing reference must fail");
+        assert!(err.to_string().contains("Reference file not found"));
+        assert!(
+            !output_dir.exists(),
+            "no output directory should be created on failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_color_match_real_inputs_returns_honest_err_no_files() {
+        let dir = std::env::temp_dir();
+        let reference = dir.join("oximedia_mc_test_color_match_ref.mov");
+        let input = dir.join("oximedia_mc_test_color_match_in.mov");
+        let output_dir = dir.join("oximedia_mc_test_color_match_out_2");
+        std::fs::write(
+            &reference,
+            b"not a real video, just bytes for existence checks",
+        )
+        .expect("write reference");
+        std::fs::write(&input, b"not a real video either").expect("write input");
+        let _ = std::fs::remove_dir_all(&output_dir);
+
+        let err = color_match(&reference, std::slice::from_ref(&input), &output_dir, false)
+            .await
+            .expect_err("color_match must not fabricate success");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not yet implemented"),
+            "error should be honest about the missing decode pipeline, got: {msg}"
+        );
+        // The message may legitimately *name* the old status while refusing
+        // it (that's honest: "refusing to report ... color_match_ready");
+        // what must never reappear is the old success-shaped JSON fragment.
+        assert!(
+            !msg.contains("\"status\": \"color_match_ready\"")
+                && !msg.contains("\"status\":\"color_match_ready\""),
+            "must not resurrect the old fabricated status JSON, got: {msg}"
+        );
+        assert!(
+            !output_dir.exists(),
+            "no output directory or matched files should be fabricated"
+        );
+
+        std::fs::remove_file(&reference).ok();
+        std::fs::remove_file(&input).ok();
+    }
+
+    // ── export_timeline: real EDL/XML content, not boilerplate ──────────────
+
+    fn sample_switch_timeline() -> serde_json::Value {
+        serde_json::json!({
+            "cameras": ["/media/cam_a.mov", "/media/cam_b.mov"],
+            "auto_switch": false,
+            "min_shot_duration_secs": 2.0,
+            "switch_points": [
+                { "time": 0.0, "camera": 0 },
+                { "time": 5.0, "camera": 1 },
+            ],
+            "output": "/media/out.json",
+            "status": "switch_ready",
+        })
+    }
+
+    #[test]
+    fn test_build_multicam_edl_contains_real_camera_and_switch_data() {
+        let timeline = sample_switch_timeline();
+        let edl = build_multicam_edl(&timeline).expect("should build EDL from real timeline");
+        assert!(
+            edl.contains("cam_a.mov"),
+            "must reference the real camera path"
+        );
+        assert!(
+            edl.contains("cam_b.mov"),
+            "must reference the real camera path"
+        );
+        assert!(edl.contains("CAM_A"), "must include a derived reel name");
+        // Second switch point at 5.0s, default 25fps -> 00:00:05:00.
+        assert!(
+            edl.contains("00:00:05:00"),
+            "must encode the real switch-point timecode, got:\n{edl}"
+        );
+    }
+
+    #[test]
+    fn test_build_multicam_edl_rejects_non_timeline_json() {
+        let not_a_timeline = serde_json::json!({ "hello": "world" });
+        let err = build_multicam_edl(&not_a_timeline).expect_err("must reject unrecognized JSON");
+        assert!(err.to_string().contains("cameras"));
+    }
+
+    #[test]
+    fn test_build_multicam_xml_contains_real_data() {
+        let timeline = sample_switch_timeline();
+        let xml = build_multicam_xml(&timeline, std::path::Path::new("/tmp/in.json"))
+            .expect("should build XML from real timeline");
+        assert!(xml.contains("cam_a.mov"));
+        assert!(xml.contains("cam_b.mov"));
+        assert!(xml.contains("time=\"5\"") || xml.contains("time=\"5.0\""));
+        assert!(xml.contains("<multicam>") && xml.contains("</multicam>"));
+    }
+
+    #[test]
+    fn test_xml_escape() {
+        assert_eq!(xml_escape("a & b < c"), "a &amp; b &lt; c");
+    }
+
+    #[test]
+    fn test_reel_name_from_path() {
+        assert_eq!(reel_name_from_path("/media/cam_a.mov", 0), "CAM_A");
+        assert_eq!(reel_name_from_path("", 3), "CAM3");
+    }
+
+    #[test]
+    fn test_seconds_to_edl_timecode() {
+        assert_eq!(seconds_to_edl_timecode(0.0, 25.0), "00:00:00:00");
+        assert_eq!(seconds_to_edl_timecode(61.0, 25.0), "00:01:01:00");
+        assert_eq!(seconds_to_edl_timecode(5.0, 25.0), "00:00:05:00");
+    }
+
+    #[test]
+    fn test_seconds_to_edl_timecode_invalid_fps_falls_back_consistently() {
+        // fps <= 0 must fall back to a single consistent effective rate for
+        // both the frame count and the frames-per-second modulus, not mix a
+        // raw invalid `fps` in one place and a defaulted one in another.
+        let zero = seconds_to_edl_timecode(2.0, 0.0);
+        let neg = seconds_to_edl_timecode(2.0, -10.0);
+        let explicit_default = seconds_to_edl_timecode(2.0, 25.0);
+        assert_eq!(zero, explicit_default);
+        assert_eq!(neg, explicit_default);
+    }
+
+    #[tokio::test]
+    async fn test_export_timeline_edl_writes_real_content_not_boilerplate() {
+        let dir = std::env::temp_dir();
+        let timeline_path = dir.join("oximedia_mc_test_export_timeline.json");
+        let output_path = dir.join("oximedia_mc_test_export_output.edl");
+        let _ = std::fs::remove_file(&output_path);
+
+        let timeline_json = serde_json::to_string_pretty(&sample_switch_timeline())
+            .expect("serialize sample timeline");
+        std::fs::write(&timeline_path, &timeline_json).expect("write sample timeline");
+
+        export_timeline(&timeline_path, &output_path, "multicam_edl", false)
+            .await
+            .expect("export should succeed for a real timeline");
+
+        let written = std::fs::read_to_string(&output_path).expect("read exported EDL");
+        assert!(
+            written.contains("cam_a.mov") && written.contains("cam_b.mov"),
+            "exported EDL must contain the real camera paths, got:\n{written}"
+        );
+        assert!(
+            !written.contains("Exported from OxiMedia multicam timeline"),
+            "must not fall back to the old generic boilerplate line"
+        );
+
+        std::fs::remove_file(&timeline_path).ok();
+        std::fs::remove_file(&output_path).ok();
+    }
+
+    #[tokio::test]
+    async fn test_export_timeline_rejects_non_json_timeline_for_edl() {
+        let dir = std::env::temp_dir();
+        let timeline_path = dir.join("oximedia_mc_test_export_bad_timeline.json");
+        let output_path = dir.join("oximedia_mc_test_export_bad_output.edl");
+        std::fs::write(&timeline_path, b"not json at all").expect("write bad timeline");
+        let _ = std::fs::remove_file(&output_path);
+
+        let result = export_timeline(&timeline_path, &output_path, "multicam_edl", false).await;
+        assert!(
+            result.is_err(),
+            "invalid JSON timeline must not export silently"
+        );
+        assert!(
+            !output_path.exists(),
+            "no output file should be written when the timeline can't be parsed"
+        );
+
+        std::fs::remove_file(&timeline_path).ok();
     }
 }

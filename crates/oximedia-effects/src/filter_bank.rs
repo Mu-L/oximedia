@@ -102,6 +102,48 @@ impl FilterBand {
         band
     }
 
+    /// Create a low-shelf band: boosts/cuts frequencies below `center_hz`.
+    #[must_use]
+    pub fn low_shelf(center_hz: f32, bandwidth_hz: f32, gain_db: f32, sample_rate: f32) -> Self {
+        let mut band = Self {
+            center_hz,
+            bandwidth_hz_val: bandwidth_hz,
+            gain_db,
+            shape: BandShape::LowShelf,
+            enabled: true,
+            s1: 0.0,
+            s2: 0.0,
+            b0: 1.0,
+            b1: 0.0,
+            b2: 0.0,
+            a1: 0.0,
+            a2: 0.0,
+        };
+        band.recalculate(sample_rate);
+        band
+    }
+
+    /// Create a high-shelf band: boosts/cuts frequencies above `center_hz`.
+    #[must_use]
+    pub fn high_shelf(center_hz: f32, bandwidth_hz: f32, gain_db: f32, sample_rate: f32) -> Self {
+        let mut band = Self {
+            center_hz,
+            bandwidth_hz_val: bandwidth_hz,
+            gain_db,
+            shape: BandShape::HighShelf,
+            enabled: true,
+            s1: 0.0,
+            s2: 0.0,
+            b0: 1.0,
+            b1: 0.0,
+            b2: 0.0,
+            a1: 0.0,
+            a2: 0.0,
+        };
+        band.recalculate(sample_rate);
+        band
+    }
+
     /// Bandwidth in Hz.
     #[must_use]
     pub fn bandwidth_hz(&self) -> f32 {
@@ -162,13 +204,49 @@ impl FilterBand {
                 self.a1 = -2.0 * cos_w0 / a0;
                 self.a2 = (1.0 - alpha) / a0;
             }
-            BandShape::LowShelf | BandShape::HighShelf => {
-                // Flat pass-through for shelf (simplified)
-                self.b0 = 1.0;
-                self.b1 = 0.0;
-                self.b2 = 0.0;
-                self.a1 = 0.0;
-                self.a2 = 0.0;
+            BandShape::LowShelf => {
+                // RBJ Audio-EQ-Cookbook low-shelf filter (Robert Bristow-Johnson,
+                // "Audio EQ Cookbook"). `alpha` is the same Q-derived alpha computed
+                // above (alpha = sin(w0) / (2*Q)); the cookbook permits deriving the
+                // shelf `alpha` from Q directly instead of the alternative
+                // shelf-slope (S) parametrization, while reusing the same
+                // closed-form coefficient formulas below.
+                let a = 10.0_f32.powf(self.gain_db / 40.0);
+                let sqrt_a = a.sqrt();
+                let two_sqrt_a_alpha = 2.0 * sqrt_a * alpha;
+
+                let b0 = a * ((a + 1.0) - (a - 1.0) * cos_w0 + two_sqrt_a_alpha);
+                let b1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cos_w0);
+                let b2 = a * ((a + 1.0) - (a - 1.0) * cos_w0 - two_sqrt_a_alpha);
+                let a0 = (a + 1.0) + (a - 1.0) * cos_w0 + two_sqrt_a_alpha;
+                let a1 = -2.0 * ((a - 1.0) + (a + 1.0) * cos_w0);
+                let a2 = (a + 1.0) + (a - 1.0) * cos_w0 - two_sqrt_a_alpha;
+
+                self.b0 = b0 / a0;
+                self.b1 = b1 / a0;
+                self.b2 = b2 / a0;
+                self.a1 = a1 / a0;
+                self.a2 = a2 / a0;
+            }
+            BandShape::HighShelf => {
+                // RBJ Audio-EQ-Cookbook high-shelf filter; see the `LowShelf` arm
+                // above for the `A`/`alpha` derivation (same cookbook formula set).
+                let a = 10.0_f32.powf(self.gain_db / 40.0);
+                let sqrt_a = a.sqrt();
+                let two_sqrt_a_alpha = 2.0 * sqrt_a * alpha;
+
+                let b0 = a * ((a + 1.0) + (a - 1.0) * cos_w0 + two_sqrt_a_alpha);
+                let b1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cos_w0);
+                let b2 = a * ((a + 1.0) + (a - 1.0) * cos_w0 - two_sqrt_a_alpha);
+                let a0 = (a + 1.0) - (a - 1.0) * cos_w0 + two_sqrt_a_alpha;
+                let a1 = 2.0 * ((a - 1.0) - (a + 1.0) * cos_w0);
+                let a2 = (a + 1.0) - (a - 1.0) * cos_w0 - two_sqrt_a_alpha;
+
+                self.b0 = b0 / a0;
+                self.b1 = b1 / a0;
+                self.b2 = b2 / a0;
+                self.a1 = a1 / a0;
+                self.a2 = a2 / a0;
             }
         }
     }
@@ -402,5 +480,126 @@ mod tests {
         band.recalculate(48000.0);
         // Just verify it processes without panic
         let _ = band.process_sample(0.5);
+    }
+
+    /// DC (z=1) gain of a normalized biquad: (b0+b1+b2) / (1+a1+a2).
+    fn dc_gain(band: &FilterBand) -> f32 {
+        (band.b0 + band.b1 + band.b2) / (1.0 + band.a1 + band.a2)
+    }
+
+    /// Nyquist (z=-1) gain of a normalized biquad: (b0-b1+b2) / (1-a1+a2).
+    fn nyquist_gain(band: &FilterBand) -> f32 {
+        (band.b0 - band.b1 + band.b2) / (1.0 - band.a1 + band.a2)
+    }
+
+    #[test]
+    fn test_low_shelf_gain_db_produces_non_identity_and_correct_dc_gain() {
+        let band = FilterBand::low_shelf(200.0, 100.0, 6.0, 48000.0);
+
+        // Coefficients must not be the old flat pass-through identity
+        // (b0=1, b1=0, b2=0, a1=0, a2=0).
+        assert!(
+            band.b1.abs() > 1e-6 || band.b2.abs() > 1e-6 || band.a1.abs() > 1e-6,
+            "low-shelf coefficients must not be identity for nonzero gain_db: \
+             b0={} b1={} b2={} a1={} a2={}",
+            band.b0,
+            band.b1,
+            band.b2,
+            band.a1,
+            band.a2
+        );
+
+        // +6 dB → linear gain 10^(6/20) ≈ 1.995 (~2x) at DC.
+        let expected_dc = 10.0_f32.powf(6.0 / 20.0);
+        let dc = dc_gain(&band);
+        assert!(
+            (dc - expected_dc).abs() < 0.02,
+            "expected DC gain ≈ {expected_dc} (+6dB ≈ 2x), got {dc}"
+        );
+
+        // A low shelf must leave high frequencies (Nyquist) unaffected (~unity).
+        let ny = nyquist_gain(&band);
+        assert!(
+            (ny - 1.0).abs() < 0.02,
+            "expected Nyquist gain ≈ 1.0 (unaffected), got {ny}"
+        );
+    }
+
+    #[test]
+    fn test_high_shelf_gain_db_produces_non_identity_and_correct_nyquist_gain() {
+        let band = FilterBand::high_shelf(5000.0, 1000.0, 6.0, 48000.0);
+
+        assert!(
+            band.b1.abs() > 1e-6 || band.b2.abs() > 1e-6 || band.a1.abs() > 1e-6,
+            "high-shelf coefficients must not be identity for nonzero gain_db: \
+             b0={} b1={} b2={} a1={} a2={}",
+            band.b0,
+            band.b1,
+            band.b2,
+            band.a1,
+            band.a2
+        );
+
+        // A high shelf must leave low frequencies (DC) unaffected (~unity).
+        let dc = dc_gain(&band);
+        assert!(
+            (dc - 1.0).abs() < 0.02,
+            "expected DC gain ≈ 1.0 (unaffected), got {dc}"
+        );
+
+        // +6 dB → linear gain 10^(6/20) ≈ 1.995 (~2x) at Nyquist.
+        let expected_ny = 10.0_f32.powf(6.0 / 20.0);
+        let ny = nyquist_gain(&band);
+        assert!(
+            (ny - expected_ny).abs() < 0.02,
+            "expected Nyquist gain ≈ {expected_ny} (+6dB ≈ 2x), got {ny}"
+        );
+    }
+
+    #[test]
+    fn test_low_shelf_zero_gain_is_unity() {
+        let band = FilterBand::low_shelf(200.0, 100.0, 0.0, 48000.0);
+        let dc = dc_gain(&band);
+        assert!(
+            (dc - 1.0).abs() < 1e-3,
+            "0 dB low-shelf must be unity gain, got {dc}"
+        );
+    }
+
+    #[test]
+    fn test_high_shelf_zero_gain_is_unity() {
+        let band = FilterBand::high_shelf(5000.0, 1000.0, 0.0, 48000.0);
+        let ny = nyquist_gain(&band);
+        assert!(
+            (ny - 1.0).abs() < 1e-3,
+            "0 dB high-shelf must be unity gain, got {ny}"
+        );
+    }
+
+    #[test]
+    fn test_low_shelf_cut_reduces_dc_gain() {
+        let band = FilterBand::low_shelf(200.0, 100.0, -6.0, 48000.0);
+        let dc = dc_gain(&band);
+        assert!(
+            dc < 1.0,
+            "expected -6dB low shelf to attenuate DC, got {dc}"
+        );
+    }
+
+    #[test]
+    fn test_filter_bank_low_shelf_boosts_near_dc_signal_end_to_end() {
+        // End-to-end check through FilterBank::process_sample (not just the
+        // raw coefficient formula): drive a near-constant (near-DC) input to
+        // steady state and confirm a +12dB low shelf actually boosts it.
+        let mut bank = FilterBank::new(48000.0);
+        bank.add_band(FilterBand::low_shelf(100.0, 50.0, 12.0, 48000.0));
+        let mut out = 0.0;
+        for _ in 0..2000 {
+            out = bank.process_sample(0.3);
+        }
+        assert!(
+            out > 0.3,
+            "expected +12dB low shelf to boost a near-DC signal at steady state, got {out}"
+        );
     }
 }

@@ -1,32 +1,26 @@
 //! VP9 decoder implementation.
+//!
+//! Keyframes (and the show-existing-frame mechanism) decode to real pixels
+//! via the bit-exact intra pipeline in [`crate::vp9::kf`]; inter frames
+//! return an honest [`CodecError::UnsupportedFeature`] until motion
+//! compensation lands — never a fabricated frame.
 
 #![forbid(unsafe_code)]
-#![allow(clippy::match_same_arms)]
-#![allow(clippy::too_many_arguments)]
 #![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(dead_code)]
 
 use crate::error::{CodecError, CodecResult};
-use crate::frame::{FrameType, VideoFrame};
-use crate::reconstruct::{
-    ChromaSubsampling, DecoderPipeline, FrameBuffer, FrameContext as ReconFrameContext,
-    PipelineConfig,
-};
+use crate::frame::{Plane, VideoFrame};
 use crate::traits::{DecoderConfig, VideoDecoder};
-use crate::vp9::coeff_decode::{CoeffContext, CoeffDecoder};
-use crate::vp9::compressed::CompressedHeader;
-use crate::vp9::intra::IntraMode;
-use crate::vp9::partition::{BlockSize, Partition, TxSize};
-use crate::vp9::probability::FrameContext;
-use crate::vp9::segmentation::Segmentation;
+use crate::vp9::kf;
 use crate::vp9::superframe::Superframe;
-use crate::vp9::symbols::SymbolDecoder;
-use crate::vp9::transform::{apply_inverse_transform, CoeffBuffer, TxType};
 use crate::vp9::uncompressed::UncompressedHeader;
 use oximedia_core::{CodecId, PixelFormat, Rational, Timestamp};
 
-/// VP9 decoder with full reconstruction pipeline.
+/// VP9 decoder.
+///
+/// Scope: keyframe / intra-only reconstruction is implemented for 8-bit
+/// 4:2:0 (profile 0) and verified bit-exact against libvpx; inter frames
+/// and other profiles fail honestly.
 #[derive(Debug)]
 pub struct Vp9Decoder {
     #[allow(dead_code)]
@@ -37,16 +31,6 @@ pub struct Vp9Decoder {
     output_queue: Vec<VideoFrame>,
     ref_frames: [Option<VideoFrame>; 8],
     flushing: bool,
-    /// Reconstruction pipeline.
-    pipeline: Option<DecoderPipeline>,
-    /// Frame context for probability tables.
-    frame_context: FrameContext,
-    /// Compressed header state.
-    compressed_header: CompressedHeader,
-    /// Symbol decoder for entropy coding.
-    symbol_decoder: SymbolDecoder,
-    /// Coefficient decoder.
-    coeff_decoder: CoeffDecoder,
     /// Frame counter.
     frame_count: u64,
 }
@@ -66,64 +50,33 @@ impl Vp9Decoder {
             output_queue: Vec::new(),
             ref_frames: Default::default(),
             flushing: false,
-            pipeline: None,
-            frame_context: FrameContext::new(),
-            compressed_header: CompressedHeader::new(),
-            symbol_decoder: SymbolDecoder::new(),
-            coeff_decoder: CoeffDecoder::new(),
             frame_count: 0,
         })
     }
 
-    /// Initializes or reconfigures the reconstruction pipeline.
-    fn init_pipeline(&mut self, width: u32, height: u32, bit_depth: u8) -> CodecResult<()> {
-        let subsampling = match self.output_format {
-            PixelFormat::Yuv420p | PixelFormat::Yuv420p10le | PixelFormat::Yuv420p12le => {
-                ChromaSubsampling::Cs420
-            }
-            PixelFormat::Yuv422p => ChromaSubsampling::Cs422,
-            PixelFormat::Yuv444p => ChromaSubsampling::Cs444,
-            _ => ChromaSubsampling::Cs420,
-        };
-
-        let pipeline_config = PipelineConfig::new(width, height)
-            .with_bit_depth(bit_depth)
-            .with_subsampling(subsampling);
-
-        if let Some(ref mut pipeline) = self.pipeline {
-            pipeline.reconfigure(pipeline_config).map_err(|e| {
-                CodecError::DecoderError(format!("Pipeline reconfigure failed: {e}"))
-            })?;
-        } else {
-            self.pipeline =
-                Some(DecoderPipeline::new(pipeline_config).map_err(|e| {
-                    CodecError::DecoderError(format!("Pipeline creation failed: {e}"))
-                })?);
-        }
-
-        Ok(())
-    }
-
-    /// Decodes a complete frame with full reconstruction.
+    /// Decodes a single (non-superframe) VP9 frame payload.
     fn decode_frame(&mut self, data: &[u8], pts: i64) -> CodecResult<()> {
         let header = UncompressedHeader::parse(data)?;
 
         if header.show_existing_frame {
+            // Re-display a previously decoded reference frame.
             let idx = header.frame_to_show as usize;
             if let Some(ref frame) = self.ref_frames[idx] {
                 let mut output = frame.clone();
                 output.timestamp = Timestamp::new(pts, Rational::new(1, 1000));
                 self.output_queue.push(output);
+                return Ok(());
             }
-            return Ok(());
+            return Err(CodecError::InvalidBitstream(format!(
+                "VP9 show_existing_frame: reference slot {idx} holds no decoded frame"
+            )));
         }
 
-        // Update dimensions and format
+        // Real header-parse results: update stream properties.
         if header.width > 0 && header.height > 0 {
             self.width = header.width;
             self.height = header.height;
         }
-
         self.output_format = match (header.bit_depth, header.subsampling_x, header.subsampling_y) {
             (8, true, true) => PixelFormat::Yuv420p,
             (8, true, false) => PixelFormat::Yuv422p,
@@ -133,298 +86,71 @@ impl Vp9Decoder {
             _ => PixelFormat::Yuv420p,
         };
 
-        // Initialize pipeline if needed
-        self.init_pipeline(self.width, self.height, header.bit_depth)?;
+        if !header.is_keyframe() {
+            if header.is_intra_only() {
+                // TODO(0.2.x): decode intra-only frames. Their pixel path is
+                // the same as keyframes (already implemented in `kf`), but
+                // they read `frame_context_idx` contexts that preceding
+                // inter frames may have adapted — requires the inter decode
+                // (or at least full context adaptation tracking) first.
+                return Err(CodecError::UnsupportedFeature(
+                    "VP9 intra-only frame decode requires inter-frame context \
+                     tracking (not yet implemented); keyframes decode"
+                        .to_string(),
+                ));
+            }
+            // TODO(0.2.x): VP9 inter-frame decode — motion-vector /
+            // ref-frame syntax (vp9_decodemv.c inter path), eighth-pel
+            // motion compensation with the four interp filter sets, compound
+            // prediction, and backward probability adaptation
+            // (vp9_adapt_coef_probs et al) for !frame_parallel streams.
+            return Err(CodecError::UnsupportedFeature(
+                "VP9 inter-frame decode not yet implemented; keyframes decode".to_string(),
+            ));
+        }
 
-        // Setup reconstruction context
-        let mut recon_context = ReconFrameContext::new(self.width, self.height);
-        recon_context.bit_depth = header.bit_depth;
-        recon_context.is_keyframe = header.is_keyframe();
-        recon_context.show_frame = header.show_frame;
-        recon_context.decode_order = self.frame_count;
-        recon_context.display_order = self.frame_count; // Simplified
-
-        // Process frame through pipeline
-        let frame_buffer = if let Some(ref mut pipeline) = self.pipeline {
-            pipeline
-                .process_frame(data, &recon_context)
-                .map_err(|e| CodecError::DecoderError(format!("Pipeline processing failed: {e}")))?
-        } else {
-            return Err(CodecError::DecoderError("Pipeline not initialized".into()));
-        };
-
-        // Convert FrameBuffer to VideoFrame
-        let mut frame = self.frame_buffer_to_video_frame(frame_buffer)?;
+        let decoded = kf::decode_keyframe(&header, data)?;
+        let mut frame = Self::planes_to_video_frame(&header, &decoded);
         frame.timestamp = Timestamp::new(pts, Rational::new(1, 1000));
-        frame.frame_type = if header.is_keyframe() {
-            FrameType::Key
-        } else {
-            FrameType::Inter
-        };
+        self.frame_count += 1;
 
-        // Update reference frames
-        for i in 0..8 {
+        // Keyframes refresh all reference slots (refresh_frame_flags 0xFF).
+        for (i, slot) in self.ref_frames.iter_mut().enumerate() {
             if header.refresh_frame_flags & (1 << i) != 0 {
-                self.ref_frames[i] = Some(frame.clone());
+                *slot = Some(frame.clone());
             }
         }
 
-        // Add to output queue if showing
         if header.show_frame {
             self.output_queue.push(frame);
         }
-
-        self.frame_count += 1;
-
         Ok(())
     }
 
-    /// Converts FrameBuffer to VideoFrame.
-    fn frame_buffer_to_video_frame(&self, buffer: FrameBuffer) -> CodecResult<VideoFrame> {
-        use crate::frame::Plane;
-        let mut frame = VideoFrame::new(self.output_format, buffer.width(), buffer.height());
+    /// Crops the MI-aligned reconstruction planes to display size and
+    /// assembles a [`VideoFrame`].
+    fn planes_to_video_frame(
+        header: &UncompressedHeader,
+        decoded: &kf::DecodedIntraFrame,
+    ) -> VideoFrame {
+        let w = decoded.width;
+        let h = decoded.height;
+        let cw = w.div_ceil(2);
+        let ch = h.div_ceil(2);
 
-        // Convert Y plane
-        let y_data = buffer.y_plane().to_u8();
-        let y_stride = buffer.y_plane().width() as usize;
-        frame.planes.push(Plane::new(y_data, y_stride));
-
-        // Convert U plane if present
-        if let Some(u_plane) = buffer.u_plane() {
-            let u_data = u_plane.to_u8();
-            let u_stride = u_plane.width() as usize;
-            frame.planes.push(Plane::new(u_data, u_stride));
-        }
-
-        // Convert V plane if present
-        if let Some(v_plane) = buffer.v_plane() {
-            let v_data = v_plane.to_u8();
-            let v_stride = v_plane.width() as usize;
-            frame.planes.push(Plane::new(v_data, v_stride));
-        }
-
-        Ok(frame)
-    }
-
-    /// Decodes a superblock (64x64).
-    fn decode_superblock(
-        &mut self,
-        data: &[u8],
-        x: usize,
-        y: usize,
-        output: &mut FrameBuffer,
-    ) -> CodecResult<()> {
-        // Decode partition for this superblock
-        let partition = self
-            .symbol_decoder
-            .decode_partition(data, &self.frame_context, 0)?;
-
-        match partition {
-            Partition::None => {
-                // Decode single 64x64 block
-                self.decode_block(data, x, y, BlockSize::Block64x64, output)?;
+        let mut frame = VideoFrame::new(PixelFormat::Yuv420p, header.width, header.height);
+        let dims = [(w, h), (cw, ch), (cw, ch)];
+        for (plane, &(pw, ph)) in decoded.planes.iter().zip(dims.iter()) {
+            let mut data = Vec::with_capacity(pw * ph);
+            for row in 0..ph {
+                let start = row * plane.stride;
+                data.extend_from_slice(&plane.data[start..start + pw]);
             }
-            Partition::Split => {
-                // Recursively decode 4x 32x32 blocks
-                for i in 0..4 {
-                    let bx = x + ((i & 1) * 32);
-                    let by = y + ((i >> 1) * 32);
-                    self.decode_block(data, bx, by, BlockSize::Block32x32, output)?;
-                }
-            }
-            Partition::Horz => {
-                // Decode 2x horizontal blocks
-                self.decode_block(data, x, y, BlockSize::Block64x32, output)?;
-                self.decode_block(data, x, y + 32, BlockSize::Block64x32, output)?;
-            }
-            Partition::Vert => {
-                // Decode 2x vertical blocks
-                self.decode_block(data, x, y, BlockSize::Block32x64, output)?;
-                self.decode_block(data, x + 32, y, BlockSize::Block32x64, output)?;
-            }
+            frame
+                .planes
+                .push(Plane::with_dimensions(data, pw, pw as u32, ph as u32));
         }
-
-        Ok(())
-    }
-
-    /// Decodes a single block.
-    fn decode_block(
-        &mut self,
-        data: &[u8],
-        x: usize,
-        y: usize,
-        block_size: BlockSize,
-        output: &mut FrameBuffer,
-    ) -> CodecResult<()> {
-        // Decode skip flag
-        let skip = self
-            .symbol_decoder
-            .decode_skip(data, &self.frame_context, 0)?;
-
-        if skip {
-            // Skip block - copy from reference or fill with DC
-            return Ok(());
-        }
-
-        // Decode intra vs inter
-        let is_inter = self
-            .symbol_decoder
-            .decode_is_inter(data, &self.frame_context, 0)?;
-
-        if is_inter {
-            // Inter prediction
-            self.decode_inter_block(data, x, y, block_size, output)?;
-        } else {
-            // Intra prediction
-            self.decode_intra_block(data, x, y, block_size, output)?;
-        }
-
-        Ok(())
-    }
-
-    /// Decodes an intra-predicted block.
-    fn decode_intra_block(
-        &mut self,
-        data: &[u8],
-        x: usize,
-        y: usize,
-        block_size: BlockSize,
-        output: &mut FrameBuffer,
-    ) -> CodecResult<()> {
-        // Decode intra mode
-        let y_mode = self.symbol_decoder.decode_intra_y_mode_kf(
-            data,
-            &self.frame_context,
-            0, // above mode
-            0, // left mode
-        )?;
-
-        // Get transform size
-        let tx_size = self.get_tx_size_for_block(block_size);
-
-        // Decode coefficients and apply transform
-        self.decode_and_transform(data, x, y, tx_size, output)?;
-
-        // Apply intra prediction
-        self.apply_intra_prediction(x, y, block_size, y_mode, output)?;
-
-        Ok(())
-    }
-
-    /// Decodes an inter-predicted block.
-    fn decode_inter_block(
-        &mut self,
-        data: &[u8],
-        x: usize,
-        y: usize,
-        block_size: BlockSize,
-        output: &mut FrameBuffer,
-    ) -> CodecResult<()> {
-        // Decode inter mode
-        let inter_mode = self
-            .symbol_decoder
-            .decode_inter_mode(data, &self.frame_context, 0)?;
-
-        // Decode motion vector if needed
-        if inter_mode.requires_mv_delta() {
-            let _mv = self
-                .symbol_decoder
-                .decode_mv(data, &self.frame_context, false)?;
-            // Motion compensation would be applied here
-        }
-
-        // Get transform size
-        let tx_size = self.get_tx_size_for_block(block_size);
-
-        // Decode residual coefficients and apply transform
-        self.decode_and_transform(data, x, y, tx_size, output)?;
-
-        Ok(())
-    }
-
-    /// Decodes coefficients and applies inverse transform.
-    fn decode_and_transform(
-        &mut self,
-        data: &[u8],
-        x: usize,
-        y: usize,
-        tx_size: TxSize,
-        output: &mut FrameBuffer,
-    ) -> CodecResult<()> {
-        let mut coeffs = CoeffBuffer::for_size(tx_size);
-        let mut coeff_ctx = CoeffContext::new(0, tx_size);
-
-        // Decode coefficients for Y plane
-        self.coeff_decoder.decode_block(
-            data,
-            &mut coeffs,
-            &self.frame_context,
-            &mut coeff_ctx,
-            &self.compressed_header.segmentation.segments[0],
-            x,
-            y,
-        )?;
-
-        // Apply inverse transform to output buffer
-        let y_plane = output.y_plane_mut();
-        let stride = y_plane.stride();
-        let pixel_offset = y * stride + x;
-
-        if pixel_offset < y_plane.data().len() {
-            // Create mutable slice for transform output
-            let data_mut = y_plane.data_mut();
-            let mut temp_output = vec![0u8; tx_size.size() * tx_size.size()];
-
-            // Apply transform
-            apply_inverse_transform(
-                &coeffs,
-                &mut temp_output,
-                tx_size.size(),
-                tx_size,
-                TxType::DctDct,
-            );
-
-            // Copy transformed data to output
-            let size = tx_size.size();
-            for row in 0..size {
-                let src_start = row * size;
-                let dst_start = pixel_offset + row * stride;
-                if dst_start + size <= data_mut.len() {
-                    for col in 0..size {
-                        data_mut[dst_start + col] =
-                            temp_output[src_start + col].clamp(0, 255) as i16;
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Applies intra prediction to a block.
-    fn apply_intra_prediction(
-        &mut self,
-        _x: usize,
-        _y: usize,
-        _block_size: BlockSize,
-        _mode: IntraMode,
-        _output: &mut FrameBuffer,
-    ) -> CodecResult<()> {
-        // Intra prediction implementation
-        // This would use the mode to predict from neighboring pixels
-        Ok(())
-    }
-
-    /// Gets transform size for a block size.
-    fn get_tx_size_for_block(&self, block_size: BlockSize) -> TxSize {
-        match block_size {
-            BlockSize::Block4x4 | BlockSize::Block4x8 | BlockSize::Block8x4 => TxSize::Tx4x4,
-            BlockSize::Block8x8 | BlockSize::Block8x16 | BlockSize::Block16x8 => TxSize::Tx8x8,
-            BlockSize::Block16x16 | BlockSize::Block16x32 | BlockSize::Block32x16 => {
-                TxSize::Tx16x16
-            }
-            _ => TxSize::Tx32x32,
-        }
+        frame
     }
 
     /// Returns the number of pending output frames.
@@ -557,5 +283,76 @@ mod tests {
         decoder.flush().expect("should succeed");
         let result = decoder.send_packet(&[0x80], 0);
         assert!(result.is_err());
+    }
+
+    /// Real libvpx-vp9 keyframe (76x42, crf 24) — must decode to real
+    /// pixels through the public `VideoDecoder` API and match the
+    /// libvpx/ffmpeg reference decode bit-exactly.
+    #[test]
+    fn test_decode_real_keyframe_bit_exact() {
+        const IVF_FRAME: &[u8] = include_bytes!("kf/testdata/kf76x42.frame0.bin");
+        const REF_YUV: &[u8] = include_bytes!("kf/testdata/ref76x42.yuv");
+
+        let config = DecoderConfig::default();
+        let mut decoder = Vp9Decoder::new(config).expect("should succeed");
+        decoder.send_packet(IVF_FRAME, 0).expect("keyframe decodes");
+
+        assert_eq!(decoder.dimensions(), Some((76, 42)));
+        assert_eq!(decoder.output_format(), Some(PixelFormat::Yuv420p));
+
+        let frame = decoder
+            .receive_frame()
+            .expect("should succeed")
+            .expect("one frame output");
+        assert_eq!(frame.planes.len(), 3);
+        assert_eq!(frame.planes[0].data.len(), 76 * 42);
+        assert_eq!(frame.planes[1].data.len(), 38 * 21);
+        assert_eq!(frame.planes[2].data.len(), 38 * 21);
+
+        let expected_y = &REF_YUV[..76 * 42];
+        let expected_u = &REF_YUV[76 * 42..76 * 42 + 38 * 21];
+        let expected_v = &REF_YUV[76 * 42 + 38 * 21..];
+        assert_eq!(frame.planes[0].data.as_slice(), expected_y, "Y plane");
+        assert_eq!(frame.planes[1].data.as_slice(), expected_u, "U plane");
+        assert_eq!(frame.planes[2].data.as_slice(), expected_v, "V plane");
+    }
+
+    /// A real libvpx-vp9 INTER frame (frame 1 of a 3-frame encode) must
+    /// return an honest `UnsupportedFeature` error, never fabricated
+    /// pixels.
+    #[test]
+    fn test_inter_frame_returns_honest_unsupported_error() {
+        const INTER_FRAME: &[u8] = include_bytes!("kf/testdata/seq76x42.frame1.bin");
+
+        let config = DecoderConfig::default();
+        let mut decoder = Vp9Decoder::new(config).expect("should succeed");
+        let result = decoder.send_packet(INTER_FRAME, 0);
+        match result {
+            Err(CodecError::UnsupportedFeature(msg)) => {
+                assert!(
+                    msg.contains("inter-frame decode not yet implemented"),
+                    "unexpected message: {msg}"
+                );
+            }
+            other => panic!("expected honest UnsupportedFeature, got {other:?}"),
+        }
+        let frame = decoder.receive_frame().expect("should succeed");
+        assert!(frame.is_none(), "no fabricated frame may be output");
+    }
+
+    /// A truncated keyframe header must fail parsing — and must never
+    /// produce a fabricated blank frame (regression guard for the old
+    /// silent-blank-frame bug).
+    #[test]
+    fn test_truncated_keyframe_errors_without_blank_frame() {
+        // 9 bytes: valid start of a 64x64 keyframe header, truncated before
+        // the loop-filter/quant/tile sections.
+        const TRUNCATED: [u8; 9] = [0x82, 0x49, 0x83, 0x42, 0x20, 0x03, 0xF0, 0x03, 0xF0];
+
+        let config = DecoderConfig::default();
+        let mut decoder = Vp9Decoder::new(config).expect("should succeed");
+        assert!(decoder.send_packet(&TRUNCATED, 0).is_err());
+        let frame = decoder.receive_frame().expect("should succeed");
+        assert!(frame.is_none(), "no fabricated blank frame may be output");
     }
 }

@@ -5,8 +5,14 @@
 //!
 //! ## Features
 //!
-//! - **Format Probing**: Detect container formats from raw bytes
-//! - **Container Demuxing**: Extract packets from `WebM`, Matroska, Ogg, FLAC, WAV
+//! - **Format Probing**: Detect container formats from raw bytes (real
+//!   magic-byte sniffing), plus dependency-free content hashing
+//!   (`probe_hash`)
+//! - **Container Demuxing**: `WasmDemuxer`/`WasmStreamingDemuxer` scaffolding
+//!   for `WebM`, Matroska, Ogg, FLAC, WAV, MP4 -- format detection is real;
+//!   full per-container packet extraction is not wired in yet and honestly
+//!   errors rather than fabricating streams/packets (see `demuxer.rs` and
+//!   `streaming_demuxer.rs` module docs)
 //! - **Audio Decoding**: FLAC, Vorbis, and Opus decoders
 //! - **Video Decoding**: VP8 decoder outputting YUV420 planar data
 //! - **Audio Analysis**: Loudness measurement (EBU R128), beat detection, spectral features
@@ -25,10 +31,20 @@
 //! const result = oximedia.probe_format(data);
 //! console.log('Format:', result.format, 'Confidence:', result.confidence);
 //!
-//! // Demux a file
+//! // Hash the full file (real CRC-32 / FNV-1a digests, not fabricated)
+//! const hash = oximedia.probe_hash(data);
+//! console.log('CRC32:', hash.crc32());
+//!
+//! // Demux a file. NOTE: full per-container parsing is not wired in yet
+//! // for any format -- probe() currently always throws (see demuxer.rs
+//! // module docs), so real callers must catch the rejection.
 //! const demuxer = new oximedia.WasmDemuxer(data);
-//! const probe = demuxer.probe();
-//! const streams = demuxer.streams();
+//! try {
+//!     const probe = demuxer.probe();
+//!     const streams = demuxer.streams();
+//! } catch (e) {
+//!     console.error('Full demux not yet available for this build:', e);
+//! }
 //!
 //! // Decode audio
 //! const decoder = new oximedia.WasmFlacDecoder();
@@ -286,7 +302,7 @@ pub use presets_wasm::{
     wasm_get_preset, wasm_list_encoding_presets, wasm_merge_presets, wasm_preset_names,
     wasm_validate_preset,
 };
-pub use probe::{probe_format, WasmProbeResult};
+pub use probe::{probe_format, probe_hash, WasmHashResult, WasmProbeResult};
 pub use profiler_wasm::{
     wasm_benchmark_codec, wasm_bottleneck_report, wasm_profile_operation, wasm_profiling_modes,
 };

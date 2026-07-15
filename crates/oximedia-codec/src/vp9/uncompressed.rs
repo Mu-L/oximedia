@@ -130,6 +130,119 @@ pub struct UncompressedHeader {
     pub subsampling_y: bool,
     /// Bit depth (8, 10, or 12).
     pub bit_depth: u8,
+    /// Refresh frame context flag.
+    pub refresh_frame_context: bool,
+    /// Frame parallel decoding mode.
+    pub frame_parallel_decoding: bool,
+    /// Frame context index (0..=3).
+    pub frame_context_idx: u8,
+    /// Loop filter parameters.
+    pub loop_filter: LoopFilterHeader,
+    /// Quantization parameters.
+    pub quant: QuantHeader,
+    /// Segmentation parameters.
+    pub seg: SegmentationHeader,
+    /// log2 of tile columns.
+    pub tile_cols_log2: u8,
+    /// log2 of tile rows.
+    pub tile_rows_log2: u8,
+    /// Size of the compressed header in bytes (`header_size_in_bytes`).
+    pub compressed_header_size: u16,
+    /// Byte size of the uncompressed header (offset of the compressed
+    /// header within the frame payload).
+    pub uncompressed_header_bytes: usize,
+}
+
+/// Loop filter fields of the uncompressed header (spec `loop_filter_params`).
+///
+/// For keyframes the mode/ref deltas start from the
+/// `vp9_setup_past_independence` defaults (`set_default_lf_deltas`:
+/// ref `[1, 0, -1, -1]`, mode `[0, 0]`) and are then optionally updated.
+#[derive(Clone, Debug)]
+pub struct LoopFilterHeader {
+    /// Base filter level (0..=63).
+    pub filter_level: u8,
+    /// Sharpness level (0..=7).
+    pub sharpness: u8,
+    /// Mode/ref delta enabled flag.
+    pub delta_enabled: bool,
+    /// Reference deltas (INTRA, LAST, GOLDEN, ALTREF).
+    pub ref_deltas: [i8; 4],
+    /// Mode deltas.
+    pub mode_deltas: [i8; 2],
+}
+
+impl Default for LoopFilterHeader {
+    fn default() -> Self {
+        Self {
+            filter_level: 0,
+            sharpness: 0,
+            delta_enabled: true,
+            ref_deltas: [1, 0, -1, -1],
+            mode_deltas: [0, 0],
+        }
+    }
+}
+
+/// Quantization fields of the uncompressed header.
+#[derive(Clone, Debug, Default)]
+pub struct QuantHeader {
+    /// Base quantizer index.
+    pub base_q_idx: u8,
+    /// Luma DC delta.
+    pub y_dc_delta: i32,
+    /// Chroma DC delta.
+    pub uv_dc_delta: i32,
+    /// Chroma AC delta.
+    pub uv_ac_delta: i32,
+}
+
+impl QuantHeader {
+    /// True when the frame is lossless (all-zero quantizer state).
+    #[must_use]
+    pub fn lossless(&self) -> bool {
+        self.base_q_idx == 0
+            && self.y_dc_delta == 0
+            && self.uv_dc_delta == 0
+            && self.uv_ac_delta == 0
+    }
+}
+
+/// Segmentation fields of the uncompressed header.
+#[derive(Clone, Debug)]
+pub struct SegmentationHeader {
+    /// Segmentation enabled.
+    pub enabled: bool,
+    /// Segment map update flag.
+    pub update_map: bool,
+    /// Segment tree probabilities.
+    pub tree_probs: [u8; 7],
+    /// Temporal update flag.
+    pub temporal_update: bool,
+    /// Prediction probabilities (temporal updates).
+    pub pred_probs: [u8; 3],
+    /// Absolute (vs delta) feature values.
+    pub abs_delta: bool,
+    /// Per-segment feature enable flags: `[segment][feature]` with features
+    /// ALT_Q, ALT_LF, REF_FRAME, SKIP.
+    pub feature_enabled: [[bool; 4]; 8],
+    /// Per-segment feature data.
+    pub feature_data: [[i16; 4]; 8],
+}
+
+impl Default for SegmentationHeader {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            update_map: false,
+            tree_probs: [255; 7],
+            temporal_update: false,
+            pred_probs: [255; 3],
+            abs_delta: false,
+            feature_enabled: [[false; 4]; 8],
+            feature_data: [[0; 4]; 8],
+        }
+    }
 }
 
 impl UncompressedHeader {
@@ -224,7 +337,187 @@ impl UncompressedHeader {
             }
         }
 
+        if header.error_resilient {
+            header.refresh_frame_context = false;
+            header.frame_parallel_decoding = true;
+        } else {
+            header.refresh_frame_context = reader.read_bit().map_err(CodecError::Core)? != 0;
+            header.frame_parallel_decoding = reader.read_bit().map_err(CodecError::Core)? != 0;
+        }
+        header.frame_context_idx = reader.read_bits(2).map_err(CodecError::Core)? as u8;
+
+        Self::parse_loop_filter(&mut reader, &mut header)?;
+        Self::parse_quantization(&mut reader, &mut header)?;
+        Self::parse_segmentation(&mut reader, &mut header)?;
+        Self::parse_tile_info(&mut reader, &mut header)?;
+
+        header.compressed_header_size = reader.read_bits(16).map_err(CodecError::Core)? as u16;
+        if header.compressed_header_size == 0 {
+            return Err(CodecError::InvalidBitstream(
+                "VP9: zero compressed header size".into(),
+            ));
+        }
+
+        // trailing_bits(): the uncompressed header is padded to a byte
+        // boundary; the compressed header starts at the next byte.
+        header.uncompressed_header_bytes = reader.bits_read().div_ceil(8);
+
         Ok(header)
+    }
+
+    /// Reads `su(bits)`: magnitude then sign (libvpx
+    /// `vpx_rb_read_signed_literal`).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    fn read_signed_literal(reader: &mut BitReader<'_>, bits: u8) -> CodecResult<i32> {
+        let value = reader.read_bits(bits).map_err(CodecError::Core)? as i32;
+        Ok(if reader.read_bit().map_err(CodecError::Core)? != 0 {
+            -value
+        } else {
+            value
+        })
+    }
+
+    /// Spec `loop_filter_params()` (libvpx `setup_loopfilter`).
+    #[allow(clippy::cast_possible_truncation)]
+    fn parse_loop_filter(reader: &mut BitReader<'_>, header: &mut Self) -> CodecResult<()> {
+        let lf = &mut header.loop_filter;
+        lf.filter_level = reader.read_bits(6).map_err(CodecError::Core)? as u8;
+        lf.sharpness = reader.read_bits(3).map_err(CodecError::Core)? as u8;
+        lf.delta_enabled = reader.read_bit().map_err(CodecError::Core)? != 0;
+        if lf.delta_enabled {
+            let delta_update = reader.read_bit().map_err(CodecError::Core)? != 0;
+            if delta_update {
+                for i in 0..4 {
+                    if reader.read_bit().map_err(CodecError::Core)? != 0 {
+                        lf.ref_deltas[i] = Self::read_signed_literal(reader, 6)? as i8;
+                    }
+                }
+                for i in 0..2 {
+                    if reader.read_bit().map_err(CodecError::Core)? != 0 {
+                        lf.mode_deltas[i] = Self::read_signed_literal(reader, 6)? as i8;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Spec `quantization_params()` (libvpx `setup_quantization`).
+    #[allow(clippy::cast_possible_truncation)]
+    fn parse_quantization(reader: &mut BitReader<'_>, header: &mut Self) -> CodecResult<()> {
+        header.quant.base_q_idx = reader.read_bits(8).map_err(CodecError::Core)? as u8;
+        header.quant.y_dc_delta = Self::read_delta_q(reader)?;
+        header.quant.uv_dc_delta = Self::read_delta_q(reader)?;
+        header.quant.uv_ac_delta = Self::read_delta_q(reader)?;
+        Ok(())
+    }
+
+    fn read_delta_q(reader: &mut BitReader<'_>) -> CodecResult<i32> {
+        if reader.read_bit().map_err(CodecError::Core)? != 0 {
+            Self::read_signed_literal(reader, 4)
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// Spec `segmentation_params()` (libvpx `setup_segmentation`).
+    #[allow(clippy::cast_possible_truncation)]
+    fn parse_segmentation(reader: &mut BitReader<'_>, header: &mut Self) -> CodecResult<()> {
+        /// Bits per feature value (`vp9_seg_feature_data_max` bit widths for
+        /// ALT_Q=255, ALT_LF=63, REF_FRAME=3, SKIP=0).
+        const FEATURE_BITS: [u8; 4] = [8, 6, 2, 0];
+        /// Maximum feature values.
+        const FEATURE_MAX: [i32; 4] = [255, 63, 3, 0];
+        /// Signedness per feature.
+        const FEATURE_SIGNED: [bool; 4] = [true, true, false, false];
+
+        let seg = &mut header.seg;
+        seg.enabled = reader.read_bit().map_err(CodecError::Core)? != 0;
+        if !seg.enabled {
+            return Ok(());
+        }
+
+        seg.update_map = reader.read_bit().map_err(CodecError::Core)? != 0;
+        if seg.update_map {
+            for p in &mut seg.tree_probs {
+                *p = if reader.read_bit().map_err(CodecError::Core)? != 0 {
+                    reader.read_bits(8).map_err(CodecError::Core)? as u8
+                } else {
+                    255
+                };
+            }
+            seg.temporal_update = reader.read_bit().map_err(CodecError::Core)? != 0;
+            for p in &mut seg.pred_probs {
+                *p = if seg.temporal_update && reader.read_bit().map_err(CodecError::Core)? != 0 {
+                    reader.read_bits(8).map_err(CodecError::Core)? as u8
+                } else {
+                    255
+                };
+            }
+        }
+
+        if reader.read_bit().map_err(CodecError::Core)? != 0 {
+            // update_data
+            seg.abs_delta = reader.read_bit().map_err(CodecError::Core)? != 0;
+            for s in 0..8 {
+                for f in 0..4 {
+                    let enabled = reader.read_bit().map_err(CodecError::Core)? != 0;
+                    seg.feature_enabled[s][f] = enabled;
+                    let mut data = 0i32;
+                    if enabled {
+                        if FEATURE_BITS[f] > 0 {
+                            data = reader
+                                .read_bits(FEATURE_BITS[f])
+                                .map_err(CodecError::Core)?
+                                as i32;
+                            if data > FEATURE_MAX[f] {
+                                data = FEATURE_MAX[f];
+                            }
+                        }
+                        if FEATURE_SIGNED[f] && reader.read_bit().map_err(CodecError::Core)? != 0 {
+                            data = -data;
+                        }
+                    }
+                    seg.feature_data[s][f] = data as i16;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Spec `tile_info()` (libvpx `setup_tile_info` / `vp9_get_tile_n_bits`).
+    fn parse_tile_info(reader: &mut BitReader<'_>, header: &mut Self) -> CodecResult<()> {
+        let mi_cols = (header.width as usize + 7) >> 3;
+        let sb64_cols = (mi_cols + 7) >> 3;
+
+        let mut min_log2 = 0u8;
+        while (64usize << min_log2) < sb64_cols {
+            min_log2 += 1;
+        }
+        let mut max_log2 = 1u8;
+        while (sb64_cols >> max_log2) >= 4 {
+            max_log2 += 1;
+        }
+        max_log2 -= 1;
+
+        header.tile_cols_log2 = min_log2;
+        let mut max_ones = max_log2.saturating_sub(min_log2);
+        while max_ones > 0 && reader.read_bit().map_err(CodecError::Core)? != 0 {
+            header.tile_cols_log2 += 1;
+            max_ones -= 1;
+        }
+        if header.tile_cols_log2 > 6 {
+            return Err(CodecError::InvalidBitstream(
+                "VP9: invalid number of tile columns".into(),
+            ));
+        }
+
+        header.tile_rows_log2 = if reader.read_bit().map_err(CodecError::Core)? != 0 {
+            1 + reader.read_bit().map_err(CodecError::Core)? as u8
+        } else {
+            0
+        };
+        Ok(())
     }
 
     #[allow(clippy::cast_possible_truncation)]

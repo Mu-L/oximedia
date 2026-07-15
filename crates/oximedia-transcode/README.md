@@ -6,7 +6,7 @@ High-level transcoding pipeline for OxiMedia with professional features and indu
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.9 — 2026-07-08 — extensively tested
+Version: 0.2.0 — 2026-07-15 — extensively tested
 
 ## Features
 

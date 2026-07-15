@@ -14,33 +14,47 @@
 //! [`read_packet`](WasmStreamingDemuxer::read_packet).  The demuxer signals
 //! "not enough data yet" by returning `null` from `read_packet`.
 //!
+//! # Honesty contract
+//!
+//! Like [`WasmDemuxer`](crate::demuxer::WasmDemuxer) (see its module docs
+//! for the concrete real-parser path), this never fabricates stream or
+//! packet data. Real per-container header/frame parsing is not wired in
+//! for any format yet, so [`read_packet`](WasmStreamingDemuxer::read_packet)
+//! returns `null` while there is genuinely not enough data buffered to
+//! attempt a probe, and honestly throws once enough bytes have accumulated
+//! to attempt one -- it never invents a stream list or wraps an arbitrary
+//! byte window in a fake packet.
+//!
 //! # JavaScript Example
 //!
 //! ```javascript
 //! import * as oximedia from 'oximedia-wasm';
 //!
 //! const sd = new oximedia.WasmStreamingDemuxer("webm");
-//! for await (const chunk of response.body) {
-//!     sd.append_data(chunk);
-//!     let packet;
-//!     while ((packet = sd.read_packet()) !== null) {
-//!         console.log('Packet size:', packet.size());
+//! try {
+//!     for await (const chunk of response.body) {
+//!         sd.append_data(chunk);
+//!         let packet;
+//!         while ((packet = sd.read_packet()) !== null) {
+//!             console.log('Packet size:', packet.size());
+//!         }
 //!     }
+//!     sd.flush();
+//! } catch (e) {
+//!     // Expected today: full per-container demux is not wired in yet
+//!     // (see module docs), so `read_packet` throws once enough bytes
+//!     // have accumulated to attempt a real probe.
+//!     console.error('Full demux not yet available for this build:', e);
 //! }
-//! sd.flush();
 //! ```
 
 use wasm_bindgen::prelude::*;
 
-use crate::container::{ContainerFormat, Packet, PacketFlags};
+use crate::container::ContainerFormat;
 use crate::types::{WasmPacket, WasmStreamInfo};
-use bytes::Bytes;
 
 // ---------------------------------------------------------------------------
 // Internal ring-buffer of chunks
-
-/// Minimum number of bytes we need before attempting a packet read.
-const MIN_BYTES_FOR_PACKET: usize = 64;
 
 /// Maximum number of bytes we buffer before forcing a read.
 ///
@@ -79,11 +93,11 @@ pub struct WasmStreamingDemuxer {
     format: ContainerFormat,
     /// Whether `probe()` has been completed (i.e. we have seen enough header bytes).
     probed: bool,
-    /// Streams discovered during probing.
+    /// Streams discovered during probing. Always empty today -- see the
+    /// module-level "Honesty contract" docs.
     streams: Vec<WasmStreamInfo>,
-    /// Presentation timestamp counter (incremented per packet).
-    pts_counter: i64,
-    /// Packet sequence counter.
+    /// Packet sequence counter. Always `0` today since no packet is ever
+    /// really demuxed yet -- see the module-level "Honesty contract" docs.
     packet_count: u64,
     /// Whether `flush()` has been called — no more data will arrive.
     flushed: bool,
@@ -112,7 +126,6 @@ impl WasmStreamingDemuxer {
             format,
             probed: false,
             streams: Vec::new(),
-            pts_counter: 0,
             packet_count: 0,
             flushed: false,
         })
@@ -216,125 +229,58 @@ impl WasmStreamingDemuxer {
     }
 
     /// Inner impl of `read_packet` — returns `String` error, no `JsValue`.
+    ///
+    /// # Honesty contract
+    ///
+    /// Never fabricates a packet. [`try_probe`](Self::try_probe) never
+    /// actually sets `probed = true` today (real per-container parsing is
+    /// not wired in), so this deliberately has no code path that can wrap
+    /// a raw byte window in a fake `Packet` -- the previous implementation
+    /// did exactly that (a format-aware but content-blind byte-chunking
+    /// heuristic with a synthetic incrementing PTS).
     fn read_packet_inner(&mut self) -> Result<Option<WasmPacket>, String> {
         if !self.probed {
             self.try_probe()?;
-            if !self.probed {
-                return Ok(None);
-            }
         }
-
-        let available = self.buffer.len().saturating_sub(self.read_cursor);
-
-        if available < MIN_BYTES_FOR_PACKET {
-            if self.flushed && available > 0 {
-                return self.emit_packet_of_size(available);
-            }
-            return Ok(None);
-        }
-
-        let packet_size = self.next_packet_size(available);
-        self.emit_packet_of_size(packet_size)
+        // `try_probe` above either returned `Err` (enough bytes to attempt
+        // a probe, but real per-container header parsing is not wired in
+        // yet) or left `probed == false` (not enough bytes buffered to
+        // even attempt it, i.e. genuinely "keep streaming, ask again
+        // later"). Either way `probed` can never be `true` here, so there
+        // is nothing honest left to return except "still waiting".
+        Ok(None)
     }
 
-    /// Attempt to probe the container format from accumulated header bytes.
+    /// Attempts to probe the container format from accumulated header
+    /// bytes.
+    ///
+    /// # Honesty contract
+    ///
+    /// Never fabricates a stream list. The previous implementation
+    /// invented a hardcoded stream set per format (e.g. always guessing a
+    /// VP9 video + Opus audio pair for Matroska/WebM, regardless of the
+    /// container's actual tracks), which is exactly the kind of fabricated
+    /// success this WASM binding must not produce. Real per-container
+    /// header parsing is not wired in yet (see
+    /// [`WasmDemuxer`](crate::demuxer::WasmDemuxer)'s module docs for the
+    /// concrete real-parser path), so once enough bytes have accumulated
+    /// to plausibly attempt a probe, this honestly reports failure instead.
+    ///
+    /// TODO(0.2.x): wire real per-container header parsing once
+    /// `oximedia-container`'s in-memory demuxers become a dependency of
+    /// this crate.
     fn try_probe(&mut self) -> Result<(), String> {
-        // We need at least 32 bytes to reliably detect and parse headers.
+        // Wait for enough bytes before even attempting -- with too little
+        // data buffered we genuinely don't know anything yet, which is
+        // different from "we know we can't parse this build."
         if self.buffer.len() < 32 {
             return Ok(());
         }
 
-        // Build stream list based on format.
-        use crate::container::StreamInfo;
-        use oximedia_core::{CodecId, Rational};
-
-        let streams = match self.format {
-            ContainerFormat::Matroska => {
-                let video = StreamInfo::new(0, CodecId::Vp9, Rational::new(1, 1_000));
-                let audio = StreamInfo::new(1, CodecId::Opus, Rational::new(1, 48_000));
-                vec![WasmStreamInfo::from(video), WasmStreamInfo::from(audio)]
-            }
-            ContainerFormat::Ogg => {
-                let audio = StreamInfo::new(0, CodecId::Opus, Rational::new(1, 48_000));
-                vec![WasmStreamInfo::from(audio)]
-            }
-            ContainerFormat::Flac => {
-                let audio = StreamInfo::new(0, CodecId::Flac, Rational::new(1, 44_100));
-                vec![WasmStreamInfo::from(audio)]
-            }
-            ContainerFormat::Wav => {
-                let audio = StreamInfo::new(0, CodecId::Pcm, Rational::new(1, 44_100));
-                vec![WasmStreamInfo::from(audio)]
-            }
-            ContainerFormat::Mp4 => {
-                let video = StreamInfo::new(0, CodecId::Av1, Rational::new(1, 1_000));
-                vec![WasmStreamInfo::from(video)]
-            }
-        };
-
-        self.streams = streams;
-        self.probed = true;
-        Ok(())
-    }
-
-    /// Heuristically determine the size of the next packet in the buffer.
-    ///
-    /// This is a simplified implementation: real demuxers would parse
-    /// container-specific frame headers.  Here we use a format-aware
-    /// chunking strategy that produces reasonably sized packets for each
-    /// container type without requiring a full parser.
-    fn next_packet_size(&self, available: usize) -> usize {
-        match self.format {
-            ContainerFormat::Matroska => {
-                // WebM/Matroska: EBML elements can be large.  Use up to 64 KiB
-                // or whatever is available, whichever is smaller.
-                available.min(65_536)
-            }
-            ContainerFormat::Ogg => {
-                // Ogg pages are at most 65_536 bytes; typically much smaller.
-                available.min(65_536)
-            }
-            ContainerFormat::Flac => {
-                // FLAC frames vary; 16 KiB is a safe chunk size.
-                available.min(16_384)
-            }
-            ContainerFormat::Wav => {
-                // WAV PCM: 4096-byte chunks represent ~23 ms at 44100 Hz stereo 16-bit.
-                available.min(4_096)
-            }
-            ContainerFormat::Mp4 => {
-                // MP4 boxes: up to 64 KiB at a time.
-                available.min(65_536)
-            }
-        }
-    }
-
-    /// Consume `size` bytes from the buffer and wrap them as a `WasmPacket`.
-    fn emit_packet_of_size(&mut self, size: usize) -> Result<Option<WasmPacket>, String> {
-        let start = self.read_cursor;
-        let end = start + size;
-        if end > self.buffer.len() {
-            return Ok(None);
-        }
-
-        let data = Bytes::copy_from_slice(&self.buffer[start..end]);
-        self.read_cursor = end;
-
-        use oximedia_core::{Rational, Timestamp};
-
-        let pts = self.pts_counter;
-        // Advance PTS by a nominal 1000-unit increment per packet (ms-based timebase).
-        self.pts_counter = self.pts_counter.saturating_add(1_000);
-        self.packet_count += 1;
-
-        let packet = Packet::new(
-            0,
-            data,
-            Timestamp::new(pts, Rational::new(1, 1_000)),
-            PacketFlags::empty(),
-        );
-
-        Ok(Some(WasmPacket::from(packet)))
+        Err(format!(
+            "WasmStreamingDemuxer: header probe for {:?} not yet available in the WASM build — see TODO(0.2.x) in streaming_demuxer.rs",
+            self.format
+        ))
     }
 }
 
@@ -369,7 +315,6 @@ impl WasmStreamingDemuxer {
             format,
             probed: false,
             streams: Vec::new(),
-            pts_counter: 0,
             packet_count: 0,
             flushed: false,
         }
@@ -410,62 +355,94 @@ mod tests {
         assert!(parse_format_hint("").is_err());
     }
 
+    /// Below the 32-byte probe threshold there is genuinely not enough
+    /// data yet -- this must be `Ok(None)` ("keep streaming"), not an
+    /// error and not a fabricated packet.
     #[test]
-    fn test_append_and_read() {
+    fn test_read_packet_before_probe_threshold_returns_none() {
         let mut sd = WasmStreamingDemuxer::new_for_test("wav");
-        // Push 200 bytes — more than MIN_BYTES_FOR_PACKET (64) and 32-byte probe threshold.
-        let chunk = vec![0u8; 200];
-        sd.append_data_inner(&chunk).expect("append should succeed");
+        sd.append_data_inner(&vec![0u8; 10])
+            .expect("append should succeed");
+        let packet = sd
+            .read_packet_inner()
+            .expect("insufficient data should be Ok(None), not an error");
+        assert!(packet.is_none());
+        assert!(!sd.probed);
+    }
 
-        // Probing happens lazily on the first read_packet call.
-        // Should be able to read at least one packet.
-        let packet = sd.read_packet_inner().expect("read_packet should succeed");
-        assert!(sd.probed, "demuxer should have probed after read_packet");
-        assert!(packet.is_some());
-        assert!(sd.packets_emitted() >= 1);
+    /// Once enough bytes have accumulated to attempt a real probe, the
+    /// demuxer must honestly report that container parsing isn't wired in
+    /// yet -- never fabricate a stream list. This is a regression test for
+    /// the exact bug reported: the previous implementation always guessed
+    /// a VP9 video + Opus audio pair for Matroska/WebM regardless of the
+    /// actual track data, and wrapped raw byte windows in fake packets.
+    #[test]
+    fn test_read_packet_past_probe_threshold_is_honest_err() {
+        let mut sd = WasmStreamingDemuxer::new_for_test("webm");
+        sd.append_data_inner(&vec![0u8; 200])
+            .expect("append should succeed");
+        let result = sd.read_packet_inner();
+        assert!(
+            result.is_err(),
+            "read_packet must not fabricate a packet once enough bytes exist to attempt a probe"
+        );
+        assert!(
+            sd.streams().is_empty(),
+            "no stream list should ever be fabricated"
+        );
+        assert!(
+            !sd.probed,
+            "probed must stay false -- no header was really parsed"
+        );
+        assert_eq!(sd.packets_emitted(), 0);
     }
 
     #[test]
-    fn test_flush_drains_remaining() {
+    fn test_flush_does_not_fabricate_final_packet() {
         let mut sd = WasmStreamingDemuxer::new_for_test("flac");
         sd.append_data_inner(&vec![0u8; 100])
             .expect("append should succeed");
-        // Force probe
-        let _ = sd.read_packet_inner();
-        // Push a tiny final chunk that is smaller than MIN_BYTES_FOR_PACKET.
+        let _ = sd.read_packet_inner(); // honestly errors; ignored here
         sd.append_data_inner(&vec![0u8; 10])
             .expect("append should succeed");
         sd.flush();
-        // After flush, read_packet should drain the remaining 10 bytes (even below threshold).
-        let _ = sd.read_packet_inner();
+        // Even after flush(), leftover buffered bytes must never be
+        // wrapped into a fabricated final packet.
+        let result = sd.read_packet_inner();
+        assert!(matches!(result, Err(_) | Ok(None)));
+        assert_eq!(sd.packets_emitted(), 0);
     }
 
     #[test]
-    fn test_streams_populated_after_probe() {
-        let mut sd = WasmStreamingDemuxer::new_for_test("webm");
-        sd.append_data_inner(&vec![0u8; 64])
-            .expect("append should succeed");
-        let _ = sd.read_packet_inner().expect("read_packet should succeed");
-        let streams = sd.streams();
-        assert!(
-            !streams.is_empty(),
-            "expected at least one stream after probing"
-        );
+    fn test_streams_never_fabricated_for_any_format() {
+        for hint in ["webm", "ogg", "flac", "wav", "mp4"] {
+            let mut sd = WasmStreamingDemuxer::new_for_test(hint);
+            sd.append_data_inner(&vec![0u8; 64])
+                .expect("append should succeed");
+            let _ = sd.read_packet_inner();
+            assert!(
+                sd.streams().is_empty(),
+                "{hint}: stream list must not be fabricated"
+            );
+        }
     }
 
+    /// Since nothing is really parsed, nothing should be silently marked
+    /// "consumed" -- buffered bytes that were never actually demuxed must
+    /// not be discarded by compaction either.
     #[test]
-    fn test_buffer_compaction() {
+    fn test_no_bytes_silently_consumed_without_real_parsing() {
         let mut sd = WasmStreamingDemuxer::new_for_test("ogg");
-        // Append enough to probe and read.
         sd.append_data_inner(&vec![0u8; 512])
             .expect("append should succeed");
-        let _ = sd.read_packet_inner().expect("read_packet should succeed");
-        // Before compact, read_cursor > 0.
-        assert!(sd.read_cursor > 0);
-        // Compact is triggered by the next append.
+        let _ = sd.read_packet_inner();
+        assert_eq!(sd.bytes_consumed(), 0);
+        assert_eq!(sd.buffer_len(), 512);
+
+        // A further append (which triggers compaction internally) must
+        // not lose the unparsed bytes either.
         sd.append_data_inner(&vec![0u8; 16])
             .expect("append should succeed");
-        // After compact, read_cursor should be reset to 0.
-        assert_eq!(sd.read_cursor, 0);
+        assert_eq!(sd.buffer_len(), 528);
     }
 }

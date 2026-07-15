@@ -4,8 +4,8 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.87+-orange.svg)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/version-v0.1.9-green.svg)](https://github.com/cool-japan/oximedia)
-[![Released](https://img.shields.io/badge/last%20release-0.1.8%20(2026--06--02)-brightgreen.svg)](https://github.com/cool-japan/oximedia)
+[![Version](https://img.shields.io/badge/version-v0.2.0-green.svg)](https://github.com/cool-japan/oximedia)
+[![Released](https://img.shields.io/badge/last%20release-0.1.9%20(2026--07--14)-brightgreen.svg)](https://github.com/cool-japan/oximedia)
 [![Crates](https://img.shields.io/badge/crates-114-blue.svg)](https://github.com/cool-japan/oximedia)
 [![SLOC](https://img.shields.io/badge/SLOC-~2.95M-blueviolet.svg)](https://github.com/cool-japan/oximedia)
 
@@ -21,7 +21,7 @@ OxiMedia is a **clean room, Pure Rust reconstruction** of both **FFmpeg** (multi
 
 ### FFmpeg Domain
 
-Codec encoding and decoding for patent-free formats (AV1, VP9, VP8, Theora, Opus, Vorbis, FLAC, MP3 — encoders are functional across the board; decoder maturity varies per codec, from Verified down to bitstream-parsing-only for AV1/VP9/VP8/Vorbis: see the [Codec Matrix](#codec-matrix)), container muxing/demuxing (MP4, MKV, MPEG-TS, OGG, AVI, FLV), streaming protocols (HLS, DASH, RTMP, SRT, WebRTC, SMPTE 2110), transcoding pipelines, filter graphs (DAG-based), audio metering (EBU R128), loudness normalization, packaging (CMAF, DRM/CENC), and server-side media delivery.
+Codec encoding and decoding for patent-free formats (AV1, VP9, VP8, Theora, Opus, Vorbis, FLAC, MP3 — encoders are functional across the board; decoder maturity varies per codec, from Verified down to bitstream-parsing-only for Vorbis (AV1, VP9 and VP8 keyframe/intra decode is now real and bit-exact against reference decoders; inter-frame decode is the remaining gap for all three): see the [Codec Matrix](#codec-matrix)), container muxing/demuxing (MP4, MKV, MPEG-TS, OGG, AVI, FLV), streaming protocols (HLS, DASH, RTMP, SRT, WebRTC, SMPTE 2110), transcoding pipelines, filter graphs (DAG-based), audio metering (EBU R128), loudness normalization, packaging (CMAF, DRM/CENC), and server-side media delivery.
 
 ### OpenCV Domain
 
@@ -67,7 +67,7 @@ Computer vision (object detection, motion tracking, video enhancement, quality a
 
 ## Project Scale
 
-OxiMedia is a **production-grade** framework at **v0.1.9** (active cycle):
+OxiMedia is a **production-grade** framework at **v0.2.0** (active cycle):
 
 | Metric | Value |
 |--------|-------|
@@ -154,7 +154,7 @@ matrix, and roadmap.
 
 ## What's New in v0.1.9
 
-Active development cycle. Theme: **Sovereign default build, Pure-Rust infrastructure migrations, and deep correctness hardening (Waves 21–30)**.
+Released 2026-07-14. Theme: **Sovereign default build, Pure-Rust infrastructure migrations, and deep correctness hardening (Waves 21–30)**.
 
 - **100% Pure Rust default build**: `cargo check --workspace` now compiles zero C/C++/Fortran. All C-backed integrations moved behind opt-in, non-default Cargo features: `aws-sdk` (oximedia-cloud), `vulkan-backend` (oximedia-accel), `lua-scripting` (oximedia-automation), `quic-quinn` (oximedia-videoip).
 - **SQLite via Pure-Rust oxisql**: every SQLite-backed persistence path migrated from `rusqlite`/`libsqlite3-sys` to [`oxisql-sqlite-compat`](https://crates.io/crates/oxisql-sqlite-compat) — the `sqlite` features are now Pure Rust too.
@@ -447,9 +447,9 @@ breakdown, what is missing, and the effort required to close each gap.
 
 | Category | Codec | Encode | Decode | Notes |
 |----------|-------|--------|--------|-------|
-| Video | AV1 | Functional | **Bitstream-parsing** | Alliance for Open Media, royalty-free. OBU parsing complete; pixel reconstruction pipeline is stubbed (see issue #9). |
-| Video | VP9 | Functional | **Bitstream-parsing** | Google, royalty-free. Frame/tile parsing complete; reconstruction pipeline stages are no-ops. |
-| Video | VP8 | Functional | **Bitstream-parsing** | Google, royalty-free. Y-plane emitted as constant gray; no intra/inter decode. |
+| Video | AV1 | Functional | **Functional** (keyframe/intra only) | Alliance for Open Media, royalty-free. Keyframe/intra-frame decode real, bit-exact vs dav1d/aomdec (8-bit 4:2:0 profile 0), including deblocking, CDEF and loop restoration; super-resolution, film grain, palette mode, intra block copy, quantizer matrices, 10/12-bit and inter-frame decode are not yet implemented and return an honest `Err`. |
+| Video | VP9 | Functional | **Functional** (keyframe/intra only) | Google, royalty-free. Keyframe/intra-frame decode real, bit-exact vs libvpx (8-bit 4:2:0); inter-frame decode not yet implemented, returns an honest `Err`. |
+| Video | VP8 | Functional | **Functional** (keyframe/intra only) | Google, royalty-free. Keyframe/intra-frame decode real (full RFC 6386 §11-§15 pipeline), bit-exact vs libwebp reference; inter-frame decode not yet implemented, returns an honest `Err`. |
 | Video | Theora | Functional | Functional | Xiph.org, royalty-free. Real DCT/IDCT, quantization, intra prediction; self-consistent encode↔decode round-trip tests (≤8 LSB at Q48). P-frame/inter paths not yet exercised; not conformance-verified against libtheora. |
 | Video | MJPEG | Functional | Functional | Motion JPEG via `oximedia-image` JPEG baseline; ≥28 dB PSNR at Q85. |
 | Video | APV | Functional | Functional | ISO/IEC 23009-13 royalty-free intra-frame; real DCT + entropy decode. |
@@ -461,8 +461,8 @@ breakdown, what is missing, and the effort required to close each gap.
 | Video | JPEG XS | Functional | Functional | ISO/IEC 21122-1 (SMPTE ST 2110-22) encode+decode; byte-exact lossless round-trip; NLT Extended transform deferred (feature `jpegxs`, opt-in). |
 | Image | JPEG 2000 | Functional | Functional | ISO/IEC 15444-1; lossless 5-3 + lossy 9-7 encode/decode, multi-tile. Single-layer LRCP only; multi-layer/progressive deferred (feature `jpeg2000`, opt-in). |
 | Image | JPEG-LS | Functional | Functional | ISO/IEC 14495-1 LOCO-I; regular + RUN modes, near-lossless (NEAR>0), ILV 0/1/2 (feature `jpegls`, opt-in). HP patents expired 2017–2019. |
-| Audio | Opus | Functional | Functional (CELT only) | Xiph.org/IETF, royalty-free. SILK and hybrid modes are placeholder. |
-| Audio | Vorbis | Functional | **Bitstream-parsing** | Xiph.org, royalty-free. Headers parse; `decode_audio_packet` returns empty. |
+| Audio | Opus | Functional | Functional (CELT + SILK + Hybrid) | Xiph.org/IETF, royalty-free. All three decode paths are real and wired (RFC 6716 §4.2 SILK, §4.5 Hybrid); no bit-exact conformance fixtures against libopus yet. |
+| Audio | Vorbis | Functional | **Bitstream-parsing** | Xiph.org, royalty-free. Headers parse; `decode_audio_packet` returns an honest `Err` (not fabricated empty samples). |
 | Audio | FLAC | Functional | Functional / Verified | Lossless, royalty-free; CRC-16 verified, real LPC decode. |
 | Audio | ALAC | Functional | Functional | Apple Lossless (reference Apache-2.0 since 2011, royalty-free); byte-exact 16/20/24-bit round-trip. 32-bit and rare extended predictor modes unsupported (feature `alac`, opt-in). |
 | Audio | PCM | Verified | Verified | Unencumbered; trivial round-trip verified. |
@@ -470,7 +470,7 @@ breakdown, what is missing, and the effort required to close each gap.
 | Image | PNG/APNG | Functional | Functional | Unencumbered; real unfilter + RGBA conversion. |
 | Image | GIF | Functional | Functional | Unencumbered; real LZW decode. |
 | Image | WebP (VP8L) | Functional | Functional | Google, royalty-free. Lossless only — no VP8 lossy WebP decoder. |
-| Image | AVIF | Functional | **Bitstream-parsing** | AOM, royalty-free. Depends on AV1 decoder, which is itself bitstream-parsing. |
+| Image | AVIF | Functional | **Bitstream-parsing** | AOM, royalty-free. Container validates; `decode()` returns an honest `Err` — not yet wired to the new AV1 keyframe/intra decoder. |
 | Image | JPEG-XL (AJXL) | Functional | Functional | Animated JPEG-XL via ISOBMFF; real modular decoder. |
 
 ## Red List (Rejected Codecs)

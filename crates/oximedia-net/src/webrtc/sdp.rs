@@ -584,11 +584,17 @@ impl SessionDescription {
                 continue;
             }
 
-            if line.len() < 2 || !line.chars().nth(1).is_some_and(|c| c == '=') {
+            // SDP lines are `<type>=<value>` where `<type>` is a single ASCII
+            // byte. Comparing the second *byte* (not char) to '=' guarantees
+            // byte 0 is a complete ASCII character and byte 2 is a UTF-8
+            // boundary, so `&line[2..]` cannot panic on a multibyte leading
+            // char in a hostile WHIP/WHEP offer (e.g. a line starting with 'é').
+            let bytes = line.as_bytes();
+            if bytes.len() < 2 || bytes[1] != b'=' {
                 continue;
             }
 
-            let type_char = line.chars().next().unwrap_or(' ');
+            let type_char = bytes[0] as char;
             let value = &line[2..];
 
             match type_char {
@@ -805,6 +811,25 @@ a=sendrecv
         assert_eq!(audio.mid, Some("audio".to_string()));
         assert!(audio.rtcp_mux);
         assert_eq!(audio.direction, Direction::SendRecv);
+    }
+
+    #[test]
+    fn parse_multibyte_leading_char_does_not_panic() {
+        // A line whose first character is a 2-byte UTF-8 char ('é') whose
+        // second byte is not '='. The old `&line[2..]` slice would panic on a
+        // non-char-boundary; the parser must skip the line and return cleanly.
+        let sdp = "v=0\r\né=malformed\r\ns=ok\r\n";
+        let parsed = SessionDescription::parse(sdp).expect("must not panic");
+        assert_eq!(parsed.version, 0);
+        assert_eq!(parsed.session_name, "ok");
+    }
+
+    #[test]
+    fn parse_multibyte_where_second_byte_would_slice_mid_char() {
+        // '€' is 3 bytes (0xE2 0x82 0xAC); byte index 2 lands mid-character.
+        // Must be skipped without panicking.
+        let sdp = "v=0\r\n€uro\r\n";
+        assert!(SessionDescription::parse(sdp).is_ok());
     }
 
     #[test]

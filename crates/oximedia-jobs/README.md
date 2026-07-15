@@ -1,9 +1,9 @@
 # oximedia-jobs
 
 ![Status: Stable](https://img.shields.io/badge/status-stable-green)
-![Version: 0.1.9](https://img.shields.io/badge/version-0.1.9-blue)
+![Version: 0.2.0](https://img.shields.io/badge/version-0.2.0-blue)
 ![Tests: 499](https://img.shields.io/badge/tests-499-brightgreen)
-![Updated: 2026-07-08](https://img.shields.io/badge/updated-2026--07--08-blue)
+![Updated: 2026-07-14](https://img.shields.io/badge/updated-2026--07--14-blue)
 
 Production-quality job queue and worker management system for OxiMedia video transcoding operations.
 

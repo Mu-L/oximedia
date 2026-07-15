@@ -122,7 +122,8 @@ pub enum CollabCommand {
         #[arg(long)]
         include_comments: bool,
 
-        /// Include edit history
+        /// Include edit history (not implemented yet: sessions do not track
+        /// edit events; warns and proceeds)
         #[arg(long)]
         include_edits: bool,
 
@@ -567,10 +568,22 @@ async fn run_export(
     output: &PathBuf,
     format: &str,
     include_comments: bool,
-    _include_edits: bool,
+    include_edits: bool,
     db_path: &PathBuf,
     json_output: bool,
 ) -> Result<()> {
+    // Collaboration sessions do not record edit events anywhere yet, so
+    // there is nothing real to export; warn instead of silently dropping
+    // the flag (or fabricating an empty "edits" section).
+    // TODO(0.2.x): add edit-event tracking to SessionRecord, then export it
+    // here alongside comments.
+    if include_edits {
+        eprintln!(
+            "warning: --include-edits is not implemented yet and is ignored (sessions do not \
+             track edit events)"
+        );
+    }
+
     let db = load_db(db_path)?;
 
     let session = db

@@ -1,6 +1,6 @@
 # oximedia-renderfarm
 
-**Status: [Stable]** | Version: 0.1.9 | Tests: extensively tested | Updated: 2026-07-08
+**Status: [Stable]** | Version: 0.2.0 | Tests: extensively tested | Updated: 2026-07-14
 
 Enterprise-grade render farm coordinator for OxiMedia. Provides distributed media rendering with job management, worker pools, advanced scheduling, cloud bursting, fault tolerance, and real-time monitoring.
 

@@ -7,7 +7,9 @@
 
 use anyhow::{Context, Result};
 use colored::Colorize;
-use oximedia_compat_ffmpeg::{parse_and_translate, DiagnosticKind, ParsedFilter, TranscodeJob};
+use oximedia_compat_ffmpeg::{
+    parse_and_translate, DiagnosticKind, MapSpec, ParsedFilter, TranscodeJob,
+};
 use std::path::PathBuf;
 use tracing::warn;
 
@@ -264,14 +266,45 @@ async fn execute_job(job: &TranscodeJob) -> Result<()> {
         preset: "medium".to_string(),
         two_pass: false,
         crf,
-        threads: num_cpus(),
+        // 0 = "auto": the stream-copy pipeline has no threading knob, and a
+        // non-zero value only triggers `transcode`'s --threads warning. Keep
+        // it silent unless the user explicitly asked for threads.
+        threads: 0,
         overwrite: job.overwrite,
-        resume: false,
+        map: map_specs_to_selectors(&job.map),
         normalize_audio,
         progress_format: ProgressFormat::Plain,
     };
 
     transcode::transcode(options).await
+}
+
+/// Convert parsed FFmpeg `-map` specs into `--map` selector strings.
+///
+/// Filter-graph label maps (`-map "[out]"`) address filter output pads, not
+/// input streams, so they have no meaning in the packet-level stream-copy
+/// pipeline and are skipped with a warning.
+fn map_specs_to_selectors(specs: &[MapSpec]) -> Vec<String> {
+    specs
+        .iter()
+        .filter_map(|spec| {
+            if let Some(ref label) = spec.label {
+                eprintln!(
+                    "{} -map '{label}' addresses a filter-graph pad; \
+                     not supported in stream-copy mode, ignoring",
+                    "Warning:".yellow().bold()
+                );
+                return None;
+            }
+            let sign = if spec.negative { "-" } else { "" };
+            let selector = spec
+                .stream_selector
+                .as_deref()
+                .map(|s| format!(":{s}"))
+                .unwrap_or_default();
+            Some(format!("{sign}{}{selector}", spec.input_index))
+        })
+        .collect()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -351,17 +384,6 @@ fn extract_scale_filter(filters: &[ParsedFilter]) -> Option<String> {
             None
         }
     })
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Platform helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Return a reasonable default thread count for the current machine.
-fn num_cpus() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

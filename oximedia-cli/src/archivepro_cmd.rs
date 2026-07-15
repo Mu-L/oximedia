@@ -6,6 +6,7 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use colored::Colorize;
+use oximedia_transcode::TranscodePipeline;
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
@@ -489,10 +490,36 @@ async fn run_migrate(
 
     let pf = parse_preservation_format(target)?;
 
-    if !dry_run && !output.exists() {
-        std::fs::create_dir_all(output)
-            .with_context(|| format!("Failed to create output dir: {}", output.display()))?;
-    }
+    // Real re-encode is wired up only for the audio preservation formats
+    // today, via the same `oximedia_transcode` frame-level pipeline that
+    // backs `oximedia transcode` (it genuinely decodes WAV/FLAC and
+    // re-encodes to FLAC or PCM/WAV — see
+    // `oximedia-cli/tests/transcode_reencode.rs::flagship_wav_to_flac_round_trips`
+    // for an end-to-end, sample-exact proof). Every other preservation
+    // target (lossless video, image, document) would require real
+    // codec/container/format work this crate does not yet have wired
+    // end-to-end. Refuse outright — including for `--dry-run` — rather than
+    // ever emit a copy+rename mislabeled as a converted preservation
+    // master: for a digital-preservation tool, that is a data-integrity lie
+    // (e.g. a WAV renamed `.mxf` reads back as a "successfully migrated"
+    // MXF file that is actually still a WAV).
+    //
+    // TODO(0.2.x): wire real video (FFV1/UT Video), image (TIFF/PNG/JP2),
+    // and document (PDF/A, plain text) preservation migration once real
+    // codec/container/format pipelines exist for those domains.
+    let audio_codec_name = match pf {
+        oximedia_archive_pro::PreservationFormat::AudioFlac => "flac",
+        oximedia_archive_pro::PreservationFormat::AudioWav => "pcm",
+        _ => {
+            return Err(anyhow::anyhow!(
+                "archive-pro migrate: real format conversion for '{}' -> {target} ({}) is not \
+                 yet implemented; refusing to emit a mislabeled copy. Real conversion is \
+                 currently available only for: flac, wav.",
+                input.display(),
+                pf.description(),
+            ));
+        }
+    };
 
     let filename = input.file_name().unwrap_or_default().to_string_lossy();
     let new_name = format!(
@@ -504,22 +531,76 @@ async fn run_migrate(
         pf.extension()
     );
 
-    if !dry_run {
-        let dest = output.join(&new_name);
-        std::fs::copy(input, &dest)
-            .with_context(|| format!("Failed to copy to {}", dest.display()))?;
+    if dry_run {
+        if json_output {
+            let result = serde_json::json!({
+                "command": "archive-pro migrate",
+                "input": input.display().to_string(),
+                "output": output.display().to_string(),
+                "target_format": target,
+                "target_extension": pf.extension(),
+                "target_mime": pf.mime_type(),
+                "dry_run": true,
+                "new_filename": new_name,
+            });
+            let s = serde_json::to_string_pretty(&result).context("JSON serialization failed")?;
+            println!("{s}");
+        } else {
+            println!("{}", "Archive Pro Migrate".green().bold());
+            println!("{}", "=".repeat(60));
+            println!("{:20} {}", "Input:", input.display());
+            println!("{:20} {}", "Target format:", pf.description());
+            println!("{:20} {}", "New filename:", new_name);
+            println!();
+            println!(
+                "{}",
+                "(Dry run - no files were converted; a real re-encode would be attempted)".yellow()
+            );
+        }
+        return Ok(());
     }
+
+    if !output.exists() {
+        std::fs::create_dir_all(output)
+            .with_context(|| format!("Failed to create output dir: {}", output.display()))?;
+    }
+    let dest = output.join(&new_name);
+
+    let mut pipeline = TranscodePipeline::builder()
+        .input(input.clone())
+        .output(dest.clone())
+        .audio_codec(audio_codec_name)
+        .build()
+        .map_err(|e| {
+            anyhow::anyhow!("archive-pro migrate: failed to configure conversion pipeline: {e}")
+        })?;
+
+    let transcode_output = match pipeline.execute().await {
+        Ok(out) => out,
+        Err(e) => {
+            // Never leave a partially-written / fabricated output file
+            // behind after a failed real conversion.
+            std::fs::remove_file(&dest).ok();
+            return Err(anyhow::anyhow!(
+                "archive-pro migrate: real conversion of '{}' to {} failed: {e}",
+                input.display(),
+                pf.description()
+            ));
+        }
+    };
 
     if json_output {
         let result = serde_json::json!({
             "command": "archive-pro migrate",
             "input": input.display().to_string(),
-            "output": output.display().to_string(),
+            "output": dest.display().to_string(),
             "target_format": target,
             "target_extension": pf.extension(),
             "target_mime": pf.mime_type(),
-            "dry_run": dry_run,
+            "dry_run": false,
             "new_filename": new_name,
+            "real_conversion": true,
+            "output_size_bytes": transcode_output.file_size,
         });
         let s = serde_json::to_string_pretty(&result).context("JSON serialization failed")?;
         println!("{s}");
@@ -529,12 +610,17 @@ async fn run_migrate(
         println!("{:20} {}", "Input:", input.display());
         println!("{:20} {}", "Target format:", pf.description());
         println!("{:20} {}", "New filename:", new_name);
-        if dry_run {
-            println!();
-            println!("{}", "(Dry run - no files were converted)".yellow());
-        } else {
-            println!("{:20} {}", "Output:", output.join(&new_name).display());
-        }
+        println!("{:20} {}", "Output:", dest.display());
+        println!(
+            "{:20} {:.2} MB",
+            "Output size:",
+            transcode_output.file_size as f64 / (1024.0 * 1024.0)
+        );
+        println!();
+        println!(
+            "{}",
+            "Real conversion complete (genuinely re-encoded, not a renamed copy).".green()
+        );
     }
 
     Ok(())
@@ -725,5 +811,222 @@ mod tests {
         assert!(!ts.is_empty());
         // Should be a number string (seconds since epoch)
         assert!(ts.parse::<u64>().is_ok());
+    }
+
+    // ── Real migration / fabrication-elimination tests ──────────────────────
+    //
+    // `archive-pro migrate` previously did `fs::copy` + extension rename and
+    // reported success — a WAV renamed `.flac` reads back as a "migrated"
+    // FLAC file that is actually still a WAV, a data-integrity lie in a
+    // preservation tool. These tests assert the fixed behavior: genuine
+    // re-encodes for the formats that have one (audio), and a clean,
+    // no-side-effect error for everything else.
+
+    /// Unique temp-file path for this test process. Per project policy,
+    /// tests must use `std::env::temp_dir()` rather than a hardcoded path.
+    fn archivepro_temp_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "oximedia_archivepro_cmd_test_{}_{name}",
+            std::process::id()
+        ))
+    }
+
+    /// Mirror `run_migrate`'s own filename derivation so tests compute the
+    /// exact same destination path the production code writes to (the temp
+    /// fixture helper bakes a unique prefix into the filename itself, not
+    /// into a parent directory, so the migrated basename is longer than the
+    /// short suffix passed to `archivepro_temp_path`).
+    fn expected_migrate_dest(
+        out_dir: &std::path::Path,
+        input: &std::path::Path,
+        target_ext: &str,
+    ) -> std::path::PathBuf {
+        let filename = input.file_name().unwrap_or_default().to_string_lossy();
+        let stem = filename
+            .rsplit_once('.')
+            .map(|(n, _)| n)
+            .unwrap_or(&filename);
+        out_dir.join(format!("{stem}.{target_ext}"))
+    }
+
+    /// Build a minimal, genuinely valid 16-bit PCM WAV file (canonical
+    /// 44-byte header + a short sine wave) so tests exercise the REAL
+    /// `oximedia_transcode` decode -> re-encode pipeline rather than a byte
+    /// stub. Mirrors `oximedia-cli/tests/common::make_sine_wav`.
+    fn make_sine_wav(freq_hz: f32, sample_rate: u32, channels: u16, duration_secs: f32) -> Vec<u8> {
+        let num_samples = (sample_rate as f32 * duration_secs) as u32;
+        let num_channels = u32::from(channels);
+        let bits_per_sample: u16 = 16;
+        let byte_rate = sample_rate * num_channels * u32::from(bits_per_sample / 8);
+        let block_align = channels * (bits_per_sample / 8);
+        let data_size = num_samples * num_channels * u32::from(bits_per_sample / 8);
+        let file_size = 36 + data_size;
+
+        let mut buf = Vec::with_capacity(44 + data_size as usize);
+        buf.extend_from_slice(b"RIFF");
+        buf.extend_from_slice(&file_size.to_le_bytes());
+        buf.extend_from_slice(b"WAVE");
+        buf.extend_from_slice(b"fmt ");
+        buf.extend_from_slice(&16u32.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.extend_from_slice(&channels.to_le_bytes());
+        buf.extend_from_slice(&sample_rate.to_le_bytes());
+        buf.extend_from_slice(&byte_rate.to_le_bytes());
+        buf.extend_from_slice(&block_align.to_le_bytes());
+        buf.extend_from_slice(&bits_per_sample.to_le_bytes());
+        buf.extend_from_slice(b"data");
+        buf.extend_from_slice(&data_size.to_le_bytes());
+        for i in 0..num_samples {
+            let t = i as f32 / sample_rate as f32;
+            let sample = (2.0 * std::f32::consts::PI * freq_hz * t).sin();
+            let pcm = (sample * 32767.0) as i16;
+            for _ch in 0..channels {
+                buf.extend_from_slice(&pcm.to_le_bytes());
+            }
+        }
+        buf
+    }
+
+    #[tokio::test]
+    async fn test_run_migrate_real_wav_to_flac_is_genuine_reencode() {
+        let input = archivepro_temp_path("mig_wav_to_flac_in.wav");
+        let out_dir = archivepro_temp_path("mig_wav_to_flac_out_dir");
+        std::fs::write(&input, make_sine_wav(1_000.0, 48_000, 2, 0.2)).expect("write wav fixture");
+        std::fs::remove_dir_all(&out_dir).ok();
+
+        run_migrate(&input, &out_dir, "flac", false, false, false, true)
+            .await
+            .expect("real WAV -> FLAC migration must succeed");
+
+        let dest = expected_migrate_dest(&out_dir, &input, "flac");
+        let flac_bytes = std::fs::read(&dest).expect("output flac must exist");
+        assert!(
+            flac_bytes.starts_with(b"fLaC"),
+            "output must be a real FLAC stream, not a renamed copy"
+        );
+        let input_bytes = std::fs::read(&input).expect("read input");
+        assert_ne!(
+            flac_bytes[..flac_bytes.len().min(256)],
+            input_bytes[..input_bytes.len().min(256)],
+            "output must not be a byte copy of the input"
+        );
+
+        std::fs::remove_file(&input).ok();
+        std::fs::remove_dir_all(&out_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_run_migrate_real_wav_to_wav_reencode() {
+        let input = archivepro_temp_path("mig_wav_to_wav_in.wav");
+        let out_dir = archivepro_temp_path("mig_wav_to_wav_out_dir");
+        std::fs::write(&input, make_sine_wav(700.0, 44_100, 2, 0.2)).expect("write wav fixture");
+        std::fs::remove_dir_all(&out_dir).ok();
+
+        run_migrate(&input, &out_dir, "wav", false, false, false, true)
+            .await
+            .expect("real WAV -> WAV (PCM) migration must succeed");
+
+        let dest = expected_migrate_dest(&out_dir, &input, "wav");
+        let out_bytes = std::fs::read(&dest).expect("output wav must exist");
+        assert!(
+            out_bytes.starts_with(b"RIFF"),
+            "output must be a real WAV file"
+        );
+        assert!(
+            out_bytes.len() > 44,
+            "output must contain real PCM sample data, not just a header"
+        );
+
+        std::fs::remove_file(&input).ok();
+        std::fs::remove_dir_all(&out_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_run_migrate_unsupported_target_is_honest_err_no_output() {
+        let input = archivepro_temp_path("mig_unsupported_in.wav");
+        let out_dir = archivepro_temp_path("mig_unsupported_out_dir");
+        std::fs::write(&input, make_sine_wav(440.0, 48_000, 1, 0.1)).expect("write wav fixture");
+        std::fs::remove_dir_all(&out_dir).ok();
+
+        let err = run_migrate(&input, &out_dir, "tiff", false, false, false, true)
+            .await
+            .expect_err("unimplemented preservation target must be an honest error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not yet"),
+            "error must say real conversion is not yet implemented: {msg}"
+        );
+        assert!(
+            msg.contains("mislabeled"),
+            "error must name the fabrication it refuses to produce: {msg}"
+        );
+        assert!(
+            !out_dir.exists(),
+            "no output directory/file may be created for an unsupported target"
+        );
+
+        std::fs::remove_file(&input).ok();
+    }
+
+    #[tokio::test]
+    async fn test_run_migrate_dry_run_does_not_bypass_honesty_check() {
+        let input = archivepro_temp_path("mig_dryrun_unsupported_in.wav");
+        std::fs::write(&input, make_sine_wav(440.0, 48_000, 1, 0.1)).expect("write wav fixture");
+        let out_dir = archivepro_temp_path("mig_dryrun_unsupported_out_dir");
+
+        let result = run_migrate(&input, &out_dir, "png", true, false, false, true).await;
+        assert!(
+            result.is_err(),
+            "dry-run must not report a fake successful plan for an unimplemented target"
+        );
+
+        std::fs::remove_file(&input).ok();
+    }
+
+    #[tokio::test]
+    async fn test_run_migrate_dry_run_supported_target_writes_nothing() {
+        let input = archivepro_temp_path("mig_dryrun_ok_in.wav");
+        std::fs::write(&input, make_sine_wav(440.0, 48_000, 1, 0.1)).expect("write wav fixture");
+        let out_dir = archivepro_temp_path("mig_dryrun_ok_out_dir");
+        std::fs::remove_dir_all(&out_dir).ok();
+
+        run_migrate(&input, &out_dir, "flac", true, false, false, true)
+            .await
+            .expect("dry-run on a real-conversion-capable target must succeed");
+        assert!(!out_dir.exists(), "dry-run must not touch the filesystem");
+
+        std::fs::remove_file(&input).ok();
+    }
+
+    #[tokio::test]
+    async fn test_run_migrate_non_audio_input_honest_err_no_fabricated_output() {
+        let input = archivepro_temp_path("mig_garbage_in.wav");
+        std::fs::write(&input, b"not a real wav file at all, just some bytes")
+            .expect("write garbage");
+        let out_dir = archivepro_temp_path("mig_garbage_out_dir");
+        std::fs::remove_dir_all(&out_dir).ok();
+
+        let result = run_migrate(&input, &out_dir, "flac", false, false, false, true).await;
+        assert!(
+            result.is_err(),
+            "a non-WAV/FLAC input must not silently 'convert'"
+        );
+
+        let dest = expected_migrate_dest(&out_dir, &input, "flac");
+        assert!(
+            !dest.exists(),
+            "no fabricated FLAC output may remain after a failed real conversion"
+        );
+
+        std::fs::remove_file(&input).ok();
+        std::fs::remove_dir_all(&out_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_run_migrate_missing_input_is_err() {
+        let input = archivepro_temp_path("mig_does_not_exist.wav");
+        let out_dir = archivepro_temp_path("mig_missing_out_dir");
+        let result = run_migrate(&input, &out_dir, "flac", false, false, false, true).await;
+        assert!(result.is_err());
     }
 }

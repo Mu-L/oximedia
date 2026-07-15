@@ -319,6 +319,15 @@ async fn init_cluster(
 ) -> Result<()> {
     validate_scheduler(scheduler)?;
 
+    // CoordinatorConfig has no state-directory field, so --data-dir cannot
+    // configure anything real; warn instead of silently accepting a path
+    // the coordinator will never touch.
+    // TODO(0.2.x): add a persistent state directory to
+    // oximedia_renderfarm::CoordinatorConfig and thread this through.
+    if data_dir.is_some() {
+        eprintln!("warning: --data-dir is not implemented yet and is ignored");
+    }
+
     let config = oximedia_renderfarm::CoordinatorConfig {
         max_concurrent_jobs: max_jobs as usize,
         ..oximedia_renderfarm::CoordinatorConfig::default()

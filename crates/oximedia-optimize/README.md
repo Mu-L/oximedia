@@ -1,6 +1,6 @@
 # oximedia-optimize
 
-**Status: [Stable]** | Version: 0.1.9 | Tests: extensively tested | Updated: 2026-07-08
+**Status: [Stable]** | Version: 0.2.0 | Tests: extensively tested | Updated: 2026-07-14
 
 Codec optimization and tuning suite for OxiMedia. Provides advanced optimization techniques for video encoders, including rate-distortion optimization, psychovisual tuning, and adaptive quantization.
 

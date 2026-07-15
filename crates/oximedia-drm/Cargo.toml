@@ -7,6 +7,7 @@ description = "DRM and encryption support for OxiMedia streaming"
 keywords = ["drm", "rights", "multimedia", "security", "media"]
 categories = ["multimedia"]
 license.workspace = true
+rust-version.workspace = true
 readme = "README.md"
 homepage.workspace = true
 repository.workspace = true

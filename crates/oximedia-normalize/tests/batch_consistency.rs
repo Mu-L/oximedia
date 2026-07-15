@@ -1,23 +1,22 @@
 //! Batch normalization convergence / consistency tests.
 //!
-//! ## Why this targets `batch_normalizer::BatchNormalizer`, not `batch::BatchProcessor`
+//! ## Why tests 1-3 target `batch_normalizer::BatchNormalizer`, not `batch::BatchProcessor`
 //!
-//! The TODO item "Test BatchProcessor with multiple files verifying consistent target
-//! loudness across all outputs" names `batch::BatchProcessor`, but that type is a
-//! **placeholder stub** and a convergence test against it would be *vacuous*:
+//! `batch_normalizer::BatchNormalizer` and `batch::BatchProcessor` are two distinct,
+//! legitimate batch engines with different shapes:
 //!
-//! * `BatchProcessor::process_file` never ingests the input file — it constructs a
-//!   `LoudnessAnalyzer` and immediately calls `analyzer.result()` on an empty meter
-//!   (`src/batch.rs:170-176`, with explicit "this is a placeholder" comments). The empty
-//!   meter yields `integrated_lufs == -inf` and `recommended_gain_db == 0.0`, so the
-//!   "applied gain" is always `0.0` regardless of the (unread) audio.
-//! * `BatchProcessor::process_directory` returns an empty `Vec` unconditionally
-//!   (`src/batch.rs:239,249`).
+//! * `BatchNormalizer` operates on in-memory sample buffers the caller already holds
+//!   (or on pre-computed measurements via `register_measurement`) and exposes an
+//!   explicit two-pass measure → `schedule_gains` → `apply_to_item` flow with several
+//!   gain modes (`Independent` / `Album` / `AlbumAverage`). Tests 1-3 exercise its
+//!   closed-form gain-scheduling math directly.
+//! * `BatchProcessor` operates on WAV files on disk end-to-end (decode → analyze →
+//!   gain → encode); see `batch_processor_normalizes_real_wav_files_on_disk` below.
 //!
-//! The *real* batch engine is `batch_normalizer::BatchNormalizer`, which performs the
-//! two-pass measure → schedule flow. We therefore verify convergence against that engine
-//! and pin the stub behaviour separately (see `batch_processor_is_a_placeholder_stub`) so a
-//! future production fix is detected.
+//! (Historical note: `BatchProcessor::process_file`/`process_directory` were once
+//! placeholder stubs that never ingested audio — see git history for
+//! `batch_processor_is_a_placeholder_stub` — and have since been given a real,
+//! WAV-backed implementation in `src/batch.rs`.)
 //!
 //! Key engine property exploited below: the scheduler does **not** re-measure after applying
 //! gain. In `Independent` mode with `true_peak_ceiling_dbtp: None` and a wide gain window,
@@ -27,9 +26,11 @@
 // Mirrors src/batch_normalizer.rs:45-47 — energy/dB math involves f64↔f32 casts in tests.
 #![allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 
+use oximedia_audio::wav::{WavReader, WavSpec, WavWriter};
 use oximedia_metering::Standard;
 use oximedia_normalize::batch::{BatchConfig, BatchProcessor};
 use oximedia_normalize::batch_normalizer::{BatchNormalizer, BatchNormalizerConfig, GainMode};
+use std::io::{BufReader, BufWriter};
 
 /// Build a wide-window, peak-ceiling-free config that makes `gain_db` an exact function of
 /// the measured loudness (no clamping, no peak back-off) for the given target.
@@ -249,52 +250,115 @@ fn album_mode_shares_single_gain() {
     );
 }
 
-/// 4. Pin the `batch::BatchProcessor` placeholder so a future production fix is detected.
+/// 4. `batch::BatchProcessor` now has a real, WAV-backed implementation: verify it
+/// actually ingests audio from disk and converges loudness toward the configured
+/// target, using real files under `std::env::temp_dir()`.
 ///
-/// * `process_directory` returns an empty `Vec` unconditionally.
-/// * `process_file` never ingests the input, so the meter is empty: `integrated_lufs` is
-///   non-finite and the applied gain is `0.0`.
-///
-/// If/when `BatchProcessor` is given a real implementation, these assertions will start
-/// failing and this test should be re-pointed at the actual file-ingest convergence.
+/// This supersedes the former `batch_processor_is_a_placeholder_stub` pin (see git
+/// history) now that `process_file` / `process_directory` decode real audio, apply
+/// a real gain, and write a real WAV output instead of operating on an empty meter.
 #[test]
-fn batch_processor_is_a_placeholder_stub() {
-    let config = BatchConfig::minimal(Standard::EbuR128);
+fn batch_processor_normalizes_real_wav_files_on_disk() {
+    let sample_rate = 48_000u32;
+    let channels = 1u16;
+    let target = Standard::Spotify;
+
+    let config = BatchConfig {
+        standard: target,
+        enable_limiter: false,
+        enable_drc: false,
+        write_metadata: false,
+        write_replaygain: true,
+        output_format: None,
+        max_gain_db: 40.0,
+        overwrite: true,
+        parallel: false,
+    };
     let processor = BatchProcessor::new(config);
 
-    // process_directory: empty Vec regardless of contents.
-    let tmp = std::env::temp_dir().join("oximedia_wave29_batch_stub_in");
-    let out = std::env::temp_dir().join("oximedia_wave29_batch_stub_out");
-    std::fs::create_dir_all(&tmp).expect("create temp input dir");
-    let results = processor
-        .process_directory(&tmp, &out)
-        .expect("process_directory (stub) should not error");
-    assert!(
-        results.is_empty(),
-        "STUB CHANGED: process_directory returned {} results — BatchProcessor may now be \
-         implemented; re-point this test at real file-ingest convergence",
-        results.len()
-    );
-    // Best-effort cleanup; ignore errors.
-    let _ = std::fs::remove_dir_all(&tmp);
-    let _ = std::fs::remove_dir_all(&out);
+    let dir = std::env::temp_dir().join("oximedia_batch_processor_convergence_test");
+    let dir_out = dir.join("dir_out");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let input_path = dir.join("quiet_input.wav");
+    let output_path = dir.join("normalized_output.wav");
 
-    // process_file: no ingest ⇒ empty meter ⇒ non-finite measured loudness, zero gain.
-    let infile = std::path::Path::new("nonexistent_input.wav");
-    let outfile = std::path::Path::new("nonexistent_output.wav");
-    let single = processor
-        .process_file(infile, outfile, 48_000.0, 2)
-        .expect("process_file (stub) should not error");
+    // Synthesize a quiet 1 kHz sine (well below the -14 LUFS Spotify target) as a
+    // real 16-bit PCM WAV file — no fixtures, no shortcuts.
+    let wav_spec = WavSpec {
+        channels,
+        sample_rate,
+        bits_per_sample: 16,
+        float: false,
+    };
+    let amplitude = 0.05_f32;
+    let n = (f64::from(sample_rate) * 3.0) as usize;
+    let input_samples: Vec<f32> = (0..n)
+        .map(|i| amplitude * (std::f32::consts::TAU * 1000.0 * i as f32 / sample_rate as f32).sin())
+        .collect();
+    {
+        let file = std::fs::File::create(&input_path).expect("create input wav");
+        let mut writer = WavWriter::new(BufWriter::new(file), wav_spec);
+        writer
+            .write_samples_f32(&input_samples)
+            .expect("write input samples");
+        writer.finalize().expect("finalize input wav");
+    }
+
+    // -- process_file: real ingest, real gain, real output --------------------
+    let result = processor
+        .process_file(&input_path, &output_path, f64::from(sample_rate), 1)
+        .expect("process_file should now really ingest audio and succeed");
+
     assert!(
-        !single.analysis.integrated_lufs.is_finite(),
-        "STUB CHANGED: process_file produced a finite integrated_lufs ({}) — it now appears \
-         to ingest audio; re-point this test at real convergence",
-        single.analysis.integrated_lufs
+        result.analysis.integrated_lufs.is_finite(),
+        "STUB REGRESSION: integrated_lufs is not finite — process_file is not decoding \
+         real audio"
     );
     assert!(
-        single.applied_gain_db.abs() < 1e-12,
-        "STUB CHANGED: process_file applied a non-zero gain ({}) — it now appears to compute \
-         a real gain; re-point this test",
-        single.applied_gain_db
+        result.applied_gain_db > 1.0,
+        "STUB REGRESSION: applied_gain_db ({}) should be a substantial positive value for \
+         a quiet input targeting {:?}",
+        result.applied_gain_db,
+        target
     );
+    assert!(result.success);
+    let rg = result
+        .replay_gain
+        .expect("write_replaygain=true should populate a real ReplayGain result");
+    assert!(rg.track_gain.is_finite());
+
+    // The output must exist and be measurably louder than the input — i.e. this is
+    // not a silent / unmodified copy.
+    let out_file = std::fs::File::open(&output_path).expect("open output wav");
+    let mut out_reader = WavReader::new(BufReader::new(out_file)).expect("parse output wav header");
+    let output_samples = out_reader
+        .read_samples_f32()
+        .expect("decode output samples");
+    assert_eq!(output_samples.len(), input_samples.len());
+
+    let rms = |s: &[f32]| -> f64 {
+        (s.iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>() / s.len() as f64).sqrt()
+    };
+    let rms_in = rms(&input_samples);
+    let rms_out = rms(&output_samples);
+    assert!(
+        rms_out > rms_in * 1.5,
+        "output should be measurably louder than input after positive-gain normalization: \
+         rms_in={rms_in}, rms_out={rms_out}"
+    );
+
+    // -- process_directory: real enumeration, per-file results ------------------
+    let results = processor
+        .process_directory(&dir, &dir_out)
+        .expect("process_directory should succeed");
+    assert!(
+        !results.is_empty(),
+        "STUB REGRESSION: process_directory returned an empty Vec for a non-empty directory"
+    );
+    assert!(
+        results.iter().any(|r| r.success),
+        "process_directory should successfully process at least the WAV file present"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

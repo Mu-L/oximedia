@@ -107,14 +107,18 @@ pub async fn extract_frames(options: ExtractOptions) -> Result<()> {
         }
     }
 
-    // Print extraction plan
-    print_extraction_plan(&options, format);
+    // Print extraction plan (status output; suppressed by --quiet)
+    if !crate::progress::is_quiet() {
+        print_extraction_plan(&options, format);
+    }
 
     // Perform extraction
-    extract_frames_impl(&options, format).await?;
+    let extracted = extract_frames_impl(&options, format).await?;
 
-    // Print summary
-    print_extraction_summary(&options);
+    // Print summary (status output; suppressed by --quiet)
+    if !crate::progress::is_quiet() {
+        print_extraction_summary(&options, extracted);
+    }
 
     Ok(())
 }
@@ -396,7 +400,8 @@ fn make_decoder(codec: CodecId, extradata: Option<Vec<u8>>) -> Result<Box<dyn Vi
 }
 
 /// Perform the actual frame extraction from a real video file.
-async fn extract_frames_impl(options: &ExtractOptions, format: ImageFormat) -> Result<()> {
+/// Returns the number of frames actually written to disk.
+async fn extract_frames_impl(options: &ExtractOptions, format: ImageFormat) -> Result<usize> {
     let input_path = &options.input;
     info!("Extracting frames from {}", input_path.display());
 
@@ -471,7 +476,7 @@ async fn extract_frames_impl(options: &ExtractOptions, format: ImageFormat) -> R
         input_path.display()
     );
 
-    Ok(())
+    Ok(extracted)
 }
 
 /// Open the given container format, find a video stream, decode frames, and return
@@ -781,13 +786,17 @@ fn generate_output_filename(pattern: &str, frame_number: usize) -> PathBuf {
 }
 
 /// Print extraction summary after completion.
-fn print_extraction_summary(options: &ExtractOptions) {
-    let extracted_count = options.frames.unwrap_or(100) / options.every;
-
+///
+/// `extracted` is the number of frames actually written to disk by
+/// `extract_frames_impl` — never an estimate derived from the requested
+/// options (the old `frames.unwrap_or(100) / every` formula reported a
+/// fabricated count whenever `--frames` was omitted or decoding stopped
+/// early).
+fn print_extraction_summary(options: &ExtractOptions, extracted: usize) {
     println!();
     println!("{}", "Frame Extraction Complete".green().bold());
     println!("{}", "=".repeat(60));
-    println!("{:20} {}", "Frames Extracted:", extracted_count);
+    println!("{:20} {}", "Frames Extracted:", extracted);
     println!("{:20} {}", "Output Pattern:", options.output_pattern);
     println!("{}", "=".repeat(60));
 }

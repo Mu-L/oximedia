@@ -259,10 +259,14 @@ pub fn parse_av1_codec_string(s: &str) -> Result<Av1CodecString, Error> {
         codec.monochrome = parts[3] == "1";
     }
     if parts.len() > 4 {
-        let sub = parts[4];
-        if sub.len() >= 2 {
-            codec.chroma_subsampling_x = sub[0..1].parse().unwrap_or(1);
-            codec.chroma_subsampling_y = sub[1..2].parse().unwrap_or(1);
+        // Char-safe parse of the two subsampling digits. Slicing `sub[0..1]`
+        // panics when the first character is multibyte UTF-8 (a char-boundary
+        // panic reachable from an attacker-supplied DASH/HLS `codecs=`
+        // attribute), so iterate characters instead of taking byte ranges.
+        let mut sub_chars = parts[4].chars();
+        if let (Some(x), Some(y)) = (sub_chars.next(), sub_chars.next()) {
+            codec.chroma_subsampling_x = x.to_digit(10).map_or(1, |d| d as u8);
+            codec.chroma_subsampling_y = y.to_digit(10).map_or(1, |d| d as u8);
         }
     }
     if parts.len() > 5 {
@@ -1143,5 +1147,20 @@ mod tests {
             suggest_container("hvc1.1.6.L93.B0", "mp4a.40.2"),
             "video/mp4"
         );
+    }
+
+    #[test]
+    fn parse_av1_codec_string_multibyte_subsampling_no_panic() {
+        // Regression: a multibyte UTF-8 character in the chroma-subsampling
+        // field (`parts[4]`) used to panic on `sub[0..1]` (char-boundary panic)
+        // when reached from an attacker-controlled DASH/HLS `codecs=` attribute.
+        // Parsing is now char-safe and must not panic.
+        let result = parse_av1_codec_string("av01.0.13M.10.0.Ÿ0");
+        assert!(
+            result.is_ok(),
+            "multibyte subsampling must not panic: {result:?}"
+        );
+        // A three-byte character straddling the offset likewise must not panic.
+        assert!(parse_av1_codec_string("av01.0.13M.10.0.€x").is_ok());
     }
 }

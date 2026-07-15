@@ -1,7 +1,7 @@
 //! Audit log: track who submitted, modified, and cancelled each job.
 //!
 //! Every state transition and configuration change is recorded as an
-//! [`AuditEntry`] with a timestamp, actor, action, and optional details.
+//! [`AuditEntry`](crate::audit_log::AuditEntry) with a timestamp, actor, action, and optional details.
 //! The log is append-only, thread-safe, and supports filtering and export.
 
 use std::collections::VecDeque;

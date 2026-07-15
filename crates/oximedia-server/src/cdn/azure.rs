@@ -39,7 +39,7 @@ const BLOCK_SIZE: usize = 5 * 1024 * 1024; // 5 MiB
 ///
 /// Implements the same interface as [`super::s3::S3CdnUploader`].  Under the
 /// `cdn-azure` feature every operation performs real network I/O through
-/// [`AzureStorage`](oximedia_storage::azure::AzureStorage); otherwise the
+/// `AzureStorage` (`oximedia_storage::azure::AzureStorage`, requires the `azure` feature on `oximedia-storage`); otherwise the
 /// uploader falls back to a pure-Rust log-only path.
 pub struct AzureCdnUploader {
     /// Azure storage account name.
@@ -63,7 +63,7 @@ impl AzureCdnUploader {
     /// storage account name, and `config.secret_key` is the account access key.
     ///
     /// Under the `cdn-azure` feature this constructs a real
-    /// [`AzureStorage`](oximedia_storage::azure::AzureStorage) client; the
+    /// `AzureStorage` (`oximedia_storage::azure::AzureStorage`, requires the `azure` feature on `oximedia-storage`) client; the
     /// account key is required for that path.
     ///
     /// # Errors
@@ -212,7 +212,7 @@ impl AzureCdnUploader {
     /// Upload raw bytes to Azure Blob Storage.
     ///
     /// Under the `cdn-azure` feature the bytes are streamed to the
-    /// [`AzureStorage`](oximedia_storage::azure::AzureStorage) backend, which
+    /// `AzureStorage` (`oximedia_storage::azure::AzureStorage`, requires the `azure` feature on `oximedia-storage`) backend, which
     /// performs block-blob staging and commit.
     ///
     /// # Errors

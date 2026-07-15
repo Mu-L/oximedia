@@ -585,11 +585,38 @@ impl ComputeBackend for VulkanComputeBackend {
         }
     }
 
+    /// Download the contents of a GPU buffer.
+    ///
+    /// # Honesty note
+    ///
+    /// This backend has no real Vulkan dispatch pipeline (see
+    /// [`Self::dispatch_kernel`]), so any bytes "downloaded" here could
+    /// never actually have been GPU-computed — they would only ever be
+    /// whatever [`Self::upload_buffer`] last wrote, echoed straight back.
+    /// Returning that silently would let a caller mistake an unmodified
+    /// upload for a real compute result. This fails honestly instead.
+    // TODO(0.2.x): once real Vulkan compute dispatch exists (see
+    // dispatch_kernel), implement a real GPU->host readback here.
     fn download_buffer(&self, handle: &BufferHandle) -> AccelResult<Vec<u8>> {
+        // Confirm the handle is at least valid before explaining why the
+        // (non-existent) compute result can't be returned, so callers get
+        // `BufferAllocation` for a bad handle and `Unsupported` only for a
+        // legitimate handle that simply never went through real compute.
         let bufs = self.buffers.read().unwrap_or_else(|e| e.into_inner());
-        bufs.get(&handle.0).cloned().ok_or_else(|| {
-            AccelError::BufferAllocation(format!("Invalid buffer handle: {}", handle.0))
-        })
+        if !bufs.contains_key(&handle.0) {
+            return Err(AccelError::BufferAllocation(format!(
+                "Invalid buffer handle: {}",
+                handle.0
+            )));
+        }
+        drop(bufs);
+
+        Err(AccelError::Unsupported(
+            "Vulkan compute backend not yet implemented: cannot honestly return \
+             GPU-computed data because no real dispatch pipeline exists in this \
+             abstraction layer"
+                .to_string(),
+        ))
     }
 
     fn free_buffer(&self, handle: BufferHandle) -> AccelResult<()> {
@@ -604,18 +631,35 @@ impl ComputeBackend for VulkanComputeBackend {
         Ok(())
     }
 
+    /// Execute a registered compute kernel.
+    ///
+    /// # Honesty note
+    ///
+    /// This backend has no real compiled Vulkan pipeline — it never creates
+    /// a SPIR-V pipeline or submits a command buffer, regardless of whether
+    /// a real Vulkan device was detected (`self.available`). An earlier
+    /// revision unconditionally logged a debug message and returned `Ok`,
+    /// which made every caller believe their kernel had run when nothing
+    /// was ever dispatched to a GPU. This fails honestly instead.
+    // TODO(0.2.x): real Vulkan compute dispatch via vulkano behind the
+    // `vulkan-backend` feature: compile registered `KernelRegistry` entries
+    // to SPIR-V pipelines, bind buffers as descriptor sets, and submit a
+    // command buffer for `dispatch`.
     fn dispatch_kernel(
         &self,
         kernel_name: &str,
         _buffers: &[&BufferHandle],
         _dispatch: DispatchParams,
     ) -> AccelResult<()> {
-        // Without an actual compiled pipeline this falls back gracefully.
         tracing::debug!(
-            "VulkanComputeBackend::dispatch_kernel: '{}' (no-op in abstraction layer)",
+            "VulkanComputeBackend::dispatch_kernel: '{}' has no real pipeline to execute",
             kernel_name
         );
-        Ok(())
+        Err(AccelError::Unsupported(
+            "Vulkan compute backend not yet implemented: no real GPU dispatch pipeline \
+             exists in this abstraction layer"
+                .to_string(),
+        ))
     }
 
     fn synchronize(&self) -> AccelResult<()> {
@@ -948,14 +992,48 @@ mod tests {
     }
 
     #[test]
-    fn test_vulkan_backend_alloc_upload_download() {
+    fn test_vulkan_backend_alloc_upload_is_honest_about_download() {
+        // CHANGED: this test previously pinned the fabricated behavior —
+        // download_buffer() used to happily echo back the exact bytes that
+        // upload_buffer() had just written, letting callers believe a real
+        // GPU compute round-trip had occurred when nothing was ever
+        // dispatched. allocate/upload/free are honest host-side bookkeeping
+        // and still succeed; download must now honestly refuse to claim a
+        // GPU-computed result that was never produced.
         let b = VulkanComputeBackend::new();
         let data = vec![42u8; 16];
         let h = b.allocate_buffer(16).expect("h should be valid");
         b.upload_buffer(&h, &data)
             .expect("upload_buffer should succeed");
-        let out = b.download_buffer(&h).expect("out should be valid");
-        assert_eq!(out, data);
+
+        let result = b.download_buffer(&h);
+        assert!(
+            result.is_err(),
+            "download_buffer must not echo the upload as if it were GPU-computed"
+        );
+
         b.free_buffer(h).expect("free_buffer should succeed");
+    }
+
+    #[test]
+    fn test_vulkan_backend_download_invalid_handle_is_buffer_allocation_error() {
+        let b = VulkanComputeBackend::new();
+        let bogus = BufferHandle::new(999_999);
+        let err = b
+            .download_buffer(&bogus)
+            .expect_err("an invalid handle must fail");
+        assert!(matches!(err, AccelError::BufferAllocation(_)));
+    }
+
+    #[test]
+    fn test_vulkan_backend_dispatch_kernel_is_honest_err() {
+        let b = VulkanComputeBackend::new();
+        let dispatch = DispatchParams::new_1d(1);
+        let result = b.dispatch_kernel("scale_bilinear", &[], dispatch);
+        assert!(
+            result.is_err(),
+            "dispatch_kernel must not silently no-op and report success"
+        );
+        assert!(matches!(result.unwrap_err(), AccelError::Unsupported(_)));
     }
 }

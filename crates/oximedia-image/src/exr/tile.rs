@@ -20,6 +20,10 @@ pub(crate) fn read_tiled_data(
     width: u32,
     height: u32,
 ) -> ImageResult<Vec<u8>> {
+    // Defend against an allocation bomb and a `w*h*bytes_per_pixel` overflow:
+    // reject dimensions above the decode ceiling before sizing the output.
+    crate::limits::check_dimensions(width as usize, height as usize)
+        .map_err(ImageError::InvalidFormat)?;
     let w = width as usize;
     let h = height as usize;
 

@@ -88,6 +88,11 @@ impl DnxhdDecoder {
         let num_slices = header.num_slices as usize;
         let is_10bit = header.bits_per_pixel == 10;
 
+        // Defend against an allocation bomb: DNxHD width/height are 16-bit
+        // header fields that drive the Y/Cb/Cr output plane allocations below;
+        // reject impossibly large frames against the shared dimension ceiling.
+        crate::limits::check_dimensions(width, height).map_err(DecodeError::InvalidData)?;
+
         // ── 2. Read the slice size table ─────────────────────────────────────
         // Each entry is a 4-byte big-endian u32 giving the byte length of the
         // corresponding slice (including the slice header).

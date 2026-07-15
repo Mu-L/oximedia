@@ -384,7 +384,7 @@ mod tests {
         let kernel = KernelResources::new(256, 32, 32768);
         let result = OccupancyCalculator::calculate(&spec, &kernel);
         assert!(result.occupancy > 0.0);
-        assert!(result.limiting_factor == OccupancyLimit::SharedMemory);
+        assert_eq!(result.limiting_factor, OccupancyLimit::SharedMemory);
     }
 
     #[test]

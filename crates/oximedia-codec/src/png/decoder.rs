@@ -111,6 +111,11 @@ impl ImageHeader {
         if width == 0 || height == 0 {
             return Err(CodecError::InvalidData("Invalid dimensions".into()));
         }
+        // Defend against an allocation bomb and the u32 `width*height` multiply
+        // wrap in the RGBA/output paths: reject IHDR dimensions above the shared
+        // decode ceiling before any buffer is sized from them.
+        crate::limits::check_dimensions(width as usize, height as usize)
+            .map_err(CodecError::InvalidData)?;
 
         if compression != 0 {
             return Err(CodecError::UnsupportedFeature(format!(
@@ -578,7 +583,16 @@ impl PngDecoder {
     /// Convert raw image data to RGBA format.
     #[allow(clippy::too_many_lines)]
     fn convert_to_rgba(&self, raw_data: &[u8]) -> CodecResult<Vec<u8>> {
-        let pixel_count = (self.header.width * self.header.height) as usize;
+        // width/height are ceiling-checked at IHDR parse, but compute the pixel
+        // count with checked usize math so the `width*height` product cannot
+        // wrap (u32) and under-size the RGBA buffer.
+        let pixel_count = crate::limits::checked_dims(
+            self.header.width as usize,
+            self.header.height as usize,
+            1,
+            4,
+        )
+        .map_err(CodecError::InvalidData)?;
         let mut rgba = vec![255u8; pixel_count * 4];
 
         match self.header.color_type {
@@ -1118,5 +1132,33 @@ impl PngDecoderExtended {
     /// Returns error if decoding fails.
     pub fn decode(&self) -> CodecResult<DecodedImage> {
         self.decoder.decode()
+    }
+}
+
+#[cfg(test)]
+mod ihdr_limit_tests {
+    use super::*;
+
+    #[test]
+    fn ihdr_rejects_oversized_dimensions() {
+        // Regression: an IHDR declaring enormous dimensions used to size a
+        // `width*height` buffer whose u32 product wraps (under-allocation →
+        // OOB) or requests multiple gigabytes. parse now rejects dimensions
+        // above the shared decode ceiling.
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes()); // width
+        ihdr.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes()); // height
+        ihdr.push(8); // bit depth
+        ihdr.push(2); // color type: RGB
+        ihdr.push(0); // compression
+        ihdr.push(0); // filter method
+        ihdr.push(0); // interlace
+        assert!(ImageHeader::parse(&ihdr).is_err());
+
+        // A normal small IHDR still parses successfully.
+        let mut ok = ihdr.clone();
+        ok[0..4].copy_from_slice(&16u32.to_be_bytes());
+        ok[4..8].copy_from_slice(&16u32.to_be_bytes());
+        assert!(ImageHeader::parse(&ok).is_ok());
     }
 }

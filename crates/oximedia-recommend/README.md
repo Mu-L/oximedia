@@ -1,6 +1,6 @@
 # oximedia-recommend
 
-**Status: [Stable]** | Version: 0.1.9 | Tests: extensively tested | Updated: 2026-07-08
+**Status: [Stable]** | Version: 0.2.0 | Tests: extensively tested | Updated: 2026-07-14
 
 Content recommendation and discovery engine for OxiMedia. Provides comprehensive recommendation capabilities including content-based filtering, collaborative filtering, hybrid approaches, and advanced personalization.
 

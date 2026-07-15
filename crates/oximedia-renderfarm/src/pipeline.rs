@@ -3,7 +3,7 @@
 
 //! Rendering pipeline management (pre-render, render, post-render).
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::job::{Job, JobId};
 use crate::worker::WorkerId;
 use chrono::{DateTime, Utc};
@@ -199,7 +199,13 @@ impl Pipeline {
         self.render_results.entry(job_id).or_default().push(result);
     }
 
-    /// Execute post-render stage
+    /// Execute post-render stage.
+    ///
+    /// Note: until real output assembly is implemented (see
+    /// [`Self::assemble_output`]), this always returns `Err` after honestly
+    /// recording the real frame-verification result and marking the
+    /// pipeline task `Failed` with the real error — it never fabricates a
+    /// completed [`PostRenderResult`].
     pub async fn execute_post_render(&mut self, job: &Job) -> Result<PostRenderResult> {
         let task = PipelineTask {
             id: format!("{}-postrender", job.id),
@@ -213,11 +219,27 @@ impl Pipeline {
 
         self.tasks.entry(job.id).or_default().push(task);
 
-        // Verify all frames
+        // Verify all frames (real check against recorded render results).
         let all_frames_verified = self.verify_all_frames(job).await?;
 
-        // Assemble output
-        let (output_assembled, final_output_path) = self.assemble_output(job).await?;
+        // Assemble output. Not implemented today (no muxing dependency in
+        // this crate) — record the failure honestly on the task before
+        // propagating, instead of leaving it stuck at `Running`.
+        let (output_assembled, final_output_path) = match self.assemble_output(job).await {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(task) = self
+                    .tasks
+                    .get_mut(&job.id)
+                    .and_then(|tasks| tasks.last_mut())
+                {
+                    task.status = TaskStatus::Failed;
+                    task.completed_at = Some(Utc::now());
+                    task.error = Some(e.to_string());
+                }
+                return Err(e);
+            }
+        };
 
         // Calculate quality metrics
         let quality_metrics = self.calculate_quality_metrics(job).await?;
@@ -265,15 +287,25 @@ impl Pipeline {
         Ok(true)
     }
 
-    /// Resolve dependencies
+    /// Resolve dependencies.
+    ///
+    /// Real check: every declared dependency asset must actually exist on
+    /// disk. A job with no declared dependencies is vacuously resolved
+    /// (there is nothing to resolve). An earlier revision returned
+    /// `!dependencies.is_empty()` — a fabricated signal derived from list
+    /// length rather than any real resolution check (and backwards: it
+    /// reported jobs with *no* dependencies as unresolved).
+    // TODO(0.2.x): real dependency resolution — download missing assets,
+    // verify checksums, set up plugin paths, and check license
+    // availability. Today this only confirms each dependency path exists.
     async fn resolve_dependencies(&self, job: &Job) -> Result<bool> {
-        // In a real implementation, this would:
-        // - Download missing assets
-        // - Verify checksums
-        // - Set up plugin paths
-        // - Check license availability
+        for dep in &job.submission.dependencies {
+            if !dep.exists() {
+                return Ok(false);
+            }
+        }
 
-        Ok(!job.submission.dependencies.is_empty())
+        Ok(true)
     }
 
     /// Estimate resources
@@ -295,32 +327,82 @@ impl Pipeline {
         (frame_count, estimated_cost, estimated_time)
     }
 
-    /// Verify all frames
-    async fn verify_all_frames(&self, _job: &Job) -> Result<bool> {
-        // Check if all expected frames are present
-        // Verify checksums
-        // Check for corruption
+    /// Verify all frames.
+    ///
+    /// Real check: every recorded [`RenderResult`] for the job must report
+    /// `success`, and its `output_path` must exist on disk and be
+    /// non-empty. If no render results have been recorded yet (or fewer
+    /// were recorded than the pre-render stage estimated), verification
+    /// honestly reports `false` rather than the previous hardcoded `true`.
+    // TODO(0.2.x): also verify per-frame checksums and detect corruption
+    // (e.g. via a digest recorded by the render worker), not just
+    // existence/non-emptiness of the output file.
+    async fn verify_all_frames(&self, job: &Job) -> Result<bool> {
+        let Some(results) = self.render_results.get(&job.id) else {
+            return Ok(false);
+        };
+        if results.is_empty() {
+            return Ok(false);
+        }
+
+        if let Some(pre) = self.pre_render_results.get(&job.id) {
+            if (results.len() as u32) < pre.estimated_frames {
+                return Ok(false);
+            }
+        }
+
+        for result in results {
+            if !result.success {
+                return Ok(false);
+            }
+            match std::fs::metadata(&result.output_path) {
+                Ok(meta) if meta.len() > 0 => {}
+                _ => return Ok(false),
+            }
+        }
 
         Ok(true)
     }
 
-    /// Assemble output
+    /// Assemble output.
+    ///
+    /// Honesty note: this crate has no video muxing/encoding dependency (no
+    /// `oximedia-container`/`oximedia-codec` in `Cargo.toml`), so it cannot
+    /// actually combine rendered frames into a final deliverable. An
+    /// earlier revision fabricated a hardcoded `/output/{job_id}.mp4` path
+    /// and reported `output_assembled: true` without writing anything to
+    /// disk. That is fabricated success. This now fails honestly instead.
+    // TODO(0.2.x): real output assembly — combine image sequences into a
+    // video (requires a muxing/encoding dependency such as
+    // oximedia-container), merge render passes, and apply final
+    // processing. Until then this must not report success.
     async fn assemble_output(&self, job: &Job) -> Result<(bool, Option<PathBuf>)> {
-        // In a real implementation:
-        // - Combine image sequences into video
-        // - Merge render passes
-        // - Apply final processing
-
-        let output_path = PathBuf::from(format!("/output/{}.mp4", job.id));
-        Ok((true, Some(output_path)))
+        Err(Error::Other(format!(
+            "output assembly for job {} is not implemented: no muxing/encoding capability \
+             is available in oximedia-renderfarm",
+            job.id
+        )))
     }
 
-    /// Calculate quality metrics
-    async fn calculate_quality_metrics(&self, _job: &Job) -> Result<HashMap<String, f64>> {
-        let mut metrics = HashMap::new();
-        metrics.insert("psnr".to_string(), 42.0);
-        metrics.insert("ssim".to_string(), 0.95);
-        Ok(metrics)
+    /// Calculate quality metrics.
+    ///
+    /// Honesty note: PSNR/SSIM are full-reference metrics that require a
+    /// reference frame to compare against. This render-farm pipeline has no
+    /// reference (it renders from a scene/project; it does not transcode an
+    /// existing reference video), so a real full-reference score cannot be
+    /// computed here. An earlier revision fabricated `psnr: 42.0, ssim:
+    /// 0.95` for every job regardless of content. That is fabricated
+    /// success. This now fails honestly instead.
+    // TODO(0.2.x): real quality metrics — either accept an explicit
+    // reference asset for full-reference PSNR/SSIM/VMAF (reusing
+    // oximedia-quality's public API), or compute no-reference metrics
+    // (blur/noise/blockiness) directly from the rendered output frames.
+    async fn calculate_quality_metrics(&self, job: &Job) -> Result<HashMap<String, f64>> {
+        Err(Error::Other(format!(
+            "quality metrics for job {} are not implemented: no reference frame is available \
+             and no quality-assessment dependency is wired into oximedia-renderfarm",
+            job.id
+        )))
     }
 
     /// Get pre-render result
@@ -393,7 +475,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_post_render_execution() -> Result<()> {
+    async fn test_post_render_execution_is_honest_about_unimplemented_assembly() -> Result<()> {
+        // CHANGED: this test previously pinned the fabricated behavior —
+        // execute_post_render() used to always succeed with a hardcoded
+        // `/output/{job_id}.mp4` path and `output_assembled: true`, even
+        // though nothing was ever written to disk. Output assembly is not
+        // implemented (no muxing dependency in this crate), so
+        // execute_post_render must now honestly report that via `Err`
+        // instead of fabricating a finished output.
         let mut pipeline = Pipeline::new();
 
         let submission = JobSubmission::builder()
@@ -403,8 +492,144 @@ mod tests {
 
         let job = Job::new(submission);
 
-        let result = pipeline.execute_post_render(&job).await?;
-        assert!(result.final_output_path.is_some());
+        let result = pipeline.execute_post_render(&job).await;
+        assert!(
+            result.is_err(),
+            "post-render must not fabricate a completed assembly"
+        );
+
+        // The task must be recorded as Failed with the real error message,
+        // not left dangling at `Running` forever.
+        let tasks = pipeline.get_tasks(job.id);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].status, TaskStatus::Failed);
+        assert!(tasks[0].error.is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_resolve_dependencies_real_check() -> Result<()> {
+        let pipeline = Pipeline::new();
+
+        // No dependencies declared: vacuously resolved (nothing to
+        // resolve). The old `!dependencies.is_empty()` fabrication would
+        // have reported this case as `false`.
+        let submission_empty = JobSubmission::builder()
+            .project_file(tmp_path("resolve-deps-empty.blend"))
+            .frame_range(1, 5)
+            .build()?;
+        let job_empty = Job::new(submission_empty);
+        assert!(pipeline.resolve_dependencies(&job_empty).await?);
+
+        // A declared dependency that does not exist on disk: not resolved.
+        let missing_dep = tmp_path("resolve-deps-missing-dep.bin");
+        let _ = std::fs::remove_file(&missing_dep);
+        let submission_missing = JobSubmission::builder()
+            .project_file(tmp_path("resolve-deps-missing.blend"))
+            .frame_range(1, 5)
+            .dependency(missing_dep)
+            .build()?;
+        let job_missing = Job::new(submission_missing);
+        assert!(!pipeline.resolve_dependencies(&job_missing).await?);
+
+        // A declared dependency that does exist on disk: resolved.
+        let present_dep = tmp_path("resolve-deps-present-dep.bin");
+        std::fs::write(&present_dep, b"asset bytes")?;
+        let submission_present = JobSubmission::builder()
+            .project_file(tmp_path("resolve-deps-present.blend"))
+            .frame_range(1, 5)
+            .dependency(present_dep.clone())
+            .build()?;
+        let job_present = Job::new(submission_present);
+        assert!(pipeline.resolve_dependencies(&job_present).await?);
+
+        std::fs::remove_file(&present_dep).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_verify_all_frames_real_check() -> Result<()> {
+        let mut pipeline = Pipeline::new();
+
+        let submission = JobSubmission::builder()
+            .project_file(tmp_path("verify-frames.blend"))
+            .frame_range(1, 2)
+            .build()?;
+        let job = Job::new(submission);
+
+        // No render results recorded yet: honestly not verified (the old
+        // code hardcoded `true` here regardless).
+        assert!(!pipeline.verify_all_frames(&job).await?);
+
+        // A "successful" result pointing at a file that does not actually
+        // exist must still fail real verification.
+        pipeline.record_render_result(
+            job.id,
+            RenderResult {
+                frame: 1,
+                output_path: tmp_path("verify-frames-missing.png"),
+                render_time: 1.0,
+                worker_id: WorkerId::new(),
+                success: true,
+                error: None,
+            },
+        );
+        assert!(!pipeline.verify_all_frames(&job).await?);
+
+        // A real, non-empty frame file on disk: now it verifies.
+        let real_frame = tmp_path("verify-frames-real.png");
+        std::fs::write(&real_frame, b"not really a png but non-empty")?;
+        let mut pipeline2 = Pipeline::new();
+        pipeline2.record_render_result(
+            job.id,
+            RenderResult {
+                frame: 1,
+                output_path: real_frame.clone(),
+                render_time: 1.0,
+                worker_id: WorkerId::new(),
+                success: true,
+                error: None,
+            },
+        );
+        assert!(pipeline2.verify_all_frames(&job).await?);
+
+        std::fs::remove_file(&real_frame).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_assemble_output_is_honest_err() -> Result<()> {
+        let pipeline = Pipeline::new();
+        let submission = JobSubmission::builder()
+            .project_file(tmp_path("assemble.blend"))
+            .frame_range(1, 5)
+            .build()?;
+        let job = Job::new(submission);
+
+        let result = pipeline.assemble_output(&job).await;
+        assert!(
+            result.is_err(),
+            "assemble_output must not fabricate a finished output path"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_calculate_quality_metrics_is_honest_err() -> Result<()> {
+        let pipeline = Pipeline::new();
+        let submission = JobSubmission::builder()
+            .project_file(tmp_path("quality.blend"))
+            .frame_range(1, 5)
+            .build()?;
+        let job = Job::new(submission);
+
+        let result = pipeline.calculate_quality_metrics(&job).await;
+        assert!(
+            result.is_err(),
+            "calculate_quality_metrics must not fabricate hardcoded psnr/ssim values"
+        );
 
         Ok(())
     }

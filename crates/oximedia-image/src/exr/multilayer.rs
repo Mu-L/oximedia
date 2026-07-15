@@ -423,8 +423,20 @@ fn read_singlepart_as_layer(file: &mut File) -> ImageResult<MultiLayerExr> {
     let header = read_exr_header(file)?;
 
     let (x_min, y_min, x_max, y_max) = header.data_window;
-    let width = (x_max - x_min + 1) as u32;
-    let height = (y_max - y_min + 1) as u32;
+    // Compute inclusive-window dimensions in i64 (the window can span the full
+    // i32 range, so an i32 subtraction could overflow) and validate against the
+    // decode ceiling — a reversed or enormous window is malformed.
+    let width_i = i64::from(x_max) - i64::from(x_min) + 1;
+    let height_i = i64::from(y_max) - i64::from(y_min) + 1;
+    if width_i <= 0 || height_i <= 0 {
+        return Err(ImageError::invalid_format(
+            "EXR dataWindow is empty or reversed",
+        ));
+    }
+    crate::limits::check_dimensions(width_i as usize, height_i as usize)
+        .map_err(ImageError::InvalidFormat)?;
+    let width = width_i as u32;
+    let height = height_i as u32;
 
     let data = read_scanline_data(file, &header, width, height)?;
 
@@ -492,8 +504,19 @@ fn read_multipart_layers(file: &mut File) -> ImageResult<MultiLayerExr> {
     // Read chunk data for each part
     for (i, header) in part_headers.iter().enumerate() {
         let (x_min, y_min, x_max, y_max) = header.data_window;
-        let pw = (x_max - x_min + 1) as u32;
-        let ph = (y_max - y_min + 1) as u32;
+        // Same i64 + ceiling guard as the single-part path: the inclusive data
+        // window can overflow an i32 subtraction and drive a huge allocation.
+        let pw_i = i64::from(x_max) - i64::from(x_min) + 1;
+        let ph_i = i64::from(y_max) - i64::from(y_min) + 1;
+        if pw_i <= 0 || ph_i <= 0 {
+            return Err(ImageError::invalid_format(
+                "EXR dataWindow is empty or reversed",
+            ));
+        }
+        crate::limits::check_dimensions(pw_i as usize, ph_i as usize)
+            .map_err(ImageError::InvalidFormat)?;
+        let pw = pw_i as u32;
+        let ph = ph_i as u32;
 
         let data = read_scanline_data(file, header, pw, ph)?;
 

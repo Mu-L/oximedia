@@ -8,6 +8,19 @@
 //! the join point (fan-in) tasks are unblocked. This happens naturally through
 //! the dependency-tracking loop; no explicit graph analysis is required.
 //!
+//! # Scheduling correctness
+//!
+//! A task whose dependencies are not yet satisfied is **retried on the next
+//! pass**, never dropped: the scheduler repeatedly rescans the set of
+//! not-yet-dispatched tasks (a fixpoint loop) until every task has either
+//! run to completion, been synthetically completed from a checkpoint, or
+//! been skipped. [`WorkflowState::Completed`] is returned only when that
+//! fixpoint is reached with an empty failure set. A real task failure, or a
+//! dependency that can never be satisfied because an upstream task failed or
+//! was skipped, is reported as [`WorkflowState::Failed`] (or a scheduling
+//! [`WorkflowError`] if no task can ever become ready again) — never
+//! silently downgraded to a fabricated success.
+//!
 //! # Pause / Resume
 //!
 //! Call [`WorkflowExecutor::pause`] to signal the executor to stop launching
@@ -421,6 +434,17 @@ impl WorkflowExecutor {
     /// The executor checks the pause signal between task waves; when paused it
     /// drains the current in-flight tasks, serialises a checkpoint, and returns
     /// `WorkflowState::Paused` in the `ExecutionResult`.
+    ///
+    /// # Ordering invariant
+    ///
+    /// The scheduler rescans not-yet-dispatched tasks every pass instead of
+    /// consuming a single-pass iterator, so a task whose dependencies are not
+    /// yet satisfied is retried on a later pass rather than permanently
+    /// skipped. `WorkflowState::Completed` is only returned once every task
+    /// has actually been dispatched (run, synthetically completed, or
+    /// skipped) *and* no task failed; otherwise the result is
+    /// `WorkflowState::Failed` (or an `Err` for an unrecoverable scheduling
+    /// deadlock), never a fabricated `Completed`.
     pub async fn execute(&self, workflow: &mut Workflow) -> Result<ExecutionResult> {
         info!("Starting workflow execution: {}", workflow.name);
 
@@ -467,9 +491,15 @@ impl WorkflowExecutor {
         // Cancel signal receiver (clone so we can poll it)
         let cancel_rx = self.cancel_rx.clone();
 
-        // Execute tasks in dependency order
+        // Execute tasks in dependency order. See the "Ordering invariant"
+        // section on `Self::execute` and the "Scheduling correctness" module
+        // doc for the full contract: `pending` starts as the full
+        // topological order and is re-scanned on *every* pass of the outer
+        // `loop` below (a fixpoint), instead of being drained by a
+        // single-pass iterator that would permanently drop any task whose
+        // dependencies were not yet satisfied on the pass it was visited.
         let mut active_tasks = 0;
-        let mut task_iter = task_order.iter();
+        let mut pending: Vec<TaskId> = task_order.clone();
 
         loop {
             // Check for timeout
@@ -527,12 +557,16 @@ impl WorkflowExecutor {
                 });
             }
 
-            // Start new tasks if possible
-            while active_tasks < task_order.len() {
-                let Some(&task_id) = task_iter.next() else {
-                    break;
-                };
+            // Scan every still-pending task exactly once per pass. A task is
+            // removed from `pending` as soon as it is dispatched in any way
+            // (spawned, synthetically completed, or skipped); a task that is
+            // not yet ready is re-queued into `still_pending` so this same
+            // pass logic retries it the next time the outer `loop` runs
+            // (see the ordering invariant on `Self::execute`).
+            let pending_before = pending.len();
+            let mut still_pending = Vec::with_capacity(pending.len());
 
+            for task_id in pending {
                 // Check if dependencies are satisfied
                 let deps = workflow.get_dependencies(&task_id);
                 let completed = completed_tasks.read().await;
@@ -572,14 +606,25 @@ impl WorkflowExecutor {
                         workflow.state = WorkflowState::Failed;
                         return Err(WorkflowError::DependencyFailed(task_id.to_string()));
                     }
-                    // Skip this task
+                    // Skip this task. Record it as failed (not merely
+                    // absent from every set) so that any task depending on
+                    // *this* task correctly observes `deps_failed` on the
+                    // next pass too, instead of waiting forever on a
+                    // dependency that will never complete or fail on its
+                    // own — that silent gap used to let whole downstream
+                    // chains vanish without being counted as completed or
+                    // failed.
                     if let Some(task) = workflow.get_task_mut(&task_id) {
                         task.set_state(TaskState::Skipped)?;
                     }
+                    failed_tasks.write().await.insert(task_id);
                     continue;
                 }
 
                 if !deps_satisfied {
+                    // Not ready yet: retry on a later pass instead of
+                    // dropping the task permanently (the original bug).
+                    still_pending.push(task_id);
                     continue;
                 }
 
@@ -660,9 +705,39 @@ impl WorkflowExecutor {
                 active_tasks += 1;
             }
 
-            // Wait for task completion
-            if active_tasks == 0 {
+            pending = still_pending;
+
+            // Nothing left in flight and nothing left pending: every task
+            // has been dispatched (run, synthetically completed, or
+            // skipped). This is the only way out of the loop that leads to
+            // a `Completed` result below.
+            if active_tasks == 0 && pending.is_empty() {
                 break;
+            }
+
+            if active_tasks == 0 {
+                if pending.len() == pending_before {
+                    // A full pass over every remaining pending task
+                    // dispatched nothing, and nothing is in flight that
+                    // could ever change `completed_tasks` / `failed_tasks`
+                    // again: the remaining tasks can never become ready.
+                    // `Workflow::validate` (called above) already rejects
+                    // cycles and dangling edge references, so this should be
+                    // unreachable in practice — but we refuse to silently
+                    // report `Completed` while tasks were dropped, which is
+                    // exactly the bug this scheduler replaces.
+                    workflow.state = WorkflowState::Failed;
+                    return Err(WorkflowError::generic(format!(
+                        "Workflow scheduling deadlock: {} task(s) can never become ready: {:?}",
+                        pending.len(),
+                        pending
+                    )));
+                }
+                // Some tasks were resolved synchronously (skipped) this pass
+                // with nothing spawned to await; loop immediately to
+                // re-scan `pending` instead of blocking on `rx.recv()` with
+                // no in-flight sender, which would hang forever.
+                continue;
             }
 
             if let Some((_task_id, result)) = rx.recv().await {
@@ -680,7 +755,12 @@ impl WorkflowExecutor {
             }
         }
 
-        // Check final state
+        // Check final state. By the time the loop above breaks, every task in
+        // `task_order` has been dispatched (see the ordering invariant on
+        // `Self::execute`): a real per-task failure and a cascaded
+        // dependency-failure skip both land in `failed_tasks`, so this check
+        // now honestly reflects whether the whole workflow actually
+        // succeeded rather than merely "the scan reached the end".
         let failed = failed_tasks.read().await;
         let final_state = if failed.is_empty() {
             WorkflowState::Completed
@@ -1357,6 +1437,7 @@ impl TaskExecutor for DefaultTaskExecutor {
 mod tests {
     use super::*;
     use crate::task::{Task, TaskType};
+    use std::path::PathBuf;
 
     #[test]
     fn test_execution_context_creation() {
@@ -1436,5 +1517,248 @@ mod tests {
 
         assert_eq!(result.state, WorkflowState::Completed);
         assert_eq!(result.task_results.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression tests: `WorkflowExecutor::execute` must never fabricate
+    // `WorkflowState::Completed` while silently dropping tasks. See the
+    // "Ordering invariant" section on `WorkflowExecutor::execute` and the
+    // "Scheduling correctness" module doc.
+    // -----------------------------------------------------------------------
+
+    /// A `TaskExecutor` that records the order in which tasks are actually
+    /// executed (by name) into a shared, `Arc`-owned log, so tests can assert
+    /// dependency-respecting scheduling order.
+    struct OrderRecordingExecutor {
+        order: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl TaskExecutor for OrderRecordingExecutor {
+        async fn execute(&self, task: &Task) -> Result<TaskResult> {
+            // A short delay makes it likely that, if the scheduler ever
+            // incorrectly started a dependent task before its dependency
+            // actually finished, the ordering violation would surface here.
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            self.order
+                .lock()
+                .expect("order mutex poisoned in test")
+                .push(task.name.clone());
+            Ok(TaskResult {
+                task_id: task.id,
+                status: TaskState::Completed,
+                data: None,
+                error: None,
+                duration: Duration::ZERO,
+                outputs: Vec::new(),
+            })
+        }
+    }
+
+    /// Regression test for the scheduling bug where `execute()` scanned
+    /// `task_order` with a single-pass iterator: a task whose dependencies
+    /// were not yet satisfied got `continue`d past, and because the shared
+    /// iterator never yielded it again, every non-root task in a dependency
+    /// chain was silently dropped while the workflow still reported
+    /// `Completed`.
+    ///
+    /// With a real fixpoint scheduler, all three tasks in `a -> b -> c` must
+    /// run, and must run in dependency order.
+    #[tokio::test]
+    async fn test_dependency_chain_runs_all_steps_in_order() {
+        let mut workflow = Workflow::new("chain-workflow");
+
+        let task_a = Task::new(
+            "a",
+            TaskType::Wait {
+                duration: Duration::from_millis(1),
+            },
+        );
+        let task_b = Task::new(
+            "b",
+            TaskType::Wait {
+                duration: Duration::from_millis(1),
+            },
+        );
+        let task_c = Task::new(
+            "c",
+            TaskType::Wait {
+                duration: Duration::from_millis(1),
+            },
+        );
+
+        let id_a = workflow.add_task(task_a);
+        let id_b = workflow.add_task(task_b);
+        let id_c = workflow.add_task(task_c);
+
+        workflow
+            .add_edge(id_a, id_b)
+            .expect("should succeed in test");
+        workflow
+            .add_edge(id_b, id_c)
+            .expect("should succeed in test");
+
+        let order: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let task_executor = Arc::new(OrderRecordingExecutor {
+            order: order.clone(),
+        });
+        let executor = WorkflowExecutor::new(task_executor);
+
+        let result = tokio::time::timeout(Duration::from_secs(10), executor.execute(&mut workflow))
+            .await
+            .expect("workflow execution should not hang")
+            .expect("workflow execution should succeed in test");
+
+        assert_eq!(
+            result.state,
+            WorkflowState::Completed,
+            "all three tasks succeeded, so the workflow must report Completed"
+        );
+
+        // The core regression check: every task in the chain actually ran,
+        // not just the root `a`.
+        assert_eq!(
+            result.task_results.len(),
+            3,
+            "all three chained tasks must produce a result, not just the root: {:?}",
+            result.task_results
+        );
+        for id in [id_a, id_b, id_c] {
+            let status = result
+                .task_results
+                .get(&id)
+                .expect("every task in the chain must have a result")
+                .status;
+            assert_eq!(status, TaskState::Completed);
+        }
+
+        // And they must have run in dependency order: a before b before c.
+        let recorded = order.lock().expect("order mutex poisoned in test").clone();
+        assert_eq!(
+            recorded,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            "tasks must execute in dependency order, got {recorded:?}"
+        );
+    }
+
+    /// A cyclic dependency graph must never be reported as `Completed`.
+    /// `Workflow::validate()` (called at the top of `execute()`) rejects
+    /// cycles before any task runs; this pins that contract at the
+    /// `WorkflowExecutor::execute` boundary as a regression guard.
+    #[tokio::test]
+    async fn test_cycle_returns_err_not_completed() {
+        let mut workflow = Workflow::new("cyclic-workflow");
+        let task1 = Task::new(
+            "task1",
+            TaskType::Wait {
+                duration: Duration::from_millis(1),
+            },
+        );
+        let task2 = Task::new(
+            "task2",
+            TaskType::Wait {
+                duration: Duration::from_millis(1),
+            },
+        );
+        let id1 = workflow.add_task(task1);
+        let id2 = workflow.add_task(task2);
+        workflow.add_edge(id1, id2).expect("should succeed in test");
+        workflow.add_edge(id2, id1).expect("should succeed in test");
+
+        let executor = WorkflowExecutor::new(Arc::new(DefaultTaskExecutor));
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(10), executor.execute(&mut workflow))
+                .await
+                .expect("workflow execution must not hang on a cyclic graph");
+
+        assert!(
+            outcome.is_err(),
+            "a cyclic dependency graph must be rejected, never reported as Completed"
+        );
+        assert_ne!(workflow.state, WorkflowState::Completed);
+    }
+
+    /// A real failure on a **non-root** task (`b`, which depends on `a`) must
+    /// still be observed and reported, and must cascade to `c` (which
+    /// depends on `b`) instead of being silently dropped.
+    ///
+    /// This specifically pins the single-pass-iterator failure mode: `b`
+    /// cannot possibly be ready during the very first scan (its dependency
+    /// `a` is still in flight), so under the old scheduler it was
+    /// `continue`d past *forever* and never retried once `a` finished --
+    /// meaning `b` never actually ran, never reported failure, and
+    /// `failed_tasks` stayed empty. The workflow then dishonestly reported
+    /// `Completed` even though the task that was designed to fail never got
+    /// a chance to execute at all. With a real fixpoint scheduler `b` is
+    /// retried after `a` completes, actually runs, actually fails, and the
+    /// failure is recorded -- so the workflow must resolve promptly (not
+    /// hang) and report `Failed`, with `c` cascaded rather than vanishing.
+    #[tokio::test]
+    async fn test_non_root_failure_is_not_silently_dropped() {
+        let mut workflow = Workflow::new("non-root-failure-workflow");
+        workflow.config.fail_fast = false;
+
+        let task_a = Task::new(
+            "a",
+            TaskType::Wait {
+                duration: Duration::from_millis(1),
+            },
+        );
+        // `b` fails for real: a `CustomScript` task pointing at a script
+        // that does not exist on disk. Crucially, `b` is NOT a root task,
+        // so it can never be ready on the very first scheduling pass.
+        let task_b = Task::new(
+            "b",
+            TaskType::CustomScript {
+                script: PathBuf::from("/nonexistent/does-not-exist.sh"),
+                args: Vec::new(),
+                env: HashMap::new(),
+            },
+        );
+        let task_c = Task::new(
+            "c",
+            TaskType::Wait {
+                duration: Duration::from_millis(1),
+            },
+        );
+
+        let id_a = workflow.add_task(task_a);
+        let id_b = workflow.add_task(task_b);
+        let id_c = workflow.add_task(task_c);
+
+        workflow
+            .add_edge(id_a, id_b)
+            .expect("should succeed in test");
+        workflow
+            .add_edge(id_b, id_c)
+            .expect("should succeed in test");
+
+        let executor = WorkflowExecutor::new(Arc::new(DefaultTaskExecutor));
+
+        let result = tokio::time::timeout(Duration::from_secs(10), executor.execute(&mut workflow))
+            .await
+            .expect("workflow execution must not hang on a downstream failure")
+            .expect("execute() returns Ok with a Failed state (not an Err) for a cascaded skip");
+
+        assert_eq!(
+            result.state,
+            WorkflowState::Failed,
+            "a real non-root failure must yield a Failed workflow, never a fabricated Completed \
+             (the failing task must not be silently dropped by the scheduler)"
+        );
+        assert_ne!(result.state, WorkflowState::Completed);
+
+        // `b` must have actually run (and been recorded as failed), not
+        // vanished: its result must be present and Failed.
+        let b_status = result
+            .task_results
+            .get(&id_b)
+            .expect("the failing non-root task must have actually run and produced a result")
+            .status;
+        assert_eq!(
+            b_status,
+            TaskState::Failed,
+            "b must be recorded as Failed, not silently skipped"
+        );
     }
 }

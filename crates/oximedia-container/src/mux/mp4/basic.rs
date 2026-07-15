@@ -90,13 +90,21 @@ impl BasicMp4Muxer {
 
     /// Writes an `mdat` (media data) box containing `data`.
     ///
+    /// For payloads whose total box size (8-byte header + `data`) would not
+    /// fit in a 32-bit field, this emits the ISO/IEC 14496-12 §4.2
+    /// `largesize` form (`size` field set to the sentinel `1`, followed by
+    /// an 8-byte big-endian `largesize` field carrying the true size)
+    /// instead of writing a header that lies about its own length. Silently
+    /// clamping the 32-bit `size` field for an oversized payload would still
+    /// write every byte of `data` after a box header that undersells its own
+    /// length, corrupting the file for any conformant demuxer.
+    ///
     /// # Errors
     ///
     /// Returns [`BasicMp4Error::Io`] on write failure.
     pub fn write_mdat(&mut self, data: &[u8]) -> Result<(), BasicMp4Error> {
-        // mdat box: 8 bytes header + data
-        let box_size = 8u32.saturating_add(u32::try_from(data.len()).unwrap_or(u32::MAX));
-        write_box_header(&mut self.output, box_size, b"mdat")?;
+        let header = box_header_for_len(b"mdat", data.len() as u64);
+        self.output.write_all(&header)?;
         self.output.write_all(data)?;
         Ok(())
     }
@@ -143,6 +151,35 @@ fn write_box_header(w: &mut dyn Write, size: u32, box_type: &[u8; 4]) -> io::Res
     w.write_all(&size.to_be_bytes())?;
     w.write_all(box_type)?;
     Ok(())
+}
+
+/// Builds the box header bytes for a box whose payload is `payload_len`
+/// bytes, per ISO/IEC 14496-12 §4.2.
+///
+/// Returns the standard 8-byte header (`size:u32` + `type:4`) when the total
+/// box size (header + payload) fits in a 32-bit field. Otherwise returns the
+/// 16-byte `largesize` header: a `size` field of `1` (the sentinel meaning
+/// "the real size follows as a 64-bit field"), the 4-byte type, and an
+/// 8-byte big-endian `largesize` carrying the true total size.
+///
+/// This is a pure function over the payload length (rather than being
+/// inlined into a `data: &[u8]`-taking writer) so the 4 GiB boundary can be
+/// exercised in tests without allocating gigabytes of data.
+fn box_header_for_len(box_type: &[u8; 4], payload_len: u64) -> Vec<u8> {
+    let small_total = 8u64.saturating_add(payload_len);
+    if let Ok(size) = u32::try_from(small_total) {
+        let mut header = Vec::with_capacity(8);
+        header.extend_from_slice(&size.to_be_bytes());
+        header.extend_from_slice(box_type);
+        header
+    } else {
+        let large_total = 16u64.saturating_add(payload_len);
+        let mut header = Vec::with_capacity(16);
+        header.extend_from_slice(&1u32.to_be_bytes());
+        header.extend_from_slice(box_type);
+        header.extend_from_slice(&large_total.to_be_bytes());
+        header
+    }
 }
 
 /// Write a complete box with `box_type` and `payload`.
@@ -462,6 +499,85 @@ mod tests {
         });
         assert_eq!(read_u32_be(&out, 0), 8);
         assert_eq!(&out[4..8], b"mdat");
+    }
+
+    // 5a. box_header_for_len: small payload uses the standard 8-byte header
+    #[test]
+    fn test_box_header_small_uses_32_bit_field() {
+        let header = box_header_for_len(b"mdat", 100);
+        assert_eq!(header.len(), 8);
+        assert_eq!(&header[0..4], &108u32.to_be_bytes());
+        assert_eq!(&header[4..8], b"mdat");
+    }
+
+    // 5b. box_header_for_len: exactly at the u32 boundary still uses the
+    // 8-byte header (total size == u32::MAX must not tip into largesize).
+    #[test]
+    fn test_box_header_boundary_fits_in_u32() {
+        let payload_len = u64::from(u32::MAX) - 8; // header(8) + payload == u32::MAX
+        let header = box_header_for_len(b"mdat", payload_len);
+        assert_eq!(
+            header.len(),
+            8,
+            "boundary case must still use the 8-byte header"
+        );
+        assert_eq!(&header[0..4], &u32::MAX.to_be_bytes());
+        assert_eq!(&header[4..8], b"mdat");
+    }
+
+    // 5c. box_header_for_len: one byte past the boundary must switch to the
+    // ISO/IEC 14496-12 largesize form instead of silently truncating.
+    #[test]
+    fn test_box_header_over_4gib_uses_largesize() {
+        let payload_len = u64::from(u32::MAX) - 7; // header(8) + payload == u32::MAX + 1
+        let header = box_header_for_len(b"mdat", payload_len);
+        assert_eq!(
+            header.len(),
+            16,
+            "must switch to the 16-byte largesize header"
+        );
+        assert_eq!(
+            &header[0..4],
+            &1u32.to_be_bytes(),
+            "size field must be the largesize sentinel value 1"
+        );
+        assert_eq!(&header[4..8], b"mdat");
+        let largesize = u64::from_be_bytes(
+            header[8..16]
+                .try_into()
+                .expect("largesize field is exactly 8 bytes"),
+        );
+        assert_eq!(largesize, 16 + payload_len, "largesize must be the TRUE total box size (16-byte header + payload), not the truncated/saturated 32-bit value");
+    }
+
+    // 5d. box_header_for_len: well over 4 GiB (~5 GB) also uses largesize
+    // and reports the exact size, proving this isn't a boundary-only fix.
+    #[test]
+    fn test_box_header_well_over_4gib() {
+        let payload_len = 5_000_000_000u64;
+        let header = box_header_for_len(b"mdat", payload_len);
+        assert_eq!(header.len(), 16);
+        assert_eq!(&header[0..4], &1u32.to_be_bytes());
+        assert_eq!(&header[4..8], b"mdat");
+        let largesize = u64::from_be_bytes(
+            header[8..16]
+                .try_into()
+                .expect("largesize field is exactly 8 bytes"),
+        );
+        assert_eq!(largesize, 16 + payload_len);
+    }
+
+    // 5e. write_mdat end-to-end still produces the correct standard header
+    // for realistic (small) payloads after the box_header_for_len refactor.
+    #[test]
+    fn test_write_mdat_still_uses_standard_header_for_small_payload() {
+        let payload = vec![0xABu8; 4096];
+        let out = capture(|m| {
+            m.write_mdat(&payload).expect("should succeed");
+        });
+        assert_eq!(read_u32_be(&out, 0), 8 + 4096);
+        assert_eq!(&out[4..8], b"mdat");
+        assert_eq!(&out[8..], payload.as_slice());
     }
 
     // 6. write_moov produces a moov box with mvhd

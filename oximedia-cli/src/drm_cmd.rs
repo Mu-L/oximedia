@@ -510,9 +510,18 @@ async fn run_info(
     input: &PathBuf,
     pssh: bool,
     key_ids: bool,
-    _license: bool,
+    license: bool,
     json_output: bool,
 ) -> Result<()> {
+    // No license-acquisition metadata parser exists yet (nothing reads
+    // license URLs/policies back out of protected files), so the flag
+    // cannot produce real output; warn instead of silently dropping it.
+    // TODO(0.2.x): surface license info once oximedia-drm exposes a reader
+    // for embedded license-acquisition metadata.
+    if license {
+        eprintln!("warning: --license is not implemented yet and is ignored");
+    }
+
     if !input.exists() {
         return Err(anyhow::anyhow!("Input file not found: {}", input.display()));
     }

@@ -116,8 +116,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_text_animation() {
+    fn test_text_animation_nonempty_text_propagates_honest_render_err() {
+        // The underlying TextRenderer has no font rasterizer wired up yet
+        // (see oximedia_vfx::text::render), so animating non-empty text
+        // must propagate that honest error rather than the animation layer
+        // masking it as success.
         let config = TextConfig::new("Animated").with_font_size(32.0);
+        let mut animation = TextAnimation::new(AnimationType::FadeIn, config)
+            .expect("should succeed in test")
+            .with_duration(1.0);
+
+        let input = Frame::new(200, 100).expect("should succeed in test");
+        let mut output = Frame::new(200, 100).expect("should succeed in test");
+        let params = EffectParams::new().with_time(0.5);
+        let err = animation
+            .apply(&input, &mut output, &params)
+            .expect_err("animating non-empty text without a font rasterizer must fail honestly");
+        assert!(matches!(err, crate::VfxError::TextRenderError(_)));
+    }
+
+    #[test]
+    fn test_text_animation_empty_text_succeeds_as_passthrough() {
+        let config = TextConfig::new("").with_font_size(32.0);
         let mut animation = TextAnimation::new(AnimationType::FadeIn, config)
             .expect("should succeed in test")
             .with_duration(1.0);
@@ -127,6 +147,6 @@ mod tests {
         let params = EffectParams::new().with_time(0.5);
         animation
             .apply(&input, &mut output, &params)
-            .expect("should succeed in test");
+            .expect("empty text animation must succeed as an identity pass-through");
     }
 }

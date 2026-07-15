@@ -63,6 +63,7 @@ pub mod film_grain_perblock;
 pub mod film_grain_table;
 mod frame;
 mod frame_header;
+pub(crate) mod kf;
 mod loop_filter;
 mod loop_optimization;
 mod mode_decision;

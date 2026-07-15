@@ -1,6 +1,6 @@
 # oximedia-monitor
 
-**Status: [Stable]** | Version: 0.1.9 | Tests: extensively tested | Updated: 2026-07-08
+**Status: [Stable]** | Version: 0.2.0 | Tests: extensively tested | Updated: 2026-07-14
 
 Comprehensive system monitoring and alerting for OxiMedia, providing professional-grade infrastructure monitoring with metrics collection, alerting, dashboards, REST API, and real-time streaming.
 

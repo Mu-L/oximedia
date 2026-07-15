@@ -439,33 +439,50 @@ fn substitute_template(
     result
 }
 
+/// Maximum zero-pad width honoured in a `$Number%0Nd$` style template.
+///
+/// Real segment templates never need more than a couple of digits. Capping the
+/// width stops a hostile MPD from requesting e.g. `%0999999999d$` and forcing a
+/// multi-gigabyte formatted string.
+const MAX_TEMPLATE_WIDTH: usize = 32;
+
 fn substitute_with_format(s: &str, var: &str, value: u64) -> String {
     let pattern = format!("${var}%");
     let mut result = s.to_string();
     let mut search_start = 0;
 
-    while let Some(start) = result[search_start..].find(&pattern) {
-        let abs_start = search_start + start;
-        if let Some(end) = result[abs_start..].find("d$") {
-            let format_spec = &result[abs_start + pattern.len()..abs_start + end + 1];
-            // Parse width from format spec (e.g., "05" from "%05d")
-            let width: usize = format_spec.trim_start_matches('0').parse().unwrap_or(0);
-            let pad_char = if format_spec.starts_with('0') {
-                '0'
-            } else {
-                ' '
-            };
+    // `search_start` strictly increases on every iteration, so this always
+    // terminates. The previous version hung forever on a standard
+    // `$Number%0Nd$` template: an off-by-one made `format_spec` include the
+    // trailing `d`, so the width parsed to 0, the rebuilt `full_pattern` never
+    // matched `result`, and the cursor was never advanced.
+    while let Some(rel) = result[search_start..].find(&pattern) {
+        let abs_start = search_start + rel;
+        let after_pattern = abs_start + pattern.len();
+        if let Some(rel_end) = result[after_pattern..].find("d$") {
+            // Width digits sit between '%' and 'd', e.g. "05" in "%05d$".
+            let format_spec = &result[after_pattern..after_pattern + rel_end];
+            let zero_pad = format_spec.starts_with('0');
+            let width = format_spec
+                .trim_start_matches('0')
+                .parse::<usize>()
+                .unwrap_or(0)
+                .min(MAX_TEMPLATE_WIDTH);
 
-            let formatted = if pad_char == '0' && width > 0 {
+            let formatted = if zero_pad && width > 0 {
                 format!("{value:0>width$}")
             } else {
                 format!("{value:>width$}")
             };
 
-            let full_pattern = format!("${var}%{format_spec}d$");
-            result = result.replace(&full_pattern, &formatted);
+            // Replace exactly this `$Var%<spec>d$` occurrence and continue
+            // scanning past the substituted text.
+            let spec_end = after_pattern + rel_end + 2; // include the "d$"
+            result.replace_range(abs_start..spec_end, &formatted);
+            search_start = abs_start + formatted.len();
         } else {
-            search_start = abs_start + 1;
+            // No `d$` terminator for this '%': skip past it and keep scanning.
+            search_start = after_pattern;
         }
     }
 
@@ -1063,5 +1080,37 @@ mod tests {
         let cp = ContentProtection::new("urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed");
         assert!(cp.is_widevine());
         assert!(!cp.is_playready());
+    }
+
+    #[test]
+    fn segment_template_number_format_spec_terminates() {
+        // A standard `$Number%0Nd$` template previously hung the worker forever.
+        let template = SegmentTemplate::new(90000).with_media("seg_$Number%05d$.m4s");
+        let url = template.media_url("v1", 42, None).expect("must terminate");
+        assert_eq!(url, "seg_00042.m4s");
+    }
+
+    #[test]
+    fn substitute_with_format_basic_and_termination() {
+        assert_eq!(
+            substitute_with_format("$Number%05d$", "Number", 42),
+            "00042"
+        );
+        // Space padding (no leading zero in the spec).
+        assert_eq!(substitute_with_format("$Number%5d$", "Number", 42), "   42");
+        // No format spec: returned unchanged (and must terminate).
+        assert_eq!(substitute_with_format("plain", "Number", 1), "plain");
+        // Dangling '%' with no `d$` terminator must not loop forever.
+        assert_eq!(
+            substitute_with_format("$Number%zzz", "Number", 1),
+            "$Number%zzz"
+        );
+    }
+
+    #[test]
+    fn substitute_with_format_width_is_capped() {
+        // A hostile width must not allocate a multi-gigabyte string.
+        let out = substitute_with_format("$Number%0999999999d$", "Number", 7);
+        assert!(out.len() <= MAX_TEMPLATE_WIDTH);
     }
 }

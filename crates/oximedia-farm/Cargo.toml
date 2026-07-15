@@ -49,7 +49,7 @@ sha2.workspace = true
 
 # Internal dependencies (all wasm32-compatible)
 oximedia-core.workspace = true
-oximedia-codec.workspace = true
+oximedia-codec = { workspace = true, features = ["image-io"] }
 oximedia-io.workspace = true
 oximedia-transcode.workspace = true
 oximedia-qc.workspace = true

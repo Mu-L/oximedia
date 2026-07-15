@@ -1,9 +1,9 @@
 //! Batch notification hub — webhook callbacks, email notification specs,
 //! and notification deduplication.
 //!
-//! [`NotificationHub`] is the central dispatcher for job state-transition
-//! events.  Subscribers register a [`NotificationTarget`] (webhook URL or an
-//! email specification) together with an [`EventFilter`] that selects which
+//! [`NotificationHub`](crate::notification_hub::NotificationHub) is the central dispatcher for job state-transition
+//! events.  Subscribers register a [`NotificationTarget`](crate::notification_hub::NotificationTarget) (webhook URL or an
+//! email specification) together with an [`EventFilter`](crate::notification_hub::EventFilter) that selects which
 //! job state changes they care about.  Before dispatching, the hub runs every
 //! outbound notification through a deduplication window so that retry storms
 //! or rapid state flips never result in duplicate deliveries.
@@ -26,7 +26,7 @@
 //! ```
 //!
 //! Actual HTTP delivery is intentionally left to the caller (or a pluggable
-//! [`Dispatcher`] trait) so that the hub stays framework-agnostic and fully
+//! [`Dispatcher`](crate::notification_hub::Dispatcher) trait) so that the hub stays framework-agnostic and fully
 //! testable without a live network.
 
 use std::collections::{HashMap, VecDeque};

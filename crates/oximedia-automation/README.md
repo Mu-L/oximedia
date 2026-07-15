@@ -6,7 +6,7 @@ Professional broadcast automation and control system for 24/7 operation with Lua
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.9 — 2026-07-08 — extensively tested
+Version: 0.2.0 — 2026-07-15 — extensively tested
 
 ## Overview
 

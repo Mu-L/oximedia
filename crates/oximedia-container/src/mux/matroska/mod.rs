@@ -37,6 +37,7 @@
 
 mod cluster;
 mod cues;
+mod seek_head;
 mod writer;
 
 pub use cluster::ClusterWriter;

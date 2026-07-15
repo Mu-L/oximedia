@@ -1,8 +1,8 @@
 //! Graceful shutdown for `BatchEngine`.
 //!
-//! Provides [`GracefulShutdown`] — a controller that coordinates an orderly
+//! Provides [`GracefulShutdown`](crate::graceful_shutdown::GracefulShutdown) — a controller that coordinates an orderly
 //! shutdown sequence with configurable drain timeout and force-kill escalation.
-//! The progression is tracked through [`ShutdownPhase`] and observable at any
+//! The progression is tracked through [`ShutdownPhase`](crate::graceful_shutdown::ShutdownPhase) and observable at any
 //! time via `phase()`.
 
 use std::collections::HashSet;

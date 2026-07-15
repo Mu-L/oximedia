@@ -8,7 +8,7 @@ Vulkan compute backend for systems that want real GPU dispatch via `vulkano`.
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.9 — 409+ tests
+Version: 0.2.0 — 409+ tests
 
 ## Features
 

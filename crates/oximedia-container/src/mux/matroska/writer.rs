@@ -16,6 +16,7 @@ use crate::{ContainerFormat, Packet, StreamInfo};
 
 use super::cluster::ClusterWriter;
 use super::cues::CueWriter;
+use super::seek_head::{build_void, SeekHeadWriter, SeekSlot};
 
 // ============================================================================
 // Constants
@@ -35,6 +36,29 @@ const WEBM_DOC_TYPE: &[u8] = b"webm";
 
 /// EBML header for Matroska.
 const MATROSKA_DOC_TYPE: &[u8] = b"matroska";
+
+// ============================================================================
+// Pending Seek Slot
+// ============================================================================
+
+/// A [`SeekSlot`] reserved in the file's `SeekHead`, with offsets already
+/// translated from "relative to the `SeekHead` element buffer" to absolute
+/// sink byte positions, ready to hand to [`MatroskaMuxer::patch_bytes_at`].
+#[derive(Debug, Clone, Copy)]
+struct PendingSeekSlot {
+    /// EBML ID of the element this slot points to.
+    target_id: u32,
+    /// Absolute sink offset of the reserved entry's 8-byte `SeekPosition`
+    /// value.
+    position_field_offset: u64,
+    /// Absolute sink offset of the reserved entry's first byte (its `Seek`
+    /// element ID), for `Void` neutralization if `target_id` is never
+    /// actually written.
+    entry_offset: u64,
+    /// Total byte length of the reserved entry (`Seek` element, ID+size+
+    /// content), i.e. how many bytes a same-length `Void` replacement needs.
+    entry_len: usize,
+}
 
 // ============================================================================
 // Matroska Muxer
@@ -88,6 +112,12 @@ pub struct MatroskaMuxer<W> {
 
     /// Maximum cluster size in bytes.
     max_cluster_size: usize,
+
+    /// `SeekHead` slot reserved for `Cues`, awaiting back-patch once `Cues`
+    /// is actually written (or neutralized with a `Void` element if it
+    /// never is). `None` if no slot was reserved (`write_cues` disabled) or
+    /// if it has already been resolved.
+    pending_cues_slot: Option<PendingSeekSlot>,
 }
 
 impl<W> MatroskaMuxer<W> {
@@ -125,6 +155,7 @@ impl<W> MatroskaMuxer<W> {
             output_format: ContainerFormat::Matroska,
             max_cluster_duration,
             max_cluster_size,
+            pending_cues_slot: None,
         }
     }
 
@@ -354,6 +385,68 @@ impl<W: MediaSource> MatroskaMuxer<W> {
         self.write_element_id(element_id::SEGMENT).await?;
         self.write_unknown_size().await?;
         self.segment_data_start = self.position;
+        Ok(())
+    }
+
+    /// Overwrites `data.len()` bytes at absolute sink offset `pos`, then
+    /// restores the write cursor to the current end of the stream so that
+    /// subsequent appends continue exactly where they left off.
+    ///
+    /// This is the seek-write-seek-back back-patch technique used both for
+    /// the segment `Duration` field (see [`Self::fixup_duration`]) and for
+    /// `SeekHead` entries, whose real values (byte offsets of `Info`,
+    /// `Tracks`, and -- written last, in the trailer -- `Cues`) are only
+    /// known well after the placeholder `SeekHead` itself has been written.
+    async fn patch_bytes_at(&mut self, pos: u64, data: &[u8]) -> OxiResult<()> {
+        let resume_pos = self.position;
+        self.sink.seek(SeekFrom::Start(pos)).await?;
+        self.sink.write_all(data).await?;
+        self.sink.seek(SeekFrom::Start(resume_pos)).await?;
+        Ok(())
+    }
+
+    /// Writes a placeholder `SeekHead` reserving one entry for `Info` and
+    /// `Tracks` (always written next, so resolved immediately by
+    /// [`Self::patch_seek_slot`]) and, if cues are enabled, one more for
+    /// `Cues` (written much later, in the trailer -- see
+    /// [`Self::write_trailer`]).
+    ///
+    /// Returns the reserved slots translated to absolute sink offsets.
+    async fn write_seek_head_placeholder(&mut self) -> OxiResult<Vec<PendingSeekSlot>> {
+        let mut target_ids = vec![element_id::INFO, element_id::TRACKS];
+        if self.config.write_cues {
+            target_ids.push(element_id::CUES);
+        }
+
+        let (placeholder, slots) = SeekHeadWriter::new(target_ids).build_placeholder();
+        let base = self.position;
+        self.write_bytes(&placeholder).await?;
+
+        Ok(slots
+            .into_iter()
+            .map(|slot: SeekSlot| PendingSeekSlot {
+                target_id: slot.target_id,
+                position_field_offset: base + slot.position_field_offset as u64,
+                entry_offset: base + slot.entry_offset as u64,
+                entry_len: slot.entry_len,
+            })
+            .collect())
+    }
+
+    /// Resolves the reserved `SeekHead` slot for `target_id` (if any) by
+    /// patching its `SeekPosition` with `element_start`'s offset relative to
+    /// `segment_data_start`, as required by the Matroska spec.
+    async fn patch_seek_slot(
+        &mut self,
+        slots: &[PendingSeekSlot],
+        target_id: u32,
+        element_start: u64,
+    ) -> OxiResult<()> {
+        if let Some(slot) = slots.iter().find(|s| s.target_id == target_id) {
+            let relative = element_start - self.segment_data_start;
+            self.patch_bytes_at(slot.position_field_offset, &relative.to_be_bytes())
+                .await?;
+        }
         Ok(())
     }
 
@@ -672,17 +765,8 @@ impl<W: MediaSource> MatroskaMuxer<W> {
 
         if let Some(duration_pos) = self.duration_position {
             let duration = self.max_timestamp as f64;
-            let duration_bytes = duration.to_be_bytes();
-
-            // Save current position
-            let current_pos = self.position;
-
-            // Seek to duration position and write
-            self.sink.seek(SeekFrom::Start(duration_pos)).await?;
-            self.sink.write_all(&duration_bytes).await?;
-
-            // Seek back to end
-            self.sink.seek(SeekFrom::Start(current_pos)).await?;
+            self.patch_bytes_at(duration_pos, &duration.to_be_bytes())
+                .await?;
         }
 
         Ok(())
@@ -716,8 +800,28 @@ impl<W: MediaSource> Muxer for MatroskaMuxer<W> {
 
         self.write_ebml_header().await?;
         self.write_segment_header().await?;
+
+        // Reserve a placeholder SeekHead (Info + Tracks, and -- if cues are
+        // enabled -- a third slot for Cues, resolved much later in
+        // `write_trailer` once Cues has actually been written). Info and
+        // Tracks are written unconditionally right below, so their slots
+        // are resolved immediately.
+        let seek_slots = self.write_seek_head_placeholder().await?;
+
+        let info_start = self.position;
         self.write_segment_info().await?;
+        self.patch_seek_slot(&seek_slots, element_id::INFO, info_start)
+            .await?;
+
+        let tracks_start = self.position;
         self.write_tracks().await?;
+        self.patch_seek_slot(&seek_slots, element_id::TRACKS, tracks_start)
+            .await?;
+
+        // Keep the Cues slot (if any) around for `write_trailer`.
+        self.pending_cues_slot = seek_slots
+            .into_iter()
+            .find(|slot| slot.target_id == element_id::CUES);
 
         self.header_written = true;
         Ok(())
@@ -751,13 +855,17 @@ impl<W: MediaSource> Muxer for MatroskaMuxer<W> {
         };
 
         if need_new_cluster {
-            // Add cue point for keyframes at cluster boundaries
+            // Add cue point for keyframes at cluster boundaries. The new
+            // cluster hasn't been written yet at this point, so its
+            // position is simply the current end of the stream
+            // (segment-relative) -- exactly the value `start_cluster` is
+            // about to compute for the new `ClusterWriter::position` a few
+            // lines down. (Using the *previous* `self.cluster_writer`'s
+            // position here, as a stale earlier version of this code did,
+            // would point every cue but the first one at the wrong -- prior
+            // -- cluster.)
             if packet.is_keyframe() && self.config.write_cues {
-                let cluster_position = if let Some(ref cluster) = self.cluster_writer {
-                    cluster.position
-                } else {
-                    self.position - self.segment_data_start
-                };
+                let cluster_position = self.position - self.segment_data_start;
                 self.cue_writer.add_cue_point(
                     timecode as u64,
                     (packet.stream_index + 1) as u64,
@@ -796,8 +904,26 @@ impl<W: MediaSource> Muxer for MatroskaMuxer<W> {
         // Finalize last cluster
         self.finalize_cluster();
 
-        // Write cues
+        // Write cues (in the trailer, after every Cluster -- their byte
+        // positions aren't known any earlier), then resolve whatever
+        // SeekHead slot was reserved for them back in `write_header`.
+        let cues_start = self.position;
         self.write_cues().await?;
+        let cues_written = self.position > cues_start;
+
+        if let Some(slot) = self.pending_cues_slot.take() {
+            if cues_written {
+                let relative = cues_start - self.segment_data_start;
+                self.patch_bytes_at(slot.position_field_offset, &relative.to_be_bytes())
+                    .await?;
+            } else {
+                // No cue points were collected (e.g. no keyframes were
+                // ever written) -- neutralize the reservation instead of
+                // leaving it dangling at offset 0.
+                let void = build_void(slot.entry_len);
+                self.patch_bytes_at(slot.entry_offset, &void).await?;
+            }
+        }
 
         // Fix up duration
         self.fixup_duration().await?;

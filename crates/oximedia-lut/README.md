@@ -1,9 +1,9 @@
 # oximedia-lut
 
 ![Status: Stable](https://img.shields.io/badge/status-stable-green)
-![Version: 0.1.9](https://img.shields.io/badge/version-0.1.9-blue)
+![Version: 0.2.0](https://img.shields.io/badge/version-0.2.0-blue)
 ![Tests: 550](https://img.shields.io/badge/tests-550-brightgreen)
-![Updated: 2026-07-08](https://img.shields.io/badge/updated-2026--07--08-blue)
+![Updated: 2026-07-14](https://img.shields.io/badge/updated-2026--07--14-blue)
 
 Professional LUT (Look-Up Table) and color science library for OxiMedia, providing 1D/3D LUT operations, ACES workflow, gamut mapping, and tone mapping.
 

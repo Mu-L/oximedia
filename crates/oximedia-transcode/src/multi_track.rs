@@ -60,6 +60,9 @@ pub struct PerTrack {
     pub flushed: bool,
     /// Frame counter; used to derive synthetic PTS for flush packets.
     frame_count: u64,
+    /// Highest PTS seen from the decoder, so flush tail-packets sort after
+    /// every data packet in the DTS heap.
+    last_pts_ms: Option<i64>,
     /// Accumulated encoded-bytes count (public for stats queries).
     pub encoded_bytes: u64,
     /// Accumulated encoded-frame count (public for stats queries).
@@ -89,6 +92,7 @@ impl PerTrack {
             encoder,
             flushed: false,
             frame_count: 0,
+            last_pts_ms: None,
             encoded_bytes: 0,
             encoded_frames: 0,
             is_audio: None,
@@ -116,6 +120,7 @@ impl PerTrack {
             encoder,
             flushed: false,
             frame_count: 0,
+            last_pts_ms: None,
             encoded_bytes: 0,
             encoded_frames: 0,
             is_audio: Some(is_audio),
@@ -158,6 +163,14 @@ impl PerTrack {
         self.encoded_bytes += n;
         self.encoded_frames += 1;
         self.frame_count += 1;
+        self.last_pts_ms = Some(self.last_pts_ms.map_or(pts_ms, |prev| prev.max(pts_ms)));
+
+        if encoded.is_empty() {
+            // The encoder buffered this frame internally (e.g. a codec that
+            // needs a full block before emitting a packet) — nothing to
+            // stage; the bytes will surface with a later frame or at flush.
+            return Ok(None);
+        }
 
         Ok(Some(TrackEncoded {
             data: encoded,
@@ -192,8 +205,13 @@ impl PerTrack {
             None => return Ok(None),
         };
         self.encoded_bytes += data.len() as u64;
-        // Derive a synthetic PTS from the frame count (33 ms/frame ≈ 30 fps).
-        let pts_ms = self.frame_count as i64 * 33;
+        // Tail packets must sort after every data packet in the DTS heap:
+        // use the highest real PTS seen plus one, falling back to a
+        // frame-count estimate (33 ms/frame ≈ 30 fps) for zero-PTS tracks.
+        let pts_ms = match self.last_pts_ms {
+            Some(last) => last.saturating_add(1),
+            None => self.frame_count as i64 * 33,
+        };
         Ok(Some(TrackEncoded {
             data,
             pts_ms,

@@ -7,8 +7,38 @@
 
 use crate::error::{NetError, NetResult};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+
+/// Maximum bytes buffered for a single SCTP stream awaiting `recv_data`.
+const MAX_STREAM_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+
+/// Maximum bytes buffered across every stream of one association.
+///
+/// SCTP DATA chunks are reassembled into per-stream queues that a consumer
+/// drains with `recv_data`. Without a cap a peer can flood DATA chunks after
+/// the handshake and grow these queues until the process is OOM-killed. These
+/// two bounds keep total reassembly memory to at most `MAX_TOTAL_BUFFER_BYTES`.
+const MAX_TOTAL_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+
+/// A single stream's reassembly queue with an O(1) byte total.
+#[derive(Default)]
+struct StreamQueue {
+    /// Buffered user-data chunks in arrival order.
+    chunks: VecDeque<Bytes>,
+    /// Sum of `chunks` lengths, tracked incrementally to avoid O(n) scans.
+    bytes: usize,
+}
+
+/// All reassembly queues of an association plus a running byte total, so the
+/// per-stream and association-wide caps can be checked in O(1).
+#[derive(Default)]
+struct StreamBuffers {
+    /// Per-stream queues keyed by SCTP stream identifier.
+    queues: HashMap<u16, StreamQueue>,
+    /// Sum of every queue's `bytes`, for the association-wide cap.
+    total_bytes: usize,
+}
 
 /// SCTP chunk type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,8 +296,8 @@ pub struct Association {
     remote_tag: Arc<Mutex<u32>>,
     /// Association state.
     state: Arc<Mutex<AssociationState>>,
-    /// Stream data.
-    streams: Arc<Mutex<HashMap<u16, Vec<Bytes>>>>,
+    /// Stream data (bounded reassembly queues).
+    streams: Arc<Mutex<StreamBuffers>>,
     /// Next TSN to send.
     next_tsn: Arc<Mutex<u32>>,
 }
@@ -285,7 +315,7 @@ impl Association {
             local_tag,
             remote_tag: Arc::new(Mutex::new(0)),
             state: Arc::new(Mutex::new(AssociationState::Closed)),
-            streams: Arc::new(Mutex::new(HashMap::new())),
+            streams: Arc::new(Mutex::new(StreamBuffers::default())),
             next_tsn: Arc::new(Mutex::new(1)),
         }
     }
@@ -404,10 +434,24 @@ impl Association {
         let _ppid = cursor.get_u32();
 
         let user_data = cursor.copy_to_bytes(cursor.remaining());
+        let len = user_data.len();
 
-        // Store data
+        // Store data, enforcing the reassembly caps. A post-handshake DATA
+        // flood would otherwise grow these queues without bound (OOM).
         let mut streams = self.streams.lock().unwrap_or_else(|e| e.into_inner());
-        streams.entry(stream_id).or_default().push(user_data);
+        if streams.total_bytes.saturating_add(len) > MAX_TOTAL_BUFFER_BYTES {
+            return Err(NetError::parse(
+                0,
+                "SCTP association reassembly buffer full",
+            ));
+        }
+        let queue = streams.queues.entry(stream_id).or_default();
+        if queue.bytes.saturating_add(len) > MAX_STREAM_BUFFER_BYTES {
+            return Err(NetError::parse(0, "SCTP per-stream reassembly buffer full"));
+        }
+        queue.chunks.push_back(user_data);
+        queue.bytes = queue.bytes.saturating_add(len);
+        streams.total_bytes = streams.total_bytes.saturating_add(len);
 
         Ok(())
     }
@@ -439,13 +483,13 @@ impl Association {
     #[must_use]
     pub fn recv_data(&self, stream_id: u16) -> Option<Bytes> {
         let mut streams = self.streams.lock().unwrap_or_else(|e| e.into_inner());
-        streams.get_mut(&stream_id).and_then(|queue| {
-            if queue.is_empty() {
-                None
-            } else {
-                Some(queue.remove(0))
-            }
-        })
+        let queue = streams.queues.get_mut(&stream_id)?;
+        let data = queue.chunks.pop_front()?;
+        let len = data.len();
+        // Keep the byte accounting in sync as the consumer drains the queue.
+        queue.bytes = queue.bytes.saturating_sub(len);
+        streams.total_bytes = streams.total_bytes.saturating_sub(len);
+        Some(data)
     }
 
     /// Gets the association state.
@@ -517,5 +561,44 @@ mod tests {
         let packet = assoc.init();
         assert_eq!(assoc.state(), AssociationState::CookieWait);
         assert!(!packet.chunks.is_empty());
+    }
+
+    /// Builds a DATA chunk of `payload` bytes on `stream_id`.
+    fn data_chunk(stream_id: u16, payload: usize) -> Chunk {
+        let mut d = BytesMut::new();
+        d.put_u32(0); // TSN
+        d.put_u16(stream_id); // stream id
+        d.put_u16(0); // stream sequence number
+        d.put_u32(51); // PPID
+        d.put_slice(&vec![0xAB; payload]);
+        Chunk::new(ChunkType::Data, 0x03, d.freeze())
+    }
+
+    #[test]
+    fn data_flood_is_bounded_and_recoverable() {
+        let assoc = Association::new(1234, 5678);
+
+        // 1 MiB per DATA chunk on one stream. The per-stream cap (4 MiB) must
+        // reject the flood instead of letting the queue grow without bound.
+        let mut accepted = 0;
+        let mut rejected = false;
+        for _ in 0..64 {
+            if assoc.handle_data(&data_chunk(7, 1024 * 1024)).is_ok() {
+                accepted += 1;
+            } else {
+                rejected = true;
+                break;
+            }
+        }
+        assert!(rejected, "a DATA flood must eventually be rejected");
+        assert!(
+            accepted <= 4,
+            "per-stream cap (~4 MiB) must bound accepted chunks, got {accepted}"
+        );
+
+        // Draining frees capacity so legitimate traffic resumes (proves the
+        // byte accounting is decremented on recv, not leaked).
+        assert!(assoc.recv_data(7).is_some());
+        assert!(assoc.handle_data(&data_chunk(7, 1024 * 1024)).is_ok());
     }
 }

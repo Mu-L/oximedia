@@ -67,6 +67,10 @@ impl JlsPresetParams {
     /// Compute default preset parameters per ISO 14495-1 Annex C.2 / Table C.1.
     #[must_use]
     pub fn default_for_precision(precision: u8) -> Self {
+        // Defend against `1u32 << precision` overflow (shift >= 32 panics):
+        // JPEG-LS sample precision is 2..=16, so clamp. A larger value is
+        // malformed and the clamp never affects a well-formed stream.
+        let precision = precision.min(16);
         let max_val = (1u32 << precision) - 1;
         let (t1, t2, t3) = if max_val >= 128 {
             let factor = (max_val as i32 + 127) / 256;

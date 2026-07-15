@@ -1,6 +1,6 @@
 # oximedia-metadata
 
-**Status: [Stable]** | Version: 0.1.9 | Tests: extensively tested | Updated: 2026-07-08
+**Status: [Stable]** | Version: 0.2.0 | Tests: extensively tested | Updated: 2026-07-14
 
 Comprehensive metadata standards support for OxiMedia, parsing and writing all major media metadata formats including ID3v2, Vorbis Comments, APEv2, iTunes, XMP, EXIF, IPTC, QuickTime, and Matroska.
 
@@ -64,7 +64,7 @@ if let Some(MetadataValue::Text(title)) = metadata.get("TIT2") {
 - `MetadataValue` — Value types (Text, Binary, Integer, Picture, etc.)
 - `CommonFields` — Format-agnostic common field access
 - `MetadataConverter` — Cross-format conversion
-- `MetadataEmbed` — Embed metadata into media files
+- `MetadataEmbed` — Embed metadata into media files; `embed()` does real container-aware splicing for ID3v2 (prepend), APEv2 (append), and Exif/XMP (JPEG `APP1` segment, or bare-blob merge) — Matroska, IPTC, Vorbis Comments, iTunes, and QuickTime targets return `Error::Unsupported` rather than a corrupting byte concatenation
 
 **Format modules:**
 - `id3v2` — ID3v2 tag parser/writer

@@ -1,6 +1,6 @@
 //! Batch error recovery policy.
 //!
-//! [`BatchErrorRecovery`] records per-job failures and decides whether
+//! [`BatchErrorRecovery`](crate::error_recovery::BatchErrorRecovery) records per-job failures and decides whether
 //! the batch should continue processing remaining jobs or abort.
 //!
 //! Two modes are supported:

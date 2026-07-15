@@ -222,7 +222,7 @@
 //!
 //! - **`normalize`** → also activates **`metering`**: enabling loudness normalization
 //!   requires the EBU R128 metering infrastructure.  Users who enable `normalize` will
-//!   find [`LoudnessMeter`](oximedia_metering::LoudnessMeter) and related types in scope
+//!   find `LoudnessMeter` (`oximedia_metering::LoudnessMeter`) and related types in scope
 //!   even if they did not explicitly request the `metering` feature.
 //!
 //! ## Meta-Feature Presets

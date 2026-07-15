@@ -208,6 +208,29 @@ impl LazyEssence {
     /// Read `length` bytes at `offset` using `seek` + `read_exact`.
     fn load_via_read(path: &std::path::Path, offset: u64, length: u64) -> std::io::Result<Vec<u8>> {
         let mut file = std::fs::File::open(path)?;
+
+        // Guard: reject a declared (offset, length) pair that extends beyond
+        // the actual file size *before* allocating the read buffer. `length`
+        // comes straight from the caller (e.g. an AAF index entry) and has
+        // no inherent relationship to the real file on disk; an
+        // over-declared length would otherwise drive an arbitrarily large
+        // `vec![0u8; length]` allocation from a tiny (or nonexistent) file.
+        // Mirrors the bounds check `load_via_mmap` gets for free from
+        // `mmap.get(start..end)`.
+        let file_len = file.metadata()?.len();
+        let end = offset.checked_add(length).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "offset + length overflows",
+            )
+        })?;
+        if end > file_len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("declared range {offset}..{end} out of bounds (file size {file_len})"),
+            ));
+        }
+
         file.seek(SeekFrom::Start(offset))?;
         let mut buf = vec![0u8; length as usize];
         file.read_exact(&mut buf)?;
@@ -230,6 +253,32 @@ impl LazyEssence {
         if guard.is_some() {
             return Ok(());
         }
+
+        // Guard: bound the declared `self.length` against the reader's
+        // actual stream size *before* allocating the read buffer.
+        // `self.length` is caller-supplied (e.g. parsed from an AAF index
+        // entry) and has no inherent relationship to how much data `reader`
+        // can actually provide; an over-declared length would otherwise
+        // attempt a multi-gigabyte `vec![0u8; length]` allocation before
+        // `read_exact` ever discovers the short read. Mirrors the bounds
+        // check `load_via_mmap` gets for free from `mmap.get(start..end)`.
+        let stream_len = reader.seek(SeekFrom::End(0))?;
+        let end = self.offset.checked_add(self.length).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "offset + length overflows",
+            )
+        })?;
+        if end > stream_len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!(
+                    "declared range {}..{end} out of bounds (reader stream length {stream_len})",
+                    self.offset
+                ),
+            ));
+        }
+
         reader.seek(SeekFrom::Start(self.offset))?;
         let mut buf = vec![0u8; self.length as usize];
         reader.read_exact(&mut buf)?;
@@ -725,5 +774,87 @@ mod tests {
         assert_eq!(&data[..], &payload[..]);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ── OOM guards (over-declared length) ────────────────────────────────────
+
+    /// `load_via_read` must reject a declared length that extends far
+    /// beyond the real file size *before* allocating the read buffer,
+    /// rather than attempting a huge allocation for a tiny file.
+    #[test]
+    fn test_load_via_read_rejects_over_declared_length() {
+        let path = make_temp_file(b"tiny");
+        let result = LazyEssence::load_via_read(&path, 0, 1024 * 1024 * 1024);
+        assert!(
+            result.is_err(),
+            "over-declared length must be rejected before allocating"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `load_via_read` must also reject a valid-looking length whose
+    /// `offset + length` sum runs past end-of-file, even when `length`
+    /// alone looks reasonable.
+    #[test]
+    fn test_load_via_read_rejects_offset_plus_length_beyond_file() {
+        // offset (5) + length (10) = 15, but the file is only 8 bytes.
+        let path = make_temp_file(b"12345678");
+        let result = LazyEssence::load_via_read(&path, 5, 10);
+        assert!(
+            result.is_err(),
+            "offset + length beyond file size must be rejected"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// End-to-end through the public `data()` API: a tiny file with a
+    /// wildly over-declared length (kept below `MMAP_THRESHOLD` so this
+    /// specifically exercises the `load_via_read` path) must surface a
+    /// clean `Err`, not attempt a huge allocation or panic.
+    #[test]
+    fn test_lazy_essence_data_rejects_over_declared_length() {
+        let path = make_temp_file(b"tiny");
+        let e = LazyEssence::new(path.clone(), 0, 65_535, "Picture".to_string());
+        let result = e.data();
+        assert!(
+            result.is_err(),
+            "declared length far beyond the real file size must error, not allocate"
+        );
+        assert!(!e.is_loaded());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `load_from_reader` has no file-size introspection available (the
+    /// source is a generic `Read + Seek`), so it must bound `self.length`
+    /// against the reader's actual stream length instead. A declared
+    /// length of ~1 GiB against an 8-byte in-memory buffer must error
+    /// before the read buffer is allocated.
+    #[test]
+    fn test_load_from_reader_rejects_over_declared_length() {
+        let e = LazyEssence::new(
+            PathBuf::from("/unused"),
+            0,
+            1_000_000_000,
+            "Sound".to_string(),
+        );
+        let mut cursor = std::io::Cursor::new(vec![0u8; 8]);
+        let result = e.load_from_reader(&mut cursor);
+        assert!(
+            result.is_err(),
+            "over-declared length must be rejected before allocating"
+        );
+        assert!(!e.is_loaded());
+    }
+
+    /// Sanity check: a correctly bounded `(offset, length)` pair still
+    /// loads successfully through `load_from_reader` after adding the
+    /// stream-length guard — the fix must not break valid input.
+    #[test]
+    fn test_load_from_reader_accepts_length_within_stream() {
+        let e = LazyEssence::new(PathBuf::from("/unused"), 2, 4, "Sound".to_string());
+        let mut cursor = std::io::Cursor::new(b"ABCDEFGH".to_vec());
+        e.load_from_reader(&mut cursor)
+            .expect("length within stream bounds must succeed");
+        assert_eq!(e.data().expect("cached").as_slice(), b"CDEF");
     }
 }

@@ -4,7 +4,6 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use async_trait::async_trait;
-use md5::{Digest, Md5};
 use oximedia_core::{CodecId, OxiError, OxiResult};
 use oximedia_io::MediaSource;
 use std::io::SeekFrom;
@@ -80,11 +79,14 @@ pub struct FlacStreamInfo {
 
     /// MD5 signature of unencoded audio data.
     ///
-    /// Note: Currently set to zeros as MD5 calculation requires access
-    /// to unencoded PCM data. To properly calculate this, the FLAC frames
-    /// would need to be decoded, which is beyond the scope of a simple muxer.
-    /// A future enhancement could add optional MD5 calculation if raw PCM
-    /// data is provided alongside encoded frames.
+    /// Per the FLAC specification, this is the MD5 of the raw (unencoded)
+    /// interleaved PCM samples. [`FlacMuxer`] only ever sees already-encoded
+    /// FLAC frames (`Packet::data`), so it cannot compute this value itself;
+    /// callers that have the original PCM must hash it externally and pass
+    /// the result to [`FlacMuxer::set_md5_signature`]. Otherwise this field
+    /// stays all-zero, which the spec explicitly sanctions as "MD5 signature
+    /// unknown" (§ Stream / `METADATA_BLOCK_STREAMINFO`) — a spec-legal
+    /// "unknown" beats a confidently wrong hash of the encoded bytes.
     pub md5_signature: [u8; 16],
 }
 
@@ -227,16 +229,21 @@ impl SeekPoint {
 /// # MD5 Signature
 ///
 /// The FLAC specification requires an MD5 signature of the unencoded (PCM) audio data
-/// in the STREAMINFO block. However, this muxer only has access to encoded FLAC frames,
-/// not the raw PCM data. Therefore, the MD5 signature is currently set to all zeros
-/// unless explicitly provided.
+/// in the STREAMINFO block. This muxer only has access to encoded FLAC frames
+/// (`Packet::data`), never the raw PCM samples that produced them, so it cannot compute
+/// a spec-correct MD5 on its own. Hashing the *encoded* bytes instead — which earlier
+/// revisions of this muxer did — produces a value that decoders would treat as a
+/// legitimate MD5 of the PCM, silently failing any integrity check that relies on it.
+/// That is worse than not signing at all, so this muxer:
 ///
-/// For proper MD5 calculation, one would need to:
-/// 1. Decode each FLAC frame back to PCM samples
-/// 2. Feed the raw PCM data to an MD5 hasher
-/// 3. Finalize the hash when all audio has been processed
+/// - Writes the all-zero MD5 (the spec-sanctioned "unknown"/unsigned sentinel) by
+///   default.
+/// - Uses whatever value was passed to [`FlacMuxer::set_md5_signature`] if the caller
+///   computed the real MD5 of the raw PCM externally (e.g. before encoding) and
+///   supplied it before [`write_trailer`](Muxer::write_trailer) runs.
 ///
-/// This functionality could be added in the future if raw PCM access is available.
+/// A future enhancement could compute this automatically by decoding each FLAC frame
+/// back to PCM and hashing that, if/when a FLAC decoder becomes available at this layer.
 ///
 /// # Example
 ///
@@ -297,11 +304,11 @@ pub struct FlacMuxer<W> {
     /// Maximum frame size seen.
     max_frame_size: u32,
 
-    /// MD5 hasher for audio data.
-    ///
-    /// Note: This hashes the encoded frame data, not the raw PCM audio.
-    /// For proper FLAC MD5 calculation, we would need access to decoded PCM.
-    md5_hasher: Md5,
+    /// Whether [`set_md5_signature`](Self::set_md5_signature) was called with
+    /// a real (externally-computed) PCM MD5. When `false`, `write_trailer`
+    /// writes the all-zero "unknown" MD5 rather than fabricating one from
+    /// encoded frame bytes.
+    md5_explicit: bool,
 }
 
 impl<W> FlacMuxer<W> {
@@ -327,7 +334,7 @@ impl<W> FlacMuxer<W> {
             total_samples: 0,
             min_frame_size: 0,
             max_frame_size: 0,
-            md5_hasher: Md5::new(),
+            md5_explicit: false,
         }
     }
 
@@ -358,12 +365,16 @@ impl<W> FlacMuxer<W> {
     /// Sets the MD5 signature if known from external source.
     ///
     /// This should be called before `write_trailer()` if you have calculated
-    /// the MD5 of the raw PCM audio data externally.
-    #[allow(dead_code)]
+    /// the MD5 of the raw PCM audio data externally (this muxer never sees
+    /// raw PCM itself — only already-encoded FLAC frames — so it cannot
+    /// compute the spec-correct MD5 on its own). Calling this marks the
+    /// signature as explicit, so `write_trailer()` preserves `md5` verbatim
+    /// instead of falling back to the all-zero "unknown" sentinel.
     pub fn set_md5_signature(&mut self, md5: [u8; 16]) {
         if let Some(ref mut info) = self.stream_info {
             info.md5_signature = md5;
         }
+        self.md5_explicit = true;
     }
 }
 
@@ -468,10 +479,13 @@ impl<W: MediaSource> FlacMuxer<W> {
             stream_info.min_frame_size = self.min_frame_size;
             stream_info.max_frame_size = self.max_frame_size;
 
-            // Finalize MD5 (note: this is MD5 of encoded data, not raw PCM)
-            // In a complete implementation, this would be MD5 of decoded PCM
-            let md5_result = self.md5_hasher.clone().finalize();
-            stream_info.md5_signature.copy_from_slice(&md5_result);
+            // Only keep a caller-supplied MD5 of the real PCM data (set via
+            // `set_md5_signature`). Otherwise write the spec-sanctioned
+            // all-zero "unknown" MD5 rather than a confidently wrong hash of
+            // the encoded frame bytes.
+            if !self.md5_explicit {
+                stream_info.md5_signature = [0u8; 16];
+            }
 
             let data = stream_info.encode();
 
@@ -598,8 +612,9 @@ impl<W: MediaSource> Muxer for FlacMuxer<W> {
             self.max_frame_size = frame_size;
         }
 
-        // Update MD5 hash (note: this hashes encoded frames, not raw PCM)
-        self.md5_hasher.update(&packet.data);
+        // Deliberately not hashing `packet.data` into an MD5 here: it is
+        // encoded FLAC frame data, not the raw PCM the spec requires. See
+        // `set_md5_signature` / the `FlacMuxer` "MD5 Signature" doc section.
 
         // Record seek point at regular intervals
         if self.config.write_cues {
@@ -834,7 +849,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_muxer_md5_calculation() {
+    async fn test_muxer_md5_zero_without_explicit_pcm_hash() {
+        // Without an externally-supplied PCM MD5, the muxer must never
+        // fabricate a hash from the encoded frame bytes: FLAC decoders treat
+        // the STREAMINFO MD5 as authoritative for integrity checks, so a
+        // wrong-but-nonzero value is worse than the spec-sanctioned
+        // all-zero "unknown" sentinel.
         let sink = MemorySource::new_writable(4096);
         let config = MuxerConfig::new();
         let mut muxer = FlacMuxer::new(sink, config);
@@ -846,7 +866,6 @@ mod tests {
             .await
             .expect("operation should succeed");
 
-        // Write some test packets
         for i in 0..10 {
             let packet = Packet::new(
                 0,
@@ -860,15 +879,75 @@ mod tests {
                 .expect("operation should succeed");
         }
 
-        // The MD5 should be calculated during trailer
         muxer
             .write_trailer()
             .await
             .expect("operation should succeed");
 
-        // Verify MD5 is non-zero (it was calculated)
-        if let Some(ref info) = muxer.stream_info {
-            assert_ne!(info.md5_signature, [0u8; 16]);
-        }
+        let info = muxer
+            .stream_info
+            .as_ref()
+            .expect("stream_info must be set after add_stream");
+        assert_eq!(
+            info.md5_signature, [0u8; 16],
+            "MD5 must stay the all-zero 'unknown' sentinel when no real PCM hash was supplied"
+        );
+
+        // The all-zero MD5 must also have reached the actual bytes written
+        // to the sink (not just the in-memory struct), at STREAMINFO's
+        // fixed MD5 offset: block header (4 bytes) + 18 bytes of preceding
+        // STREAMINFO fields.
+        let written = muxer.sink().written_data();
+        let md5_offset = (muxer.streaminfo_position + 4 + 18) as usize;
+        assert_eq!(&written[md5_offset..md5_offset + 16], &[0u8; 16][..]);
+    }
+
+    #[tokio::test]
+    async fn test_muxer_md5_explicit_signature_preserved_through_trailer() {
+        // When the caller supplies a real MD5 of the raw PCM (computed
+        // externally, e.g. before encoding), write_trailer must preserve it
+        // verbatim, both in memory and in the bytes written to the sink.
+        let sink = MemorySource::new_writable(4096);
+        let config = MuxerConfig::new();
+        let mut muxer = FlacMuxer::new(sink, config);
+
+        let flac = create_flac_stream();
+        muxer.add_stream(flac).expect("operation should succeed");
+        muxer
+            .write_header()
+            .await
+            .expect("operation should succeed");
+
+        let real_pcm_md5: [u8; 16] = [
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE,
+            0xFF, 0x01,
+        ];
+        muxer.set_md5_signature(real_pcm_md5);
+
+        let packet = Packet::new(
+            0,
+            Bytes::from(vec![0xFF, 0xF8, 0x00, 0x00]),
+            Timestamp::new(0, Rational::new(1, 44_100)),
+            crate::PacketFlags::KEYFRAME,
+        );
+        muxer
+            .write_packet(&packet)
+            .await
+            .expect("operation should succeed");
+
+        muxer
+            .write_trailer()
+            .await
+            .expect("operation should succeed");
+
+        let info = muxer
+            .stream_info
+            .as_ref()
+            .expect("stream_info must be set after add_stream");
+        assert_eq!(info.md5_signature, real_pcm_md5);
+
+        let written = muxer.sink().written_data();
+        let md5_offset = (muxer.streaminfo_position + 4 + 18) as usize;
+        assert_eq!(&written[md5_offset..md5_offset + 16], &real_pcm_md5[..]);
     }
 }

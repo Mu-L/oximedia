@@ -1,13 +1,15 @@
-# Codec Status — OxiMedia 0.1.9
+# Codec Status — OxiMedia 0.2.0
 
 This document is the single source of truth for the honest status of every
 codec decoder in the `oximedia-codec` and `oximedia-audio` crates, and (as of
 0.1.9) for the cryptographic honesty of the networking (`oximedia-net`) and
 DRM (`oximedia-drm`) crates. It was originally produced by a static-analysis
-audit of the 0.1.5 source tree (0.1.7 stamp), and has now been **re-audited
-directly against the 0.1.9 source tree on 2026-07-08** — every codec entry
-below was re-verified by reading the current module rather than trusting the
-prior text (see "0.1.9 re-audit summary" below for what changed). It is
+audit of the 0.1.5 source tree (0.1.7 stamp), was re-audited directly against
+the 0.1.9 source tree on 2026-07-08 (see "0.1.9 re-audit summary" below), and
+has now been **re-audited a third time, for AV1/VP9/VP8 specifically,
+against the 0.2.0 source tree on 2026-07-15** — every codec entry below was
+re-verified by reading the current module rather than trusting the prior
+text (see "0.2.0 re-audit summary" below for what changed). It is
 referenced from the top-level `README.md`, from
 `crates/oximedia-codec/README.md`, from `SECURITY.md` (crypto status table),
 and from `TODO.md`.
@@ -92,6 +94,48 @@ crate (published to npm as `@cooljapan/oximedia`; see
   does not touch codec decode at all; it consumes already-decoded
   `VideoFrame`s from the browser's own `VideoDecoder`.
 
+**Note (0.2.0):** the native AV1/VP8/VP9 status referenced in the paragraph
+above (all "Bitstream-parsing") is now stale — see "0.2.0 re-audit summary"
+immediately below and the revised entries under "Video decoders". This WASM
+surface note itself describes the `oximedia-wasm` npm package as of 0.1.9
+and has not been independently re-checked against 0.2.0 `oximedia-wasm`
+source in this pass.
+
+## 0.2.0 re-audit summary
+
+- **AV1 pixel-reconstruction decode — promoted from Bitstream-parsing to
+  Functional (keyframe/intra only).** The 0.1.9 summary above ("AV1 / VP9 /
+  VP8 pixel-reconstruction decode — re-confirmed unchanged") no longer
+  applies to AV1. A new `crates/oximedia-codec/src/av1/kf/` module — an
+  exact port of the intra decode path of the AV1 specification — is now
+  called directly from `av1/decoder.rs::decode_temporal_unit`; the old
+  no-op `"Tile group data would be processed here"` branch is confirmed
+  gone from the source. Verified bit-exact (0 differing Y/U/V pixels)
+  against both `dav1d` 1.5.1 and `aomdec`/libaom v3.12.1 on 13 keyframe
+  test vectors (`av1/kf/mod.rs`, tests `stage1_lossless_gray64_bit_exact`
+  through `stage4_switchable_wiener_320x192_bit_exact`), covering lossless
+  coding, 128×128 superblocks, 2 tile columns, an odd 76×42 crop, and
+  320×192 loop-restoration cases, with the full post-filter chain
+  (deblocking, CDEF, and loop restoration — Wiener and self-guided/SGRPROJ)
+  applied. See the revised AV1 entry below for the current scope and the
+  specific file:line markers for what is still missing.
+- **VP9 / VP8 pixel-reconstruction decode — also promoted, in an earlier
+  0.2.0-session pass that predates this particular audit.**
+  `crates/oximedia-codec/src/vp9/kf/` and
+  `crates/oximedia-codec/src/vp8/keyframe/` shipped real keyframe/intra
+  decode, verified bit-exact against libvpx/ffmpeg and libwebp reference
+  decodes respectively (see `CHANGELOG.md`'s `[0.2.0]` Added section).
+  This document was not updated when that code shipped — flagged as
+  cross-file drift in `TODO.md` — and is corrected below in the same pass
+  as the AV1 update above.
+- **The orphaned `av1/avif.rs`** (never declared as a module in
+  `av1/mod.rs`, and a duplicate of the live `avif/mod.rs` AVIF
+  implementation) **was deleted.** `avif/mod.rs::decode()` itself has
+  **not** been wired to the new AV1 keyframe decoder and still returns an
+  honest `Err` — see the AVIF entry below, unchanged by this audit.
+- **All other codec entries below are unchanged from the 0.1.9 re-audit
+  above** and were not re-verified in this pass.
+
 ## Taxonomy
 
 OxiMedia classifies each decoder with one of four honesty labels.
@@ -114,52 +158,92 @@ OxiMedia classifies each decoder with one of four honesty labels.
 
 ## Video decoders
 
-### AV1 — Bitstream-parsing
+### AV1 — Functional (keyframe/intra only)
 
-- **Module:** `crates/oximedia-codec/src/av1/`
-- **Current state:** OBU parsing, sequence/frame headers, loop-filter / CDEF /
-  quantization parameters, symbol decoder, and an output-queue scaffold are
-  all present. The decoder allocates a `VideoFrame` and populates metadata
-  (width, height, format, pts) but the reconstruction stages inside
-  `crates/oximedia-codec/src/reconstruct/pipeline.rs` (`stage_parse`,
-  `stage_entropy`, `stage_predict`, `stage_transform`) are no-ops. The
-  `TileGroup` branch of `decode_temporal_unit` explicitly returns without
-  touching tile data (`"Tile group data would be processed here"`).
-- **What is missing:** entropy decode of coefficients, intra / inter
-  prediction, inverse transform, loop-filter / CDEF / film-grain application
-  back into the output buffer, reference-frame management wired to the
-  pipeline.
-- **Effort:** specialist.
-- **Target:** 0.2.0+. Tracked by GitHub issue #9. *(Re-verified against 0.1.9
-  source on 2026-07-08: unchanged — see "0.1.9 re-audit summary" above.)*
+- **Module:** `crates/oximedia-codec/src/av1/` (keyframe pipeline:
+  `av1/kf/` — `bits`, `msac`, `hdr`, `cdfs`, `coef`, `pred`, `itx`,
+  `recon`, `lf`, `cdef`, `lr`, plus `tables_*`/`consts` machine-extracted
+  from the AV1 specification sources and cross-checked against libaom
+  v3.12.1).
+- **Current state (0.2.0):** keyframe/intra ✓ — 8-bit 4:2:0 profile 0,
+  bit-exact vs dav1d/aomdec incl. deblock, CDEF and loop restoration;
+  superres, film grain, palette, intrabc, qmatrix, 10/12-bit and inter are
+  honest `Err` (mirrors the `lib.rs` Codec Feature Matrix row). The `kf`
+  module is an exact port of the intra decode path of the AV1
+  specification (symbol/range decoder, sequence/frame header parsing,
+  transform-coefficient decode, intra prediction including CFL, exact
+  inverse transforms, tile/partition/block decode driver), and
+  `av1/decoder.rs::decode_temporal_unit` calls into it directly — the old
+  no-op `"Tile group data would be processed here"` branch is gone.
+  Verified bit-exact (0 differing pixels, Y+U+V) against **both** dav1d
+  1.5.1 and aomdec (libaom) on 13 keyframe vectors (aomenc + SVT-AV1
+  encodes incl. lossless, 128×128 superblocks, 2 tile columns, an odd
+  76×42 crop, and 320×192 loop-restoration cases), with the full
+  post-filter chain applied: deblocking loop filter, CDEF, and loop
+  restoration (Wiener + self-guided/SGRPROJ). Tests:
+  `stage1_lossless_gray64_bit_exact` through
+  `stage4_switchable_wiener_320x192_bit_exact` in `av1/kf/mod.rs`.
+- **What is missing (each an honest `CodecError::UnsupportedFeature` —
+  never a fabricated frame):** inter-frame decode (`av1/kf/hdr.rs:440`),
+  intra block copy (`av1/kf/recon.rs:665`), palette mode
+  (`av1/kf/recon.rs:739`), 10/12-bit / monochrome / 4:2:2 / 4:4:4
+  (`av1/kf/recon.rs:1475`), horizontal super-resolution upscaling
+  (`av1/kf/recon.rs:1482`), quantizer matrices (`av1/kf/recon.rs:1488`),
+  and film-grain synthesis on output (`av1/kf/recon.rs:1494`).
+- **Effort to close the inter gap:** specialist.
+- **Target:** inter and the remaining surfaces 0.2.x. Tracked by GitHub
+  issue #9. *(Audited against 0.2.0 source on 2026-07-15 — see "0.2.0
+  re-audit summary" above.)*
 
-### VP9 — Bitstream-parsing
+### VP9 — Functional (keyframe/intra only)
 
-- **Module:** `crates/oximedia-codec/src/vp9/`
-- **Current state:** Frame parsing, tile infrastructure, and block/superblock
-  decode methods exist. Decode routes through the same
-  `DecoderPipeline::process_frame` shell as AV1, whose stages are no-ops.
-  Output `VideoFrame` gets an allocated but unpopulated work buffer.
-- **What is missing:** wiring the existing superblock/block/intra decode
-  routines to actually write into the returned `VideoFrame`; filling in the
-  pipeline stages; reference-frame management.
-- **Effort:** large.
-- **Target:** 0.2.0+. *(Re-verified against 0.1.9 source on 2026-07-08:
-  `decode_superblock` exists but has zero callers — unchanged.)*
+- **Module:** `crates/oximedia-codec/src/vp9/` (keyframe pipeline:
+  `vp9/kf/` — `booldec`, `hdr`, `itx`, `lf`, `pred`, `recon`, `scan`,
+  `tables`).
+- **Current state (0.2.0):** keyframe/intra ✓ — 8-bit 4:2:0, bit-exact vs
+  libvpx; inter not yet (honest `Err`) (mirrors the `lib.rs` Codec Feature
+  Matrix row). The `kf` module is an exact port of libvpx's intra decode
+  path (boolean/range decoder, inverse DCT/ADST transforms, the lossless
+  4×4 Walsh-Hadamard transform, loop filter, and the tile/partition/block
+  decode driver); `vp9/decoder.rs` dispatches keyframes to
+  `kf::decode_keyframe` (`vp9/decoder.rs:112`). Verified bit-exact against
+  `ffmpeg`/libvpx reference decodes of real encoder output (tests in
+  `vp9/kf/mod.rs`: lossless 64×64, CRF 128×128, odd 76×42 crop, and
+  512×64 with two tile columns, all `*_bit_exact_vs_libvpx`).
+- **What is missing (each an honest `CodecError::UnsupportedFeature`):**
+  inter-frame decode (`vp9/decoder.rs:102`) — motion-vector/ref-frame
+  syntax, eighth-pel motion compensation with the four interp filter sets,
+  compound prediction, backward probability adaptation; intra-only frames
+  (`vp9/decoder.rs:91`) — same pixel path as keyframes but requires
+  inter-frame context tracking first; profiles 1–3 (`vp9/kf/mod.rs:47`) —
+  4:2:2 / 4:4:4 subsampling and 10/12-bit depths.
+- **Effort to close the inter gap:** large.
+- **Target:** 0.2.x. *(Audited against 0.2.0 source on 2026-07-15.)*
 
-### VP8 — Bitstream-parsing
+### VP8 — Functional (keyframe/intra only)
 
-- **Module:** `crates/oximedia-codec/src/vp8/`
-- **Current state:** Bitstream parsing exists; the Y plane is filled with a
-  constant `128` and no chroma decode is performed. Comment in
-  `src/vp8/decoder.rs` states `"In a full implementation, we would decode the
-  actual pixel data here"`.
-- **What is missing:** intra/inter decode, DCT/WHT inverse transform, loop
-  filter, actual Y/U/V output.
-- **Effort:** large.
-- **Target:** 0.2.0+. *(Re-verified against 0.1.9 source on 2026-07-08: the
-  constant-128 fill and "would decode the actual pixel data here" comment
-  are unchanged.)*
+- **Module:** `crates/oximedia-codec/src/vp8/` (keyframe pipeline:
+  `vp8/keyframe/` — `bool_decoder`, `header`, `loopfilter`, `predict`,
+  `tables`, `transform`).
+- **Current state (0.2.0):** keyframe/intra ✓ — full RFC 6386 pipeline;
+  inter not yet (honest `Err`) (mirrors the `lib.rs` Codec Feature Matrix
+  row). The full RFC 6386 §11–§15 intra pipeline (macroblock mode parsing,
+  DCT coefficient token decode, dequantise/inverse-transform, intra
+  prediction, in-loop deblocking filter), ported from the pre-existing,
+  production-verified `oximedia-image` WebP/VP8 still-image decoder (a
+  lossy WebP image *is* a single VP8 key frame); `vp8/decoder.rs`
+  dispatches keyframes to `keyframe::decode_keyframe`
+  (`vp8/decoder.rs:134`). The old constant-128 Y-plane fill and the "In a
+  full implementation, we would decode the actual pixel data here" comment
+  are gone. Verified bit-exact against libwebp (`dwebp -yuv`) reference
+  output on real libwebp/libvpx encodes
+  (`crates/oximedia-codec/tests/vp8_real_bitstream.rs`).
+- **What is missing (an honest `CodecError::UnsupportedFeature`):**
+  inter-frame decode (`vp8/decoder.rs:119`) — motion-vector entropy decode
+  (RFC 6386 §16–§18), quarter-pel motion compensation, and
+  last/golden/altref reference-frame management.
+- **Effort to close the inter gap:** medium.
+- **Target:** 0.2.x. *(Audited against 0.2.0 source on 2026-07-15.)*
 
 ### Theora — Functional
 
@@ -191,12 +275,24 @@ OxiMedia classifies each decoder with one of four honesty labels.
 ### AVIF — Bitstream-parsing
 
 - **Module:** `crates/oximedia-codec/src/avif/`
-- **Current state:** `decode()` returns the raw AV1 bitstream in
-  `y_plane`. Comment: `"full decode of AV1 frames is out of scope for this
-  implementation"`. Transitively depends on the AV1 decoder gap.
-- **What is missing:** real AV1 pixel output + image-item demux.
-- **Effort:** specialist (bounded by AV1).
-- **Target:** follows AV1 (0.2.0+).
+- **Current state (re-checked 2026-07-15):** `decode()` validates the
+  ISOBMFF container (signature, `meta`/`iloc` structure, `mdat` extents,
+  via `extract_av1_payload`) and then returns an honest
+  `CodecError::UnsupportedFeature` (`avif/mod.rs:249`) — it never
+  fabricates pixels. An earlier revision returned the raw AV1 bitstream in
+  the `y_plane` field as if it were decoded pixels; that misleading
+  behaviour has been removed (the module doc records this), and this
+  entry's previous text describing it was stale. What works today:
+  `AvifDecoder::probe` (dimensions, bit depth, colour metadata, alpha
+  presence) and `AvifDecoder::extract_av1_payload` (raw AV1 OBU
+  bitstream(s), honestly labelled as encoded data).
+- **What is missing:** wiring `decode()` to the new AV1 keyframe/intra
+  decoder (`av1/kf/`, shipped 0.2.0 — see the AV1 entry above); recorded
+  as a 0.2.x follow-up in `TODO.md`'s "Deferred (0.2.x)" section. Initial
+  scope would match the AV1 decoder (8-bit 4:2:0 profile 0).
+- **Effort:** small–medium (the AV1 keyframe decoder now exists; the
+  remaining work is the decode wiring plus still-image scope handling).
+- **Target:** 0.2.x (follows the shipped AV1 keyframe decoder).
 
 ### WebP — Functional (VP8L lossless only)
 
@@ -512,11 +608,16 @@ OxiMedia classifies each decoder with one of four honesty labels.
 ### Vorbis — Bitstream-parsing
 
 - **Module:** `crates/oximedia-codec/src/vorbis/`
-- **Current state:** Headers parse. `decode_audio_packet` returns
-  `Ok(Vec::new())` with a comment noting that a full decode would need the
-  stateful MDCT/OLA context. Floor reconstruction is a "simplified linear
-  interpolation" placeholder. A real MDCT exists but is only wired to a
-  custom test format.
+- **Current state (re-checked 2026-07-15):** Headers parse (and are
+  validated). `decode_audio_packet` returns an honest
+  `CodecError::UnsupportedFeature` — "Vorbis full decode not implemented:
+  stateless audio-packet decode is unsupported" — rather than fabricated
+  empty samples (`vorbis/decoder.rs:275`; this entry previously described
+  an `Ok(Vec::new())` return, which is gone from the source). Floor
+  reconstruction is a "simplified linear interpolation" placeholder
+  (`vorbis/decoder.rs:567`). A real MDCT exists but is only wired to
+  `decode_packet`'s custom OxiMedia simplified packet format, not to real
+  Vorbis streams.
 - **What is missing:** full Vorbis reverse codebook decode, residue, floor
   curve, MDCT/IMDCT, overlap-add, window switching, channel coupling.
 - **Effort:** specialist.

@@ -2,7 +2,7 @@
 
 Sovereign ML pipelines for OxiMedia — Pure-Rust ONNX inference (OxiONNX)
 
-**Status: [Stable]** | Version: 0.1.9 | Updated: 2026-07-08
+**Status: [Stable]** | Version: 0.2.0 | Updated: 2026-07-14
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 

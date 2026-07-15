@@ -280,16 +280,21 @@ fn decode_run_mode(
                     context: "run residual length",
                 })? as i32
             };
-            for k in 0..residual as usize {
-                samples[row * w + col + k] = runval as u16;
-            }
-            col += residual as usize;
-            // Sanity: the termination sample exists at `col` (col < w).
-            if col >= w {
+            // Defend against a malformed run residual that would write past the
+            // end of the row (out-of-bounds write). In RUN-interruption mode the
+            // breaking (termination) sample sits at `col + residual`, so that
+            // index must be strictly inside the row *before* any sample is
+            // filled — checking after the write loop is too late.
+            let residual = residual as usize;
+            if col + residual >= w {
                 return Err(JlsError::Truncated {
                     context: "run residual overflows row",
                 });
             }
+            for k in 0..residual {
+                samples[row * w + col + k] = runval as u16;
+            }
+            col += residual;
             // Decode the breaking sample with the RUN-interruption context.
             let term_sample =
                 decode_run_termination_sample(samples, ctx_states, reader, row, col, runval, p)?;
@@ -322,15 +327,19 @@ fn decode_run_mode(
                 context: "run residual length",
             })? as i32
         };
-        for k in 0..residual as usize {
-            samples[row * w + col + k] = runval as u16;
-        }
-        col += residual as usize;
-        if col >= w {
+        // Same out-of-bounds defence as the phase-1 interruption branch: the
+        // termination sample lands at `col + residual`, so bound the run length
+        // before writing any samples to the row buffer.
+        let residual = residual as usize;
+        if col + residual >= w {
             return Err(JlsError::Truncated {
                 context: "run residual overflows row",
             });
         }
+        for k in 0..residual {
+            samples[row * w + col + k] = runval as u16;
+        }
+        col += residual;
         let term_sample =
             decode_run_termination_sample(samples, ctx_states, reader, row, col, runval, p)?;
         samples[row * w + col] = term_sample;
@@ -455,6 +464,11 @@ fn decode_scan(scan_data: &[u8], headers: &JlsHeaders) -> JlsResult<DecodedImage
     let near = headers.scan.near as i32;
     let ilv = headers.scan.ilv;
 
+    // Defend against an allocation bomb: `w`, `h` and `nc` come straight from
+    // the frame header and drive a `vec![0u16; w*h]` allocation per component
+    // below. Reject impossibly large / overflowing declarations up front.
+    crate::limits::checked_dims(w, h, nc, 2).map_err(JlsError::Unsupported)?;
+
     let t1 = headers.presets.t1;
     let t2 = headers.presets.t2;
     let t3 = headers.presets.t3;
@@ -561,3 +575,62 @@ fn decode_scan(scan_data: &[u8], headers: &JlsHeaders) -> JlsResult<DecodedImage
 /// Re-export the near-lossless map function so that the inline test encoder
 /// can use it without duplicating the formula.
 pub use super::golomb::map_error_near as golomb_map_error_near;
+
+#[cfg(test)]
+mod run_mode_regression_tests {
+    use super::*;
+
+    /// Regression for the RUN-mode out-of-bounds write: a run interruption whose
+    /// residual length would extend past the end of the row must return a clean
+    /// `Err`, never write past the row buffer.
+    ///
+    /// Setup: a 12-pixel-wide row (row 0), RUN entered at column 10 with
+    /// `run_index = 7` (`J[7] = 2`, threshold `1 << 2 = 4`). Because
+    /// `10 + 4 > 12`, no full token fits, so the decoder takes the phase-2
+    /// trailing-bit path. Byte `0x60 = 0b0110_0000` (read MSB-first) supplies a
+    /// `0` trailing bit (run interruption) followed by residual bits `11` = 3,
+    /// giving `10 + 3 = 13 >= 12`. Before the fix this wrote `samples[12]`,
+    /// one past the 12-element row.
+    #[test]
+    fn run_residual_past_row_end_errors_not_oob() {
+        let w = 12usize;
+        let mut samples = vec![0u16; w]; // single row, row = 0
+        let mut ctx = vec![ContextState::default(); NUM_TOTAL_CONTEXTS];
+        let mut run_state = RunState {
+            run_index: 7, // J[7] = 2 → residual is 2 bits, threshold 4
+            run_value: 0,
+        };
+        let scan = [0x60u8];
+        let mut reader = BitReader::new(&scan);
+        let params = ScanDecodeParams {
+            max_val: 255,
+            near: 0,
+            reset: 64,
+            limit: 47,
+            qbpp: 8,
+            t1: 3,
+            t2: 7,
+            t3: 21,
+            w,
+        };
+
+        // Confirm the crafted configuration exercises the phase-2 residual path.
+        assert_eq!(threshold_for(7), 4);
+        assert_eq!(j_for(7), 2);
+
+        let result = decode_run_mode(
+            &mut samples,
+            &mut ctx,
+            &mut run_state,
+            &mut reader,
+            0,  // row
+            10, // start_col
+            0,  // ra (run value)
+            &params,
+        );
+        assert!(
+            result.is_err(),
+            "a residual overrunning the row must error, got {result:?}"
+        );
+    }
+}

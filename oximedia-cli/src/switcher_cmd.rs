@@ -336,6 +336,26 @@ async fn handle_preview(input: usize, me_row: usize, json_output: bool) -> Resul
 // Handler: Record
 // ---------------------------------------------------------------------------
 
+/// Start or stop recording the switcher's program output.
+///
+/// `oximedia-switcher` provides a real recording *state machine*
+/// (`oximedia_switcher::recording::RecordingManager`/`RecordingTrack`) but it
+/// is in-process bookkeeping only -- it does not itself open an encoder or
+/// write bytes to disk, and `oximedia-cli`'s `switcher` command has no live
+/// capture pipeline or long-running switcher daemon (each CLI invocation
+/// configures a switcher and exits immediately). So "start" genuinely cannot
+/// produce a real recording here.
+///
+/// This still does real, useful work before refusing: it validates the
+/// codec, validates the track configuration through the real
+/// `RecordingTrack::validate()` (name/output-path checks), checks the output
+/// directory actually exists, and exercises the real
+/// `RecordingManager::add_track`/`start` state transition -- then reports an
+/// honest error instead of a fabricated `"status": "recording"` with no file
+/// ever created.
+// TODO(0.2.x): wire a real encoder once oximedia-cli gains a live capture
+// source and/or a persistent switcher process for `record start` to attach
+// to; only then can this legitimately report "recording".
 async fn handle_record(
     action: &str,
     output: Option<&std::path::Path>,
@@ -347,54 +367,95 @@ async fn handle_record(
             let out = output
                 .ok_or_else(|| anyhow::anyhow!("Output path is required for 'start' action"))?;
 
-            match codec {
-                "av1" | "vp9" | "vp8" => {}
+            let recording_codec = match codec {
+                "av1" => oximedia_switcher::recording::RecordingCodec::Av1Cbr,
+                "vp9" => oximedia_switcher::recording::RecordingCodec::Vp9Crf,
+                // `RecordingCodec` has no dedicated VP8 variant; the closest
+                // royalty-free long-GOP preset is reused purely for config
+                // validation below (name/path checks only -- see doc above).
+                "vp8" => oximedia_switcher::recording::RecordingCodec::Vp9Crf,
                 other => {
                     return Err(anyhow::anyhow!(
                         "Unsupported codec '{}'. Use: av1, vp9, vp8",
                         other
                     ));
                 }
+            };
+
+            let track = oximedia_switcher::recording::RecordingTrack::new("program_out")
+                .with_codec(recording_codec)
+                .with_output_path(out.display().to_string());
+            track
+                .validate()
+                .map_err(|e| anyhow::anyhow!("Invalid recording configuration: {e}"))?;
+
+            if let Some(parent) = out.parent() {
+                if !parent.as_os_str().is_empty() && !parent.exists() {
+                    return Err(anyhow::anyhow!(
+                        "Output directory does not exist: {}",
+                        parent.display()
+                    ));
+                }
             }
 
+            let mut manager = oximedia_switcher::recording::RecordingManager::new();
+            let id = manager
+                .add_track(track)
+                .map_err(|e| anyhow::anyhow!("Failed to register recording track: {e}"))?;
+            manager
+                .start(id)
+                .map_err(|e| anyhow::anyhow!("Failed to start recording track: {e}"))?;
+            let state_machine_recording = manager.is_recording(id);
+
             if json_output {
-                let result = serde_json::json!({
+                let diag = serde_json::json!({
                     "action": "record_start",
                     "output": out.display().to_string(),
                     "codec": codec,
-                    "status": "recording",
+                    "status": "error",
+                    "config_validated": true,
+                    "state_machine_recording": state_machine_recording,
+                    "error": "no live capture pipeline; refusing to fabricate a recording",
                 });
-                let json_str =
-                    serde_json::to_string_pretty(&result).context("Failed to serialize result")?;
-                println!("{}", json_str);
-            } else {
-                println!("{}", "Recording Started".green().bold());
-                println!("{:20} {}", "Output:", out.display());
-                println!("{:20} {}", "Codec:", codec);
+                eprintln!(
+                    "{}",
+                    serde_json::to_string_pretty(&diag).unwrap_or_else(|_| diag.to_string())
+                );
             }
+
+            Err(anyhow::anyhow!(
+                "Switcher recording is not yet implemented: configuration for '{}' (codec: {}) \
+                 validated successfully and the in-process recording state machine transitioned \
+                 to recording (is_recording={}), but oximedia-cli's `switcher` command has no \
+                 live capture pipeline or persistent switcher process to write real frames to \
+                 disk. Refusing to report \"recording\" with no file ever written.",
+                out.display(),
+                codec,
+                state_machine_recording
+            ))
         }
         "stop" => {
             if json_output {
-                let result = serde_json::json!({
+                let diag = serde_json::json!({
                     "action": "record_stop",
-                    "status": "stopped",
+                    "status": "error",
+                    "error": "no recording is active (switcher recording is not implemented)",
                 });
-                let json_str =
-                    serde_json::to_string_pretty(&result).context("Failed to serialize result")?;
-                println!("{}", json_str);
-            } else {
-                println!("{}", "Recording Stopped".green().bold());
+                eprintln!(
+                    "{}",
+                    serde_json::to_string_pretty(&diag).unwrap_or_else(|_| diag.to_string())
+                );
             }
+            Err(anyhow::anyhow!(
+                "Switcher recording is not yet implemented, so no recording can be stopped. \
+                 See `oximedia switcher record start` for details on the current limitation."
+            ))
         }
-        other => {
-            return Err(anyhow::anyhow!(
-                "Unknown record action '{}'. Use: start, stop",
-                other
-            ));
-        }
+        other => Err(anyhow::anyhow!(
+            "Unknown record action '{}'. Use: start, stop",
+            other
+        )),
     }
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -517,5 +578,61 @@ mod tests {
     async fn test_handle_record_start_no_output() {
         let result = handle_record("start", None, "av1", false).await;
         assert!(result.is_err());
+    }
+
+    // ── record start/stop: honest-Err, never a fabricated "recording" ───────
+
+    #[tokio::test]
+    async fn test_handle_record_start_never_claims_success() {
+        let dir = std::env::temp_dir();
+        let out = dir.join("oximedia_switcher_test_record_output.mkv");
+        let _ = std::fs::remove_file(&out);
+
+        let err = handle_record("start", Some(out.as_path()), "av1", false)
+            .await
+            .expect_err("switcher recording must not report success");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not yet implemented"),
+            "error should be honest about the limitation, got: {msg}"
+        );
+        assert!(
+            !msg.to_lowercase().contains("\"status\": \"recording\""),
+            "must not resemble the old fabricated JSON success payload"
+        );
+        assert!(
+            !out.exists(),
+            "no output file should be fabricated for a recording that never started"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_record_start_invalid_output_dir() {
+        let missing_parent = std::env::temp_dir()
+            .join("oximedia_switcher_test_definitely_missing_dir_xyz")
+            .join("out.mkv");
+
+        let err = handle_record("start", Some(missing_parent.as_path()), "av1", false)
+            .await
+            .expect_err("a nonexistent output directory must fail");
+        assert!(err.to_string().contains("does not exist"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_record_start_unknown_codec() {
+        let dir = std::env::temp_dir();
+        let out = dir.join("oximedia_switcher_test_record_bad_codec.mkv");
+        let err = handle_record("start", Some(out.as_path()), "h264", false)
+            .await
+            .expect_err("unsupported codec must fail");
+        assert!(err.to_string().contains("Unsupported codec"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_record_stop_never_claims_success() {
+        let err = handle_record("stop", None, "av1", false)
+            .await
+            .expect_err("stop must be honest when nothing was ever recording");
+        assert!(err.to_string().contains("not yet implemented"));
     }
 }

@@ -29,11 +29,11 @@ pub enum WorkflowCommand {
         #[arg(long)]
         tasks: Option<String>,
 
-        /// Source file path (for template-based creation)
+        /// Source media path, recorded in the definition file
         #[arg(long)]
         source: Option<PathBuf>,
 
-        /// Destination file path (for template-based creation)
+        /// Destination path, recorded in the definition file
         #[arg(long)]
         destination: Option<PathBuf>,
     },
@@ -44,7 +44,7 @@ pub enum WorkflowCommand {
         #[arg(long)]
         config: PathBuf,
 
-        /// Database path for persistence
+        /// Database path for persistence (not implemented yet: warns and proceeds)
         #[arg(long)]
         db: Option<PathBuf>,
 
@@ -122,7 +122,7 @@ pub enum WorkflowCommand {
         #[arg(short, long)]
         workflow: PathBuf,
 
-        /// Database path for persistence
+        /// Database path for persistence (not implemented yet: warns and proceeds)
         #[arg(long)]
         db_path: Option<PathBuf>,
 
@@ -230,6 +230,14 @@ pub async fn handle_workflow_command(command: WorkflowCommand, json_output: bool
 struct WorkflowDef {
     name: String,
     template: Option<String>,
+    /// Source media path recorded by `create --source` (consumed by steps
+    /// at execution time). `serde(default)` keeps older definition files
+    /// loadable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    /// Destination path recorded by `create --destination`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    destination: Option<String>,
     steps: Vec<WorkflowStepDef>,
 }
 
@@ -247,6 +255,8 @@ impl WorkflowDef {
         Self {
             name: name.to_string(),
             template: None,
+            source: None,
+            destination: None,
             steps: Vec::new(),
         }
     }
@@ -455,13 +465,13 @@ async fn handle_create(
     name: Option<&str>,
     template: Option<&str>,
     tasks: Option<&str>,
-    _source: Option<&std::path::Path>,
-    _destination: Option<&std::path::Path>,
+    source: Option<&std::path::Path>,
+    destination: Option<&std::path::Path>,
     json_output: bool,
 ) -> Result<()> {
     let workflow_name = name.unwrap_or("Untitled Workflow");
 
-    let def = if let Some(tmpl) = template {
+    let mut def = if let Some(tmpl) = template {
         let mut d = get_template(tmpl)?;
         d.name = workflow_name.to_string();
         d
@@ -503,6 +513,15 @@ async fn handle_create(
         WorkflowDef::new(workflow_name)
     };
 
+    // Record --source / --destination in the definition file itself so
+    // downstream `submit`/`run` consumers see the paths the user configured.
+    if let Some(src) = source {
+        def.source = Some(src.display().to_string());
+    }
+    if let Some(dst) = destination {
+        def.destination = Some(dst.display().to_string());
+    }
+
     def.save(output)?;
 
     if json_output {
@@ -511,6 +530,8 @@ async fn handle_create(
             "output": output.display().to_string(),
             "name": workflow_name,
             "template": template,
+            "source": def.source,
+            "destination": def.destination,
             "steps": def.steps.len(),
             "status": "created",
         });
@@ -524,6 +545,12 @@ async fn handle_create(
         println!("{:20} {}", "Output:", output.display());
         if let Some(t) = template {
             println!("{:20} {}", "Template:", t);
+        }
+        if let Some(ref src) = def.source {
+            println!("{:20} {}", "Source:", src);
+        }
+        if let Some(ref dst) = def.destination {
+            println!("{:20} {}", "Destination:", dst);
         }
         println!("{:20} {}", "Steps:", def.steps.len());
 
@@ -547,13 +574,29 @@ async fn handle_create(
 // Handler: Submit
 // ---------------------------------------------------------------------------
 
+/// `--db` has no persistence layer wired behind it yet; warn instead of
+/// silently accepting a path the command will never touch.
+// TODO(0.2.x): back the workflow state commands with the SQLite persistence
+// available in oximedia-workflow (the crate is already linked with the
+// `sqlite` feature) instead of the current in-process-only execution.
+fn warn_db_unwired(db: Option<&std::path::Path>) {
+    if let Some(path) = db {
+        eprintln!(
+            "warning: --db is not implemented yet and is ignored; workflow state is not \
+             persisted to {}",
+            path.display()
+        );
+    }
+}
+
 async fn handle_submit(
     config: &std::path::Path,
-    _db: Option<&std::path::Path>,
+    db: Option<&std::path::Path>,
     parallelism: usize,
     dry_run: bool,
     json_output: bool,
 ) -> Result<()> {
+    warn_db_unwired(db);
     if !config.exists() {
         return Err(anyhow::anyhow!(
             "Config file not found: {}",
@@ -634,10 +677,11 @@ async fn handle_submit(
 
 async fn handle_status(
     workflow_id: &str,
-    _db: Option<&std::path::Path>,
+    db: Option<&std::path::Path>,
     detailed: bool,
     json_output: bool,
 ) -> Result<()> {
+    warn_db_unwired(db);
     if json_output {
         let result = serde_json::json!({
             "workflow_id": workflow_id,
@@ -674,9 +718,10 @@ async fn handle_status(
 
 async fn handle_list(
     state_filter: Option<&str>,
-    _db: Option<&std::path::Path>,
+    db: Option<&std::path::Path>,
     json_output: bool,
 ) -> Result<()> {
+    warn_db_unwired(db);
     // Validate state filter if provided
     if let Some(s) = state_filter {
         match s {
@@ -722,10 +767,11 @@ async fn handle_list(
 
 async fn handle_cancel(
     workflow_id: &str,
-    _db: Option<&std::path::Path>,
+    db: Option<&std::path::Path>,
     force: bool,
     json_output: bool,
 ) -> Result<()> {
+    warn_db_unwired(db);
     if json_output {
         let result = serde_json::json!({
             "action": "cancel",
@@ -752,9 +798,10 @@ async fn handle_cancel(
 async fn handle_logs(
     workflow_id: &str,
     tail: usize,
-    _db: Option<&std::path::Path>,
+    db: Option<&std::path::Path>,
     json_output: bool,
 ) -> Result<()> {
+    warn_db_unwired(db);
     // In a full implementation this would query the persistence layer.
     // Here we return a well-structured empty response.
     if json_output {
@@ -831,11 +878,12 @@ async fn handle_templates(json_output: bool) -> Result<()> {
 
 async fn handle_run(
     workflow_path: &std::path::Path,
-    _db_path: Option<&std::path::Path>,
+    db_path: Option<&std::path::Path>,
     dry_run: bool,
     parallelism: usize,
     json_output: bool,
 ) -> Result<()> {
+    warn_db_unwired(db_path);
     if !workflow_path.exists() {
         return Err(anyhow::anyhow!(
             "Workflow file not found: {}",

@@ -325,7 +325,8 @@ fn create_job_queue(
             crf: config.crf,
             threads: config.threads,
             overwrite: config.overwrite,
-            resume: false,
+            // `BatchConfig` has no stream-selection knob; keep every stream.
+            map: Vec::new(),
             // `BatchConfig` has no normalization knob today (batch TOML jobs
             // are driven purely by codec/bitrate/scale/preset fields); keep
             // batch transcodes byte-for-byte unchanged from before this flag

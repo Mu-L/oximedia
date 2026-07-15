@@ -1,6 +1,6 @@
 # oximedia-packager
 
-**Status: [Stable]** | Version: 0.1.9 | Tests: extensively tested | Updated: 2026-07-08
+**Status: [Stable]** | Version: 0.2.0 | Tests: extensively tested | Updated: 2026-07-14
 
 Adaptive streaming packaging (HLS/DASH) for OxiMedia. Provides comprehensive support for packaging media content into HLS and DASH adaptive streaming formats with encryption, cloud upload, and live/VOD support.
 

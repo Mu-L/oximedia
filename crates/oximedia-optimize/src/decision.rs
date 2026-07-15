@@ -1,6 +1,6 @@
 //! Mode decision strategies and helpers.
 //!
-//! When the `ml-decision` feature is enabled, [`MlModeDecider`] can pre-filter
+//! When the `ml-decision` feature is enabled, `MlModeDecider` can pre-filter
 //! the candidate pool via a small 3-layer MLP before the full RDO pass.
 
 /// Mode decision strategy.

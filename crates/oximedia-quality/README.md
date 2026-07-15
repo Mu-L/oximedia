@@ -1,6 +1,6 @@
 # oximedia-quality
 
-**Status: [Stable]** | Version: 0.1.9 | Tests: extensively tested | Updated: 2026-07-08
+**Status: [Stable]** | Version: 0.2.0 | Tests: extensively tested | Updated: 2026-07-14
 
 Video quality assessment and objective metrics for OxiMedia. Provides comprehensive video quality assessment including full-reference metrics (PSNR, SSIM, VMAF) and no-reference metrics (NIQE, BRISQUE, blur, noise).
 

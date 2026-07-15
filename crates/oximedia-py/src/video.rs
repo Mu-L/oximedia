@@ -413,3 +413,103 @@ impl Vp8Decoder {
         format!("Vp8Decoder(dimensions={:?})", self.inner.dimensions())
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+//
+// Task-2 disposition: the `receive_frame` consumer sites above already
+// propagate a decode `Err` cleanly. Each `receive_frame` body is
+// `py.detach(...).map(...).map_err(crate::error::from_codec_error)`: the
+// `.map` (which would construct a `VideoFrame`) only runs on the `Ok`
+// branch, so an `Err` from the underlying `oximedia_codec` decoder short-
+// circuits straight to `from_codec_error` and becomes a real Python
+// `OxiMediaError` exception (see `crate::error::from_codec_error`). There is
+// no `.unwrap()`/`.expect()`/panic anywhere in this file, and no code path
+// that silently turns a decode `Err` into a blank/placeholder `VideoFrame`.
+//
+// The tests below exercise this with a real, already-implemented error
+// condition (`CodecError::Eof`, returned by `receive_frame` once the decoder
+// has been flushed and its output queue is empty) rather than depending on
+// the timing of the separate in-flight change that makes unsupported AV1/VP9
+// bitstream decode itself return `Err`. Whatever `CodecError` variant the
+// codec crate raises, it flows through the identical `map_err` path
+// exercised here.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn av1_decoder_eof_after_flush_is_clear_pyerr_not_panic() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let mut decoder = Av1Decoder::new().expect("decoder should construct");
+            decoder.flush(py).expect("flush should succeed");
+            // No packets were ever sent, so the output queue is empty; after
+            // flush the decoder must report a real end-of-stream error
+            // rather than silently returning None (which means "need more
+            // data") or fabricating a blank frame.
+            // `VideoFrame` does not implement `Debug`, so match explicitly
+            // instead of `.expect_err(..)` (which requires `T: Debug`).
+            match decoder.receive_frame(py) {
+                Err(err) => {
+                    let msg = err.to_string();
+                    assert!(
+                        !msg.is_empty(),
+                        "decode error must carry an actionable message, not an empty string"
+                    );
+                }
+                Ok(frame) => panic!(
+                    "receive_frame after flush with an empty queue must return Err, not \
+                     Ok({frame:?}) — a blank/placeholder frame must never masquerade as success",
+                    frame = frame.is_some()
+                ),
+            }
+        });
+    }
+
+    #[test]
+    fn vp9_decoder_eof_after_flush_is_clear_pyerr_not_panic() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let mut decoder = Vp9Decoder::new().expect("decoder should construct");
+            decoder.flush(py).expect("flush should succeed");
+            let result = decoder.receive_frame(py);
+            assert!(
+                result.is_err(),
+                "receive_frame after flush with an empty queue must return Err, not Ok(blank frame)"
+            );
+        });
+    }
+
+    #[test]
+    fn vp8_decoder_eof_after_flush_is_clear_pyerr_not_panic() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let mut decoder = Vp8Decoder::new().expect("decoder should construct");
+            decoder.flush(py).expect("flush should succeed");
+            let result = decoder.receive_frame(py);
+            assert!(
+                result.is_err(),
+                "receive_frame after flush with an empty queue must return Err, not Ok(blank frame)"
+            );
+        });
+    }
+
+    #[test]
+    fn av1_decoder_no_data_no_flush_returns_none_not_err() {
+        // Sanity check on the *other* branch: before flush, an empty queue
+        // means "need more data" (Ok(None)), which is distinct from the real
+        // end-of-stream Err exercised above.
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let mut decoder = Av1Decoder::new().expect("decoder should construct");
+            let result = decoder.receive_frame(py);
+            assert!(
+                result.is_ok(),
+                "no data, no flush => Ok(None), not an error"
+            );
+            assert!(result.expect("checked above").is_none());
+        });
+    }
+}

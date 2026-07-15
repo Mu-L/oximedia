@@ -1,6 +1,6 @@
 # oximedia-normalize
 
-**Status: [Stable]** | Version: 0.1.9 | Tests: extensively tested | Updated: 2026-07-08
+**Status: [Stable]** | Version: 0.2.0 | Tests: extensively tested | Updated: 2026-07-14
 
 Professional broadcast loudness normalization for OxiMedia.
 
@@ -126,7 +126,7 @@ println!("{}", report.format());
 
 - **Two-pass (`Normalizer`)** — use whenever the full signal is available (files, in-memory clips). `analyze_f32`/`analyze_f64` measure the whole program once; `process_f32`/`process_f64` then apply one precise, constant gain. This is the only mode that reliably lands the output loudness inside a standard's compliance tolerance, because the gain comes from a fully gated measurement rather than a running estimate.
 - **One-pass (`RealtimeNormalizer`)** — use for live/streaming sources where you cannot buffer the whole program. `process_chunk` measures only a lookahead window (exposed as `latency_samples()`), rides a smoothed gain, and can run the result through `TruePeakLimiter` so inter-sample peaks never clip even though the loudness estimate itself is still approximate. Use `RealtimeConfig::low_latency` to trade measurement stability for lower delay.
-- **Batch (`BatchProcessor` / `batch_normalizer::BatchNormalizer`)** — use for collections of files. `batch_normalizer::BatchNormalizer` is the working two-pass batch engine: `measure` every item, `schedule_gains` in `GainMode::Independent` (each file hits the target on its own — right for standalone tracks/episodes) or `GainMode::Album` (every file shares one gain derived from the loudest item, preserving relative loudness across an album), then `apply_to_item`. `batch::BatchProcessor` exposes the same `BatchConfig`/`BatchResult` shape (parallel processing, ReplayGain tagging, metadata writing) but its `process_file`/`process_directory` do not yet perform file I/O — drive `batch_normalizer::BatchNormalizer` with decoded sample buffers for real batch runs today.
+- **Batch (`BatchProcessor` / `batch_normalizer::BatchNormalizer`)** — use for collections of files. `batch_normalizer::BatchNormalizer` is the working two-pass batch engine: `measure` every item, `schedule_gains` in `GainMode::Independent` (each file hits the target on its own — right for standalone tracks/episodes) or `GainMode::Album` (every file shares one gain derived from the loudest item, preserving relative loudness across an album), then `apply_to_item`. `batch::BatchProcessor` exposes the same `BatchConfig`/`BatchResult` shape and its `process_file`/`process_directory` now decode/normalize/encode real WAV files end-to-end (analyze → gain → optional limiter/DRC → write); `write_metadata` is still inert (no tags are embedded yet) and non-WAV formats are not yet supported — use `batch_normalizer::BatchNormalizer` directly for those cases or for in-memory sample buffers.
 
 ## Relationship with `oximedia-metering`
 

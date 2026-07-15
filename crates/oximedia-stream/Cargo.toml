@@ -6,6 +6,7 @@ authors.workspace = true
 description = "Adaptive streaming pipeline, segment lifecycle management, and stream health monitoring for OxiMedia"
 readme = "README.md"
 license.workspace = true
+rust-version.workspace = true
 homepage.workspace = true
 repository.workspace = true
 keywords = ["streaming", "adaptive", "hls", "dash", "media"]

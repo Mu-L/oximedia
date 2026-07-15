@@ -439,20 +439,23 @@ async fn convert_image(
         None
     };
 
-    println!("{}", "Image Conversion".green().bold());
-    println!("{}", "=".repeat(60));
-    println!("{:20} {} ({})", "Input:", input.display(), in_fmt.name());
-    println!("{:20} {} ({})", "Output:", output.display(), out_fmt.name());
-    if let Some(ref pt) = target_depth {
-        println!("{:20} {}-bit", "Target bit depth:", pt.bit_depth());
+    // Status output; suppressed by --quiet.
+    if !crate::progress::is_quiet() {
+        println!("{}", "Image Conversion".green().bold());
+        println!("{}", "=".repeat(60));
+        println!("{:20} {} ({})", "Input:", input.display(), in_fmt.name());
+        println!("{:20} {} ({})", "Output:", output.display(), out_fmt.name());
+        if let Some(ref pt) = target_depth {
+            println!("{:20} {}-bit", "Target bit depth:", pt.bit_depth());
+        }
+        if let Some(ref cs) = target_cs {
+            println!("{:20} {}", "Target colorspace:", colorspace_name(*cs));
+        }
+        if let Some(ref c) = target_compression {
+            println!("{:20} {}", "Compression:", compression_name(*c));
+        }
+        println!();
     }
-    if let Some(ref cs) = target_cs {
-        println!("{:20} {}", "Target colorspace:", colorspace_name(*cs));
-    }
-    if let Some(ref c) = target_compression {
-        println!("{:20} {}", "Compression:", compression_name(*c));
-    }
-    println!();
 
     // Read input frame
     let mut frame = read_input_frame(input, &in_fmt)?;
@@ -470,7 +473,9 @@ async fn convert_image(
     // Write output
     write_output_frame(output, &frame, &out_fmt, target_compression, quality)?;
 
-    println!("{}", "✓ Conversion complete.".green().bold());
+    if !crate::progress::is_quiet() {
+        println!("{}", "✓ Conversion complete.".green().bold());
+    }
     Ok(())
 }
 

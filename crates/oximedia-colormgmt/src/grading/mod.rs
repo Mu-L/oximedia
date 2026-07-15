@@ -243,8 +243,10 @@ pub enum GradingNode {
     Cdl(CdlGrade),
     /// Color wheel lift/gamma/gain with luma weighting.
     ColorWheel(ColorWheel),
-    /// Tone curves (placeholder, applies identity).
-    Curves,
+    /// Master + per-channel tone curves (see [`crate::curves::RgbCurves`]),
+    /// applied to each pixel via [`crate::curves::RgbCurves::apply_pixel`].
+    /// Use [`crate::curves::RgbCurves::identity`] for a no-op curve node.
+    Curves(crate::curves::RgbCurves),
     /// Global saturation adjustment.
     Saturation(f32),
     /// Exposure adjustment in stops.
@@ -261,7 +263,7 @@ impl GradingNode {
                 let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
                 wheel.apply_pixel(r, g, b, luma)
             }
-            GradingNode::Curves => (r, g, b),
+            GradingNode::Curves(curves) => curves.apply_pixel(r, g, b),
             GradingNode::Saturation(sat) => {
                 let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
                 let r_out = luma + sat * (r - luma);
@@ -440,11 +442,83 @@ mod tests {
     }
 
     #[test]
-    fn test_grading_node_curves_passthrough() {
-        let node = GradingNode::Curves;
+    fn test_grading_node_curves_identity_passthrough() {
+        // An explicit identity curve node must still be a passthrough.
+        let node = GradingNode::Curves(crate::curves::RgbCurves::identity());
         let (r, g, b) = node.apply_pixel(0.5, 0.4, 0.3);
         assert!((r - 0.5).abs() < 1e-6);
         assert!((g - 0.4).abs() < 1e-6);
         assert!((b - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_grading_node_curves_nonidentity_changes_pixel() {
+        use crate::curves::{CurvePoint, RgbCurves, ToneCurve};
+
+        // Master curve that strongly lifts shadows (0.25 -> 0.5): a
+        // non-identity curve LUT, not a passthrough.
+        let lift_curve = ToneCurve::new(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.25, 0.5),
+            CurvePoint::new(1.0, 1.0),
+        ]);
+        let curves = RgbCurves::new(
+            ToneCurve::identity(),
+            ToneCurve::identity(),
+            ToneCurve::identity(),
+            lift_curve,
+        );
+        let node = GradingNode::Curves(curves);
+        let (r, g, b) = node.apply_pixel(0.25, 0.25, 0.25);
+
+        // Proves the curve LUT is actually applied to pixels rather than
+        // skipped as identity: the output must differ substantially from
+        // the un-graded input.
+        assert!(
+            (r - 0.25).abs() > 0.1,
+            "expected curve to change the pixel value, got r={r} (input was 0.25)"
+        );
+        assert!(
+            (r - 0.5).abs() < 1e-4,
+            "expected curve-lifted value ≈ 0.5, got r={r}"
+        );
+        assert!(
+            (r - g).abs() < 1e-6,
+            "all channels fed the same input must match"
+        );
+        assert!(
+            (g - b).abs() < 1e-6,
+            "all channels fed the same input must match"
+        );
+    }
+
+    #[test]
+    fn test_grading_pipeline_with_curves_node_applies_curve() {
+        use crate::curves::{CurvePoint, RgbCurves, ToneCurve};
+
+        // A per-channel curve that only boosts the red channel.
+        let red_boost = ToneCurve::new(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.9),
+            CurvePoint::new(1.0, 1.0),
+        ]);
+        let curves = RgbCurves::new(
+            red_boost,
+            ToneCurve::identity(),
+            ToneCurve::identity(),
+            ToneCurve::identity(),
+        );
+
+        let mut pipeline = GradingPipeline::new();
+        pipeline.add_node(GradingNode::Curves(curves));
+
+        let (r, g, b) = pipeline.apply_pixel(0.5, 0.5, 0.5);
+        assert!(
+            r > 0.7,
+            "expected the pipeline to apply the red-boosting curve, got r={r}"
+        );
+        // Green/blue used identity curves, so they pass through unchanged.
+        assert!((g - 0.5).abs() < 1e-4);
+        assert!((b - 0.5).abs() < 1e-4);
     }
 }

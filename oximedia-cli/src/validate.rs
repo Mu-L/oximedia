@@ -20,6 +20,12 @@ pub struct ValidateOptions {
     pub checks: Vec<ValidationCheck>,
     pub strict: bool,
     pub fix: bool,
+    /// Run a real EBU R128 loudness compliance check (`--loudness-check`).
+    /// Requires decodable audio; WAV/PCM is supported today.
+    pub loudness_check: bool,
+    /// `--gamut-check` — no YUV-level analysis path exists yet; a stderr
+    /// warning is printed and the flag is otherwise ignored.
+    pub gamut_check: bool,
     pub json_output: bool,
 }
 
@@ -126,6 +132,15 @@ pub struct ValidationSummary {
 pub async fn validate_files(options: ValidateOptions) -> Result<()> {
     info!("Starting file validation");
     debug!("Validation options: {:?}", options);
+
+    // No decoded-YUV analysis path exists in the CLI yet, so a gamut check
+    // cannot produce a real verdict; warn instead of silently dropping the
+    // flag (and instead of fabricating a pass).
+    // TODO(0.2.x): implement a real EBU R103 legal-range check once the
+    // frame-extraction helpers expose pre-RGB YUV planes.
+    if options.gamut_check {
+        eprintln!("warning: --gamut-check is not implemented yet and is ignored");
+    }
 
     // Validate inputs exist
     for input in &options.inputs {
@@ -273,6 +288,13 @@ async fn validate_single_file(
             }
             ValidationCheck::All => {}
         }
+    }
+
+    // Optional EBU R128 loudness compliance check (--loudness-check):
+    // decodes real audio samples and meters them; never a silent no-op.
+    if options.loudness_check {
+        checks_performed.push("Loudness".to_string());
+        check_loudness(path, &mut issues).await;
     }
 
     // Fix issues if requested
@@ -637,6 +659,127 @@ async fn check_metadata(path: &Path, issues: &mut Vec<ValidationIssue>) -> Resul
     Ok(())
 }
 
+/// EBU R128 loudness tolerance around the target, in LU.
+///
+/// EBU R128 specifies ±0.5 LU for programmes measured as a whole and ±1.0 LU
+/// for live programmes; the CLI uses the more permissive ±1.0 LU so borderline
+/// offline measurements are warnings the user can act on, not noise.
+const LOUDNESS_TOLERANCE_LU: f64 = 1.0;
+
+/// Real EBU R128 loudness compliance check (`--loudness-check`).
+///
+/// Decodes actual audio samples (WAV/PCM today via
+/// [`crate::decode_helper::decode_wav_f32`]) and feeds them through a real
+/// [`oximedia_metering::LoudnessMeter`]. Files whose audio cannot be decoded
+/// produce a visible warning-severity issue — never a silent skip and never a
+/// fabricated pass on synthetic data.
+// TODO(0.2.x): extend decode coverage beyond WAV (FLAC/Opus in
+// Matroska/Ogg) once decode_helper grows a compressed-audio path.
+async fn check_loudness(path: &Path, issues: &mut Vec<ValidationIssue>) {
+    debug!("Checking loudness compliance for {}", path.display());
+
+    let audio = match crate::decode_helper::decode_wav_f32(path).await {
+        Ok(audio) => audio,
+        Err(e) => {
+            issues.push(ValidationIssue {
+                severity: IssueSeverity::Warning,
+                check: "Loudness".to_string(),
+                message: format!(
+                    "Loudness check skipped: cannot decode audio ({e}). \
+                     WAV/PCM input is supported today."
+                ),
+                location: None,
+                fixable: false,
+            });
+            return;
+        }
+    };
+
+    let standard = oximedia_metering::Standard::EbuR128;
+    let config = oximedia_metering::MeterConfig::new(
+        standard,
+        f64::from(audio.sample_rate),
+        audio.channels as usize,
+    );
+    if let Err(e) = config.validate() {
+        issues.push(ValidationIssue {
+            severity: IssueSeverity::Warning,
+            check: "Loudness".to_string(),
+            message: format!("Loudness check skipped: invalid meter configuration ({e})"),
+            location: None,
+            fixable: false,
+        });
+        return;
+    }
+
+    let mut meter = match oximedia_metering::LoudnessMeter::new(config) {
+        Ok(meter) => meter,
+        Err(e) => {
+            issues.push(ValidationIssue {
+                severity: IssueSeverity::Warning,
+                check: "Loudness".to_string(),
+                message: format!("Loudness check skipped: cannot create meter ({e})"),
+                location: None,
+                fixable: false,
+            });
+            return;
+        }
+    };
+
+    meter.process_f32(&audio.samples);
+    let metrics = meter.metrics();
+
+    let target = standard.target_lufs();
+    let max_tp = standard.max_true_peak_dbtp();
+
+    if metrics.integrated_lufs.is_finite() {
+        let deviation = metrics.integrated_lufs - target;
+        if deviation.abs() > LOUDNESS_TOLERANCE_LU {
+            issues.push(ValidationIssue {
+                severity: IssueSeverity::Warning,
+                check: "Loudness".to_string(),
+                message: format!(
+                    "Integrated loudness {:.1} LUFS deviates {:+.1} LU from the EBU R128 \
+                     target of {:.1} LUFS (tolerance ±{:.1} LU); a {:+.1} dB gain change \
+                     would reach the target.",
+                    metrics.integrated_lufs, deviation, target, LOUDNESS_TOLERANCE_LU, -deviation
+                ),
+                location: Some("audio".to_string()),
+                fixable: true,
+            });
+        }
+    } else {
+        issues.push(ValidationIssue {
+            severity: IssueSeverity::Info,
+            check: "Loudness".to_string(),
+            message: "Integrated loudness is -inf LUFS (silence or below the gating \
+                      threshold); nothing to normalize."
+                .to_string(),
+            location: Some("audio".to_string()),
+            fixable: false,
+        });
+    }
+
+    if metrics.true_peak_dbtp.is_finite() && metrics.true_peak_dbtp > max_tp {
+        issues.push(ValidationIssue {
+            severity: IssueSeverity::Error,
+            check: "Loudness".to_string(),
+            message: format!(
+                "True peak {:+.1} dBTP exceeds the EBU R128 maximum of {:+.1} dBTP \
+                 (clipping risk on downstream codecs).",
+                metrics.true_peak_dbtp, max_tp
+            ),
+            location: Some("audio".to_string()),
+            fixable: true,
+        });
+    }
+
+    debug!(
+        "Loudness measured: integrated {:.2} LUFS, true peak {:.2} dBTP (target {:.1} LUFS)",
+        metrics.integrated_lufs, metrics.true_peak_dbtp, target
+    );
+}
+
 /// Attempt to fix issues.
 ///
 /// For each fixable issue we apply the best available remediation and mark
@@ -732,7 +875,22 @@ async fn fix_issues(path: &Path, issues: &mut Vec<ValidationIssue>) -> Result<()
 /// Print result for a single file.
 fn print_file_result(result: &FileValidationResult) {
     if result.valid {
-        println!("   {} {}", "✓".green().bold(), "Valid".green());
+        if result.issues.is_empty() {
+            println!("   {} {}", "✓".green().bold(), "Valid".green());
+        } else {
+            // Sub-error findings (warnings/infos — e.g. a loudness deviation
+            // measurement) must stay visible: hiding them behind a bare
+            // "Valid" would silently discard the check's real output.
+            println!(
+                "   {} {} ({} advisory issue(s))",
+                "✓".green().bold(),
+                "Valid".green(),
+                result.issues.len()
+            );
+            for issue in &result.issues {
+                print_issue(issue);
+            }
+        }
     } else {
         println!(
             "   {} {} issue(s) found",

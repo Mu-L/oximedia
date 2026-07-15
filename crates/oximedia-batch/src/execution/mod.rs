@@ -97,6 +97,7 @@ impl ExecutionEngine {
         }
 
         self.running.store(true, Ordering::SeqCst);
+        self.queue.reset_shutdown();
 
         // Spawn worker tasks
         for i in 0..self.config.worker_count {
@@ -145,6 +146,7 @@ impl ExecutionEngine {
         }
 
         self.running.store(false, Ordering::SeqCst);
+        self.queue.request_shutdown();
 
         // Wait for all workers to finish
         let handles = std::mem::take(&mut *self.task_handles.write());

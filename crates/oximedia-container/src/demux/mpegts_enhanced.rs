@@ -205,6 +205,15 @@ pub fn parse_pat(payload: &[u8]) -> Option<Pat> {
         return None;
     }
 
+    // A malformed PAT may declare `section_length == 0`, making the
+    // CRC-excluding end offset `3 + section_length - 4` underflow (usize) and
+    // spin the entry loop far out of bounds. `psi.rs` is implicitly guarded by
+    // its CRC-length check; this enhanced fast-path has none, so require at
+    // least one byte of section body (equivalently `section_length >= 1`).
+    if section_length == 0 {
+        return None;
+    }
+
     let transport_stream_id = (u16::from(payload[3]) << 8) | u16::from(payload[4]);
 
     // Entries start at byte 8, end 4 bytes before section end (CRC)
@@ -244,6 +253,14 @@ pub fn parse_pmt(payload: &[u8]) -> Option<Pmt> {
 
     let section_length = (usize::from(payload[1] & 0x0F) << 8) | usize::from(payload[2]);
     if payload.len() < section_length + 3 {
+        return None;
+    }
+
+    // A malformed PMT may declare `section_length == 0`, making the
+    // CRC-excluding end offset `3 + section_length - 4` underflow (usize).
+    // Require at least one byte of section body (equivalently
+    // `section_length >= 1`) before the subtraction below.
+    if section_length == 0 {
         return None;
     }
 
@@ -549,6 +566,23 @@ impl TsDemuxer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── Security regression tests (P0 #1: section_length underflow) ──────
+
+    #[test]
+    fn parse_pat_zero_section_length_is_rejected() {
+        // section_length == 0 makes `3 + section_length - 4` underflow (usize)
+        // and spin the entry loop out of bounds. Must return None, not panic.
+        let payload = [0x00u8, 0x00, 0x00, 0, 0, 0, 0, 0]; // table_id=PAT, len=0
+        assert!(parse_pat(&payload).is_none());
+    }
+
+    #[test]
+    fn parse_pmt_zero_section_length_is_rejected() {
+        // Same underflow guard for the PMT fast-path.
+        let payload = [0x02u8, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // table_id=PMT, len=0
+        assert!(parse_pmt(&payload).is_none());
+    }
 
     // ─── Helpers ──────────────────────────────────────────────────────────
 

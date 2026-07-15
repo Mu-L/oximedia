@@ -1,9 +1,10 @@
 //! Transcoding pipeline orchestration and execution.
 //!
-//! This module implements the core packet-level transcode loop:
-//! demux → (optional codec-compat check) → mux.  Full decode/encode
-//! paths are wired in for the codecs that OxiMedia natively supports
-//! (AV1, VP8, VP9, Opus, Vorbis, FLAC).
+//! This module implements the core packet-level stream-copy loop
+//! (demux → mux) and dispatches codec-changing jobs to the real
+//! decode → filter → encode path in [`crate::frame_level`] (FLAC, PCM,
+//! ALAC audio; MJPEG, APV, MPEG-2, rawvideo video — see that module's
+//! support matrix for containers and honest-error cases).
 //!
 //! For audio-analysis (normalization), the raw packet bytes are treated
 //! as PCM-like interleaved f32 so that the LoudnessMeter can derive a
@@ -61,19 +62,19 @@
 //! 4. **Verification** – confirm the output file is non-empty and assemble
 //!    `TranscodeOutput` with real stats.
 
+use crate::stream_map::{build_index_remap, resolve_stream_selection, StreamMap};
 use crate::{
-    make_video_encoder, MultiPassConfig, MultiPassEncoder, MultiPassMode, NormalizationConfig,
-    ProgressTracker, QualityConfig, RateControlMode, Result, TranscodeError, TranscodeOutput,
-    VideoEncoderParams,
+    MultiPassConfig, MultiPassEncoder, MultiPassMode, NormalizationConfig, ProgressTracker,
+    QualityConfig, Result, TranscodeError, TranscodeOutput,
 };
 use oximedia_container::{
     demux::{Demuxer, FlacDemuxer, MatroskaDemuxer, OggDemuxer, WavDemuxer},
     mux::{MatroskaMuxer, MuxerConfig, OggMuxer},
     probe_format, ContainerFormat, Muxer, StreamInfo,
 };
-use oximedia_core::CodecId;
 use oximedia_io::FileSource;
 use oximedia_metering::{LoudnessMeter, MeterConfig, Standard};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{debug, info, warn};
@@ -88,48 +89,6 @@ const DEFAULT_SAMPLE_RATE: f64 = 48_000.0;
 
 /// Default assumed channel count when audio streams carry no params.
 const DEFAULT_CHANNELS: usize = 2;
-
-// ─── Intra-codec helpers ──────────────────────────────────────────────────────
-
-/// Default quality/QP used when the caller does not supply CRF for intra codecs.
-const INTRA_DEFAULT_QUALITY: u8 = 85;
-
-/// Fallback frame width when the stream header carries no resolution.
-const INTRA_FALLBACK_WIDTH: u32 = 1920;
-
-/// Fallback frame height when the stream header carries no resolution.
-const INTRA_FALLBACK_HEIGHT: u32 = 1080;
-
-/// Parse a codec name string into a [`CodecId`] if it is an intra-only codec
-/// supported by [`make_video_encoder`] (MJPEG or APV).
-///
-/// Returns `None` if the name does not map to an intra codec.
-fn parse_intra_codec(name: &str) -> Option<CodecId> {
-    match name.to_lowercase().as_str() {
-        "mjpeg" | "motion-jpeg" | "motion_jpeg" => Some(CodecId::Mjpeg),
-        "apv" => Some(CodecId::Apv),
-        _ => None,
-    }
-}
-
-/// Build a [`VideoEncoderParams`] from the first video stream found in `streams`.
-///
-/// Falls back to [`INTRA_FALLBACK_WIDTH`] × [`INTRA_FALLBACK_HEIGHT`] when the
-/// stream header does not carry resolution metadata.  `quality` comes from the
-/// pipeline's CRF setting (if present) or [`INTRA_DEFAULT_QUALITY`].
-fn intra_encoder_params(streams: &[StreamInfo], quality: u8) -> Result<VideoEncoderParams> {
-    let (w, h) = streams
-        .iter()
-        .find(|s| s.is_video())
-        .and_then(|s| {
-            let w = s.codec_params.width?;
-            let h = s.codec_params.height?;
-            Some((w, h))
-        })
-        .unwrap_or((INTRA_FALLBACK_WIDTH, INTRA_FALLBACK_HEIGHT));
-
-    VideoEncoderParams::new(w, h, quality)
-}
 
 // ─── PassStats ────────────────────────────────────────────────────────────────
 
@@ -152,7 +111,7 @@ struct PassStats {
 // ─── Container-format helpers ─────────────────────────────────────────────────
 
 /// Detect the container format of `path` by reading a small probe buffer.
-async fn detect_format(path: &std::path::Path) -> Result<ContainerFormat> {
+pub(crate) async fn detect_format(path: &std::path::Path) -> Result<ContainerFormat> {
     let mut source = FileSource::open(path)
         .await
         .map_err(|e| TranscodeError::IoError(e.to_string()))?;
@@ -184,6 +143,20 @@ fn output_format_from_path(path: &std::path::Path) -> ContainerFormat {
         // Fallback: if input was matroska-family keep it, else matroska
         _ => ContainerFormat::Matroska,
     }
+}
+
+// ─── ScaleSpec ────────────────────────────────────────────────────────────────
+
+/// Requested output resolution for `-vf scale` / `--scale`.
+///
+/// A `None` axis means "keep aspect ratio" (FFmpeg's `-1`); the frame-level
+/// executor resolves it against the source dimensions and rounds to even.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScaleSpec {
+    /// Target width in pixels; `None` derives it from the height.
+    pub width: Option<u32>,
+    /// Target height in pixels; `None` derives it from the width.
+    pub height: Option<u32>,
 }
 
 // ─── Pipeline stage types ─────────────────────────────────────────────────────
@@ -230,6 +203,21 @@ pub struct PipelineConfig {
     pub track_progress: bool,
     /// Enable hardware acceleration.
     pub hw_accel: bool,
+    /// FFmpeg-style stream selection (`--map`). Empty keeps every stream.
+    pub stream_map: Vec<StreamMap>,
+    /// Start time in seconds (`-ss`): real demuxer seek where supported,
+    /// read-and-discard by PTS otherwise.
+    pub start_time_secs: Option<f64>,
+    /// Maximum output duration in seconds (`-t`), measured from the start
+    /// point (FFmpeg semantics: `-ss 10 -t 5` keeps 10 s → 15 s).
+    pub duration_secs: Option<f64>,
+    /// `-vf scale` / `--scale` target resolution (frame-level path only).
+    pub video_scale: Option<ScaleSpec>,
+    /// `-af volume` gain in dB, folded into the frame-level audio filter
+    /// graph together with any `--normalize-audio` gain.
+    pub audio_gain_db: Option<f64>,
+    /// `-r` output frame rate as `(num, den)` (frame-level path only).
+    pub output_fps: Option<(u32, u32)>,
 }
 
 // ─── Pipeline ─────────────────────────────────────────────────────────────────
@@ -327,33 +315,38 @@ impl Pipeline {
     // ── Frame-level detection ─────────────────────────────────────────────────
 
     /// Returns `true` when the pipeline configuration requests a frame-level
-    /// transcode operation (i.e., a video or audio codec that requires
-    /// decode → filter → encode rather than packet-level stream-copy).
+    /// transcode operation (i.e., anything that requires decode → filter →
+    /// encode rather than packet-level stream-copy).
     ///
     /// The following are **not** considered frame-level:
     /// - No codec override (stream-copy default).
-    /// - `video_codec` of `"copy"` or `"stream-copy"`.
-    /// - `video_codec` that maps to an intra-only codec handled by the
-    ///   [`make_video_encoder`] path (MJPEG, APV).
+    /// - `video_codec` / `audio_codec` of `"copy"` or `"stream-copy"`.
     ///
-    /// Everything else — including AV1, VP9, VP8, Opus, Vorbis — is treated as
-    /// frame-level because it requires a full decode → encode cycle that the
-    /// packet-level `remux` loop cannot perform.
+    /// Every real codec target (MJPEG, APV, MPEG-2, FLAC, Opus, …) and every
+    /// frame filter (`-vf scale`, `-af volume`, `-r`) goes through the real
+    /// decode → filter → encode path in [`crate::frame_level`], which either
+    /// performs the work or returns a descriptive unsupported-codec error.
     fn requires_frame_level(&self) -> bool {
-        let video_needs_frame_level = self.config.video_codec.as_deref().map_or(false, |vc| {
-            let lc = vc.to_lowercase();
-            lc != "copy"
-                && lc != "stream-copy"
-                && lc != "stream_copy"
-                && parse_intra_codec(vc).is_none()
-        });
+        let is_copy = |name: &str| {
+            let lc = name.to_lowercase();
+            lc == "copy" || lc == "stream-copy" || lc == "stream_copy"
+        };
+        let video_needs_frame_level = self
+            .config
+            .video_codec
+            .as_deref()
+            .is_some_and(|vc| !is_copy(vc));
+        let audio_needs_frame_level = self
+            .config
+            .audio_codec
+            .as_deref()
+            .is_some_and(|ac| !is_copy(ac));
 
-        let audio_needs_frame_level = self.config.audio_codec.as_deref().map_or(false, |ac| {
-            let lc = ac.to_lowercase();
-            lc != "copy" && lc != "stream-copy" && lc != "stream_copy"
-        });
-
-        video_needs_frame_level || audio_needs_frame_level
+        video_needs_frame_level
+            || audio_needs_frame_level
+            || self.config.video_scale.is_some()
+            || self.config.audio_gain_db.is_some()
+            || self.config.output_fps.is_some()
     }
 
     // ── Validation ───────────────────────────────────────────────────────────
@@ -375,6 +368,21 @@ impl Pipeline {
                 .ok_or_else(|| TranscodeError::InvalidOutput("Invalid output path".to_string()))?,
             true,
         )?;
+
+        if let Some(start) = self.config.start_time_secs {
+            if !start.is_finite() || start < 0.0 {
+                return Err(TranscodeError::InvalidInput(format!(
+                    "start time (-ss) must be a finite, non-negative number of seconds, got {start}"
+                )));
+            }
+        }
+        if let Some(duration) = self.config.duration_secs {
+            if !duration.is_finite() || duration <= 0.0 {
+                return Err(TranscodeError::InvalidInput(format!(
+                    "duration (-t) must be a finite, positive number of seconds, got {duration}"
+                )));
+            }
+        }
 
         Ok(())
     }
@@ -599,28 +607,23 @@ impl Pipeline {
             in_format, out_format
         );
 
-        // ── Frame-level codec gate ────────────────────────────────────────────
+        // ── Frame-level dispatch ──────────────────────────────────────────────
         //
-        // When a video or audio codec other than stream-copy is requested, the
-        // packet-level `remux` loop below cannot perform decode → filter →
-        // encode.  Callers who need full codec transcoding should use
-        // [`MultiTrackExecutor`] directly:
-        //
-        // ```rust,ignore
-        // use oximedia_transcode::multi_track::{MultiTrackExecutor, PerTrack};
-        //
-        // let mut executor = MultiTrackExecutor::new(muxer);
-        // executor.add_track(PerTrack::new_typed(0, decoder, FilterGraph::new(), encoder, false));
-        // let stats = executor.execute(&streams).await?;
-        // ```
+        // When a real codec change or a frame filter (`-vf scale`,
+        // `-af volume`, `-r`) is requested, run the real decode → filter →
+        // encode path. Pure stream-copy jobs (no codec change, no filters)
+        // stay on the packet-level remux loop below, byte-for-byte identical
+        // to previous behaviour.
         if self.requires_frame_level() {
-            let vc = self.config.video_codec.as_deref().unwrap_or("(none)");
-            let ac = self.config.audio_codec.as_deref().unwrap_or("(none)");
-            return Err(TranscodeError::Unsupported(format!(
-                "Codec transcoding (video={vc}, audio={ac}) requires frame-level decode→encode. \
-                 Use MultiTrackExecutor with per-track FrameDecoder/FrameEncoder instances \
-                 instead of Pipeline::execute()."
-            )));
+            let fl_stats =
+                crate::frame_level::execute_frame_level(&self.config, self.normalization_gain_db)
+                    .await?;
+            return Ok(PassStats {
+                bytes_in: fl_stats.bytes_in,
+                bytes_out: fl_stats.bytes_out,
+                video_frames: fl_stats.video_frames,
+                audio_frames: fl_stats.audio_frames,
+            });
         }
 
         // Ensure output directory exists.
@@ -720,62 +723,46 @@ impl Pipeline {
         D: Demuxer,
     {
         // Gather streams from the demuxer.
-        let streams: Vec<StreamInfo> = demuxer.streams().to_vec();
+        let all_streams: Vec<StreamInfo> = demuxer.streams().to_vec();
 
-        if streams.is_empty() {
+        if all_streams.is_empty() {
             return Err(TranscodeError::ContainerError(
                 "Input container has no streams".to_string(),
             ));
         }
 
-        // Identify audio stream indices for gain application.
+        // ── `--map` stream selection ─────────────────────────────────────────
+        //
+        // Resolve the selector list to the set of original stream indices to
+        // keep, then build the original→sequential remap table. Both output
+        // muxers (Matroska, Ogg) route `write_packet` by the packet's
+        // position in the muxer's own stream list, so the drain loop must
+        // rewrite every surviving packet's `stream_index` through this table
+        // and drop packets from unselected streams.
+        let kept_indices = resolve_stream_selection(&all_streams, &self.config.stream_map)?;
+        let streams: Vec<StreamInfo> = all_streams
+            .iter()
+            .filter(|s| kept_indices.contains(&s.index))
+            .cloned()
+            .collect();
+        let index_remap = build_index_remap(&kept_indices);
+        if streams.len() != all_streams.len() {
+            info!(
+                "--map selection: keeping {}/{} stream(s): {:?}",
+                streams.len(),
+                all_streams.len(),
+                kept_indices
+            );
+        }
+
+        // Identify audio stream indices for gain application (original
+        // demuxer indices — the drain loop checks them before remapping).
         let audio_stream_indices: Vec<usize> = streams
             .iter()
             .filter(|s| s.is_audio())
             .map(|s| s.index)
             .collect();
 
-        // ── Intra-codec fast path: validate encoder before remuxing ─────────────
-        //
-        // When the requested video codec is MJPEG or APV (intra-only codecs),
-        // `make_video_encoder` is called here to:
-        //   1. Confirm the codec feature is compiled in.
-        //   2. Validate the params (width/height from stream header).
-        //   3. Provide a ready-to-use encoder for the encode loop.
-        //
-        // If it cannot be built (feature disabled, bad params) the pipeline
-        // returns an error immediately rather than silently falling back to an
-        // incorrect stream-copy path.
-        if let Some(ref vc) = self.config.video_codec {
-            if let Some(intra_id) = parse_intra_codec(vc) {
-                let quality = self
-                    .config
-                    .quality
-                    .as_ref()
-                    .and_then(|q| {
-                        if let RateControlMode::Crf(v) = q.rate_control {
-                            Some(v)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or(INTRA_DEFAULT_QUALITY);
-
-                let params = intra_encoder_params(&streams, quality)?;
-                // Build and immediately drop – this validates the encoder can be
-                // instantiated with the given params and feature flags.
-                let _encoder = make_video_encoder(intra_id, &params)?;
-                info!(
-                    "Intra-codec {} encoder ready: {}×{} quality={}",
-                    vc, params.width, params.height, quality
-                );
-            } else {
-                debug!("Video codec override requested: {} (stream-copy path)", vc);
-            }
-        }
-        if let Some(ref ac) = self.config.audio_codec {
-            debug!("Audio codec override requested: {} (stream-copy path)", ac);
-        }
         if self.normalization_gain_db.abs() > 0.01 {
             info!(
                 "Normalization gain {:.2} dB will be applied to {} audio stream(s)",
@@ -783,6 +770,36 @@ impl Pipeline {
                 audio_stream_indices.len()
             );
         }
+
+        // ── `-ss` start-time handling ────────────────────────────────────────
+        //
+        // Exact `-ss` semantics come from reading and discarding packets by
+        // PTS: the output starts at the first packet with PTS ≥ the start
+        // point. A demuxer seek is deliberately NOT used here — container
+        // seeks are cue/cluster granular and may land either before the
+        // target (harmless) or *after* it (packets between the target and
+        // the landing point would be silently lost, breaking exactness).
+        // The full-scan discard is correct on every input, seekable or not.
+        let mut discard_below_secs: Option<f64> = None;
+        if let Some(start_secs) = self.config.start_time_secs {
+            if start_secs > 0.0 {
+                debug!("Reading and discarding packets below {start_secs:.3}s (-ss, exact)");
+                discard_below_secs = Some(start_secs);
+            }
+        }
+
+        // `-t` termination point: FFmpeg measures the duration from the seek
+        // point, so the drain loop stops at start + duration.
+        let stop_at_secs = self
+            .config
+            .duration_secs
+            .map(|duration| self.config.start_time_secs.unwrap_or(0.0) + duration);
+
+        let drain_control = DrainControl {
+            index_remap,
+            discard_below_secs,
+            stop_at_secs,
+        };
 
         let mux_config = MuxerConfig::new().with_writing_app("OxiMedia-Transcode");
 
@@ -808,6 +825,7 @@ impl Pipeline {
                     &self.progress_tracker,
                     &audio_stream_indices,
                     self.normalization_gain_db,
+                    &drain_control,
                 )
                 .await?;
 
@@ -839,6 +857,7 @@ impl Pipeline {
                     &self.progress_tracker,
                     &audio_stream_indices,
                     self.normalization_gain_db,
+                    &drain_control,
                 )
                 .await?;
 
@@ -963,12 +982,36 @@ impl Pipeline {
 
 // ─── Free helper functions ────────────────────────────────────────────────────
 
+/// Packet-level drain controls: `--map` remapping and `-ss`/`-t` trimming.
+#[derive(Debug)]
+struct DrainControl {
+    /// Original demuxer stream index → position in the muxer's stream list.
+    ///
+    /// The Matroska and Ogg muxers route `write_packet` positionally, so
+    /// packets missing from this table are dropped and survivors have their
+    /// `stream_index` rewritten before muxing. With no `--map` filtering the
+    /// table is the identity over all input streams.
+    index_remap: HashMap<usize, usize>,
+    /// `-ss`: drop packets whose PTS is below this many seconds. Always set
+    /// alongside a start time — a demuxer seek (when supported) only
+    /// shortens the read, it does not replace the discard, because seeks
+    /// are keyframe/cue granular and may silently rewind to the start on
+    /// cue-less Matroska files.
+    discard_below_secs: Option<f64>,
+    /// `-t` termination: stop draining at the first kept packet whose PTS
+    /// reaches this many seconds (start + duration).
+    stop_at_secs: Option<f64>,
+}
+
 /// Drain all packets from `demuxer` and write them via `muxer`.
 ///
 /// For every audio packet (identified by stream index membership in
 /// `audio_stream_indices`) the `gain_db` is applied to the raw payload
 /// interpreted as interleaved i16 PCM little-endian samples.  A gain of
 /// 0.0 dB is a no-op.
+///
+/// `control` applies `--map` stream filtering/remapping and `-ss`/`-t`
+/// packet trimming — see [`DrainControl`].
 ///
 /// Returns a `PassStats` with real bytes-in / bytes-out and frame counts so
 /// the caller can build meaningful `TranscodeOutput` statistics.
@@ -978,6 +1021,7 @@ async fn drain_packets_with_gain<D, M>(
     _progress: &Option<ProgressTracker>,
     audio_stream_indices: &[usize],
     gain_db: f64,
+    control: &DrainControl,
 ) -> Result<PassStats>
 where
     D: Demuxer,
@@ -995,6 +1039,28 @@ where
                     continue;
                 }
 
+                // `--map`: drop packets from unselected streams; survivors
+                // are remapped to the muxer's positional index below.
+                let Some(&mapped_index) = control.index_remap.get(&pkt.stream_index) else {
+                    continue;
+                };
+
+                let pkt_secs = pkt.timestamp.to_seconds();
+                // `-ss` fallback for non-seekable inputs.
+                if let Some(below) = control.discard_below_secs {
+                    if pkt_secs < below {
+                        continue;
+                    }
+                }
+                // `-t`: packets arrive in rough interleave order, so the
+                // first kept packet at/after the stop point ends the drain.
+                if let Some(stop) = control.stop_at_secs {
+                    if pkt_secs >= stop {
+                        debug!("Reached -t stop point at {pkt_secs:.3}s (limit {stop:.3}s)");
+                        break;
+                    }
+                }
+
                 let raw_len = pkt.data.len() as u64;
                 stats.bytes_in += raw_len;
 
@@ -1007,6 +1073,10 @@ where
                 } else {
                     stats.video_frames += 1;
                 }
+
+                // Rewrite to the muxer-positional stream index (identity
+                // when no `--map` filtering is active).
+                pkt.stream_index = mapped_index;
 
                 let out_len = pkt.data.len() as u64;
                 stats.bytes_out += out_len;
@@ -1181,6 +1251,12 @@ pub struct TranscodePipelineBuilder {
     normalization: Option<NormalizationConfig>,
     track_progress: bool,
     hw_accel: bool,
+    stream_map: Vec<StreamMap>,
+    start_time_secs: Option<f64>,
+    duration_secs: Option<f64>,
+    video_scale: Option<ScaleSpec>,
+    audio_gain_db: Option<f64>,
+    output_fps: Option<(u32, u32)>,
 }
 
 impl TranscodePipelineBuilder {
@@ -1197,6 +1273,12 @@ impl TranscodePipelineBuilder {
             normalization: None,
             track_progress: false,
             hw_accel: true,
+            stream_map: Vec::new(),
+            start_time_secs: None,
+            duration_secs: None,
+            video_scale: None,
+            audio_gain_db: None,
+            output_fps: None,
         }
     }
 
@@ -1263,6 +1345,58 @@ impl TranscodePipelineBuilder {
         self
     }
 
+    /// Sets FFmpeg-style stream selection maps (`--map`).
+    ///
+    /// An empty list keeps every stream. See
+    /// [`crate::stream_map::StreamMap::parse`] for the accepted grammar.
+    #[must_use]
+    pub fn stream_map(mut self, maps: Vec<StreamMap>) -> Self {
+        self.stream_map = maps;
+        self
+    }
+
+    /// Sets the start time in seconds (`-ss`).
+    #[must_use]
+    pub fn start_time_secs(mut self, secs: f64) -> Self {
+        self.start_time_secs = Some(secs);
+        self
+    }
+
+    /// Sets the maximum output duration in seconds (`-t`), measured from
+    /// the start point.
+    #[must_use]
+    pub fn duration_secs(mut self, secs: f64) -> Self {
+        self.duration_secs = Some(secs);
+        self
+    }
+
+    /// Sets the output resolution (`-vf scale` / `--scale`).
+    ///
+    /// Requires a re-encoding video codec; triggers the frame-level path.
+    #[must_use]
+    pub fn video_scale(mut self, spec: ScaleSpec) -> Self {
+        self.video_scale = Some(spec);
+        self
+    }
+
+    /// Sets an audio gain in dB (`-af volume=NdB`).
+    ///
+    /// Requires a re-encoding audio codec; triggers the frame-level path.
+    #[must_use]
+    pub fn audio_gain_db(mut self, db: f64) -> Self {
+        self.audio_gain_db = Some(db);
+        self
+    }
+
+    /// Sets the output frame rate (`-r`) as a `(num, den)` pair.
+    ///
+    /// Requires a re-encoding video codec; triggers the frame-level path.
+    #[must_use]
+    pub fn output_fps(mut self, num: u32, den: u32) -> Self {
+        self.output_fps = Some((num, den.max(1)));
+        self
+    }
+
     /// Builds the transcoding pipeline.
     ///
     /// # Errors
@@ -1295,6 +1429,12 @@ impl TranscodePipelineBuilder {
                 normalization: self.normalization,
                 track_progress: self.track_progress,
                 hw_accel: self.hw_accel,
+                stream_map: self.stream_map,
+                start_time_secs: self.start_time_secs,
+                duration_secs: self.duration_secs,
+                video_scale: self.video_scale,
+                audio_gain_db: self.audio_gain_db,
+                output_fps: self.output_fps,
             },
         })
     }
@@ -1367,6 +1507,12 @@ mod tests {
             normalization: None,
             track_progress: false,
             hw_accel: true,
+            stream_map: Vec::new(),
+            start_time_secs: None,
+            duration_secs: None,
+            video_scale: None,
+            audio_gain_db: None,
+            output_fps: None,
         };
 
         let pipeline = Pipeline::new(config);
@@ -1629,6 +1775,12 @@ mod tests {
             normalization: Some(norm_config),
             track_progress: false,
             hw_accel: false,
+            stream_map: Vec::new(),
+            start_time_secs: None,
+            duration_secs: None,
+            video_scale: None,
+            audio_gain_db: None,
+            output_fps: None,
         };
         let mut pipeline_inner = Pipeline::new(pipeline_config);
         // Skip audio analysis by directly setting the gain: +6 dB ≈ ×2.

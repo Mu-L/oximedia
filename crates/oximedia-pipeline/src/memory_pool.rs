@@ -73,9 +73,22 @@ impl PoolConfig {
     /// the nearest 64-byte cache-line boundary for alignment).  Pool size
     /// defaults to `pre_alloc_count`.
     pub fn from_estimate(estimate: &ResourceEstimate, pre_alloc_count: usize) -> Self {
-        let raw = estimate.memory_bytes as usize;
-        // Round up to 64-byte cache-line multiple.
-        let aligned = if raw == 0 { 64 } else { (raw + 63) & !63 };
+        // `memory_bytes` is `u64`, but `usize` can be 32 bits wide on some
+        // targets this workspace builds for (e.g. `wasm32-unknown-unknown`).
+        // A bare `as usize` would silently wrap a >4 GiB estimate down to a
+        // small (even zero) buffer size instead of flagging a problem, so
+        // saturate to `usize::MAX` on overflow: an oversized estimate then
+        // stays "too big" and gets caught by `MemoryPool::new`'s ceiling
+        // check below, rather than silently becoming "too small".
+        let raw = usize::try_from(estimate.memory_bytes).unwrap_or(usize::MAX);
+        // Round up to 64-byte cache-line multiple; saturate instead of
+        // overflowing when `raw` is already within 64 bytes of `usize::MAX`
+        // (a plain `raw + 63` would panic in debug / wrap in release there).
+        let aligned = if raw == 0 {
+            64
+        } else {
+            raw.saturating_add(63) & !63
+        };
         Self {
             buffer_size: aligned,
             pool_size: pre_alloc_count.max(1),
@@ -160,6 +173,20 @@ pub struct MemoryPool {
     inner: Arc<Mutex<PoolInner>>,
 }
 
+/// Safety ceiling on a pool's total footprint (`buffer_size * pool_size`):
+/// 4 GiB.
+///
+/// Deliberately typed `u64` rather than expressed as `1usize << 32`: `usize`
+/// is only 32 bits wide on some targets this workspace builds for (notably
+/// `wasm32-unknown-unknown`), where shifting a `usize` left by exactly 32
+/// either panics in debug builds (shift amount equals the type's bit width)
+/// or silently wraps to `1usize << 0 == 1` in release builds — turning a
+/// "reject anything over 4 GiB" guard into "reject anything over 1 byte".
+/// `u64` comfortably represents 4 GiB on every target, and widening `total`
+/// to `u64` at the comparison site below is always lossless because `usize`
+/// never exceeds 64 bits on any target this workspace builds for.
+const MAX_POOL_BYTES: u64 = 1u64 << 32;
+
 impl MemoryPool {
     /// Create a new pool, pre-allocating all buffers eagerly.
     ///
@@ -175,8 +202,10 @@ impl MemoryPool {
                 PipelineError::BuildError("PoolConfig total_bytes overflows usize".to_string())
             })?;
 
-        // Refuse obviously unreasonable sizes (> 4 GiB on 64-bit).
-        if total > (1usize << 32) {
+        // Refuse obviously unreasonable sizes (> 4 GiB). Compared as `u64`
+        // (see `MAX_POOL_BYTES`) so the check is correct on both 32-bit and
+        // 64-bit `usize` targets.
+        if total as u64 > MAX_POOL_BYTES {
             return Err(PipelineError::BuildError(format!(
                 "PoolConfig requests {total} bytes, which exceeds the 4 GiB safety limit"
             )));
@@ -423,6 +452,20 @@ mod tests {
         assert_eq!(cfg.total_bytes(), 8192);
     }
 
+    #[test]
+    fn pool_config_from_estimate_saturates_instead_of_overflowing() {
+        // `memory_bytes` can legitimately be `u64::MAX`. The old
+        // `estimate.memory_bytes as usize` followed by `raw + 63` would
+        // overflow (panicking in this debug test build, wrapping in
+        // release) once `raw` was within 64 of `usize::MAX` -- reachable
+        // even on a 64-bit host, since `usize` is 64 bits wide there too.
+        // The saturating conversion + saturating add must absorb this
+        // without panicking or wrapping to a bogus small value.
+        let est = ResourceEstimate::new(u64::MAX, 0.0, false);
+        let cfg = PoolConfig::from_estimate(&est, 1);
+        assert!(cfg.buffer_size > 0);
+    }
+
     // ── MemoryPool tests ──────────────────────────────────────────────────────
 
     #[test]
@@ -432,6 +475,34 @@ mod tests {
         assert_eq!(pool.available(), 4);
         assert_eq!(pool.total_slots(), 4);
         assert_eq!(pool.in_use(), 0);
+    }
+
+    #[test]
+    fn pool_ceiling_is_exactly_4_gib_and_is_enforced_correctly() {
+        // Pin the threshold value itself. This guards against a future edit
+        // silently loosening or tightening the ceiling (or reintroducing the
+        // shift-based `1usize << 32` form, which is only wrong on targets
+        // where `usize` is narrower than 64 bits -- see `MAX_POOL_BYTES`'s
+        // doc comment; the wasm32-unknown-unknown `cargo check` is what
+        // actually proves the 32-bit-safe form compiles there).
+        assert_eq!(MAX_POOL_BYTES, 4 * 1024 * 1024 * 1024u64);
+
+        // A config whose total is exactly one byte over the ceiling must be
+        // rejected. `MemoryPool::new` performs this check *before* calling
+        // `PoolInner::new`, so no multi-gigabyte allocation is ever
+        // attempted here even though `buffer_size` itself is huge.
+        let just_over = PoolConfig::new(MAX_POOL_BYTES as usize + 1, 1);
+        assert_eq!(just_over.total_bytes() as u64, MAX_POOL_BYTES + 1);
+        let err = MemoryPool::new(just_over);
+        assert!(err.is_err());
+
+        // A normal, real-world-sized config sits far under the ceiling and
+        // must still be accepted. This is a regression guard against the
+        // old buggy `1usize << 32`, which on a target with a 32-bit `usize`
+        // release build silently becomes `1usize << 0 == 1`, rejecting
+        // *everything* over a single byte.
+        let normal = PoolConfig::new(4096, 16);
+        assert!(MemoryPool::new(normal).is_ok());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Job dependency chaining with topological sort and cycle detection.
 //!
-//! [`JobDependencyManager`] tracks dependencies between jobs using string-based
+//! [`JobDependencyManager`](crate::job_deps::JobDependencyManager) tracks dependencies between jobs using string-based
 //! job IDs, provides topological ordering for execution, detects circular
 //! dependencies at submission time, and supports fan-out / fan-in patterns.
 

@@ -1,8 +1,9 @@
 //! XML importer for Final Cut Pro, Premiere, and Resolve timelines.
 
 use crate::error::{ConformError, ConformResult};
+use crate::importers::fcpxml::FcpxmlParser;
 use crate::importers::TimelineImporter;
-use crate::types::ClipReference;
+use crate::types::{ClipReference, FrameRate, Timecode, TrackType};
 use std::path::Path;
 
 /// XML importer for various NLE formats.
@@ -31,32 +32,118 @@ impl XmlImporter {
         Self { format }
     }
 
-    /// Detect XML format from content.
-    fn detect_format(_content: &str) -> XmlFormat {
-        // Placeholder: would analyze XML structure to detect format
-        XmlFormat::FcpXml
+    /// Detect XML format from content by sniffing well-known root-element
+    /// signatures.
+    ///
+    /// Returns [`XmlFormat::FcpXml`]/[`XmlFormat::PremiereXml`] when a
+    /// confident signature is found. Returns [`XmlFormat::Auto`] — rather
+    /// than guessing — when no known signature is found, so
+    /// [`XmlImporter::import`] surfaces an honest "could not auto-detect"
+    /// error instead of silently routing unrecognized content through the
+    /// wrong parser. An earlier revision always returned `XmlFormat::FcpXml`
+    /// regardless of content, which made the `XmlFormat::Auto => Err(..)`
+    /// arm in `import()` permanently unreachable dead code.
+    fn detect_format(content: &str) -> XmlFormat {
+        if content.contains("<fcpxml") {
+            XmlFormat::FcpXml
+        } else if content.contains("<xmeml") {
+            // Adobe Premiere Pro (and legacy Final Cut Pro 7) both export an
+            // <xmeml> root; Premiere is the far more common source for this
+            // importer today, so classify <xmeml> as Premiere.
+            XmlFormat::PremiereXml
+        } else {
+            XmlFormat::Auto
+        }
     }
 
-    /// Parse Final Cut Pro XML.
-    fn parse_fcpxml(&self, _content: &str) -> ConformResult<Vec<ClipReference>> {
-        // Placeholder implementation
-        // Real implementation would parse FCPXML structure
-        Ok(Vec::new())
+    /// Parse Final Cut Pro XML (FCPXML).
+    ///
+    /// Delegates to [`FcpxmlParser`] — the crate's real hand-written FCPXML
+    /// parser (also used directly via [`crate::FcpxmlParser`]) — and maps
+    /// its `ConformProject { sequences: [ConformSequence { clips:
+    /// [ConformClip] }] }` model onto [`ClipReference`]. An earlier
+    /// revision ignored `content` entirely and returned `Ok(Vec::new())`,
+    /// reporting "0 clips found" even for a well-formed FCPXML file.
+    fn parse_fcpxml(&self, content: &str) -> ConformResult<Vec<ClipReference>> {
+        let project = FcpxmlParser::parse(content)?;
+
+        let mut clips = Vec::new();
+        for sequence in &project.sequences {
+            // frame_rate == 0.0 means the parser could not resolve a
+            // <format> frameDuration; fall back to a conservative default
+            // (matching EdlImporter's convention) rather than dividing by
+            // zero when converting seconds to frames below.
+            let fps = if sequence.frame_rate > 0.0 {
+                FrameRate::Custom(f64::from(sequence.frame_rate))
+            } else {
+                FrameRate::Fps25
+            };
+
+            for clip in &sequence.clips {
+                let mut metadata = std::collections::HashMap::new();
+                metadata.insert("format".to_string(), "fcpxml".to_string());
+                metadata.insert("sequence".to_string(), sequence.name.clone());
+                // Preserve full sub-frame precision alongside the
+                // frame-rounded Timecode fields below.
+                metadata.insert("offset_s".to_string(), clip.offset_s.to_string());
+                metadata.insert("duration_s".to_string(), clip.duration_s.to_string());
+
+                clips.push(ClipReference {
+                    id: clip.name.clone(),
+                    source_file: Some(clip.name.clone()),
+                    source_in: seconds_to_timecode(clip.src_in_s, fps),
+                    source_out: seconds_to_timecode(clip.src_out_s, fps),
+                    record_in: seconds_to_timecode(clip.offset_s, fps),
+                    record_out: seconds_to_timecode(clip.offset_s + clip.duration_s, fps),
+                    // The lean hand-written FCPXML parser does not currently
+                    // distinguish video-only / audio-only spine clips; FCP X
+                    // `asset-clip` elements are typically synchronized
+                    // audio+video, so AudioVideo is the honest default
+                    // rather than guessing Video specifically.
+                    track: TrackType::AudioVideo,
+                    fps,
+                    metadata,
+                });
+            }
+        }
+
+        Ok(clips)
     }
 
     /// Parse Premiere XML.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`ConformError::UnsupportedFormat`]: a real Adobe
+    /// Premiere Pro `<xmeml>` importer is not implemented.
+    // TODO(0.2.x): real Adobe Premiere Pro XML importer — parse the
+    // <xmeml>/<sequence>/<track>/<clipitem> structure into ClipReference
+    // (see FcpxmlParser in importers/fcpxml.rs for the parsing style used
+    // elsewhere in this crate).
     fn parse_premiere_xml(&self, _content: &str) -> ConformResult<Vec<ClipReference>> {
-        // Placeholder implementation
-        // Real implementation would parse Premiere XML structure
-        Ok(Vec::new())
+        Err(ConformError::UnsupportedFormat(
+            "Premiere XML importer is not yet implemented".to_string(),
+        ))
     }
 
     /// Parse Resolve XML.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`ConformError::UnsupportedFormat`]: a real `DaVinci`
+    /// Resolve timeline XML importer is not implemented.
+    // TODO(0.2.x): real DaVinci Resolve timeline XML importer.
     fn parse_resolve_xml(&self, _content: &str) -> ConformResult<Vec<ClipReference>> {
-        // Placeholder implementation
-        // Real implementation would parse Resolve XML structure
-        Ok(Vec::new())
+        Err(ConformError::UnsupportedFormat(
+            "Resolve XML importer is not yet implemented".to_string(),
+        ))
     }
+}
+
+/// Convert a time offset in seconds to a [`Timecode`] at `fps`.
+fn seconds_to_timecode(seconds: f64, fps: FrameRate) -> Timecode {
+    let total_frames = (seconds.max(0.0) * fps.as_f64()).round() as u64;
+    Timecode::from_frames(total_frames, fps)
 }
 
 impl Default for XmlImporter {
@@ -100,5 +187,126 @@ mod tests {
     fn test_xml_importer_default() {
         let importer = XmlImporter::default();
         assert_eq!(importer.format, XmlFormat::Auto);
+    }
+
+    const MINIMAL_FCPXML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.9">
+  <resources>
+    <format id="r1" name="FFVideoFormat1080p24" frameDuration="100/2400s" width="1920" height="1080"/>
+  </resources>
+  <library>
+    <event name="My Event">
+      <project name="My Project">
+        <sequence format="r1" tcStart="0s" tcFormat="NDF">
+          <spine>
+            <asset-clip name="Shot_001.mov" offset="0s" duration="96/2400s" start="86400s"/>
+            <asset-clip name="Shot_002.mov" offset="96/2400s" duration="144/2400s" start="86400s"/>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+    fn tmp_xml_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("oximedia-conform-xml-importer-{name}"))
+    }
+
+    #[test]
+    fn test_detect_format_sniffs_fcpxml() {
+        assert_eq!(
+            XmlImporter::detect_format(MINIMAL_FCPXML),
+            XmlFormat::FcpXml
+        );
+    }
+
+    #[test]
+    fn test_detect_format_unknown_content_is_auto_not_a_guess() {
+        // CHANGED: detect_format() previously always guessed FcpXml
+        // regardless of content, which made the `XmlFormat::Auto =>
+        // Err(..)` arm in `import()` permanently unreachable dead code.
+        // Unrecognized content must now come back as Auto so that arm
+        // actually fires instead of silently misrouting the file through
+        // the FCPXML parser.
+        assert_eq!(
+            XmlImporter::detect_format("<not-a-timeline-xml/>"),
+            XmlFormat::Auto
+        );
+    }
+
+    #[test]
+    fn test_parse_fcpxml_real_extraction() {
+        // CHANGED: parse_fcpxml() previously ignored `content` and returned
+        // `Ok(Vec::new())`, reporting "0 clips" for any FCPXML file
+        // including well-formed ones. It now delegates to the crate's real
+        // FcpxmlParser and must extract the real clips.
+        let importer = XmlImporter::new(XmlFormat::FcpXml);
+
+        let clips = importer
+            .parse_fcpxml(MINIMAL_FCPXML)
+            .expect("real FCPXML content should parse");
+
+        assert_eq!(
+            clips.len(),
+            2,
+            "expected 2 real clips extracted, not a fabricated empty Ok(vec![])"
+        );
+        assert_eq!(clips[0].id, "Shot_001.mov");
+        assert_eq!(clips[1].id, "Shot_002.mov");
+        assert_eq!(clips[0].source_file.as_deref(), Some("Shot_001.mov"));
+    }
+
+    #[test]
+    fn test_import_fcpxml_end_to_end_from_file() -> ConformResult<()> {
+        let path = tmp_xml_path("minimal.fcpxml");
+        std::fs::write(&path, MINIMAL_FCPXML)?;
+
+        let importer = XmlImporter::new(XmlFormat::FcpXml);
+        let clips = importer.import(&path)?;
+        assert_eq!(clips.len(), 2);
+
+        std::fs::remove_file(&path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_premiere_xml_is_honest_err() {
+        // CHANGED: previously returned `Ok(Vec::new())` ("0 clips found")
+        // for any Premiere XML content instead of reporting that Premiere
+        // import is unimplemented.
+        let importer = XmlImporter::new(XmlFormat::PremiereXml);
+        let result = importer.parse_premiere_xml("<xmeml/>");
+        assert!(
+            result.is_err(),
+            "Premiere XML importer must not report Ok(vec![]) as if 0 clips were found"
+        );
+    }
+
+    #[test]
+    fn test_parse_resolve_xml_is_honest_err() {
+        // CHANGED: previously returned `Ok(Vec::new())` ("0 clips found")
+        // for any Resolve XML content instead of reporting that Resolve
+        // import is unimplemented.
+        let importer = XmlImporter::new(XmlFormat::ResolveXml);
+        let result = importer.parse_resolve_xml("<resolve-timeline/>");
+        assert!(
+            result.is_err(),
+            "Resolve XML importer must not report Ok(vec![]) as if 0 clips were found"
+        );
+    }
+
+    #[test]
+    fn test_import_auto_detect_unknown_format_is_honest_err() {
+        let path = tmp_xml_path("unknown.xml");
+        std::fs::write(&path, "<not-a-timeline-xml/>").expect("write temp file");
+
+        let importer = XmlImporter::default(); // Auto
+        let result = importer.import(&path);
+        assert!(
+            result.is_err(),
+            "unrecognized XML must not silently import as FCPXML"
+        );
+
+        std::fs::remove_file(&path).ok();
     }
 }

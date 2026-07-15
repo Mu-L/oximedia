@@ -156,11 +156,16 @@ pub(crate) enum Commands {
         #[arg(long = "preset-name", conflicts_with_all = &["video_codec", "audio_codec", "video_bitrate", "audio_bitrate"])]
         preset_name: Option<String>,
 
-        /// Video codec: av1, vp9, vp8 (FFmpeg-compatible: -c:v)
+        /// Video codec for re-encode: mjpeg, apv, mpeg2, ffv1, prores,
+        /// rawvideo (FFmpeg-compatible: -c:v). av1/vp9/vp8 parse but fail
+        /// with a precise unsupported-encode error (planned for 0.2.x);
+        /// omit for stream copy.
         #[arg(long = "codec", alias = "c:v")]
         video_codec: Option<String>,
 
-        /// Audio codec: opus, vorbis, flac, pcm, aac, mp3 (FFmpeg-compatible: -c:a)
+        /// Audio codec for re-encode: flac, pcm, alac, opus
+        /// (FFmpeg-compatible: -c:a). vorbis/aac/mp3 parse but fail with a
+        /// precise unsupported-encode error; omit for stream copy.
         #[arg(long, alias = "c:a")]
         audio_codec: Option<String>,
 
@@ -168,7 +173,9 @@ pub(crate) enum Commands {
         #[arg(long = "bitrate", alias = "b:v")]
         video_bitrate: Option<String>,
 
-        /// Audio bitrate (e.g., "128k") (FFmpeg-compatible: -b:a)
+        /// Audio bitrate (e.g., "128k") (FFmpeg-compatible: -b:a).
+        /// Not implemented yet: warns and proceeds (the wired audio
+        /// encoders are lossless)
         #[arg(long, alias = "b:a")]
         audio_bitrate: Option<String>,
 
@@ -176,7 +183,8 @@ pub(crate) enum Commands {
         #[arg(long)]
         scale: Option<String>,
 
-        /// Video filter chain (FFmpeg-compatible: -vf)
+        /// Video filter (FFmpeg-compatible: -vf). Supported today:
+        /// scale=W:H; other filters fail with a clear error
         #[arg(long, alias = "vf")]
         video_filter: Option<String>,
 
@@ -192,7 +200,9 @@ pub(crate) enum Commands {
         #[arg(short = 'r', long)]
         framerate: Option<String>,
 
-        /// Encoder preset: ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow
+        /// Encoder preset: ultrafast, superfast, veryfast, faster, fast,
+        /// medium, slow, slower, veryslow. No wired encoder has a speed
+        /// knob yet: non-default values warn and proceed
         #[arg(long, default_value = "medium")]
         preset: String,
 
@@ -200,11 +210,14 @@ pub(crate) enum Commands {
         #[arg(long)]
         two_pass: bool,
 
-        /// CRF quality (0-63 for VP9/VP8, 0-255 for AV1, lower is better)
+        /// Quality knob on the codec's native scale: MJPEG 1-100 (higher
+        /// is better), APV qp 0-63, MPEG-2 qscale 1-31 (lower is better);
+        /// ignored with a warning for lossless codecs (FFV1/rawvideo)
         #[arg(long)]
         crf: Option<u32>,
 
-        /// Number of threads (0 = auto)
+        /// Number of threads (0 = auto). The pipeline is single-threaded
+        /// today: an explicit non-zero value warns and proceeds
         #[arg(long, default_value = "0")]
         threads: usize,
 
@@ -212,15 +225,13 @@ pub(crate) enum Commands {
         #[arg(short = 'y', long)]
         overwrite: bool,
 
-        /// Resume from previous incomplete encode
-        #[arg(long)]
-        resume: bool,
-
-        /// Audio filter chain (FFmpeg-compatible: -af)
+        /// Audio filter (FFmpeg-compatible: -af). Supported today:
+        /// volume=N or volume=NdB; other filters fail with a clear error
         #[arg(long, alias = "af")]
         audio_filter: Option<String>,
 
-        /// Stream mapping (e.g., "0:0", "0:1")
+        /// Stream selection (FFmpeg-compatible: -map), e.g. "0:v", "0:a:1",
+        /// "0:1", "-0:s"; repeatable
         #[arg(long)]
         map: Vec<String>,
 

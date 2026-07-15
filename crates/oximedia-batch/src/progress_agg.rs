@@ -1,6 +1,6 @@
 //! Batch-level progress aggregation.
 //!
-//! [`BatchProgressAggregator`] tracks completion across a set of N total jobs
+//! [`BatchProgressAggregator`](crate::progress_agg::BatchProgressAggregator) tracks completion across a set of N total jobs
 //! and exposes a percentage-complete readout and a done flag.
 //!
 //! # Example

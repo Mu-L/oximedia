@@ -1,6 +1,6 @@
 # oximedia-presets
 
-**Status: [Stable]** | Version: 0.1.9 | Tests: extensively tested | Updated: 2026-07-08
+**Status: [Stable]** | Version: 0.2.0 | Tests: extensively tested | Updated: 2026-07-14
 
 Advanced encoding preset library for OxiMedia. Provides 200+ professional encoding presets covering major platforms, broadcast standards, streaming protocols, and quality tiers, with auto-selection, validation, and import/export.
 

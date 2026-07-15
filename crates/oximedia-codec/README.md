@@ -6,7 +6,7 @@ Video and audio codec implementations for the OxiMedia multimedia framework. Pur
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.9 — 2026-07-08 — extensively tested
+Version: 0.2.0 — 2026-07-15 — extensively tested
 
 ## Overview
 
@@ -24,23 +24,23 @@ per codec, and the effort required to close each gap.
 
 | Codec    | Encode     | Decode              | Feature Flag      | Notes |
 |----------|------------|---------------------|-------------------|-------|
-| AV1      | Functional | Bitstream-parsing   | `av1` (default)   | OBU parsing complete; pixel reconstruction pipeline is stubbed. GitHub issue #9. |
-| VP9      | Functional | Bitstream-parsing   | `vp9`             | Frame/tile parsing complete; reconstruction pipeline stages are no-ops. |
-| VP8      | Functional | Bitstream-parsing   | `vp8`             | Y plane is emitted as constant gray; no intra/inter decode. |
+| AV1      | Functional | **Functional** (keyframe/intra only) | `av1` (default)   | Keyframe/intra decode real, bit-exact vs dav1d/aomdec (8-bit 4:2:0 profile 0), incl. deblocking/CDEF/loop restoration; inter-frame decode, super-resolution, film grain, palette mode, intra block copy, quantizer matrices, 10/12-bit not yet implemented (honest `Err`). GitHub issue #9. |
+| VP9      | Functional | **Functional** (keyframe/intra only) | `vp9`             | Keyframe/intra decode real, bit-exact vs libvpx (8-bit 4:2:0); inter-frame decode not yet implemented (honest `Err`). |
+| VP8      | Functional | **Functional** (keyframe/intra only) | `vp8`             | Full RFC 6386 §11–§15 keyframe/intra pipeline, bit-exact vs libwebp; inter-frame decode not yet implemented (honest `Err`). |
 | Theora   | Functional | Bitstream-parsing   | `theora`          | DCT, motion compensation, and per-frame pixel hand-off into `VideoFrame` (decode hand-off bug fixed in 0.1.8, issue #9); encoder↔decoder bitstream alignment for full round-trip remains outstanding. |
 | H.263    | Functional | Functional          | *(always)*        | Real macroblock decode, motion compensation, loop filter. |
 | MJPEG    | Functional | Functional          | `mjpeg`           | Wraps `oximedia-image` JPEG baseline; ≥28 dB PSNR at Q85. |
 | APV      | Functional | Functional          | `apv`             | ISO/IEC 23009-13 royalty-free intra-frame. |
 | FFV1     | Functional | Functional          | `ffv1`            | RFC 9043 lossless; CRC-32 verified. |
-| Opus     | Functional | Functional (CELT only) | `opus`         | SILK / hybrid modes are placeholders; CELT path is real. |
-| Vorbis   | Functional | Bitstream-parsing   | *(always)*        | Headers parse; `decode_audio_packet` returns empty. |
+| Opus     | Functional | Functional (CELT + SILK + Hybrid) | `opus` | RFC 6716 §4.2 SILK + §4.5 Hybrid decode real and wired (not stubs); no bit-exact libopus conformance fixtures yet. |
+| Vorbis   | Functional | Bitstream-parsing   | *(always)*        | Headers parse; `decode_audio_packet` returns an honest `Err` (not fabricated empty samples). |
 | FLAC     | Functional | Functional / Verified | *(always)*      | CRC-16 verified; real LPC decode. |
 | PCM      | Verified   | Verified            | *(always)*        | Trivial round-trip verified. |
 | JPEG-XL  | Functional | Functional          | `jpegxl`          | ISOBMFF container + streaming decode; real modular decoder. |
 | PNG/APNG | Functional | Functional          | *(always)*        | Real unfilter + RGBA conversion. |
 | WebP     | Functional | Functional (VP8L only) | *(always)*     | Lossless only — no VP8 lossy decoder. |
 | GIF      | Functional | Functional          | *(always)*        | Real LZW decode. |
-| AVIF     | Functional | Bitstream-parsing   | *(always)*        | Depends on AV1 decoder. |
+| AVIF     | Functional | Bitstream-parsing   | *(always)*        | Container validates; `decode()` returns an honest `Err` — not yet wired to the new AV1 keyframe/intra decoder. |
 
 ## Usage
 

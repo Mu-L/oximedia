@@ -22,11 +22,17 @@
 //! detection), see [`crate::srt_aes256gcm`].
 
 use crate::error::{NetError, NetResult};
-use aes::cipher::{KeyIvInit, StreamCipher};
+// `KeyInit` is aliased to `AesKeyInit` to coexist with `hmac::KeyInit`: the two
+// come from different crypto-common versions (hmac 0.12 vs aes 0.9), so both
+// names must be in scope. The block-cipher traits provide the raw single-block
+// ECB primitive that RFC 3394 key wrap is built on.
+use aes::cipher::{
+    Array, BlockCipherDecrypt, BlockCipherEncrypt, KeyInit as AesKeyInit, KeyIvInit, StreamCipher,
+};
 use aes::{Aes128, Aes192, Aes256};
 use bytes::Bytes;
 use ctr::Ctr128BE;
-use hmac::{Hmac, KeyInit, Mac};
+use hmac::{Hmac, Mac};
 use rand::Rng;
 use sha2::Sha256;
 
@@ -320,36 +326,179 @@ pub fn derive_session_key(
     Ok(output)
 }
 
-/// AES key wrapping (RFC 3394) - simplified for demonstration.
-///
-/// In production code this should use a proper AES-WRAP implementation.
-fn aes_key_wrap(kek: &[u8], plaintext_key: &[u8]) -> Vec<u8> {
-    // Simplified: XOR-based wrapping for test purposes
-    let mut wrapped = Vec::with_capacity(plaintext_key.len() + 8);
-    // Integrity check value (8 bytes)
-    wrapped.extend_from_slice(&[0xA6u8; 8]);
-    for (i, &byte) in plaintext_key.iter().enumerate() {
-        wrapped.push(byte ^ kek[i % kek.len()]);
-    }
-    wrapped
+/// RFC 3394 default initial value (Section 2.2.3.1): 0xA6A6A6A6A6A6A6A6.
+const AES_KEY_WRAP_IV: [u8; 8] = [0xA6; 8];
+
+/// A raw AES block cipher keyed with the SRT KEK, used for the RFC 3394 key
+/// wrap ECB passes. Built once per wrap/unwrap so the AES key schedule is not
+/// recomputed for every 64-bit block.
+enum WrapCipher {
+    /// AES-128 (16-byte KEK).
+    Aes128(Aes128),
+    /// AES-192 (24-byte KEK).
+    Aes192(Aes192),
+    /// AES-256 (32-byte KEK).
+    Aes256(Aes256),
 }
 
-/// AES key unwrapping (RFC 3394) - simplified for demonstration.
+impl WrapCipher {
+    /// Builds the cipher for a 16/24/32-byte KEK (AES-128/192/256).
+    fn new(kek: &[u8]) -> NetResult<Self> {
+        match kek.len() {
+            16 => Aes128::new_from_slice(kek)
+                .map(WrapCipher::Aes128)
+                .map_err(|_| NetError::protocol("AES key wrap: bad 128-bit KEK")),
+            24 => Aes192::new_from_slice(kek)
+                .map(WrapCipher::Aes192)
+                .map_err(|_| NetError::protocol("AES key wrap: bad 192-bit KEK")),
+            32 => Aes256::new_from_slice(kek)
+                .map(WrapCipher::Aes256)
+                .map_err(|_| NetError::protocol("AES key wrap: bad 256-bit KEK")),
+            _ => Err(NetError::protocol(
+                "AES key wrap requires a 16/24/32-byte KEK",
+            )),
+        }
+    }
+
+    /// Encrypts one 16-byte block in place (ECB, single block).
+    fn encrypt_block16(&self, block: &mut [u8; 16]) {
+        let mut b = Array::from(*block);
+        match self {
+            WrapCipher::Aes128(c) => c.encrypt_block(&mut b),
+            WrapCipher::Aes192(c) => c.encrypt_block(&mut b),
+            WrapCipher::Aes256(c) => c.encrypt_block(&mut b),
+        }
+        block.copy_from_slice(&b[..]);
+    }
+
+    /// Decrypts one 16-byte block in place (ECB, single block).
+    fn decrypt_block16(&self, block: &mut [u8; 16]) {
+        let mut b = Array::from(*block);
+        match self {
+            WrapCipher::Aes128(c) => c.decrypt_block(&mut b),
+            WrapCipher::Aes192(c) => c.decrypt_block(&mut b),
+            WrapCipher::Aes256(c) => c.decrypt_block(&mut b),
+        }
+        block.copy_from_slice(&b[..]);
+    }
+}
+
+/// Splits a byte slice (a multiple of 8 in length) into 64-bit blocks.
+fn to_blocks(data: &[u8]) -> Vec<[u8; 8]> {
+    data.chunks_exact(8)
+        .map(|c| {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(c);
+            b
+        })
+        .collect()
+}
+
+/// Wraps `plaintext_key` under `kek` with the **RFC 3394 AES Key Wrap**
+/// algorithm.
+///
+/// This is the real 6·n-round A/B construction with the
+/// `0xA6A6A6A6A6A6A6A6` integrity IV (RFC 3394 §2.2.1), so the output
+/// interoperates with libsrt / OBS / ffmpeg. It replaces a previous XOR
+/// "wrap" that only masqueraded as RFC 3394 and produced non-interoperable,
+/// unauthenticated output. `plaintext_key` must be a non-empty multiple of 8
+/// bytes (SRT session keys are 16/24/32 → n = 2/3/4 64-bit blocks) and `kek`
+/// must be 16/24/32 bytes.
+///
+/// # Errors
+///
+/// Returns an error if `plaintext_key` is empty or not a multiple of 8 bytes,
+/// or if `kek` is not a valid AES key length.
+fn aes_key_wrap(kek: &[u8], plaintext_key: &[u8]) -> NetResult<Vec<u8>> {
+    if plaintext_key.is_empty() || plaintext_key.len() % 8 != 0 {
+        return Err(NetError::protocol(
+            "AES key wrap: plaintext must be a non-empty multiple of 8 bytes",
+        ));
+    }
+    let cipher = WrapCipher::new(kek)?;
+    let n = plaintext_key.len() / 8;
+
+    // A = IV; R[i] = P[i]
+    let mut a = AES_KEY_WRAP_IV;
+    let mut r = to_blocks(plaintext_key);
+
+    // Six rounds over all n blocks (RFC 3394 §2.2.1).
+    for j in 0..6u64 {
+        for i in 0..n {
+            // B = AES(KEK, A | R[i])
+            let mut block = [0u8; 16];
+            block[..8].copy_from_slice(&a);
+            block[8..].copy_from_slice(&r[i]);
+            cipher.encrypt_block16(&mut block);
+
+            // A = MSB64(B) XOR t, with t = n*j + i + 1
+            let t = (n as u64) * j + i as u64 + 1;
+            let mut msb = [0u8; 8];
+            msb.copy_from_slice(&block[..8]);
+            a = (u64::from_be_bytes(msb) ^ t).to_be_bytes();
+            // R[i] = LSB64(B)
+            r[i].copy_from_slice(&block[8..]);
+        }
+    }
+
+    // C[0] = A, C[i] = R[i]
+    let mut out = Vec::with_capacity((n + 1) * 8);
+    out.extend_from_slice(&a);
+    for block in &r {
+        out.extend_from_slice(block);
+    }
+    Ok(out)
+}
+
+/// Unwraps a key wrapped with [`aes_key_wrap`] (**RFC 3394 §2.2.2**).
+///
+/// The final value of the `A` register is compared against the RFC 3394 IV;
+/// a mismatch (wrong KEK or tampered ciphertext) is reported as an error.
+///
+/// # Errors
+///
+/// Returns an error if `wrapped_key` is not a multiple of 8 bytes (min 16),
+/// `kek` is not a valid AES key length, or the integrity check fails.
 fn aes_key_unwrap(kek: &[u8], wrapped_key: &[u8]) -> NetResult<Vec<u8>> {
-    if wrapped_key.len() < 8 {
-        return Err(NetError::protocol("Wrapped key too short"));
+    if wrapped_key.len() < 16 || wrapped_key.len() % 8 != 0 {
+        return Err(NetError::protocol(
+            "AES key unwrap: ciphertext must be a multiple of 8 bytes and at least 16",
+        ));
     }
-    // Check integrity check value
-    let icv = &wrapped_key[..8];
-    if icv != [0xA6u8; 8] {
-        return Err(NetError::protocol("Key wrap integrity check failed"));
+    let cipher = WrapCipher::new(kek)?;
+    let n = wrapped_key.len() / 8 - 1;
+
+    // A = C[0]; R[i] = C[i]
+    let mut a = [0u8; 8];
+    a.copy_from_slice(&wrapped_key[..8]);
+    let mut r = to_blocks(&wrapped_key[8..]);
+
+    // Six rounds in reverse.
+    for j in (0..6u64).rev() {
+        for i in (0..n).rev() {
+            // B = AES-1(KEK, (A XOR t) | R[i]), with t = n*j + i + 1
+            let t = (n as u64) * j + i as u64 + 1;
+            let a_xor_t = (u64::from_be_bytes(a) ^ t).to_be_bytes();
+            let mut block = [0u8; 16];
+            block[..8].copy_from_slice(&a_xor_t);
+            block[8..].copy_from_slice(&r[i]);
+            cipher.decrypt_block16(&mut block);
+
+            a.copy_from_slice(&block[..8]);
+            r[i].copy_from_slice(&block[8..]);
+        }
     }
-    let payload = &wrapped_key[8..];
-    let mut key = Vec::with_capacity(payload.len());
-    for (i, &byte) in payload.iter().enumerate() {
-        key.push(byte ^ kek[i % kek.len()]);
+
+    // Integrity check: A must equal the RFC 3394 IV.
+    if a != AES_KEY_WRAP_IV {
+        return Err(NetError::protocol("AES key unwrap: integrity check failed"));
     }
-    Ok(key)
+
+    let mut out = Vec::with_capacity(n * 8);
+    for block in &r {
+        out.extend_from_slice(block);
+    }
+    Ok(out)
 }
 
 /// Key schedule for SRT: holds both even and odd session keys.
@@ -638,8 +787,8 @@ impl SrtCryptoContext {
     ///
     /// Returns an error if wrapping fails.
     pub fn build_key_material(&self, kek: &[u8]) -> NetResult<KeyMaterialPacket> {
-        let wrapped_even = aes_key_wrap(kek, self.key_schedule.even_key());
-        let wrapped_odd = aes_key_wrap(kek, self.key_schedule.odd_key());
+        let wrapped_even = aes_key_wrap(kek, self.key_schedule.even_key())?;
+        let wrapped_odd = aes_key_wrap(kek, self.key_schedule.odd_key())?;
 
         Ok(KeyMaterialPacket {
             version: KM_VERSION,
@@ -836,8 +985,8 @@ impl PassphraseAuth {
             return Err(NetError::protocol("Key size mismatch in wrap_keys"));
         }
 
-        let wrapped_even = aes_key_wrap(&self.kek, even_key);
-        let wrapped_odd = aes_key_wrap(&self.kek, odd_key);
+        let wrapped_even = aes_key_wrap(&self.kek, even_key)?;
+        let wrapped_odd = aes_key_wrap(&self.kek, odd_key)?;
         let mut salt = [0u8; 14];
         salt.copy_from_slice(&self.kek_salt[..14]);
 
@@ -1258,13 +1407,13 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // --- aes_key_wrap / unwrap tests ---
+    // --- aes_key_wrap / unwrap tests (RFC 3394) ---
 
     #[test]
     fn test_key_wrap_unwrap_roundtrip() {
         let kek = vec![0x55u8; 16];
         let key = vec![0xAAu8; 16];
-        let wrapped = aes_key_wrap(&kek, &key);
+        let wrapped = aes_key_wrap(&kek, &key).expect("wrap should succeed");
         let unwrapped = aes_key_unwrap(&kek, &wrapped).expect("should succeed in test");
         assert_eq!(unwrapped, key);
     }
@@ -1272,9 +1421,61 @@ mod tests {
     #[test]
     fn test_key_unwrap_bad_icv() {
         let kek = vec![0x55u8; 16];
-        let mut bad = vec![0x00u8; 24]; // wrong ICV
-        bad[0] = 0xFF;
+        let bad = vec![0x00u8; 24]; // garbage ciphertext: integrity check must fail
         let result = aes_key_unwrap(&kek, &bad);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn rfc3394_128bit_kek_128bit_key_vector() {
+        // RFC 3394 §4.1: wrap 128-bit key data with a 128-bit KEK.
+        let kek: [u8; 16] = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
+            0x0E, 0x0F,
+        ];
+        let key: [u8; 16] = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD,
+            0xEE, 0xFF,
+        ];
+        let expected: [u8; 24] = [
+            0x1F, 0xA6, 0x8B, 0x0A, 0x81, 0x12, 0xB4, 0x47, 0xAE, 0xF3, 0x4B, 0xD8, 0xFB, 0x5A,
+            0x7B, 0x82, 0x9D, 0x3E, 0x86, 0x23, 0x71, 0xD2, 0xCF, 0xE5,
+        ];
+
+        // wrap must match the published ciphertext exactly (interop proof).
+        let wrapped = aes_key_wrap(&kek, &key).expect("wrap should succeed");
+        assert_eq!(
+            wrapped.as_slice(),
+            &expected[..],
+            "RFC 3394 §4.1 ciphertext"
+        );
+
+        // unwrap of the published ciphertext must recover the original key.
+        let unwrapped = aes_key_unwrap(&kek, &expected).expect("unwrap should succeed");
+        assert_eq!(unwrapped.as_slice(), &key[..]);
+    }
+
+    #[test]
+    fn rfc3394_wrong_kek_fails_integrity_check() {
+        // Unwrapping the RFC 3394 vector with the wrong KEK must fail (the A
+        // register will not equal the 0xA6.. IV).
+        let key: [u8; 16] = [0x11; 16];
+        let good_kek: [u8; 16] = [0x22; 16];
+        let wrapped = aes_key_wrap(&good_kek, &key).expect("wrap should succeed");
+        let wrong_kek: [u8; 16] = [0x33; 16];
+        assert!(aes_key_unwrap(&wrong_kek, &wrapped).is_err());
+    }
+
+    #[test]
+    fn rfc3394_192_and_256_bit_kek_roundtrip() {
+        // Exercise AES-192 and AES-256 KEKs (24/32-byte) over 24/32-byte keys.
+        for kek_len in [24usize, 32] {
+            let kek = vec![0x5Au8; kek_len];
+            let key = vec![0xA5u8; kek_len];
+            let wrapped = aes_key_wrap(&kek, &key).expect("wrap should succeed");
+            assert_eq!(wrapped.len(), key.len() + 8);
+            let unwrapped = aes_key_unwrap(&kek, &wrapped).expect("unwrap should succeed");
+            assert_eq!(unwrapped, key);
+        }
     }
 }

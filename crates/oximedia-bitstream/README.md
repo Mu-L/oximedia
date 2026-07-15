@@ -4,7 +4,7 @@
 
 Part of the [OxiMedia](https://github.com/cool-japan/oximedia) multimedia framework.
 
-Version: 0.1.9 — 2026-07-08 — extensively tested
+Version: 0.2.0 — 2026-07-15 — extensively tested
 
 ## Features
 

@@ -6,15 +6,15 @@
 //!
 //! # Architecture
 //!
-//! A [`WorkerNode`] represents a single batch processing worker.  The
-//! [`ClusterRegistry`] holds all known nodes and exposes methods for:
+//! A [`WorkerNode`](crate::cluster_discovery::WorkerNode) represents a single batch processing worker.  The
+//! [`ClusterRegistry`](crate::cluster_discovery::ClusterRegistry) holds all known nodes and exposes methods for:
 //!
 //! - Manual registration and deregistration.
 //! - Health-check evaluation (last-seen timestamp + timeout).
 //! - Capability-based node selection.
 //! - Serialisation to JSON for persistence or peer exchange.
 //!
-//! The optional [`DiscoveryAnnouncement`] type encodes the UDP datagram
+//! The optional [`DiscoveryAnnouncement`](crate::cluster_discovery::DiscoveryAnnouncement) type encodes the UDP datagram
 //! payload used for zero-config peer discovery via LAN multicast.
 
 use parking_lot::RwLock;

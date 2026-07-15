@@ -6,9 +6,10 @@ use oximedia_net::rtmp::MediaPacket;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::info;
+use tracing::{info, warn};
 
 /// DASH configuration.
 #[derive(Debug, Clone)]
@@ -66,8 +67,12 @@ struct StreamPackager {
     /// Packets buffered for current segment.
     packet_buffer: RwLock<Vec<MediaPacket>>,
 
-    /// Initialization segment written.
+    /// Initialization segment written (or honestly skipped as unsupported).
     init_written: RwLock<bool>,
+
+    /// Set once we have logged that real segment muxing is unavailable, so we
+    /// warn a single time per stream instead of once per segment.
+    mux_unsupported_logged: AtomicBool,
 }
 
 impl StreamPackager {
@@ -84,12 +89,15 @@ impl StreamPackager {
             segment_index: RwLock::new(1),
             packet_buffer: RwLock::new(Vec::new()),
             init_written: RwLock::new(false),
+            mux_unsupported_logged: AtomicBool::new(false),
         })
     }
 
     /// Processes a media packet.
     async fn process_packet(&self, packet: MediaPacket) -> ServerResult<()> {
-        // Write initialization segment if not done yet
+        // Attempt the initialization segment once. `write_init_segment`
+        // degrades honestly (never fabricates an empty init.mp4); we mark the
+        // attempt done regardless so we do not retry on every packet.
         if !*self.init_written.read() {
             self.write_init_segment().await?;
             *self.init_written.write() = true;
@@ -109,11 +117,32 @@ impl StreamPackager {
         Ok(())
     }
 
-    /// Writes the initialization segment.
+    /// Logs the "segment muxing unavailable" warning at most once per stream.
+    fn warn_mux_unsupported_once(&self, err: &crate::error::ServerError) {
+        if !self.mux_unsupported_logged.swap(true, Ordering::Relaxed) {
+            warn!(
+                "DASH segment muxing unavailable for stream '{}': {}; \
+                 dropping segments (no fabricated output produced)",
+                self.stream_key, err
+            );
+        }
+    }
+
+    /// Attempts to write the fMP4 initialization segment.
+    ///
+    /// Real fMP4 init muxing is not implemented yet (see dash/segment.rs), so
+    /// this degrades honestly: it neither writes a placeholder `init.mp4` nor
+    /// claims success — it logs once and moves on so ingest is not aborted.
     async fn write_init_segment(&self) -> ServerResult<()> {
         let init_name = "init.mp4";
-        self.segment_writer.write_init_segment(init_name).await?;
-        info!("Wrote DASH initialization segment: {}", init_name);
+        match self.segment_writer.write_init_segment(init_name).await {
+            Ok(()) => {
+                info!("Wrote DASH initialization segment: {}", init_name);
+            }
+            Err(e) => {
+                self.warn_mux_unsupported_once(&e);
+            }
+        }
         Ok(())
     }
 
@@ -135,16 +164,25 @@ impl StreamPackager {
             (idx, format!("segment{}.m4s", idx))
         };
 
-        // Write segment
-        self.segment_writer
+        // Attempt to write a real fMP4 fragment. Real muxing is not yet
+        // implemented (see dash/segment.rs), so this fails honestly. We degrade
+        // by dropping the segment rather than writing a fabricated file or
+        // advertising a segment that does not exist in the MPD.
+        match self
+            .segment_writer
             .write_media_segment(&segment_name, &packets)
-            .await?;
-
-        // Update MPD
-        self.mpd_gen
-            .add_segment(index_val, self.config.segment_duration.as_secs_f64())?;
-
-        info!("Finalized DASH segment: {}", segment_name);
+            .await
+        {
+            Ok(()) => {
+                // Only advertise the segment once it was genuinely produced.
+                self.mpd_gen
+                    .add_segment(index_val, self.config.segment_duration.as_secs_f64())?;
+                info!("Finalized DASH segment: {}", segment_name);
+            }
+            Err(e) => {
+                self.warn_mux_unsupported_once(&e);
+            }
+        }
 
         Ok(())
     }

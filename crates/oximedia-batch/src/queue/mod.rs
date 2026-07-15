@@ -10,6 +10,7 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use priority_queue::PriorityJobQueue;
 use scheduler::Scheduler;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Notify;
 
@@ -23,8 +24,12 @@ pub struct JobQueue {
     jobs: Arc<DashMap<JobId, BatchJob>>,
     /// Scheduler for delayed/recurring jobs
     scheduler: Arc<RwLock<Scheduler>>,
-    /// Notification for queue changes
+    /// Notification for queue changes (and shutdown requests)
     notify: Arc<Notify>,
+    /// Set when a consumer should stop waiting for jobs and return
+    /// immediately. Checked by `dequeue`'s wait loop so idle workers can be
+    /// woken deterministically instead of blocking until a job arrives.
+    shutdown: Arc<AtomicBool>,
 }
 
 impl JobQueue {
@@ -37,7 +42,23 @@ impl JobQueue {
             jobs: Arc::new(DashMap::new()),
             scheduler: Arc::new(RwLock::new(Scheduler::new())),
             notify: Arc::new(Notify::new()),
+            shutdown: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Request that any in-progress or future `dequeue` calls return
+    /// `Ok(None)` immediately instead of waiting for a job.
+    ///
+    /// Wakes any consumers currently parked inside `dequeue`'s wait loop.
+    pub fn request_shutdown(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    /// Clear a previously requested shutdown so the queue can be reused by a
+    /// freshly (re)started consumer loop.
+    pub fn reset_shutdown(&self) {
+        self.shutdown.store(false, Ordering::SeqCst);
     }
 
     /// Enqueue a job
@@ -91,6 +112,11 @@ impl JobQueue {
     /// Returns an error if dequeueing fails
     pub async fn dequeue(&self) -> Result<Option<BatchJob>> {
         loop {
+            // A shutdown request takes priority over waiting for more work.
+            if self.shutdown.load(Ordering::SeqCst) {
+                return Ok(None);
+            }
+
             // Check scheduler for due jobs
             let due_jobs = self.scheduler.write().get_due_jobs();
             for job in due_jobs {
@@ -103,7 +129,7 @@ impl JobQueue {
                 return Ok(Some(job));
             }
 
-            // Wait for notification or timeout
+            // Wait for notification (new job or shutdown) or timeout
             tokio::select! {
                 () = self.notify.notified() => {}
                 () = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {}

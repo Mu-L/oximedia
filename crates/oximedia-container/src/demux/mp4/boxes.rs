@@ -11,6 +11,30 @@
 use super::atom::Mp4Atom;
 use oximedia_core::{OxiError, OxiResult};
 
+/// Maximum container-box nesting depth accepted while recursing through
+/// `trak` sub-containers (`mdia`/`minf`/`stbl`/`edts`).
+///
+/// A malicious file can nest these container boxes arbitrarily deep to exhaust
+/// the call stack (stack overflow / abort). Legitimate MP4 nesting is only a
+/// handful of levels deep, so a cap of 32 rejects hostile inputs without
+/// affecting any real file.
+const MAX_BOX_DEPTH: usize = 32;
+
+/// Computes the exclusive end offset (`offset + box_total`) of a box during
+/// sequential box iteration, returning `None` on `usize` overflow.
+///
+/// Defends against a malformed box that declares a 64-bit extended size close
+/// to `u64::MAX`: once a preceding sibling box has advanced `offset` past 0,
+/// the naive `offset + box_total` wraps around, silently passing the
+/// `> data.len()` bounds check and letting the subsequent
+/// `&data[offset + header_size..offset + box_total]` slice panic (start > end
+/// or out of range). Callers must treat `None` as a malformed/oversized box and
+/// stop parsing.
+#[inline]
+fn box_end(offset: usize, box_total: usize) -> Option<usize> {
+    offset.checked_add(box_total)
+}
+
 /// Box header containing size and type information.
 ///
 /// Every MP4 box starts with an 8-byte header (or 16 bytes for extended size).
@@ -298,12 +322,18 @@ impl MoovBox {
                 header.size as usize
             };
 
-            if box_total < header_size || offset + box_total > data.len() {
+            // Checked box advance: `offset + box_total` wraps when a malformed
+            // 64-bit extended box size (near u64::MAX) follows a sibling box,
+            // bypassing the `> data.len()` check and panicking the slice below.
+            let Some(end_off) = box_end(offset, box_total) else {
+                break;
+            };
+            if box_total < header_size || end_off > data.len() {
                 // Malformed or truncated box: stop parsing gracefully
                 break;
             }
 
-            let content = &data[offset + header_size..offset + box_total];
+            let content = &data[offset + header_size..end_off];
 
             match header.box_type {
                 BoxType::MVHD => {
@@ -316,7 +346,7 @@ impl MoovBox {
                 _ => {}
             }
 
-            offset += box_total;
+            offset = end_off;
         }
 
         Ok(moov)
@@ -507,12 +537,24 @@ impl TrakBox {
     /// Returns an error if the data is malformed.
     pub fn parse(data: &[u8]) -> OxiResult<Self> {
         let mut trak = TrakBox::default();
-        Self::parse_container(data, &mut trak)?;
+        Self::parse_container(data, &mut trak, 0)?;
         Ok(trak)
     }
 
     /// Iterates over child boxes in a container box and dispatches to handlers.
-    fn parse_container(data: &[u8], trak: &mut TrakBox) -> OxiResult<()> {
+    ///
+    /// `depth` tracks how deep the `mdia`/`minf`/`stbl`/`edts` recursion has
+    /// gone so a maliciously deep nesting cannot overflow the stack.
+    fn parse_container(data: &[u8], trak: &mut TrakBox, depth: usize) -> OxiResult<()> {
+        // Reject pathologically deep container nesting before recursing further:
+        // a crafted chain of nested container boxes would otherwise exhaust the
+        // call stack (stack overflow / abort).
+        if depth >= MAX_BOX_DEPTH {
+            return Err(OxiError::Parse {
+                offset: 0,
+                message: format!("MP4 box nesting exceeds maximum depth {MAX_BOX_DEPTH}"),
+            });
+        }
         let mut offset = 0usize;
 
         while offset + 8 <= data.len() {
@@ -526,19 +568,25 @@ impl TrakBox {
                 header.size as usize
             };
 
-            if box_total < header_size || offset + box_total > data.len() {
+            // Checked box advance guards against a wrapping 64-bit extended box
+            // size (see `box_end`); an unchecked `offset + box_total` would
+            // bypass the bounds check and panic the slice below.
+            let Some(end_off) = box_end(offset, box_total) else {
+                break;
+            };
+            if box_total < header_size || end_off > data.len() {
                 break;
             }
 
-            let content = &data[offset + header_size..offset + box_total];
+            let content = &data[offset + header_size..end_off];
 
             match header.box_type {
                 BoxType::TKHD => {
                     trak.tkhd = Some(TkhdBox::parse(content)?);
                 }
-                // Container boxes — recurse directly
+                // Container boxes — recurse directly (depth-capped)
                 BoxType::MDIA | BoxType::MINF | BoxType::STBL | BoxType::EDTS => {
-                    Self::parse_container(content, trak)?;
+                    Self::parse_container(content, trak, depth + 1)?;
                 }
                 BoxType::MDHD => {
                     Self::parse_mdhd(content, trak)?;
@@ -576,7 +624,7 @@ impl TrakBox {
                 _ => {}
             }
 
-            offset += box_total;
+            offset = end_off;
         }
 
         Ok(())
@@ -860,11 +908,16 @@ impl TrakBox {
             } else {
                 header.size as usize
             };
-            if box_total < header_size || offset + box_total > data.len() {
+            // Checked box advance guards against a wrapping 64-bit extended box
+            // size (see `box_end`).
+            let Some(end_off) = box_end(offset, box_total) else {
+                break;
+            };
+            if box_total < header_size || end_off > data.len() {
                 break;
             }
 
-            let content = &data[offset + header_size..offset + box_total];
+            let content = &data[offset + header_size..end_off];
             let tag = header.box_type.as_u32();
 
             // AV1 config: "av1C"
@@ -882,7 +935,7 @@ impl TrakBox {
                 break;
             }
 
-            offset += box_total;
+            offset = end_off;
         }
 
         Ok(())
@@ -1164,6 +1217,44 @@ pub struct CttsEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Security regression (P0 #4): a sibling box followed by a box whose
+    /// 64-bit extended size is near u64::MAX makes `offset + box_total` wrap,
+    /// bypassing the bounds check and panicking the slice. Must stop gracefully.
+    #[test]
+    fn moov_parse_wrapping_sibling_box_no_panic() {
+        let mut data = Vec::new();
+        // A small valid 'free' box (size 8, empty body).
+        data.extend_from_slice(&8u32.to_be_bytes());
+        data.extend_from_slice(b"free");
+        // An extended-size box whose size wraps when added to the current offset.
+        data.extend_from_slice(&1u32.to_be_bytes());
+        data.extend_from_slice(b"trak");
+        data.extend_from_slice(&u64::MAX.to_be_bytes());
+        // Must not panic (graceful break); result may be Ok with no traks.
+        let _ = MoovBox::parse(&data);
+    }
+
+    /// Security regression (P1 #6): deeply nested container boxes must be
+    /// rejected before the recursion overflows the stack.
+    #[test]
+    fn trak_parse_deeply_nested_containers_errors() {
+        fn nested_mdia(depth: usize) -> Vec<u8> {
+            let mut inner: Vec<u8> = Vec::new();
+            for _ in 0..depth {
+                let mut boxed = Vec::new();
+                let size = (inner.len() + 8) as u32;
+                boxed.extend_from_slice(&size.to_be_bytes());
+                boxed.extend_from_slice(b"mdia");
+                boxed.extend_from_slice(&inner);
+                inner = boxed;
+            }
+            inner
+        }
+        // 40 levels exceeds MAX_BOX_DEPTH (32) → clean Err, no stack overflow.
+        let data = nested_mdia(40);
+        assert!(TrakBox::parse(&data).is_err());
+    }
 
     #[test]
     fn test_box_header_normal() {

@@ -335,7 +335,16 @@ impl PyCloudProvider {
 
     /// Upload a local file to the cloud.
     ///
-    /// Returns the remote key.
+    /// # Errors
+    ///
+    /// Returns `PyValueError` if `local_path` does not exist. Returns
+    /// `PyRuntimeError` unconditionally otherwise: this build has no cloud
+    /// provider credentials or backend wired in (the real S3/Azure/GCS
+    /// clients live in `oximedia-storage` behind non-default, non-Pure-Rust
+    /// `s3`/`azure`/`gcs` features that this crate does not enable by
+    /// default), so a real upload cannot be performed. This never returns a
+    /// fabricated remote URI implying bytes were actually transferred —
+    /// matching `download`/`delete`/`object_info` below.
     fn upload(&self, local_path: &str, remote_key: &str) -> PyResult<String> {
         let path = std::path::Path::new(local_path);
         if !path.exists() {
@@ -343,10 +352,10 @@ impl PyCloudProvider {
                 "Local file not found: {local_path}"
             )));
         }
-        let bucket = self.config.bucket.as_deref().unwrap_or("default-bucket");
-        // Simulation: return the URI that would be created
-        let uri = format!("{}://{}/{}", self.config.provider, bucket, remote_key);
-        Ok(uri)
+        let _ = remote_key;
+        Err(PyRuntimeError::new_err(
+            "Cloud credentials required for actual upload; configure provider credentials",
+        ))
     }
 
     /// Download a remote object to a local path.
@@ -621,7 +630,7 @@ mod tests {
     fn test_pricing_s3() {
         let p = get_pricing("s3", "us-east-1");
         assert!(p.is_ok());
-        let p = p.expect("should succeed");
+        let p = p.expect_ok("should succeed");
         assert!(p.storage_per_gb > 0.0);
         assert!(p.egress_per_gb > 0.0);
     }
@@ -658,11 +667,92 @@ mod tests {
 
     #[test]
     fn test_cost_estimate_total() {
-        let p = get_pricing("s3", "us-east-1").expect("should succeed");
+        let p = get_pricing("s3", "us-east-1").expect_ok("should succeed");
         let storage = 100.0 * p.storage_per_gb;
         let egress = 50.0 * p.egress_per_gb;
         let transcode = 120.0 * p.transcode_per_min_hd;
         let total = storage + egress + transcode;
         assert!(total > 0.0);
+    }
+
+    /// Unique per-call temp path so parallel tests never collide.
+    fn unique_tmp(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::path::Path::new(name);
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+        let filename = match path.extension().and_then(|e| e.to_str()) {
+            Some(ext) => format!("oximedia-py-cloud-{stem}-{nanos}.{ext}"),
+            None => format!("oximedia-py-cloud-{stem}-{nanos}"),
+        };
+        std::env::temp_dir().join(filename)
+    }
+
+    /// Like `.expect()`, but never touches `PyErr`'s `Debug`/`Display` impl.
+    /// Those internally require the Python GIL; in a bare `cargo test` /
+    /// `nextest` process for this crate (no embedded Python interpreter),
+    /// formatting a `PyErr` while already unwinding from a failed `.expect()`
+    /// triggers a second panic ("interpreter not initialized") and aborts
+    /// the process (SIGABRT) instead of printing a readable message. This
+    /// panics with just `msg` on `Err`, which is always safe.
+    trait PyResultTestExt<T> {
+        fn expect_ok(self, msg: &str) -> T;
+    }
+
+    impl<T> PyResultTestExt<T> for PyResult<T> {
+        // Deliberately discards the `PyErr` without formatting it (see the
+        // trait doc comment above for why `.expect(msg)` is unsafe here).
+        #[allow(clippy::match_wild_err_arm)]
+        fn expect_ok(self, msg: &str) -> T {
+            match self {
+                Ok(v) => v,
+                Err(_) => panic!("{msg}"),
+            }
+        }
+    }
+
+    /// Regression test for the fabrication bug: uploading a real, existing
+    /// local file must NOT return a fabricated `provider://bucket/key` URI
+    /// implying bytes were transferred when this build has no real cloud
+    /// backend/credentials wired in. It must return a real `Err`.
+    #[test]
+    fn test_upload_existing_file_returns_err_not_fabricated_uri() {
+        let local = unique_tmp("upload-src.bin");
+        std::fs::write(&local, b"real bytes that must not be silently dropped")
+            .expect("write test input");
+
+        let config = PyCloudConfig::new(
+            "s3",
+            Some("us-east-1".to_string()),
+            Some("my-bucket".to_string()),
+        )
+        .expect_ok("valid config");
+        let provider = PyCloudProvider::new(config).expect_ok("valid provider");
+
+        let result = provider.upload(local.to_str().expect("valid utf8 path"), "videos/clip.mp4");
+
+        assert!(
+            result.is_err(),
+            "upload() must return Err rather than a fabricated URI when no real \
+             cloud backend is wired in"
+        );
+
+        let _ = std::fs::remove_file(&local);
+    }
+
+    /// `upload()` must still fail fast on a genuinely missing local file,
+    /// distinct from (and checked before) the "no backend wired" error.
+    #[test]
+    fn test_upload_missing_local_file_returns_err() {
+        let missing = unique_tmp("does-not-exist.bin");
+        let _ = std::fs::remove_file(&missing);
+
+        let config = PyCloudConfig::new("s3", None, None).expect_ok("valid config");
+        let provider = PyCloudProvider::new(config).expect_ok("valid provider");
+
+        let result = provider.upload(missing.to_str().expect("valid utf8 path"), "key");
+        assert!(result.is_err(), "missing local file must return Err");
     }
 }

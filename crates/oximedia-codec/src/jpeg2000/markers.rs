@@ -371,6 +371,23 @@ fn parse_siz(payload: &[u8]) -> Jp2Result<SizMarker> {
         let ssiz = read_u8(payload, off, "SIZ.ssiz")?;
         let xr_siz = read_u8(payload, off + 1, "SIZ.xrsiz")?;
         let yr_siz = read_u8(payload, off + 2, "SIZ.yrsiz")?;
+        // Defend against a divide-by-zero in the per-component size computation
+        // `(width + xr - 1) / xr` performed by the decoder: a zero subsampling
+        // factor is malformed input.
+        if xr_siz == 0 || yr_siz == 0 {
+            return Err(Jp2Error::Unsupported(
+                "SIZ component subsampling factor must be non-zero".to_string(),
+            ));
+        }
+        // Defend against `1u32 << bit_depth` overflow in the decoder: bit depth
+        // is `(Ssiz & 0x7F) + 1` (up to 128), but samples are stored as u16, so
+        // reject anything above 16 bits.
+        let bit_depth = (ssiz & 0x7F) + 1;
+        if bit_depth > 16 {
+            return Err(Jp2Error::Unsupported(format!(
+                "SIZ component bit depth {bit_depth} exceeds 16"
+            )));
+        }
         components.push(ComponentParams {
             ssiz,
             xr_siz,
@@ -753,5 +770,33 @@ mod tests {
         let result = parse_codestream(&data);
         // Either Ok([]) or Err — both are acceptable; we just check no panic.
         let _ = result;
+    }
+
+    #[test]
+    fn parse_siz_rejects_zero_subsampling() {
+        // Regression: a zero XRsiz/YRsiz subsampling factor caused a
+        // divide-by-zero in the decoder's `(width + xr - 1) / xr`. parse_siz
+        // must reject it while parsing the marker segment.
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u16.to_be_bytes()); // Rsiz
+        p.extend_from_slice(&16u32.to_be_bytes()); // Xsiz
+        p.extend_from_slice(&16u32.to_be_bytes()); // Ysiz
+        p.extend_from_slice(&0u32.to_be_bytes()); // XOsiz
+        p.extend_from_slice(&0u32.to_be_bytes()); // YOsiz
+        p.extend_from_slice(&16u32.to_be_bytes()); // XTsiz
+        p.extend_from_slice(&16u32.to_be_bytes()); // YTsiz
+        p.extend_from_slice(&0u32.to_be_bytes()); // XTOsiz
+        p.extend_from_slice(&0u32.to_be_bytes()); // YTOsiz
+        p.extend_from_slice(&1u16.to_be_bytes()); // Csiz = 1
+        p.push(7); // Ssiz = 8-bit
+        p.push(0); // XRsiz = 0 (malformed)
+        p.push(1); // YRsiz = 1
+        assert!(parse_siz(&p).is_err());
+
+        // The same payload with a valid XRsiz parses successfully.
+        let mut ok = p.clone();
+        let n = ok.len();
+        ok[n - 2] = 1; // XRsiz = 1
+        assert!(parse_siz(&ok).is_ok());
     }
 }

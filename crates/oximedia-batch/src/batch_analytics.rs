@@ -1,7 +1,7 @@
 //! Batch analytics — run-time trend analysis, failure rates, throughput
 //! metrics, and SLA monitoring for batch processing workloads.
 //!
-//! [`BatchAnalytics`] ingests [`JobSample`] records as jobs complete and
+//! [`BatchAnalytics`](crate::batch_analytics::BatchAnalytics) ingests [`JobSample`](crate::batch_analytics::JobSample) records as jobs complete and
 //! maintains rolling time-series windows at configurable granularities.
 //! Callers can query:
 //!

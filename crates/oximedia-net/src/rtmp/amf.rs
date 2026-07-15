@@ -430,18 +430,32 @@ impl AmfEncoder {
     }
 }
 
+/// Maximum AMF object/array nesting depth accepted by the decoder.
+///
+/// AMF0 allows objects and arrays to contain further objects and arrays, and
+/// each level recurses through [`AmfDecoder::decode`]. A hostile RTMP peer can
+/// send deeply nested containers to exhaust the stack; capping the depth turns
+/// that into a clean error. 32 is far deeper than any real RTMP command.
+const MAX_AMF_DEPTH: usize = 32;
+
 /// AMF0 decoder.
 #[derive(Debug)]
 pub struct AmfDecoder<'a> {
     data: &'a [u8],
     pos: usize,
+    /// Current nesting depth, used to bound recursion (see `MAX_AMF_DEPTH`).
+    depth: usize,
 }
 
 impl<'a> AmfDecoder<'a> {
     /// Creates a new decoder.
     #[must_use]
     pub const fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
+        Self {
+            data,
+            pos: 0,
+            depth: 0,
+        }
     }
 
     /// Returns remaining bytes.
@@ -462,6 +476,20 @@ impl<'a> AmfDecoder<'a> {
     ///
     /// Returns an error if the data is malformed.
     pub fn decode(&mut self) -> NetResult<AmfValue> {
+        // Bound recursion: a peer nesting objects/arrays past MAX_AMF_DEPTH
+        // would otherwise recurse until the thread stack overflows (abort).
+        self.depth += 1;
+        if self.depth > MAX_AMF_DEPTH {
+            self.depth -= 1;
+            return Err(NetError::encoding("AMF nesting exceeds maximum depth"));
+        }
+        let result = self.decode_value();
+        self.depth -= 1;
+        result
+    }
+
+    /// Decodes the next value without touching the recursion guard.
+    fn decode_value(&mut self) -> NetResult<AmfValue> {
         let marker = self.read_u8()?;
         let marker = AmfMarker::from_byte(marker)
             .ok_or_else(|| NetError::encoding(format!("Unknown AMF marker: {marker:02x}")))?;
@@ -518,7 +546,13 @@ impl<'a> AmfDecoder<'a> {
 
     fn decode_strict_array(&mut self) -> NetResult<AmfValue> {
         let count = self.read_u32()? as usize;
-        let mut arr = Vec::with_capacity(count);
+        // Never pre-allocate from the unchecked on-wire count: a peer can claim
+        // count = u32::MAX (~4 billion) to force a multi-GB reservation before
+        // a single element is read. Every element needs at least one marker
+        // byte, so the reservation cannot legitimately exceed the bytes left;
+        // if `count` really is larger the loop below errors on end-of-data.
+        let cap = count.min(self.remaining());
+        let mut arr = Vec::with_capacity(cap);
         for _ in 0..count {
             arr.push(self.decode()?);
         }
@@ -775,5 +809,45 @@ mod tests {
         );
         assert!(dec.decode().expect("should succeed in test").is_null());
         assert!(!dec.has_remaining());
+    }
+
+    #[test]
+    fn strict_array_huge_count_does_not_oom() {
+        // StrictArray marker + count = u32::MAX with no element bytes. The
+        // decoder must NOT pre-allocate ~4 billion slots; it should error out
+        // reading the (absent) first element instead.
+        let mut data = vec![AmfMarker::StrictArray as u8];
+        data.extend_from_slice(&u32::MAX.to_be_bytes());
+        let mut dec = AmfDecoder::new(&data);
+        assert!(dec.decode().is_err());
+    }
+
+    #[test]
+    fn deeply_nested_amf_is_rejected_not_stack_overflow() {
+        // 40 nested single-element strict arrays exceed MAX_AMF_DEPTH (32).
+        // Reaching this assertion at all proves the stack did not overflow.
+        let mut data = Vec::new();
+        for _ in 0..40 {
+            data.push(AmfMarker::StrictArray as u8);
+            data.extend_from_slice(&1u32.to_be_bytes());
+        }
+        data.push(AmfMarker::Null as u8);
+        let mut dec = AmfDecoder::new(&data);
+        assert!(dec.decode().is_err());
+    }
+
+    #[test]
+    fn nesting_at_limit_still_decodes() {
+        // A handful of nested arrays (well under the cap) must still succeed,
+        // proving the guard does not reject legitimate nested structures.
+        let mut data = Vec::new();
+        for _ in 0..4 {
+            data.push(AmfMarker::StrictArray as u8);
+            data.extend_from_slice(&1u32.to_be_bytes());
+        }
+        data.push(AmfMarker::Number as u8);
+        data.extend_from_slice(&1.5f64.to_be_bytes());
+        let mut dec = AmfDecoder::new(&data);
+        assert!(dec.decode().is_ok());
     }
 }

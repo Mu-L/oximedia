@@ -6,6 +6,7 @@ authors.workspace = true
 description = "Professional broadcast playout server for OxiMedia"
 readme = "README.md"
 license.workspace = true
+rust-version.workspace = true
 homepage.workspace = true
 repository.workspace = true
 keywords = ["broadcast", "playout", "media", "video", "streaming"]

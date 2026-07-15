@@ -132,6 +132,87 @@ pub async fn handle_recommend_command(command: RecommendCommand, json_output: bo
     }
 }
 
+/// Parse a `WIDTHxHEIGHT` (or `WIDTH:HEIGHT`) resolution string.
+fn parse_resolution(s: &str) -> Result<(u32, u32)> {
+    let normalized = s.to_lowercase().replace(':', "x");
+    let (w, h) = normalized.split_once('x').ok_or_else(|| {
+        anyhow::anyhow!("Invalid resolution '{s}'. Expected WIDTHxHEIGHT, e.g. 1920x1080")
+    })?;
+    let width: u32 = w
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid width in resolution '{s}'"))?;
+    let height: u32 = h
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid height in resolution '{s}'"))?;
+    if width == 0 || height == 0 {
+        return Err(anyhow::anyhow!("Resolution dimensions must be non-zero"));
+    }
+    Ok((width, height))
+}
+
+/// Bitrate adequacy assessment derived from bits-per-pixel at an assumed
+/// 30 fps: the classification and per-codec guidance genuinely change with
+/// the `--bitrate` / `--resolution` inputs.
+struct BitrateAssessment {
+    bits_per_pixel: f64,
+    verdict: &'static str,
+    guidance: String,
+}
+
+/// Assess a target bitrate against a target resolution.
+///
+/// Bits-per-pixel-per-frame thresholds (assuming 30 fps) follow common
+/// encoder guidance: below ~0.02 bpp even AV1 visibly struggles; 0.02–0.05
+/// is AV1-efficient territory; 0.05–0.10 gives VP9 headroom; above 0.10 any
+/// of the patent-free codecs has ample budget.
+fn assess_bitrate(bitrate_kbps: u32, width: u32, height: u32) -> BitrateAssessment {
+    const ASSUMED_FPS: f64 = 30.0;
+    let pixels_per_second = f64::from(width) * f64::from(height) * ASSUMED_FPS;
+    let bits_per_pixel = (f64::from(bitrate_kbps) * 1000.0) / pixels_per_second;
+
+    let (verdict, guidance) = if bits_per_pixel < 0.02 {
+        (
+            "very low",
+            format!(
+                "{bitrate_kbps} kbps is a very tight budget for {width}x{height}@30 — expect \
+                 visible artifacts even with AV1; consider a lower resolution or a higher bitrate"
+            ),
+        )
+    } else if bits_per_pixel < 0.05 {
+        (
+            "low",
+            format!(
+                "{bitrate_kbps} kbps at {width}x{height}@30 needs AV1's efficiency; VP9/VP8 \
+                 would degrade noticeably at this budget"
+            ),
+        )
+    } else if bits_per_pixel < 0.10 {
+        (
+            "adequate",
+            format!(
+                "{bitrate_kbps} kbps at {width}x{height}@30 is comfortable for AV1 and workable \
+                 for VP9"
+            ),
+        )
+    } else {
+        (
+            "generous",
+            format!(
+                "{bitrate_kbps} kbps at {width}x{height}@30 leaves ample headroom — any \
+                 patent-free codec (AV1/VP9/VP8) will look good; pick by encode-speed needs"
+            ),
+        )
+    };
+
+    BitrateAssessment {
+        bits_per_pixel,
+        verdict,
+        guidance,
+    }
+}
+
 /// Recommend a codec for the input.
 async fn handle_codec(
     input: &PathBuf,
@@ -153,8 +234,9 @@ async fn handle_codec(
         ));
     }
 
-    // Use the recommendation engine for heuristic analysis
-    let _engine = oximedia_recommend::RecommendationEngine::new();
+    // Validate --resolution for real (garbage must not be echoed back as if
+    // it had been understood).
+    let parsed_resolution = resolution.map(parse_resolution).transpose()?;
 
     let file_size = std::fs::metadata(input)
         .context("Failed to read file metadata")?
@@ -173,8 +255,15 @@ async fn handle_codec(
         _ => ("AV1", "Opus", "Default recommendation"),
     };
 
+    // --bitrate/--resolution genuinely shape the output: with both present a
+    // bits-per-pixel assessment is computed and reported.
+    let assessment = match (bitrate, parsed_resolution) {
+        (Some(kbps), Some((w, h))) => Some(assess_bitrate(kbps, w, h)),
+        _ => None,
+    };
+
     if json_output {
-        let result = serde_json::json!({
+        let mut result = serde_json::json!({
             "command": "codec",
             "input": input.display().to_string(),
             "file_size": file_size,
@@ -192,6 +281,14 @@ async fn handle_codec(
             ],
             "status": "analyzed",
         });
+        if let Some(ref a) = assessment {
+            result["bitrate_assessment"] = serde_json::json!({
+                "bits_per_pixel": a.bits_per_pixel,
+                "assumed_fps": 30,
+                "verdict": a.verdict,
+                "guidance": a.guidance,
+            });
+        }
         let json_str = serde_json::to_string_pretty(&result)
             .context("Failed to serialize codec recommendation")?;
         println!("{}", json_str);
@@ -204,8 +301,8 @@ async fn handle_codec(
         if let Some(br) = bitrate {
             println!("{:20} {} kbps", "Target bitrate:", br);
         }
-        if let Some(res) = resolution {
-            println!("{:20} {}", "Target resolution:", res);
+        if let Some((w, h)) = parsed_resolution {
+            println!("{:20} {}x{}", "Target resolution:", w, h);
         }
         println!();
         println!("{}", "Recommendation".cyan().bold());
@@ -213,6 +310,17 @@ async fn handle_codec(
         println!("  Video codec:  {}", recommended_video.green());
         println!("  Audio codec:  {}", recommended_audio.green());
         println!("  Reason:       {}", reason);
+        if let Some(ref a) = assessment {
+            println!();
+            println!("{}", "Bitrate Assessment".cyan().bold());
+            println!("{}", "-".repeat(60));
+            println!(
+                "  Bits/pixel:   {:.4} (at an assumed 30 fps)",
+                a.bits_per_pixel
+            );
+            println!("  Verdict:      {}", a.verdict.yellow());
+            println!("  Guidance:     {}", a.guidance);
+        }
         println!();
         println!("{}", "Alternatives".cyan().bold());
         println!("{}", "-".repeat(60));
@@ -430,12 +538,44 @@ async fn handle_analyze(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn test_valid_use_cases() {
         let valid = ["streaming", "archival", "editing", "broadcast"];
         for uc in &valid {
             assert!(valid.contains(uc));
         }
+    }
+
+    #[test]
+    fn test_parse_resolution_forms() {
+        assert_eq!(parse_resolution("1920x1080").expect("x form"), (1920, 1080));
+        assert_eq!(
+            parse_resolution("1280:720").expect("colon form"),
+            (1280, 720)
+        );
+        assert_eq!(
+            parse_resolution("3840X2160").expect("capital X"),
+            (3840, 2160)
+        );
+        assert!(parse_resolution("garbage").is_err());
+        assert!(parse_resolution("0x1080").is_err());
+        assert!(parse_resolution("1920x").is_err());
+    }
+
+    #[test]
+    fn test_assess_bitrate_verdicts_change_with_inputs() {
+        // 500 kbps for 4K is starvation territory.
+        let low = assess_bitrate(500, 3840, 2160);
+        assert_eq!(low.verdict, "very low");
+        // 8000 kbps for 720p is generous.
+        let high = assess_bitrate(8000, 1280, 720);
+        assert_eq!(high.verdict, "generous");
+        // The numeric output must actually derive from the inputs.
+        assert!(low.bits_per_pixel < high.bits_per_pixel);
+        assert!(low.guidance.contains("3840x2160"));
+        assert!(high.guidance.contains("8000 kbps"));
     }
 
     #[test]

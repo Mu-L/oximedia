@@ -230,6 +230,12 @@ impl HlsServer {
         filename: &str,
         response: hyper::http::response::Builder,
     ) -> Result<hyper::Response<Full<Bytes>>, hyper::Error> {
+        // Server-side serve latency: time to locate the segment and build the
+        // response. Real measurement replacing a hardcoded 100 ms placeholder.
+        // TODO(0.2.x): end-to-end (glass-to-glass) latency also needs client
+        // request timestamps threaded in from the connection layer.
+        let serve_start = std::time::Instant::now();
+
         // Parse filename to get sequence number
         // Format: seg_{sequence}_{uuid}.m4s or init_{uuid}.mp4
 
@@ -253,9 +259,9 @@ impl HlsServer {
             {
                 if let Ok(sequence) = seq_str.parse::<u64>() {
                     if let Some(segment) = stream.segment_generator.get_video_segment(sequence) {
-                        // Update metrics
+                        // Update metrics with the real server-side serve time.
                         if let Some(analytics) = stream.analytics() {
-                            analytics.record_latency(100); // Placeholder
+                            analytics.record_latency(serve_start.elapsed().as_millis() as u64);
                         }
 
                         return Ok(response

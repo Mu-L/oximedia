@@ -8,15 +8,27 @@ use crate::transcode::TranscodeEngine;
 use async_trait::async_trait;
 use oximedia_net::rtmp::{
     AuthHandler, AuthResult, MediaPacket as NetMediaPacket, PublishType, RtmpServer,
-    RtmpServerBuilder, RtmpServerConfig, StreamMetadata,
+    RtmpServerBuilder, StreamMetadata, StreamRegistry,
 };
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use std::time::Duration;
+use tokio::sync::{broadcast, mpsc};
 use tracing::{error, info, warn};
 use uuid::Uuid;
+
+/// Emitted by [`StreamKeyValidator`] the moment a publish is authorized, so the
+/// ingest bridge can subscribe to the corresponding net stream once the
+/// oximedia-net RTMP server registers it.
+#[derive(Debug, Clone)]
+struct PublishEvent {
+    /// RTMP application name.
+    app: String,
+    /// RTMP stream key.
+    stream_key: String,
+}
 
 /// RTMP ingest server configuration.
 #[derive(Debug, Clone)]
@@ -74,6 +86,11 @@ impl Default for RtmpIngestConfig {
 /// Stream key validator.
 pub struct StreamKeyValidator {
     valid_keys: RwLock<HashMap<String, StreamKeyInfo>>,
+
+    /// Optional notifier: emits a [`PublishEvent`] whenever a publish is
+    /// authorized, so the ingest bridge can subscribe to the newly registered
+    /// net stream. `None` for standalone use (e.g. unit tests via `new`).
+    publish_notifier: RwLock<Option<mpsc::UnboundedSender<PublishEvent>>>,
 }
 
 /// Stream key information.
@@ -104,7 +121,17 @@ impl StreamKeyValidator {
     pub fn new() -> Self {
         Self {
             valid_keys: RwLock::new(HashMap::new()),
+            publish_notifier: RwLock::new(None),
         }
+    }
+
+    /// Installs the publish notifier used by the ingest bridge.
+    ///
+    /// Called by [`RtmpIngestServer::new`] so that each authorized publish is
+    /// forwarded to the bridge loop. Uses interior mutability so it can be set
+    /// on an `Arc<StreamKeyValidator>` already shared with the net server.
+    fn set_publish_notifier(&self, tx: mpsc::UnboundedSender<PublishEvent>) {
+        *self.publish_notifier.write() = Some(tx);
     }
 
     /// Adds a valid stream key.
@@ -164,6 +191,16 @@ impl AuthHandler for StreamKeyValidator {
     ) -> AuthResult {
         if self.validate(app, stream_key) {
             info!("Authenticated publish: {}/{}", app, stream_key);
+            // Notify the ingest bridge (if wired) so it can subscribe to this
+            // stream once the net server registers it. Clone the sender out of
+            // the guard so nothing is held across the send.
+            let notifier = self.publish_notifier.read().clone();
+            if let Some(tx) = notifier {
+                let _ = tx.send(PublishEvent {
+                    app: app.to_string(),
+                    stream_key: stream_key.to_string(),
+                });
+            }
             AuthResult::Success
         } else {
             warn!("Rejected publish: {}/{}", app, stream_key);
@@ -232,6 +269,11 @@ pub struct RtmpIngestServer {
 
     /// Metrics collector.
     metrics: Arc<MetricsCollector>,
+
+    /// Receiver for [`PublishEvent`]s from the validator, consumed once by
+    /// [`Self::start`] to drive the ingest bridge. Wrapped so the `&self`
+    /// `start` can move it out exactly once.
+    publish_rx: Mutex<Option<mpsc::UnboundedReceiver<PublishEvent>>>,
 }
 
 impl RtmpIngestServer {
@@ -246,17 +288,21 @@ impl RtmpIngestServer {
     ) -> ServerResult<Self> {
         let validator = Arc::new(StreamKeyValidator::new());
 
-        let _rtmp_config = RtmpServerConfig {
-            bind_address: config.bind_addr.to_string(),
-            chunk_size: config.chunk_size as u32,
-            window_ack_size: config.window_ack_size,
-            max_connections: config.max_streams,
-            ..RtmpServerConfig::default()
-        };
+        // Wire the validator to notify the ingest bridge on each authorized
+        // publish. The receiver is consumed once by `start`.
+        let (publish_tx, publish_rx) = mpsc::unbounded_channel::<PublishEvent>();
+        validator.set_publish_notifier(publish_tx);
 
-        let mut rtmp_builder = RtmpServerBuilder::new();
-        rtmp_builder = rtmp_builder.auth_handler(Arc::clone(&validator) as Arc<dyn AuthHandler>);
-        let rtmp_server = rtmp_builder.build();
+        // Build the REAL oximedia-net RTMP server: bind the configured address,
+        // apply chunk/window/connection limits, and use our validator as the
+        // auth handler (which also feeds the publish notifier above).
+        let rtmp_server = RtmpServerBuilder::new()
+            .bind_address(config.bind_addr.to_string())
+            .chunk_size(config.chunk_size as u32)
+            .window_ack_size(config.window_ack_size)
+            .max_connections(config.max_streams)
+            .auth_handler(Arc::clone(&validator) as Arc<dyn AuthHandler>)
+            .build();
 
         let transcode_engine = if config.enable_transcoding {
             Some(Arc::new(TranscodeEngine::new().await?))
@@ -285,6 +331,7 @@ impl RtmpIngestServer {
             recorder,
             cdn_uploader,
             metrics,
+            publish_rx: Mutex::new(Some(publish_rx)),
         })
     }
 
@@ -296,61 +343,154 @@ impl RtmpIngestServer {
     pub async fn start(&self) -> ServerResult<()> {
         info!("Starting RTMP ingest server on {}", self.config.bind_addr);
 
-        let server = Arc::clone(&self.rtmp_server);
-        let streams = Arc::clone(&self.streams);
-        let metrics = Arc::clone(&self.metrics);
-        let transcode = self.transcode_engine.clone();
-        let recorder = self.recorder.clone();
-        let cdn = self.cdn_uploader.clone();
-
+        // 1. Drive the REAL oximedia-net accept loop. `RtmpServer::run` binds
+        //    the TCP socket at `config.bind_addr` and accepts publish/play
+        //    connections, registering each published stream into
+        //    `stream_registry()`. Without this the server never accepts a
+        //    single connection.
+        let accept_server = Arc::clone(&self.rtmp_server);
         tokio::spawn(async move {
-            if let Err(e) =
-                Self::run_server(server, streams, metrics, transcode, recorder, cdn).await
-            {
-                error!("RTMP server error: {}", e);
+            if let Err(e) = accept_server.run().await {
+                error!("RTMP accept loop error: {}", e);
             }
         });
+
+        // 2. Bridge accepted net streams into this server's ingest map so that
+        //    transcoding / recording / CDN upload actually observe the media.
+        //    The bridge is driven by publish notifications from the validator.
+        let bridge_rx = self.publish_rx.lock().take();
+        if let Some(publish_rx) = bridge_rx {
+            let registry = Arc::clone(self.rtmp_server.stream_registry());
+            let streams = Arc::clone(&self.streams);
+            let metrics = Arc::clone(&self.metrics);
+            let transcode = self.transcode_engine.clone();
+            let recorder = self.recorder.clone();
+            let cdn = self.cdn_uploader.clone();
+            tokio::spawn(async move {
+                Self::run_bridge(
+                    registry, streams, metrics, transcode, recorder, cdn, publish_rx,
+                )
+                .await;
+            });
+        } else {
+            warn!("RTMP ingest bridge already started; not starting a second bridge");
+        }
 
         Ok(())
     }
 
-    /// Runs the RTMP server.
-    async fn run_server(
-        _server: Arc<RtmpServer>,
+    /// Bridges published net streams into this server's ingest map.
+    ///
+    /// For every authorized publish (delivered on `publish_rx`), waits for the
+    /// oximedia-net server to register the stream in `registry`, then creates
+    /// an [`IngestStream`] and forwards the stream's broadcast media into it so
+    /// the transcode / record / CDN pipeline runs on the real bytes.
+    async fn run_bridge(
+        registry: Arc<StreamRegistry>,
         streams: Arc<RwLock<HashMap<String, Arc<IngestStream>>>>,
         metrics: Arc<MetricsCollector>,
-        _transcode: Option<Arc<TranscodeEngine>>,
-        _recorder: Option<Arc<StreamRecorder>>,
-        _cdn: Option<Arc<CdnUploader>>,
-    ) -> ServerResult<()> {
-        // Server main loop
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        transcode: Option<Arc<TranscodeEngine>>,
+        recorder: Option<Arc<StreamRecorder>>,
+        cdn: Option<Arc<CdnUploader>>,
+        mut publish_rx: mpsc::UnboundedReceiver<PublishEvent>,
+    ) {
+        while let Some(event) = publish_rx.recv().await {
+            let key = format!("{}/{}", event.app, event.stream_key);
 
-            // Process active streams
-            let stream_list = {
-                let s = streams.read();
-                s.values().map(Arc::clone).collect::<Vec<_>>()
+            // Idempotent against duplicate/re-published keys.
+            if streams.read().contains_key(&key) {
+                continue;
+            }
+
+            // The net connection handler registers the stream into `registry`
+            // *after* `authenticate_publish` returns, so poll briefly until it
+            // appears. Bounded (≈2s) so a rejected/aborted publish cannot wedge
+            // the bridge.
+            let mut active = None;
+            for _ in 0..100 {
+                if let Some(stream) = registry.get_stream(&key).await {
+                    active = Some(stream);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let active = match active {
+                Some(stream) => stream,
+                None => {
+                    warn!(
+                        "RTMP publish '{}' was authorized but never registered; not bridged",
+                        key
+                    );
+                    continue;
+                }
             };
 
-            for stream in stream_list {
-                // Update metrics
-                metrics.record_stream_active(&stream.app_name, &stream.stream_key);
-            }
+            // Register the ingest stream (spawns the transcode/record/CDN task)
+            // and record it as active.
+            let ingest = Self::spawn_ingest_stream(
+                &streams,
+                &metrics,
+                &transcode,
+                &recorder,
+                &cdn,
+                event.app.clone(),
+                event.stream_key.clone(),
+                active.metadata.clone(),
+            );
+            metrics.record_stream_active(&event.app, &event.stream_key);
+
+            // Forward media from the net broadcast channel into the ingest
+            // packet task until the publisher ends.
+            let mut media_rx = active.media_tx.subscribe();
+            let packet_tx = ingest.packet_tx.clone();
+            let streams_for_cleanup = Arc::clone(&streams);
+            let cleanup_key = key.clone();
+            tokio::spawn(async move {
+                // NOTE: `subscribe()` only observes packets sent after this
+                // point, so a publisher's very first codec-sequence headers may
+                // be missed on a fast loopback.
+                // TODO(0.2.x): cache and replay sequence headers on subscribe.
+                loop {
+                    match media_rx.recv().await {
+                        Ok(packet) => {
+                            if packet_tx.send(packet).is_err() {
+                                break; // ingest task gone
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                            warn!(
+                                "RTMP ingest bridge lagged on '{}'; dropped {} packets",
+                                cleanup_key, dropped
+                            );
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break, // publisher ended
+                    }
+                }
+                // Net stream ended: drop the ingest stream so state stays honest.
+                streams_for_cleanup.write().remove(&cleanup_key);
+                info!("RTMP ingest bridge closed for stream: {}", cleanup_key);
+            });
+
+            info!("Bridged RTMP ingest stream: {}", key);
         }
     }
 
-    /// Registers a new stream.
-    pub fn register_stream(
-        &self,
-        app_name: impl Into<String>,
-        stream_key: impl Into<String>,
+    /// Creates an [`IngestStream`], inserts it into `streams`, and spawns its
+    /// packet-processing task (stats, metrics, transcode, record, CDN).
+    ///
+    /// Shared by the live bridge ([`Self::run_bridge`]) and the direct
+    /// [`Self::register_stream`] entry point.
+    fn spawn_ingest_stream(
+        streams: &Arc<RwLock<HashMap<String, Arc<IngestStream>>>>,
+        metrics: &Arc<MetricsCollector>,
+        transcode: &Option<Arc<TranscodeEngine>>,
+        recorder: &Option<Arc<StreamRecorder>>,
+        cdn: &Option<Arc<CdnUploader>>,
+        app_name: String,
+        stream_key: String,
         metadata: StreamMetadata,
     ) -> Arc<IngestStream> {
-        let app_name = app_name.into();
-        let stream_key = stream_key.into();
         let id = Uuid::new_v4();
-
         let (packet_tx, mut packet_rx) = mpsc::unbounded_channel();
 
         let stream = Arc::new(IngestStream {
@@ -365,42 +505,59 @@ impl RtmpIngestServer {
         });
 
         let key = format!("{}/{}", app_name, stream_key);
-        let mut streams = self.streams.write();
-        streams.insert(key.clone(), Arc::clone(&stream));
+        {
+            let mut map = streams.write();
+            map.insert(key.clone(), Arc::clone(&stream));
+        }
 
-        // Spawn packet processing task
+        // Spawn packet processing task.
         let stream_clone = Arc::clone(&stream);
-        let metrics = Arc::clone(&self.metrics);
-        let transcode = self.transcode_engine.clone();
-        let recorder = self.recorder.clone();
-        let cdn = self.cdn_uploader.clone();
+        let metrics = Arc::clone(metrics);
+        let transcode = transcode.clone();
+        let recorder = recorder.clone();
+        let cdn = cdn.clone();
 
         tokio::spawn(async move {
+            // Logged once per stream if transcoding is unavailable, so we do
+            // not flood the log on every packet.
+            let mut transcode_passthrough_logged = false;
+
             while let Some(packet) = packet_rx.recv().await {
-                // Update stats
+                // Update stats.
                 let data_len = packet.data.len() as u64;
                 *stream_clone.bytes_received.write() += data_len;
                 *stream_clone.packets_received.write() += 1;
 
-                // Record metrics
+                // Record metrics.
                 metrics.record_bytes_received(data_len);
                 metrics.record_packet_received();
 
-                // Process transcoding
+                // Transcode when enabled. `process_packet` honestly reports
+                // that real-time ingest transcoding is unimplemented; on that
+                // error we degrade to stream-copy (pass-through) — the same
+                // packet still flows to the recorder / CDN below. We never
+                // claim a transcode happened.
                 if let Some(ref engine) = transcode {
                     if let Err(e) = engine.process_packet(&packet).await {
-                        error!("Transcode error: {}", e);
+                        if !transcode_passthrough_logged {
+                            warn!(
+                                "Transcoding unavailable for stream '{}' ({}); \
+                                 passing through (stream-copy)",
+                                stream_clone.stream_key, e
+                            );
+                            transcode_passthrough_logged = true;
+                        }
                     }
                 }
 
-                // Record stream
+                // Record stream.
                 if let Some(ref rec) = recorder {
                     if let Err(e) = rec.write_packet(&stream_clone.stream_key, &packet).await {
                         error!("Recording error: {}", e);
                     }
                 }
 
-                // Upload to CDN
+                // Upload to CDN.
                 if let Some(ref uploader) = cdn {
                     if let Err(e) = uploader
                         .upload_packet(&stream_clone.stream_key, &packet)
@@ -415,6 +572,26 @@ impl RtmpIngestServer {
         });
 
         stream
+    }
+
+    /// Registers a new stream directly (used by tests and integrations that
+    /// drive the media lifecycle themselves rather than via the live bridge).
+    pub fn register_stream(
+        &self,
+        app_name: impl Into<String>,
+        stream_key: impl Into<String>,
+        metadata: StreamMetadata,
+    ) -> Arc<IngestStream> {
+        Self::spawn_ingest_stream(
+            &self.streams,
+            &self.metrics,
+            &self.transcode_engine,
+            &self.recorder,
+            &self.cdn_uploader,
+            app_name.into(),
+            stream_key.into(),
+            metadata,
+        )
     }
 
     /// Unregisters a stream.

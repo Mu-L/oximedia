@@ -41,6 +41,36 @@ fn crc16(data: &[u8]) -> u16 {
 }
 
 // =============================================================================
+// CRC-8 (used by the FLAC frame header)
+// =============================================================================
+
+/// Compute the FLAC frame-header CRC-8.
+///
+/// Per the FLAC format specification (<https://xiph.org/flac/format.html>),
+/// the frame header ends with an 8-bit CRC computed over every header byte
+/// that precedes it (sync code through the end of the explicit block-size /
+/// sample-rate fields), using polynomial `x^8 + x^2 + x^1 + x^0` (`0x07`)
+/// with an initial value of 0, most-significant-bit first, no reflection,
+/// and no final XOR. This is also cataloged as the standalone "CRC-8"
+/// algorithm (check value `0xF4` over ASCII `"123456789"` — see
+/// `test_crc8_known_check_value` below).
+fn crc8(data: &[u8]) -> u8 {
+    const POLY: u8 = 0x07;
+    let mut crc = 0u8;
+    for &byte in data {
+        crc ^= byte;
+        for _ in 0..8 {
+            if crc & 0x80 != 0 {
+                crc = (crc << 1) ^ POLY;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    crc
+}
+
+// =============================================================================
 // Configuration
 // =============================================================================
 
@@ -209,8 +239,9 @@ impl FlacEncoder {
         data.push((bs >> 8) as u8);
         data.push(bs as u8);
 
-        // CRC-8 of header (simplified: just 0)
-        data.push(0);
+        // CRC-8 of the frame header (sync code through the field just
+        // written above), per the FLAC format spec — see `crc8()`.
+        data.push(crc8(&data));
 
         // Encode each subframe
         for chan in channels {
@@ -414,5 +445,102 @@ mod tests {
         let data1 = b"hello";
         let data2 = b"world";
         assert_ne!(crc16(data1), crc16(data2));
+    }
+
+    // -------------------------------------------------------------------
+    // CRC-8 (frame header) — was hardcoded to 0; now computed for real.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_crc8_known_check_value() {
+        // Standard CRC-8 catalogue check value (poly=0x07, init=0x00, no
+        // reflection, no final XOR) computed over ASCII "123456789" is
+        // 0xF4 — independently verified (not derived from this
+        // implementation). This is also FLAC's frame-header CRC-8, which
+        // uses the same polynomial and initial value per the format spec.
+        assert_eq!(crc8(b"123456789"), 0xF4);
+    }
+
+    #[test]
+    fn test_crc8_empty_is_zero() {
+        assert_eq!(crc8(&[]), 0);
+    }
+
+    #[test]
+    fn test_crc8_deterministic() {
+        let data = b"hello flac";
+        assert_eq!(crc8(data), crc8(data));
+    }
+
+    #[test]
+    fn test_crc8_sensitivity() {
+        assert_ne!(crc8(b"hello"), crc8(b"world"));
+    }
+
+    /// Regression test for the fabricated-CRC bug: the frame-header CRC-8
+    /// byte must be the real CRC-8 of the preceding header bytes, not a
+    /// hardcoded 0. This test previously would have passed trivially
+    /// against the old `data.push(0)` — it now pins the honest behavior.
+    #[test]
+    fn test_flac_frame_header_crc8_is_real_not_hardcoded_zero() {
+        let mut enc = make_encoder();
+        let samples = vec![12345i32; 4096 * 2]; // 4096 stereo frames
+        let (_, frames) = enc.encode(&samples).expect("encode");
+        assert!(!frames.is_empty());
+
+        // Frame header layout (see encode_frame): sync(2) + byte2(1) +
+        // byte3(1) + UTF-8 sample number(4) + explicit block size(2) = 10
+        // bytes, followed immediately by the CRC-8 byte at index 10.
+        let header_len = 10;
+        let frame = &frames[0].data;
+        assert!(frame.len() > header_len, "frame too short for a header");
+        let expected_crc = crc8(&frame[..header_len]);
+        assert_eq!(
+            frame[header_len], expected_crc,
+            "frame header CRC-8 byte must equal crc8() of the preceding header bytes"
+        );
+    }
+
+    /// Round-trip: a frame encoded with the real (non-hardcoded) CRC-8 must
+    /// still be accepted by the crate's own `FlacDecoder` — i.e. the decoder
+    /// must read past the CRC-8 byte and successfully decode the subframes
+    /// that follow it, rather than erroring or desyncing.
+    ///
+    /// This intentionally does **not** assert `consumed == frame.data.len()`.
+    /// While developing this test, two different sample fixtures (a
+    /// sawtooth-like ramp, then plain silence) both showed the decoder
+    /// consuming *fewer* bytes than the encoder wrote for the same frame
+    /// (observed: 8243-vs-42104 for the ramp, 16399-vs-16400 for silence) —
+    /// a pre-existing mismatch between the encoder's byte-oriented subframe
+    /// writer (`encode_subframe` pushes whole bytes) and the decoder's
+    /// bit-oriented subframe reader (`decode_subframe` / `BitReader`), most
+    /// likely in the "zero-pad to byte boundary" step of `encode_frame`.
+    /// That is a separate, pre-existing bug in the subframe bit-packing —
+    /// unrelated to the CRC-8 field this test is scoped to — and is out of
+    /// scope for this pass (the CRC-8 fix touches only the one header byte
+    /// read via `decode_frame`'s `_crc8` line, well before subframe decode
+    /// begins). Fixing it is a follow-up; flagging it here rather than
+    /// silently asserting around it keeps this test itself honest.
+    #[test]
+    fn test_flac_encoded_frame_round_trips_through_crate_decoder() {
+        use crate::flac::decoder::FlacDecoder;
+
+        let mut enc = make_encoder();
+        let samples = vec![0i32; 4096 * 2]; // 4096 stereo frames of silence
+        let (_, frames) = enc.encode(&samples).expect("encode");
+        assert!(!frames.is_empty());
+
+        let dec = FlacDecoder::new();
+        for frame in &frames {
+            let (decoded, consumed) = dec
+                .decode_frame(&frame.data)
+                .expect("crate's own FLAC decoder must accept a frame with a real CRC-8");
+            assert!(
+                consumed <= frame.data.len(),
+                "decoder must not read past the end of the encoded frame"
+            );
+            assert_eq!(decoded.block_size, frame.block_size as usize);
+            assert_eq!(decoded.channels, 2);
+        }
     }
 }

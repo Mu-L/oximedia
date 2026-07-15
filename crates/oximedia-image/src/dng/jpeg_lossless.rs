@@ -577,6 +577,11 @@ fn decode_scan(
     if width == 0 || height == 0 {
         return Err(ImageError::compression("Lossless JPEG: zero-sized frame"));
     }
+    // Defend against an allocation bomb: the embedded DNG-JPEG width/height and
+    // component count drive the `vec![0u16; width*height*n_comp]` sample buffer
+    // below (potentially tens of GB). Reject impossibly large frames first.
+    crate::limits::checked_dims(width, height, n_comp.max(1), 2)
+        .map_err(ImageError::InvalidFormat)?;
     // Lossless JPEG in DNG always uses 1x1 sampling for every component.
     for sc in scan {
         let fc = &frame.components[sc.frame_index];

@@ -103,7 +103,7 @@ pub use wcag::{
 /// Errors produced by caption generation operations.
 ///
 /// Note: `Clone` and `PartialEq` are intentionally *not* derived because the
-/// feature-gated [`CaptionGenError::Ml`] variant wraps [`oximedia_ml::MlError`]
+/// feature-gated `CaptionGenError::Ml` variant wraps `oximedia_ml::MlError`
 /// which implements neither trait. Equality and cloning of error values are
 /// uncommon for caption-generation callers (errors typically flow through `?`
 /// once and are rendered via `Display`), so dropping those derives is the

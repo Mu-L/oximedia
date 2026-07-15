@@ -171,17 +171,28 @@ impl TranscodeEngine {
         jobs.values().cloned().collect()
     }
 
-    /// Processes a media packet.
+    /// Processes a media packet through the transcode pipeline.
+    ///
+    /// # Errors
+    ///
+    /// Real-time transcoding on ingest requires a persistent, per-stream
+    /// decode -> scale -> encode graph that carries codec state across
+    /// packets (keyed by stream, one encoder per ABR rung). That graph is
+    /// not yet wired here, so — rather than silently returning `Ok(())` and
+    /// fabricating a "transcode happened" — this returns an honest error.
+    /// The ingest caller is expected to degrade to stream-copy (pass-through)
+    /// when it sees this error, so no transcode is ever falsely claimed.
+    // TODO(0.2.x): implement a real per-stream transcode pipeline — resolve
+    // the `TranscodeJob` for the packet's stream, feed the packet into a live
+    // decode -> ABR-scale -> encode graph (reuse oximedia-transcode), and emit
+    // the encoded output on each quality level's `output_rxs` channel. Until
+    // then this path is honestly unimplemented.
     pub async fn process_packet(&self, _packet: &MediaPacket) -> ServerResult<()> {
-        // In a real implementation, this would:
-        // 1. Decode the incoming packet
-        // 2. Transcode to multiple quality levels
-        // 3. Encode each quality level
-        // 4. Send to respective output channels
-
-        // For now, we'll just log and return
-        // This is a placeholder for the actual transcoding logic
-        Ok(())
+        Err(ServerError::TranscodingFailed(
+            "real-time ingest transcoding is not implemented; caller must \
+             stream-copy (pass-through) this packet"
+                .to_string(),
+        ))
     }
 
     /// Starts transcoding for a stream.

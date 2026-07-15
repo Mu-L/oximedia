@@ -51,6 +51,16 @@ pub const DEFAULT_CHUNK_SIZE: u32 = 128;
 /// Maximum chunk size.
 pub const MAX_CHUNK_SIZE: u32 = 65536;
 
+/// Upper bound on the buffer we pre-allocate for a reassembling message.
+///
+/// A chunk's `message_length` is a 24-bit field (up to 16 MiB) and there is a
+/// separate reassembly buffer per chunk-stream-id (up to ~65k of them). Trusting
+/// the declared length would let a peer send thousands of tiny chunk headers,
+/// each declaring 16 MiB, to force ~1 TB of reservation before sending any
+/// payload. We instead pre-allocate at most this much and let the buffer grow
+/// as real bytes arrive, so memory tracks delivered data, not declared intent.
+const MAX_MESSAGE_PREALLOC: usize = 64 * 1024;
+
 /// Chunk header types (format field).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkHeaderType {
@@ -479,11 +489,18 @@ impl ChunkStream {
             {
                 state.reset();
                 state.message_length = header.message.message_length;
-                state.message_buffer.reserve(state.message_length as usize);
+                // Bound the pre-allocation: never reserve the full declared
+                // length (a 16 MiB claim per chunk-stream-id would amplify a
+                // few bytes of headers into ~1 TB). The buffer grows via
+                // `put_slice` as genuine payload arrives.
+                let prealloc = (state.message_length as usize).min(MAX_MESSAGE_PREALLOC);
+                state.message_buffer.reserve(prealloc);
             }
 
-            // Calculate chunk payload size
-            let remaining = state.message_length - state.bytes_received;
+            // Calculate chunk payload size. `saturating_sub` guards against a
+            // malformed continuation that reports more bytes received than the
+            // declared length (which would panic on a plain subtraction).
+            let remaining = state.message_length.saturating_sub(state.bytes_received);
             let chunk_size = remaining.min(self.rx_chunk_size);
 
             if buf.len() < chunk_size as usize {
@@ -1022,6 +1039,15 @@ impl Default for ChunkEncoder {
 }
 
 #[cfg(test)]
+impl ChunkStream {
+    /// Test-only: current capacity of the reassembly buffer for `csid`, used to
+    /// assert that a hostile `message_length` is not pre-reserved wholesale.
+    fn debug_stream_capacity(&self, csid: u32) -> Option<usize> {
+        self.streams.get(&csid).map(|s| s.message_buffer.capacity())
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1097,6 +1123,35 @@ mod tests {
         let messages = cs.process_chunk(&encoded).expect("should succeed in test");
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].payload.len(), 50);
+    }
+
+    #[test]
+    fn huge_declared_message_length_does_not_over_reserve() {
+        // A Type-0 header can declare up to a 16 MiB message. Feeding one such
+        // header with only a single 128-byte chunk of payload must not cause
+        // the per-stream buffer to reserve the whole declared length (the ~1 TB
+        // amplification this guard defends). The message stays incomplete.
+        let mut cs = ChunkStream::new();
+        cs.set_rx_chunk_size(128);
+
+        let msg = MessageHeader::new(0, 0x00FF_FFFF, 9, 1);
+        let header = ChunkHeader::new(ChunkHeaderType::Full, 3, msg);
+        let mut buf = BytesMut::new();
+        header.encode(&mut buf);
+        buf.put_slice(&[0xAB; 128]);
+
+        let messages = cs
+            .process_chunk(&buf)
+            .expect("partial chunk should buffer cleanly");
+        assert!(messages.is_empty(), "incomplete message must not assemble");
+
+        let cap = cs
+            .debug_stream_capacity(3)
+            .expect("stream state should exist");
+        assert!(
+            cap < 1024 * 1024,
+            "reassembly buffer over-reserved from declared length: cap={cap}"
+        );
     }
 
     #[test]

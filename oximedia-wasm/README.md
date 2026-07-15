@@ -329,7 +329,7 @@ be fixed independently of this crate.
 
 Apache-2.0
 
-Version: 0.1.9 — 2026-07-12 — data-plane, decoder-honesty, and dependency-hygiene pass
+Version: 0.2.0 — 2026-07-15 — data-plane, decoder-honesty, and dependency-hygiene pass
 
 ## See Also
 

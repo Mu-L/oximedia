@@ -142,8 +142,8 @@ fn print_benchmark_plan(options: &BenchmarkOptions) {
     println!("{}", "Benchmark Plan".cyan().bold());
     println!("{}", "=".repeat(60));
     println!("{:20} {}", "Input:", options.input.display());
-    println!("{:20} {:?}", "Codecs:", options.codecs);
-    println!("{:20} {:?}", "Presets:", options.presets);
+    println!("{:20} {}", "Codecs:", options.codecs.join(", "));
+    println!("{:20} {}", "Presets:", options.presets.join(", "));
     println!("{:20} {}", "Iterations:", options.iterations);
 
     if let Some(duration) = options.duration {

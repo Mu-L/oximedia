@@ -7,6 +7,275 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-15
+
+Development release on branch `0.2.0` (workspace version bumped from
+`0.1.9`). Theme: **a real frame-level transcode engine, real AV1/VP9/VP8
+key-frame video decoding, and a broad "real or honest error" sweep** that
+replaces silent placeholder/fabricated-success behaviour across the
+packager, network, workflow, Python bindings, and CLI layers with genuine
+implementations or explicit, testable errors. AV1 key-frame/intra decode
+lands bit-exact against dav1d and aomdec in this release; inter-frame
+decode for AV1/VP9/VP8 remains open for 0.2.x.
+
+### Added
+- **Real frame-level transcode engine** (`crates/oximedia-transcode/src/{frame_level,frame_adapters,audio_adapters,raw_sinks,flac_bitstream,flac_decode,alac_bitstream}.rs`):
+  a genuine decode → filter → encode pipeline behind `TranscodePipeline`'s
+  `requires_frame_level()` gate (`pipeline.rs`), replacing the prior
+  stream-copy-only path for any job that actually needs re-encoding.
+  WAV/FLAC audio input re-encodes through OxiMedia's own FLAC codec, with
+  an encoder→decoder round-trip test (`test_own_encoder_round_trip_bit_exact`)
+  asserting the result is bit-exact. Y4M video decode is wired in, with
+  MPEG-2/FFV1/ProRes/raw-video encode targets. `-r` frame-rate conversion
+  is a real drop/duplicate resampler (`FpsResamplingDecoder`). New file
+  muxers back real outputs: `RawEsFileMuxer`, `FlacFileMuxer`,
+  `CafAlacFileMuxer` (standards-compliant CAF/ALAC), and `Y4mFileMuxer`.
+- **AV1 key-frame/intra-frame video decoder** (`crates/oximedia-codec/src/av1/kf/`:
+  `bits`, `msac`, `hdr`, `cdfs`, `coef`, `pred`, `itx`, `recon`, `lf`,
+  `cdef`, `lr`, plus mechanically-extracted `tables_*`/`consts`) — an exact
+  port of the intra decode path of the AV1 specification
+  (AOMediaCodec/av1-spec): symbol/range decoder, sequence/frame header
+  parsing, transform-coefficient decode, intra prediction (including CFL),
+  and exact inverse transforms, driven by a tile/partition/block decode
+  driver, with the full post-filter chain applied to the output —
+  deblocking loop filter, CDEF, and loop restoration (both Wiener and
+  self-guided/SGRPROJ). `av1/decoder.rs`'s `decode_temporal_unit` now calls
+  into this module directly, replacing the old no-op tile-group branch.
+  Verified bit-exact (0 differing Y/U/V pixels) against both `dav1d` 1.5.1
+  and `aomdec`/libaom v3.12.1 on 13 keyframe test vectors encoded with
+  `aomenc` and SVT-AV1 (`stage1_lossless_gray64_bit_exact` through
+  `stage4_switchable_wiener_320x192_bit_exact` in `av1/kf/mod.rs`),
+  covering lossless coding, 128×128 superblocks, 2 tile columns, an odd
+  76×42 crop, and 320×192 loop-restoration cases. Scope is 8-bit 4:2:0
+  profile 0, keyframe/intra only: inter-frame decode, intra block copy,
+  palette mode, super-resolution, quantizer matrices, film-grain
+  synthesis, 10/12-bit, monochrome, and 4:2:2/4:4:4 all return an honest
+  `CodecError::UnsupportedFeature` instead of a fabricated frame. The
+  orphaned `av1/avif.rs` — never declared as a module, and duplicating the
+  live `avif/mod.rs` AVIF implementation — was deleted as dead code found
+  during this work.
+- **VP9 key-frame/intra-frame video decoder** (`crates/oximedia-codec/src/vp9/kf/`:
+  `booldec`, `hdr`, `itx`, `lf`, `pred`, `recon`, `scan`, `tables`) — an
+  exact port of libvpx's intra decode path (boolean/range decoder, inverse
+  DCT/ADST transforms, the lossless 4×4 Walsh-Hadamard transform, loop
+  filter, and the tile/partition/block decode driver), verified bit-exact
+  against `ffmpeg`/libvpx reference decodes of real encoder output.
+  Non-8-bit profiles, 4:2:2/4:4:4 subsampling, intra-only frames, and
+  inter-frame decode are all out of scope for this pass and return an
+  honest `CodecError::UnsupportedFeature`.
+- **VP8 key-frame video decoder** (`crates/oximedia-codec/src/vp8/keyframe/`) —
+  the full RFC 6386 §11–§15 intra pipeline (macroblock mode parsing, DCT
+  coefficient token decode, dequantise/inverse-transform, intra
+  prediction, in-loop deblocking filter), ported from and cross-checked
+  against the pre-existing, production-verified `oximedia-image` WebP/VP8
+  still-image decoder (a lossy WebP image *is* a single VP8 key frame);
+  both decoders are independently verified bit-exact against libwebp
+  reference output (`test_decode_cwebp_textured_48x40_bit_exact_vs_libwebp_reference`,
+  `test_decode_libvpx_multi_partition_48x48_bit_exact_vs_libwebp_reference`
+  in `oximedia-image/src/webp/vp8/decode.rs`). VP8 inter-frame decode
+  returns an honest `CodecError::UnsupportedFeature`.
+- **Real CENC/`cbcs` sample encryption in the streaming packager**
+  (`crates/oximedia-packager/src/encryption.rs`): `encrypt_cenc`/`decrypt_cenc`
+  now perform genuine full-sample AES-128-CTR (128-bit big-endian counter,
+  incremented per 16-byte block), and `encrypt_sample_aes`/`decrypt_sample_aes`
+  implement the real ISO/IEC 23001-7 §9.6 `cbcs` pattern (1 block encrypted
+  AES-128-CBC / 9 blocks left clear, CBC chain reset per sample) — the
+  format FairPlay/Shaka/hls.js/dash.js actually expect. Both previously
+  just called the plain full-buffer AES-128-CBC helper under a CENC/
+  SAMPLE-AES label, producing ciphertext no real CENC or SAMPLE-AES client
+  could decrypt.
+- **oximedia-cli**: verified real (not stub) behaviour for `--map` stream
+  mapping, `-ss`/`-t` seek/duration trim, `-vf` scale, `-af` volume, `-r`
+  frame-rate conversion, `--crf`, `--normalize-audio`, `probe --hash`
+  (real SHA-256), `probe --quality-snapshot` (decodes frame 0), `validate
+  --loudness-check` (real EBU R128 over a decoded WAV), `mam
+  --extract-metadata` and its date-range filters, `batch-engine
+  --priority`/`--config`/`--state` (SQLite-persisted), `workflow
+  --source`/`--destination`, `edl parse --format`, `recommend
+  --bitrate`/`--resolution`, and a global `--quiet` flag (logging plus
+  several commands' status banners — a documented partial rollout, with
+  the remaining ~50 handlers tracked as `TODO(0.2.x)` in `progress.rs`).
+  Subtitle/caption extraction now demuxes real Matroska subtitle tracks;
+  multicam export renders from real timeline JSON; the virtual-production
+  session registry persists to real JSON on disk (not in-memory only);
+  `archivepro` performs real FLAC/WAV preservation encodes; `dolbyvision`
+  parses real RPU bitstreams (with a NAL-wrapper fallback); and the
+  `quality`/`dedup`/`mir` commands decode real media, failing honestly
+  when a file can't be decoded instead of scoring synthetic data.
+- Matroska muxer `SeekHead` writing (`crates/oximedia-container/src/mux/matroska/seek_head.rs`)
+  and matching `SeekHead`-aware seeking on the demuxer side.
+- **`oximedia-server` RTMP ingest now actually accepts connections**
+  (`crates/oximedia-server/src/rtmp/server.rs`): `RtmpIngestServer::start`
+  previously spawned a `run_server` loop that only slept one second at a
+  time and iterated an always-empty stream map — the real
+  `oximedia_net::rtmp::RtmpServer` accept loop was built but never run, so
+  the ingest server never bound a socket or accepted a single publish.
+  `start` now spawns the real `RtmpServer::run` accept loop directly, plus
+  a new bridge task: `StreamKeyValidator` gained a `publish_notifier`
+  channel that fires a `PublishEvent` the moment a publish is authorized,
+  and `run_bridge` waits (bounded ~2 s poll) for the corresponding stream
+  to appear in `oximedia_net`'s `StreamRegistry` before creating the
+  `IngestStream` that feeds transcoding, recording, and CDN upload.
+  Verified against a real loopback TCP socket
+  (`oximedia-server/tests/rtmp_ingest.rs`).
+- **`oximedia-switcher` downstream-keyer (DSK) real auto-transition**
+  (`keyer.rs`): `DownstreamKeyer`'s auto-transition now drives a genuine
+  linear ramp of the key mix level from its current value to the target
+  over `duration_frames` (new `DskTransition` state, advanced by
+  `advance_transition`), matching real DSK hardware where the tally state
+  reflects the commanded on/off target immediately while the mix level
+  ramps over time; previously the mix level had no time dimension at all.
+- **`oximedia-vfx` planar tracking: real homography solve**
+  (`tracking/planar.rs`): `PlanarData::calculate_homography` previously
+  returned a hardcoded identity matrix ("simplified... as placeholder");
+  it now calls a new `solve_homography_dlt`, a real 4-point Direct Linear
+  Transform (Hartley & Zisserman §4.1) computing the actual 3×3 homography
+  mapping the reference corner quad onto the tracked corner quad, used by
+  `PlanarTracker::warp_to_reference` for real perspective-warped
+  planar-surface tracking (e.g. screen replacement).
+
+### Changed
+- **Fabricated-success elimination ("real or honest error") across several
+  layers**, each backed by a new regression test proving the old
+  behaviour is gone:
+  - **`oximedia-py` PyO3 bindings**: `proxy_py.rs` no longer writes a
+    placeholder/marker file at the target path for an unsupported output
+    container or after a real pipeline failure (`test_*_must_return_err_not_fabricate_a_proxy`);
+    `cloud_py.rs`'s `upload()` no longer returns a fabricated
+    `provider://bucket/key` URI when no bytes were actually transferred
+    (`test_upload_existing_file_returns_err_not_fabricated_uri`);
+    `video.rs` no longer turns a decode `Err` into a blank placeholder
+    `VideoFrame`; `workflow_py.rs` no longer reports a fabricated
+    "completed" status for a task type or failure it cannot honestly
+    execute (`test_run_workflow_transcode_failure_reported_honestly`).
+  - **`oximedia-net` RTMP relay** (`rtmp/server/relay.rs`): forwarding to
+    an unreachable target, or a full outbound queue, is now honest
+    back-pressure — packets are counted as dropped rather than silently
+    accepted (`test_relay_manager_forward_to_unreachable_is_honest`).
+  - **Codec honesty**: Opus hybrid-mode encode now returns an honest
+    `UnsupportedFeature` error instead of emitting a packet that wasn't a
+    real hybrid encode (`test_hybrid_mode_encode_returns_honest_unsupported_error`);
+    the JPEG XS decoder propagates real entropy-decode errors instead of
+    zero-filling the output (`decode_propagates_entropy_error_instead_of_zero_filling`);
+    VP8/VP9 inter-frame decode return honest errors (see Added).
+  - **`oximedia-cli`**: `loudness analyze`/`check` now decode and meter
+    real WAV samples instead of a block of synthetic silence, which
+    previously reported fabricated metrics/compliance for every input;
+    subtitle and timecode burn-in now validate their real inputs and then
+    return an explicit "burn-in not implemented yet, no output file was
+    written" error rather than a silent no-op success.
+  - **`oximedia-effects`**: `FilterBand::low_shelf`/`high_shelf` now
+    compute real RBJ Audio-EQ-Cookbook shelf-filter coefficients; the
+    prior code built a `LowShelf`/`HighShelf` band but its coefficients
+    were a flat pass-through ("simplified"), so the requested EQ shape
+    was silently never applied.
+  - **Eight more "honest `Err` instead of fabricated `Ok`" fixes** found
+    during the same sweep, each backed by a `*_is_honest_err_*` regression
+    test: `oximedia-renderfarm`'s render pipeline (`pipeline.rs`) —
+    `resolve_dependencies` no longer infers "satisfied" from an empty list,
+    `verify_all_frames` no longer hardcodes `true`, and `assemble_output`/
+    `calculate_quality_metrics` now return honest `Err` instead of a
+    fabricated completed-render result (real dependency download, frame
+    verification, sequence assembly, and quality metrics remain
+    `TODO(0.2.x)`); `oximedia-stabilize`'s `ThreeDStabilizer::stabilize_3d`
+    no longer silently passes the input transforms through as if they were
+    a real structure-from-motion 3D solve; `oximedia-vfx`'s text-rendering
+    `VideoEffect::apply` (`text/render.rs`) no longer reports `Ok(())` for
+    non-empty text with no glyph rasterizer wired up; `oximedia-access`'s
+    sign-language overlay `apply()` (`sign/overlay.rs`) no longer returns
+    an empty-but-`Ok` composited frame when it has no pixel compositor;
+    `oximedia-captions`'s `detect_shot_changes` (`shotchange.rs`) no longer
+    returns a fabricated empty `Ok` result; `oximedia-automation`'s EAS
+    message composer (`eas/audio.rs`) no longer fabricates silence when
+    `load_tts_audio` can't produce real TTS samples; `oximedia-conform`'s
+    Premiere Pro / DaVinci Resolve XML importers (`importers/xml.rs`) no
+    longer return a fabricated empty `Ok(vec![])` clip list; and
+    `oximedia-accel`'s Vulkan compute backend (`compute_backend.rs`) no
+    longer returns a result buffer that was never actually dispatched to a
+    GPU.
+- `oximedia-container`'s metadata writer (`metadata/writer.rs`, over the
+  2000-line policy limit) split via `splitrs` into `metadata/writer/mod.rs`
+  and `metadata/writer/flac.rs`.
+
+### Removed
+- **`oximedia-cli transcode --resume`**: the flag was already dead code
+  (`TranscodeOptions::resume` was `#[allow(dead_code)]` and never consulted
+  by any transcode code path — no resume-from-partial-encode capability was
+  ever implemented behind it). It is now removed from the CLI entirely:
+  clap rejects `--resume` as an unknown argument, and it no longer appears
+  in `transcode --help` (`resume_flag_is_rejected_by_clap`,
+  `resume_flag_absent_from_help` in `oximedia-cli/tests/transcode_trim_map.rs`).
+  Any script currently passing `--resume` will need to drop it; it was
+  already a silent no-op before this change.
+
+### Fixed
+- **RTMP client handshake ordering** (`crates/oximedia-net/src/rtmp/client.rs`):
+  `perform_handshake` called `parse_s2` (validate S2, which transitions
+  the handshake state machine to `Done`) before `generate_c2` (send C2,
+  which transitions it to `AckSent`) — the reverse of RFC-specified
+  order. `generate_c2` now runs first.
+- **`oximedia-workflow` executor dropped non-root tasks** (`executor.rs`):
+  `execute()` scanned the task order with a single-pass iterator, so a
+  task whose dependencies weren't yet satisfied was skipped past and,
+  because the shared iterator never revisited it, every non-root task in
+  a dependency chain was silently dropped while the workflow still
+  reported `Completed`. Replaced with a repeated-rescan (fixpoint)
+  scheduler that runs all tasks in dependency order; a real non-root
+  failure now correctly yields `Failed`
+  (`test_non_root_failure_is_not_silently_dropped`,
+  `test_dependency_chain_runs_all_steps_in_order`).
+- **FLAC encoder frame-header CRC-8** (`crates/oximedia-codec/src/flac/encoder.rs`):
+  was hardcoded to `0`; now computes the real CRC-8 (polynomial `0x07`,
+  matching the standard catalogue check value `0xF4` for `"123456789"`).
+- **JPEG-LS RUN-mode decoder out-of-bounds write** (`crates/oximedia-codec/src/jpegls/decoder.rs`):
+  a run interruption near the end of a row could write past the row
+  boundary; fixed with an explicit bounds check before the token is
+  written, pinned by a regression test at `run_index = 7`.
+- **DNG writer IFD offset computation** (`crates/oximedia-image/src/dng/writer.rs`):
+  tag/value offsets into the out-of-line deferred-data area are now
+  computed and written in a single, final pass over the
+  tag-ascending-sorted entry list.
+- **wasm32 `1usize << 32` constant-eval/overflow**: allocation-limit
+  constants in `oximedia-codec` (`util/limits.rs::MAX_ALLOC_BYTES`),
+  `oximedia-image` (`limits.rs::MAX_ALLOC_BYTES`), and `oximedia-pipeline`
+  (`memory_pool.rs::MAX_POOL_BYTES`) were expressed as a `usize` left
+  shift, which overflows on the 32-bit `usize` of the
+  `wasm32-unknown-unknown` target; all three are now explicit `u64`.
+- **SRT key exchange used a fake RFC 3394 key wrap** (`crates/oximedia-net/src/srt/crypto.rs`):
+  `aes_key_wrap`/unwrap only masqueraded as RFC 3394 AES Key Wrap and
+  produced non-interoperable output. Rewritten as the real algorithm (six
+  rounds over all key blocks, the `0xA6A6A6A6A6A6A6A6` integrity IV per
+  RFC 3394 §2.2.1) and made fallible, so a corrupt or forged wrapped key
+  is rejected instead of silently accepted; verified against the RFC 3394
+  §4.1 128-bit test vector.
+
+### Security
+- **Parser bounds/allocation-cap hardening** against maliciously-crafted
+  input, added across several parsers: MP4 box nesting now rejected
+  beyond `MAX_BOX_DEPTH` (32 levels, preventing a stack-overflow via deep
+  recursion) with `checked_add` on box-offset arithmetic
+  (`oximedia-container/src/demux/mp4/{boxes,mod}.rs`); DVB subtitle
+  region-composition dimensions capped at `MAX_REGION_DIMENSION_PX`
+  (4096 px) before use (`oximedia-subtitle/src/parser/dvb.rs`); RTSP
+  request/response bodies capped at `MAX_RTSP_BODY_LEN` (16 MiB) with a
+  `checked_add` guard on the body-end offset so a huge `Content-Length`
+  can't overflow it (`oximedia-net/src/rtsp/message.rs`); WebRTC SCTP
+  message reassembly capped at 4 MiB per stream / 16 MiB total via
+  `saturating_add` accounting (`oximedia-net/src/webrtc/sctp.rs`); RTMP
+  chunk size clamped to `MAX_CHUNK_SIZE` (64 KiB) and message-length
+  preallocation capped at `MAX_MESSAGE_PREALLOC` (64 KiB) regardless of
+  the attacker-declared message length (`oximedia-net/src/rtmp/chunk.rs`);
+  AAF `LazyEssence` now validates a declared `(offset, length)` essence
+  range against the real file/stream size (with `checked_add`) before
+  allocating the read buffer, closing an over-declared-length
+  memory-exhaustion path (`oximedia-aaf/src/lazy_essence.rs`); and a
+  division-by-zero guard (`checked_div`) was added to container bitrate
+  estimation (`oximedia-container/src/container_probe/multi_format.rs`).
+- **SRT RFC 3394 AES key wrap** — see Fixed.
+- **Real CENC/`cbcs` AES-CTR packager encryption** — see Added; the
+  previous mislabeled full-buffer CBC path was not a real confidentiality
+  guarantee against a client expecting CENC/SAMPLE-AES semantics.
+
 ## [0.1.9] - 2026-07-14
 
 This is a production-readiness release: the default build is now **100% Pure
@@ -755,7 +1024,8 @@ a new **`oximedia-web`** npm package brings four browser WebAssembly modules
 - `oximedia-wasm` — WebAssembly bindings
 - `oximedia-cli` — command-line interface
 
-[Unreleased]: https://github.com/cool-japan/oximedia/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/cool-japan/oximedia/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/cool-japan/oximedia/compare/v0.1.9...HEAD
 [0.1.9]: https://github.com/cool-japan/oximedia/compare/v0.1.8...v0.1.9
 [0.1.2]: https://github.com/cool-japan/oximedia/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/cool-japan/oximedia/compare/v0.1.0...v0.1.1

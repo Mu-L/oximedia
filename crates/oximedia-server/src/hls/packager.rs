@@ -6,9 +6,10 @@ use oximedia_net::rtmp::MediaPacket;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::info;
+use tracing::{info, warn};
 
 /// HLS configuration.
 #[derive(Debug, Clone)]
@@ -65,6 +66,10 @@ struct StreamPackager {
 
     /// Packets buffered for current segment.
     packet_buffer: RwLock<Vec<MediaPacket>>,
+
+    /// Set once we have logged that real segment muxing is unavailable, so we
+    /// warn a single time per stream instead of once per segment.
+    mux_unsupported_logged: AtomicBool,
 }
 
 impl StreamPackager {
@@ -80,6 +85,7 @@ impl StreamPackager {
             segment_writer,
             segment_index: RwLock::new(0),
             packet_buffer: RwLock::new(Vec::new()),
+            mux_unsupported_logged: AtomicBool::new(false),
         })
     }
 
@@ -118,18 +124,34 @@ impl StreamPackager {
             (idx, format!("segment{}.ts", idx))
         };
 
-        // Write segment
-        self.segment_writer
+        // Attempt to write a real MPEG-TS segment. Real muxing is not yet
+        // implemented (see hls/segment.rs), so this fails honestly. We degrade
+        // by dropping the segment instead of writing a fabricated file or
+        // advertising a segment that does not exist in the playlist. Warn once
+        // per stream to avoid flooding the log every segment.
+        match self
+            .segment_writer
             .write_segment(&segment_name, &packets)
-            .await?;
+            .await
+        {
+            Ok(()) => {
+                // Only advertise the segment once it was genuinely produced.
+                self.playlist_gen
+                    .add_segment(&segment_name, self.config.segment_duration.as_secs_f64())?;
+                info!("Finalized HLS segment: {}", segment_name);
+            }
+            Err(e) => {
+                if !self.mux_unsupported_logged.swap(true, Ordering::Relaxed) {
+                    warn!(
+                        "HLS segment muxing unavailable for stream '{}': {}; \
+                         dropping segments (no fabricated output produced)",
+                        self.stream_key, e
+                    );
+                }
+            }
+        }
 
-        // Update playlist
-        self.playlist_gen
-            .add_segment(&segment_name, self.config.segment_duration.as_secs_f64())?;
-
-        let _ = index_val; // used above
-
-        info!("Finalized HLS segment: {}", segment_name);
+        let _ = index_val; // reserved above; kept monotonic even when dropped
 
         Ok(())
     }

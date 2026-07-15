@@ -54,6 +54,20 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
 
+/// Maps a desired media sequence number to an index into the current media
+/// playlist's segment list.
+///
+/// Returns `None` when `seq` is outside the playlist's sliding window. A live
+/// server can raise `media_sequence` above `seq` after evicting segments; using
+/// `checked_sub` here turns that "we fell behind" case into a clean `None`
+/// instead of a `u64` underflow panic on `seq - media_sequence`.
+fn segment_index(seq: u64, media_sequence: u64, segment_count: usize) -> Option<usize> {
+    match seq.checked_sub(media_sequence) {
+        Some(idx) if (idx as usize) < segment_count => Some(idx as usize),
+        _ => None,
+    }
+}
+
 /// Configuration for the HLS client.
 #[derive(Debug, Clone)]
 pub struct HlsClientConfig {
@@ -733,21 +747,20 @@ impl HlsClient {
                     let media_guard = media_playlist.read().await;
                     if let Some(ref playlist) = *media_guard {
                         let seq = *next_sequence.lock().await;
-                        let idx = (seq - playlist.media_sequence) as usize;
-
-                        if idx < playlist.segments.len() {
-                            Some((
-                                playlist.segments[idx].clone(),
-                                seq,
-                                playlist.base_uri.clone(),
-                            ))
-                        } else if playlist.ended {
-                            // Stream has ended
-                            None
-                        } else {
-                            // Live stream, wait for more segments
-                            None
-                        }
+                        // A live server can raise `media_sequence` past our
+                        // `seq` (segments we still wanted were evicted from the
+                        // sliding window); `segment_index` uses `checked_sub` so
+                        // that becomes a clean wait rather than an underflow
+                        // panic. Out-of-range / fell-behind both yield None.
+                        segment_index(seq, playlist.media_sequence, playlist.segments.len()).map(
+                            |idx| {
+                                (
+                                    playlist.segments[idx].clone(),
+                                    seq,
+                                    playlist.base_uri.clone(),
+                                )
+                            },
+                        )
                     } else {
                         None
                     }
@@ -990,5 +1003,30 @@ impl HlsClientBuilder {
 impl Default for HlsClientBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::segment_index;
+
+    #[test]
+    fn segment_index_normal_and_boundary() {
+        assert_eq!(segment_index(10, 8, 5), Some(2));
+        assert_eq!(segment_index(8, 8, 5), Some(0));
+        assert_eq!(segment_index(12, 8, 5), Some(4));
+    }
+
+    #[test]
+    fn segment_index_fallen_behind_is_none_not_panic() {
+        // seq < media_sequence: the live window slipped past us. Must be a
+        // clean None (the old `seq - media_sequence` panicked on underflow).
+        assert_eq!(segment_index(5, 8, 5), None);
+        assert_eq!(segment_index(0, u64::MAX, 5), None);
+    }
+
+    #[test]
+    fn segment_index_out_of_range_is_none() {
+        assert_eq!(segment_index(100, 8, 5), None);
     }
 }

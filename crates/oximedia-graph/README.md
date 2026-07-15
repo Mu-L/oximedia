@@ -1,9 +1,9 @@
 # oximedia-graph
 
 ![Status: Stable](https://img.shields.io/badge/status-stable-green)
-![Version: 0.1.9](https://img.shields.io/badge/version-0.1.9-blue)
+![Version: 0.2.0](https://img.shields.io/badge/version-0.2.0-blue)
 ![Tests: 692](https://img.shields.io/badge/tests-692-brightgreen)
-![Updated: 2026-07-08](https://img.shields.io/badge/updated-2026--07--08-blue)
+![Updated: 2026-07-14](https://img.shields.io/badge/updated-2026--07--14-blue)
 
 Filter graph pipeline for OxiMedia, providing a directed acyclic graph (DAG) implementation for processing media through composable filter pipelines.
 

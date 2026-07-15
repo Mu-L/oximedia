@@ -41,6 +41,15 @@ const FRAME_TAG: &str = "FRAME";
 /// Maximum header line length to prevent malicious inputs.
 const MAX_HEADER_LINE_LEN: usize = 4096;
 
+/// Maximum accepted uncompressed frame size (2 GiB).
+///
+/// Y4M dimensions come from ASCII `W`/`H` header fields, so a hostile file can
+/// declare enormous values. Any header whose computed raw-frame size exceeds
+/// this ceiling is rejected before `read_frame` reaches `vec![0u8; frame_size]`,
+/// preventing an out-of-memory abort. 2 GiB comfortably exceeds any real frame
+/// (16K 4:4:4:alpha is only ~0.5 GiB).
+const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Chroma subsampling
 // ---------------------------------------------------------------------------
@@ -72,28 +81,34 @@ impl Y4mChroma {
     /// This accounts for all planes (Y, Cb, Cr, and alpha if applicable).
     #[must_use]
     pub fn bytes_per_frame(self, width: u32, height: u32) -> usize {
+        // Saturating arithmetic throughout: a malicious Y4M header can carry
+        // near-u32::MAX dimensions, and `w * h * 4` (4:4:4:alpha) overflows
+        // usize — panicking in debug builds and wrapping to a small value in
+        // release. On overflow we saturate to usize::MAX, which callers reject
+        // via the `MAX_FRAME_BYTES` ceiling in `parse_header` before allocating
+        // any frame buffer.
         let w = width as usize;
         let h = height as usize;
-        let luma = w * h;
+        let luma = w.saturating_mul(h);
         match self {
             Self::C420jpeg | Self::C420mpeg2 | Self::C420paldv => {
                 // Chroma planes are half width and half height each
-                let chroma_w = (w + 1) / 2;
-                let chroma_h = (h + 1) / 2;
-                luma + 2 * chroma_w * chroma_h
+                let chroma_w = w.saturating_add(1) / 2;
+                let chroma_h = h.saturating_add(1) / 2;
+                luma.saturating_add(chroma_w.saturating_mul(chroma_h).saturating_mul(2))
             }
             Self::C422 => {
                 // Chroma planes are half width, full height
-                let chroma_w = (w + 1) / 2;
-                luma + 2 * chroma_w * h
+                let chroma_w = w.saturating_add(1) / 2;
+                luma.saturating_add(chroma_w.saturating_mul(h).saturating_mul(2))
             }
             Self::C444 => {
                 // Chroma planes are same size as luma
-                luma * 3
+                luma.saturating_mul(3)
             }
             Self::C444alpha => {
                 // Y + Cb + Cr + Alpha, all full resolution
-                luma * 4
+                luma.saturating_mul(4)
             }
             Self::Mono => {
                 // Luma only
@@ -386,6 +401,20 @@ fn parse_header(line: &str) -> OxiResult<Y4mHeader> {
         });
     }
 
+    // Reject maliciously huge text-parsed dimensions before any frame buffer is
+    // allocated. `frame_size()` uses saturating math (it never panics), so an
+    // overflowing W*H*channels product collapses to a value above this ceiling.
+    let frame_size = header.frame_size();
+    if frame_size > MAX_FRAME_BYTES {
+        return Err(OxiError::Parse {
+            offset: 0,
+            message: format!(
+                "Frame size {frame_size} bytes (W{} H{}) exceeds maximum {MAX_FRAME_BYTES}",
+                header.width, header.height
+            ),
+        });
+    }
+
     Ok(header)
 }
 
@@ -651,6 +680,24 @@ impl<R: Read> Y4mDemuxer<R> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    /// Security regression (P1 #9): near-u32::MAX W/H with 4:4:4:alpha overflow
+    /// `bytes_per_frame` (w*h*4). Saturating math must yield a value above the
+    /// MAX_FRAME_BYTES ceiling so the header is rejected before any allocation.
+    #[test]
+    fn parse_header_huge_dimensions_rejected() {
+        let data = b"YUV4MPEG2 W4000000000 H4000000000 C444alpha\n".to_vec();
+        assert!(Y4mDemuxer::new(Cursor::new(data)).is_err());
+    }
+
+    #[test]
+    fn bytes_per_frame_saturates_on_overflow() {
+        // Must not panic; saturates to usize::MAX rather than wrapping.
+        assert_eq!(
+            Y4mChroma::C444alpha.bytes_per_frame(u32::MAX, u32::MAX),
+            usize::MAX
+        );
+    }
 
     // -- Header parsing tests --
 

@@ -1,6 +1,6 @@
 //! Text rendering with effects.
 
-use crate::{Color, EffectParams, Frame, VfxResult, VideoEffect};
+use crate::{Color, EffectParams, Frame, VfxError, VfxResult, VideoEffect};
 
 /// Text configuration.
 #[derive(Debug, Clone)]
@@ -95,6 +95,15 @@ impl TextConfig {
 }
 
 /// Text renderer.
+///
+/// # Font rasterization status
+///
+/// No font rasterizer is wired up yet (`font_data` is always empty). Real
+/// glyph rasterization is a large, dependency-sensitive feature (a
+/// pure-Rust font engine is required per COOLJAPAN policy) and is not yet
+/// implemented. Rather than approximating glyphs with solid-color
+/// rectangles and reporting success, [`apply`](VideoEffect::apply) returns
+/// an honest `Err` for non-empty text. See `TODO(0.2.x)` there.
 pub struct TextRenderer {
     config: TextConfig,
     font_data: Vec<u8>,
@@ -107,9 +116,11 @@ impl TextRenderer {
     ///
     /// Returns an error if font loading fails.
     pub fn new(config: TextConfig) -> VfxResult<Self> {
-        // Use embedded font or load from system
-        // For now, we'll use a simple placeholder
-        let font_data = vec![]; // Placeholder - would load real font
+        // TODO(0.2.x): load an embedded or system font via a pure-Rust
+        // rasterizer. Until then `font_data` stays empty and `apply`
+        // reports an honest error for non-empty text instead of
+        // fabricating glyphs (see `VideoEffect::apply` below).
+        let font_data = vec![];
 
         Ok(Self { config, font_data })
     }
@@ -130,29 +141,6 @@ impl TextRenderer {
     pub fn config_mut(&mut self) -> &mut TextConfig {
         &mut self.config
     }
-
-    fn draw_text_simple(&self, frame: &mut Frame, x: i32, y: i32, color: Color) {
-        // Simple text rendering without actual font
-        // This is a placeholder implementation
-        let char_width = self.config.font_size as i32 / 2;
-        let char_height = self.config.font_size as i32;
-
-        for (i, _ch) in self.config.text.chars().enumerate() {
-            let char_x = x + i as i32 * char_width;
-
-            // Draw simple rectangle for each character (placeholder)
-            for dy in 0..char_height {
-                for dx in 0..char_width - 2 {
-                    let px = char_x + dx;
-                    let py = y + dy;
-
-                    if px >= 0 && px < frame.width as i32 && py >= 0 && py < frame.height as i32 {
-                        frame.set_pixel(px as u32, py as u32, color.to_rgba());
-                    }
-                }
-            }
-        }
-    }
 }
 
 impl VideoEffect for TextRenderer {
@@ -161,7 +149,7 @@ impl VideoEffect for TextRenderer {
     }
 
     fn description(&self) -> &'static str {
-        "High-quality text rendering"
+        "Text rendering (font rasterizer not yet implemented; see TODO(0.2.x))"
     }
 
     fn apply(
@@ -170,37 +158,29 @@ impl VideoEffect for TextRenderer {
         output: &mut Frame,
         _params: &EffectParams,
     ) -> VfxResult<()> {
-        // Copy input to output
+        if !self.config.text.is_empty() {
+            // TODO(0.2.x): real glyph rasterization (pure-Rust font engine).
+            //
+            // This previously drew solid-color rectangles per character and
+            // reported `Ok(())`, silently fabricating "rendered text" that
+            // was never actual glyphs (`font_data` is always empty — see
+            // `TextRenderer::new`). Until a real pure-Rust rasterizer is
+            // integrated, report this explicitly rather than lying about
+            // the result.
+            return Err(VfxError::TextRenderError(
+                "text rendering requires a font rasterizer — not yet implemented; \
+                 see TODO(0.2.x)"
+                    .to_string(),
+            ));
+        }
+
+        // No text configured: a faithful identity pass-through, not a
+        // fabricated rendering result — there is nothing to rasterize.
         for y in 0..output.height {
             for x in 0..output.width {
                 output.set_pixel(x, y, input.get_pixel(x, y).unwrap_or([0, 0, 0, 0]));
             }
         }
-
-        let x = (self.config.x * output.width as f32) as i32;
-        let y = (self.config.y * output.height as f32) as i32;
-
-        // Draw shadow if enabled
-        if self.config.shadow_x != 0.0 || self.config.shadow_y != 0.0 {
-            let shadow_x = x + self.config.shadow_x as i32;
-            let shadow_y = y + self.config.shadow_y as i32;
-            self.draw_text_simple(output, shadow_x, shadow_y, self.config.shadow_color);
-        }
-
-        // Draw outline if enabled
-        if self.config.outline_width > 0.0 {
-            for dy in -1..=1 {
-                for dx in -1..=1 {
-                    if dx != 0 || dy != 0 {
-                        self.draw_text_simple(output, x + dx, y + dy, self.config.outline_color);
-                    }
-                }
-            }
-        }
-
-        // Draw main text
-        self.draw_text_simple(output, x, y, self.config.color);
-
         Ok(())
     }
 }
@@ -221,15 +201,48 @@ mod tests {
     }
 
     #[test]
-    fn test_text_renderer() {
+    fn test_text_renderer_nonempty_text_returns_honest_err_not_fake_rectangles() {
+        // With no font rasterizer wired up, non-empty text must not be
+        // silently "rendered" as solid-color rectangles; it must report an
+        // honest error instead of fabricating success.
         let config = TextConfig::new("Test").with_font_size(24.0);
         let mut renderer = TextRenderer::new(config).expect("should succeed in test");
 
         let input = Frame::new(200, 100).expect("should succeed in test");
         let mut output = Frame::new(200, 100).expect("should succeed in test");
         let params = EffectParams::new();
+        let err = renderer
+            .apply(&input, &mut output, &params)
+            .expect_err("text rendering without a font rasterizer must fail honestly");
+
+        assert!(
+            matches!(err, VfxError::TextRenderError(_)),
+            "expected VfxError::TextRenderError, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_text_renderer_empty_text_is_identity_passthrough() {
+        // Empty text has nothing to rasterize, so it is honestly a no-op:
+        // output must exactly equal input, and this must succeed.
+        let config = TextConfig::new("");
+        let mut renderer = TextRenderer::new(config).expect("should succeed in test");
+
+        let input = Frame::new(8, 6).expect("should succeed in test");
+        let mut output = Frame::new(8, 6).expect("should succeed in test");
+        let params = EffectParams::new();
         renderer
             .apply(&input, &mut output, &params)
-            .expect("should succeed in test");
+            .expect("empty text must be a harmless identity pass-through");
+
+        for y in 0..output.height {
+            for x in 0..output.width {
+                assert_eq!(
+                    output.get_pixel(x, y).unwrap_or([0, 0, 0, 0]),
+                    input.get_pixel(x, y).unwrap_or([0, 0, 0, 0]),
+                    "identity pass-through must match input exactly at ({x},{y})"
+                );
+            }
+        }
     }
 }

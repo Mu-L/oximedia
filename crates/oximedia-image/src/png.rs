@@ -412,6 +412,11 @@ impl PngDecoder {
         }
 
         let ihdr = ihdr.ok_or_else(|| ImageError::invalid_format("PNG missing IHDR"))?;
+        // Defend against an allocation bomb and the u32 `width*height` multiply
+        // wrap in the defilter/pixel buffers below: reject IHDR dimensions above
+        // the decode ceiling before sizing any width*height buffer.
+        crate::limits::check_dimensions(ihdr.width as usize, ihdr.height as usize)
+            .map_err(ImageError::InvalidFormat)?;
         if idat_data.is_empty() {
             return Err(ImageError::invalid_format("PNG missing IDAT"));
         }

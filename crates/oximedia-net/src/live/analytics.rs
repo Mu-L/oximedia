@@ -275,9 +275,13 @@ impl Analytics {
 
         match packet.media_type {
             super::MediaType::Video => {
-                if packet.keyframe {
-                    // Update framerate
-                    self.framerate_series.write().add(30.0); // Placeholder
+                // Real instantaneous frame rate derived from the frame's own
+                // duration (ms), replacing a fabricated constant 30.0 fps. A
+                // zero/unknown duration is skipped rather than guessed.
+                if packet.duration > 0 {
+                    self.framerate_series
+                        .write()
+                        .add(1000.0 / packet.duration as f64);
                 }
             }
             super::MediaType::Audio => {}

@@ -1,6 +1,6 @@
 # oximedia-bitstream TODO
 
-Version: 0.1.9 | Status as of: 2026-07-08
+Version: 0.2.0 | Status as of: 2026-07-15
 
 ## Status: Stable
 

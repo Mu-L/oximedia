@@ -24,15 +24,44 @@ impl SignLanguageOverlay {
 
     /// Apply sign language overlay to video frame.
     ///
-    /// This would composite the sign language video onto the main video.
+    /// This would composite the sign language video onto the main video:
+    /// scale the sign-language frame to the configured [`SignSize`],
+    /// position it per [`SignPosition`], apply the configured
+    /// [`SignBorder`], and alpha-blend it onto `_main_frame` at
+    /// `config.opacity`.
+    ///
+    /// # Honesty note
+    ///
+    /// This is **not implemented**. An earlier revision returned
+    /// `Ok(vec![])` — an empty frame reported as success — regardless of
+    /// input, which silently discarded both frames. Beyond not being
+    /// implemented, real compositing is not even possible with this
+    /// signature today: `apply` receives only raw `&[u8]` byte slices with
+    /// no width, height, stride, or pixel-format, so there is no geometry
+    /// to scale/position/blend against. No compositor is reusable here
+    /// either — `oximedia-graph`'s blend/alignment math
+    /// (`filters::video::overlay::{BlendMode, Alignment}`) exists but is a
+    /// private module not exported from that crate, and this crate does
+    /// not otherwise depend on a pixel compositor. This fails honestly
+    /// instead of fabricating an empty "success".
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`AccessError::SignLanguageFailed`]: real PiP
+    /// compositing is not implemented.
+    // TODO(0.2.x): real PiP compositing. Requires extending this API with
+    // frame geometry (e.g. accept `width`/`height`/`PixelFormat`, or a
+    // `VideoFrame`-like type, instead of raw `&[u8]`) so scale/position/
+    // alpha-blend math has something to work with; then either export and
+    // reuse oximedia-graph's overlay blend primitives, or implement
+    // equivalent scale+alpha-blend logic directly in this crate.
     pub fn apply(&self, _main_frame: &[u8], _sign_frame: &[u8]) -> AccessResult<Vec<u8>> {
-        // In production, this would:
-        // 1. Scale sign language video to configured size
-        // 2. Position it according to config
-        // 3. Apply border if configured
-        // 4. Composite onto main frame with opacity
-
-        Ok(vec![])
+        Err(AccessError::SignLanguageFailed(
+            "PiP compositing is not implemented (and this API does not yet carry frame \
+             width/height/pixel-format, which real scale+position+alpha-blend compositing \
+             requires)"
+                .to_string(),
+        ))
     }
 
     /// Get configuration.
@@ -75,5 +104,28 @@ mod tests {
 
         overlay.config.opacity = 1.5;
         assert!(overlay.validate().is_err());
+    }
+
+    #[test]
+    fn test_apply_is_honest_err_not_fabricated_empty_frame() {
+        // CHANGED: apply() previously returned `Ok(vec![])` — an empty
+        // frame reported as a successful composite — for any input. Real
+        // compositing is not implemented (and the current signature lacks
+        // the frame geometry a real implementation would need), so it must
+        // report that honestly via `Err` instead.
+        let overlay = SignLanguageOverlay::default();
+        let main_frame = vec![0u8; 64];
+        let sign_frame = vec![255u8; 32];
+
+        let result = overlay.apply(&main_frame, &sign_frame);
+
+        assert!(
+            result.is_err(),
+            "apply() must not fabricate an empty-but-Ok composited frame"
+        );
+        assert!(matches!(
+            result.unwrap_err(),
+            AccessError::SignLanguageFailed(_)
+        ));
     }
 }

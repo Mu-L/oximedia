@@ -76,11 +76,20 @@ impl<'a> MatroskaParser<'a> {
     ///
     /// Returns an error if there's not enough data.
     pub fn read_data(&mut self, size: usize) -> OxiResult<&'a [u8]> {
-        if self.position + size > self.data.len() {
+        // `size` may be the EBML unknown-size sentinel (`u64::MAX`) cast to
+        // usize (see `EbmlElement::is_unbounded`); `self.position + size` would
+        // then wrap around and bypass the bounds check, letting the slice below
+        // panic. Use checked_add so an overflowing / oversized size is reported
+        // as EOF instead of causing an out-of-bounds slice.
+        let end = self
+            .position
+            .checked_add(size)
+            .ok_or(OxiError::UnexpectedEof)?;
+        if end > self.data.len() {
             return Err(OxiError::UnexpectedEof);
         }
-        let data = &self.data[self.position..self.position + size];
-        self.position += size;
+        let data = &self.data[self.position..end];
+        self.position = end;
         Ok(data)
     }
 
@@ -164,10 +173,22 @@ pub fn parse_ebml_header(data: &[u8]) -> OxiResult<(EbmlHeader, usize)> {
         });
     }
 
-    let end_pos = parser.position() + element.size as usize;
+    // A malformed EBML header may carry the "unknown size" sentinel
+    // (`element.size == u64::MAX`, see `EbmlElement::is_unbounded`); casting it
+    // to usize and adding it to the current position overflows and would wrap
+    // past the loop bound below. Treat an unbounded top-level EBML header as
+    // extending to end-of-data and clamp any overflow to the buffer length.
+    let end_pos = if element.is_unbounded() {
+        data.len()
+    } else {
+        parser
+            .position()
+            .checked_add(element.size as usize)
+            .map_or(data.len(), |p| p.min(data.len()))
+    };
     let mut header = EbmlHeader::default();
 
-    while parser.position() < end_pos {
+    while parser.position() < end_pos && !parser.is_eof() {
         let child = parser.read_element()?;
         let size = child.size as usize;
 
@@ -1286,11 +1307,15 @@ fn parse_xiph_lacing(data: &[u8]) -> OxiResult<Vec<Vec<u8>>> {
     // Extract frames
     let mut frames = Vec::with_capacity(frame_count);
     for size in &sizes {
-        if pos + size > data.len() {
+        // A lacing frame size is derived from attacker-controlled bytes (Xiph
+        // sums / EBML VINT deltas); `pos + size` could wrap usize and bypass
+        // the bounds check, panicking the slice. Use checked_add.
+        let end = pos.checked_add(*size).ok_or(OxiError::UnexpectedEof)?;
+        if end > data.len() {
             return Err(OxiError::UnexpectedEof);
         }
-        frames.push(data[pos..pos + size].to_vec());
-        pos += size;
+        frames.push(data[pos..end].to_vec());
+        pos = end;
     }
 
     // Last frame is the remainder
@@ -1346,11 +1371,15 @@ fn parse_ebml_lacing(data: &[u8]) -> OxiResult<Vec<Vec<u8>>> {
     // Extract frames
     let mut frames = Vec::with_capacity(frame_count);
     for size in &sizes {
-        if pos + size > data.len() {
+        // A lacing frame size is derived from attacker-controlled bytes (Xiph
+        // sums / EBML VINT deltas); `pos + size` could wrap usize and bypass
+        // the bounds check, panicking the slice. Use checked_add.
+        let end = pos.checked_add(*size).ok_or(OxiError::UnexpectedEof)?;
+        if end > data.len() {
             return Err(OxiError::UnexpectedEof);
         }
-        frames.push(data[pos..pos + size].to_vec());
-        pos += size;
+        frames.push(data[pos..end].to_vec());
+        pos = end;
     }
 
     // Last frame is the remainder
@@ -1456,6 +1485,25 @@ pub fn map_codec_id(mkv_codec: &str) -> OxiResult<CodecId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── Security regression tests (P0 #2: EBML unknown-size sentinel) ────
+
+    #[test]
+    fn read_data_rejects_overflowing_size() {
+        // The EBML unknown-size sentinel (u64::MAX) reaches read_data as
+        // usize::MAX; `position + size` must not wrap and panic the slice.
+        let mut parser = MatroskaParser::new(&[1, 2, 3, 4]);
+        assert!(parser.read_data(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn parse_ebml_header_unknown_size_sentinel_no_panic() {
+        // EBML ID (0x1A45DFA3) followed by 0xFF (a 1-byte unknown-size VINT) →
+        // element.size == u64::MAX. `position + element.size` must not overflow
+        // the loop bound; a clean Ok/Err is fine, a panic is not.
+        let data = [0x1A, 0x45, 0xDF, 0xA3, 0xFF];
+        let _ = parse_ebml_header(&data);
+    }
 
     #[test]
     fn test_parse_block_header() {

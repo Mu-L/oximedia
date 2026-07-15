@@ -1,6 +1,6 @@
 # oximedia-playlist
 
-**Status: [Stable]** | Version: 0.1.9 | Tests: extensively tested | Updated: 2026-07-08
+**Status: [Stable]** | Version: 0.2.0 | Tests: extensively tested | Updated: 2026-07-14
 
 Broadcast playlist and scheduling system for OxiMedia. Provides comprehensive broadcast automation including frame-accurate timing, scheduling, secondary events, live integration, failover, SCTE-35 markers, and EPG generation.
 

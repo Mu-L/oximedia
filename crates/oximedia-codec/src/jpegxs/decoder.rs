@@ -91,6 +91,11 @@ impl JpegXsDecoder {
         let nc = pih.num_components as usize;
         let bit_depth = pih.bit_depth;
 
+        // Defend against an allocation bomb: the picture header's width/height/
+        // component count drive the `vec![vec![0i32; frame_w*frame_h]; nc]`
+        // allocation below, so validate the total (4 bytes per i32) first.
+        crate::limits::checked_dims(frame_w, frame_h, nc, 4).map_err(JxsError::Unsupported)?;
+
         // ── 3. Build NLT params ──────────────────────────────────────────────
         // If the codestream contains an NLT marker, parse the payload and use
         // the resulting NltParams during the post-wavelet reverse transform step.
@@ -106,11 +111,9 @@ impl JpegXsDecoder {
         let mut output_planes: Vec<Vec<i32>> = vec![vec![0i32; frame_w * frame_h]; nc];
 
         // ── 5. Decode slices ─────────────────────────────────────────────────
-        let n_low_w = (frame_w + 1) / 2;
-        let n_high_w = frame_w / 2;
-        let n_low_h = (frame_h + 1) / 2;
-        let n_high_h = frame_h / 2;
-
+        // (Per-subband dimensions are computed inside `decode_slice_subbands`
+        // itself; nothing here needs them ahead of that call any more now
+        // that the zero-fallback on entropy-decode error is gone — see below.)
         if headers.slices.is_empty() {
             // No slice data — the output is all-zero (valid for header-only test streams).
             // In real streams there is always at least one slice; this path exists for tests.
@@ -130,20 +133,14 @@ impl JpegXsDecoder {
             // The simplified path here decodes component 0's subbands from the full
             // slice data, then propagates the same reconstructed plane to all components
             // (valid for single-component streams; multi-component decoding is deferred).
+            //
+            // An entropy-decode failure (truncated bitstream, unsupported VLC
+            // pattern) is propagated honestly as an `Err` rather than being
+            // silently swallowed into an all-zero (fabricated black-pixel)
+            // image — a caller must not receive an `Ok(DecodedImage)` for
+            // data this decoder failed to actually decode.
             let (ll_sb, hl_sb, lh_sb, hh_sb) =
-                match decode_slice_subbands(slice_bytes, frame_w, frame_h) {
-                    Ok(subbands) => subbands,
-                    Err(JxsError::Unsupported(_)) | Err(JxsError::TruncatedStream { .. }) => {
-                        // On any entropy decode issue, fall back to zero output.
-                        (
-                            super::entropy::SubbandCoeffs::zeros(n_low_w, n_low_h),
-                            super::entropy::SubbandCoeffs::zeros(n_high_w, n_low_h),
-                            super::entropy::SubbandCoeffs::zeros(n_low_w, n_high_h),
-                            super::entropy::SubbandCoeffs::zeros(n_high_w, n_high_h),
-                        )
-                    }
-                    Err(e) => return Err(e),
-                };
+                decode_slice_subbands(slice_bytes, frame_w, frame_h)?;
 
             // Reconstruct via inverse 5/3 2D wavelet.
             let reconstructed = inverse_53_2d(
@@ -275,5 +272,60 @@ mod tests {
         for &s in &img.samples[0] {
             assert!(s <= max_val, "sample {s} exceeds 10-bit max {max_val}");
         }
+    }
+
+    /// Regression test for the fabricated-black-pixels bug: an entropy-decode
+    /// failure inside a real slice must surface as an honest `Err`, not a
+    /// silently all-zero `Ok(DecodedImage)`.
+    ///
+    /// Builds SOC+PIH+CDT+SLH+EOC for a 64x64 frame (so the LL subband alone
+    /// has 32*32 = 1024 coefficients) with an SLH marker declaring **zero**
+    /// bytes of slice data (the EOC marker immediately follows the SLH
+    /// payload). The very first bit-consuming read inside
+    /// `decode_slice_subbands` therefore has nothing to read and must return
+    /// `JxsError::TruncatedStream` regardless of VLC table contents — this
+    /// previously got swallowed into an all-zero image by the removed
+    /// zero-fill fallback.
+    #[test]
+    fn decode_propagates_entropy_error_instead_of_zero_filling() {
+        use crate::jpegxs::markers::EOC;
+
+        let mut data = build_test_codestream(64, 64, 64, 1, 8);
+        let eoc_pos = data.len() - 2;
+        data.truncate(eoc_pos); // drop the trailing EOC temporarily
+
+        // SLH marker: Lslh = 4 (2 length bytes + 2-byte Qpih, no band info),
+        // Qpih = 0. The EOC appended right after means zero bytes of actual
+        // slice data.
+        data.extend_from_slice(&[0xFF, 0x19, 0x00, 0x04, 0x00, 0x00]);
+        data.extend_from_slice(&EOC.to_be_bytes());
+
+        let result = JpegXsDecoder::decode(&data);
+        assert!(
+            matches!(result, Err(JxsError::TruncatedStream { .. })),
+            "expected an honest TruncatedStream error, got {result:?}"
+        );
+    }
+
+    /// Companion to the above: confirms the crafted codestream really does
+    /// carry a non-empty slice (otherwise this would just be re-testing the
+    /// legitimate, unchanged `decode_headers_only_no_slices` path).
+    #[test]
+    fn decode_propagates_entropy_error_slice_is_not_empty_headers() {
+        use crate::jpegxs::markers::EOC;
+
+        let mut data = build_test_codestream(64, 64, 64, 1, 8);
+        let eoc_pos = data.len() - 2;
+        data.truncate(eoc_pos);
+        data.extend_from_slice(&[0xFF, 0x19, 0x00, 0x04, 0x00, 0x00]);
+        data.extend_from_slice(&EOC.to_be_bytes());
+
+        let (headers, _) = parse_headers(&data).expect("headers must parse");
+        assert_eq!(
+            headers.slices.len(),
+            1,
+            "codestream must contain exactly one (zero-length) slice"
+        );
+        assert_eq!(headers.slices[0].data_len, 0);
     }
 }

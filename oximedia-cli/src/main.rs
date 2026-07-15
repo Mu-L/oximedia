@@ -194,7 +194,7 @@
 //! | `--log-format json` | plain | Structured JSON log output via `tracing-subscriber` |
 //! | `--progress <plain\|json>` | plain | Progress reporting format |
 //! | `-v` / `--verbose` | off | Enable debug/trace log output (repeatable: `-vv`, `-vvv`) |
-//! | `-q` / `--quiet` | off | Suppress all non-error output |
+//! | `-q` / `--quiet` | off | Suppress logs and status/banner stdout (transcode/extract/image); results and errors still print |
 //!
 //! ## See Also
 //!
@@ -293,6 +293,7 @@ mod progress;
 mod proxy_cmd;
 mod qc_cmd;
 mod quality_cmd;
+mod quality_snapshot;
 mod recommend_cmd;
 mod renderfarm_cmd;
 mod repair_cmd;
@@ -346,7 +347,12 @@ struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
 
-    /// Suppress all output except errors
+    /// Suppress log output and status/banner text on stdout (plans, summaries,
+    /// progress banners for transcode/extract/image). Command results (probe
+    /// data, analysis values, --json/--ndjson output) and errors still print.
+    // TODO(0.2.x): extend the status-output suppression to the remaining
+    // ~50 subcommand handlers; today it covers logging plus the
+    // transcode/extract/image status paths (see progress::is_quiet callers).
     #[arg(short, long, global = true)]
     quiet: bool,
 
@@ -382,13 +388,21 @@ async fn run(cli: Cli) -> Result<()> {
             detail,
             streams,
             hash,
-            quality_snapshot: _quality_snapshot,
+            quality_snapshot,
             format,
             chapters,
             metadata,
         } => {
             probe_file(
-                &input, detail, streams, hash, &format, chapters, metadata, cli.ndjson,
+                &input,
+                detail,
+                streams,
+                hash,
+                quality_snapshot,
+                &format,
+                chapters,
+                metadata,
+                cli.ndjson,
             )
             .await
         }
@@ -421,9 +435,8 @@ async fn run(cli: Cli) -> Result<()> {
             crf,
             threads,
             overwrite,
-            resume,
-            audio_filter: _audio_filter,
-            map: _map,
+            audio_filter,
+            map,
             normalize_audio,
         } => {
             let options = transcode::TranscodeOptions {
@@ -436,7 +449,7 @@ async fn run(cli: Cli) -> Result<()> {
                 audio_bitrate,
                 scale,
                 video_filter,
-                audio_filter: _audio_filter,
+                audio_filter,
                 start_time,
                 duration,
                 framerate,
@@ -445,7 +458,7 @@ async fn run(cli: Cli) -> Result<()> {
                 crf,
                 threads,
                 overwrite,
-                resume,
+                map,
                 normalize_audio,
                 progress_format: cli.progress,
             };
@@ -709,8 +722,8 @@ async fn run(cli: Cli) -> Result<()> {
             checks,
             strict,
             fix,
-            loudness_check: _loudness_check,
-            gamut_check: _gamut_check,
+            loudness_check,
+            gamut_check,
         } => {
             let validation_checks: Result<Vec<validate::ValidationCheck>> = checks
                 .iter()
@@ -722,6 +735,8 @@ async fn run(cli: Cli) -> Result<()> {
                 checks: validation_checks?,
                 strict,
                 fix,
+                loudness_check,
+                gamut_check,
                 json_output: cli.json,
             };
             validate::validate_files(options).await
@@ -985,6 +1000,11 @@ async fn main() -> std::process::ExitCode {
     // Disable colours before anything else — must run before any Colorize use.
     // JSON / NDJSON output also forces no-colour for clean machine-readable output.
     init_color(cli.no_color || cli.json || cli.ndjson);
+
+    // Record --quiet globally so status/banner printers (transcode plan,
+    // extract plan, image status output) can suppress themselves. Command
+    // results and machine-readable output are never suppressed.
+    progress::set_quiet(cli.quiet);
 
     // Initialize logging before dispatching subcommands
     if let Err(e) = init_logging(cli.verbose, cli.quiet, cli.log_format) {

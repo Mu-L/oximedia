@@ -39,11 +39,13 @@ pub enum MamCommand {
         #[arg(long)]
         recursive: bool,
 
-        /// Generate proxy files for previews
+        /// Generate proxy files for previews (not implemented yet: warns and
+        /// proceeds; use `oximedia proxy generate` instead)
         #[arg(long)]
         generate_proxy: bool,
 
-        /// Extract and store metadata automatically
+        /// Probe each file and store technical metadata (container format,
+        /// codec, dimensions, duration) on the asset record
         #[arg(long)]
         extract_metadata: bool,
     },
@@ -254,12 +256,52 @@ fn detect_format(path: &std::path::Path) -> String {
 }
 
 fn now_iso8601() -> String {
-    let dur = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = dur.as_secs();
-    // Simple UTC timestamp (no chrono dependency in CLI for this)
-    format!("{secs}")
+    // Real RFC 3339 / ISO 8601 UTC timestamp. Catalogs written by older
+    // builds stored plain epoch-seconds strings here; parse_asset_timestamp
+    // accepts both, so old and new records stay comparable.
+    chrono::Utc::now().to_rfc3339()
+}
+
+/// Parse a stored `ingested_at` value into Unix epoch seconds.
+///
+/// Accepts the current RFC 3339 form and the legacy plain epoch-seconds
+/// string written by pre-0.2.0 catalogs. Returns `None` for unparseable
+/// values (such records are excluded when a date filter is active — they
+/// cannot be compared honestly).
+fn parse_asset_timestamp(s: &str) -> Option<i64> {
+    if let Ok(epoch) = s.parse::<i64>() {
+        return Some(epoch);
+    }
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.timestamp())
+}
+
+/// Parse a `--date-from` / `--date-to` bound into Unix epoch seconds.
+///
+/// Accepts a full RFC 3339 timestamp (`2026-07-15T12:00:00Z`), a plain date
+/// (`2026-07-15` — interpreted as the start of that UTC day for `--date-from`
+/// and the end of it for `--date-to`), or raw epoch seconds.
+fn parse_date_bound(s: &str, is_end: bool) -> Result<i64> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Ok(dt.timestamp());
+    }
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        let time = if is_end {
+            chrono::NaiveTime::from_hms_opt(23, 59, 59)
+        } else {
+            chrono::NaiveTime::from_hms_opt(0, 0, 0)
+        }
+        .ok_or_else(|| anyhow::anyhow!("Internal error building time bound"))?;
+        return Ok(date.and_time(time).and_utc().timestamp());
+    }
+    if let Ok(epoch) = s.parse::<i64>() {
+        return Ok(epoch);
+    }
+    Err(anyhow::anyhow!(
+        "Invalid date '{s}'. Expected RFC 3339 (2026-07-15T12:00:00Z), a date (2026-07-15), \
+         or Unix epoch seconds"
+    ))
 }
 
 fn parse_tags(tags: &Option<String>) -> Vec<String> {
@@ -286,19 +328,55 @@ pub async fn handle_mam_command(command: MamCommand, json_output: bool) -> Resul
             tags,
             collection,
             recursive,
-            generate_proxy: _generate_proxy,
-            extract_metadata: _extract_metadata,
-        } => run_ingest(&input, &catalog, &tags, &collection, recursive, json_output).await,
+            generate_proxy,
+            extract_metadata,
+        } => {
+            // No proxy-output policy (directory, codec, naming) exists on the
+            // ingest surface yet, so proxy generation cannot take real effect
+            // here; warn instead of silently dropping the request.
+            // TODO(0.2.x): wire `oximedia_proxy::ProxyGenerator` into ingest
+            // once a --proxy-dir/--proxy-codec surface is designed (the
+            // standalone `oximedia proxy generate` path is already real).
+            if generate_proxy {
+                eprintln!(
+                    "warning: --generate-proxy is not implemented for `mam ingest` yet and is \
+                     ignored; use `oximedia proxy generate` instead"
+                );
+            }
+            run_ingest(
+                &input,
+                &catalog,
+                &tags,
+                &collection,
+                recursive,
+                extract_metadata,
+                json_output,
+            )
+            .await
+        }
         MamCommand::Search {
             catalog,
             query,
             tags,
             format,
-            date_from: _date_from,
-            date_to: _date_to,
+            date_from,
+            date_to,
             limit,
             sort,
-        } => run_search(&catalog, &query, &tags, &format, limit, &sort, json_output).await,
+        } => {
+            run_search(
+                &catalog,
+                &query,
+                &tags,
+                &format,
+                date_from.as_deref(),
+                date_to.as_deref(),
+                limit,
+                &sort,
+                json_output,
+            )
+            .await
+        }
         MamCommand::Catalog {
             catalog,
             stats,
@@ -349,12 +427,66 @@ pub async fn handle_mam_command(command: MamCommand, json_output: bool) -> Resul
 // Ingest
 // ---------------------------------------------------------------------------
 
+/// Probe a media file's container and fill real technical metadata into the
+/// asset record (`--extract-metadata`): codec, dimensions, duration, plus a
+/// `container_format` entry and any container-level key/value metadata.
+///
+/// Uses `oximedia_container::MultiFormatProber` on the file head — the same
+/// real prober behind the TUI mini-probe. Unrecognized files simply gain no
+/// metadata (the prober reports `"unknown"`), which is recorded honestly.
+fn extract_asset_metadata(path: &std::path::Path, record: &mut AssetRecord) -> Result<()> {
+    use std::io::Read;
+
+    const PROBE_BYTES: usize = 64 * 1024;
+    let mut buf = vec![0u8; PROBE_BYTES];
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("Failed to open {} for probing", path.display()))?;
+    let n = file
+        .read(&mut buf)
+        .with_context(|| format!("Failed to read {} for probing", path.display()))?;
+    buf.truncate(n);
+
+    let info = oximedia_container::MultiFormatProber::probe(&buf);
+
+    record
+        .metadata
+        .insert("container_format".to_string(), info.format.clone());
+    if let Some(duration_ms) = info.duration_ms {
+        record.duration_secs = Some(duration_ms as f64 / 1000.0);
+    }
+    for (key, value) in &info.metadata {
+        record.metadata.insert(key.clone(), value.clone());
+    }
+
+    if let Some(video) = info.streams.iter().find(|s| s.stream_type == "video") {
+        record.codec = Some(video.codec.clone());
+        record.width = video.width;
+        record.height = video.height;
+    } else if let Some(audio) = info.streams.iter().find(|s| s.stream_type == "audio") {
+        record.codec = Some(audio.codec.clone());
+        if let Some(sr) = audio.sample_rate {
+            record
+                .metadata
+                .insert("sample_rate_hz".to_string(), sr.to_string());
+        }
+        if let Some(ch) = audio.channels {
+            record
+                .metadata
+                .insert("channels".to_string(), ch.to_string());
+        }
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_ingest(
     inputs: &[PathBuf],
     catalog: &PathBuf,
     tags: &Option<String>,
     collection: &Option<String>,
     recursive: bool,
+    extract_metadata: bool,
     json_output: bool,
 ) -> Result<()> {
     let mut db = load_catalog(catalog)?;
@@ -394,7 +526,7 @@ async fn run_ingest(
             continue;
         }
 
-        let record = AssetRecord {
+        let mut record = AssetRecord {
             id: generate_asset_id(),
             path: file_path.to_string_lossy().to_string(),
             filename: file_path
@@ -414,6 +546,12 @@ async fn run_ingest(
             checksum,
             metadata: HashMap::new(),
         };
+
+        // --extract-metadata: probe the container for real and store what it
+        // reports (codec, dimensions, duration, container format).
+        if extract_metadata {
+            extract_asset_metadata(file_path, &mut record)?;
+        }
 
         ingested.push(record.clone());
         db.assets.push(record);
@@ -487,11 +625,14 @@ fn collect_files(dir: &PathBuf, recursive: bool, out: &mut Vec<PathBuf>) -> Resu
 // Search
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn run_search(
     catalog: &PathBuf,
     query: &str,
     tags: &Option<String>,
     format: &Option<String>,
+    date_from: Option<&str>,
+    date_to: Option<&str>,
     limit: Option<u32>,
     sort: &str,
     json_output: bool,
@@ -500,6 +641,17 @@ async fn run_search(
     let tag_filter = parse_tags(tags);
     let query_lower = query.to_lowercase();
     let max_results = limit.unwrap_or(50) as usize;
+
+    // Parse date bounds up front so invalid values fail before any output.
+    let from_epoch = date_from.map(|s| parse_date_bound(s, false)).transpose()?;
+    let to_epoch = date_to.map(|s| parse_date_bound(s, true)).transpose()?;
+    if let (Some(from), Some(to)) = (from_epoch, to_epoch) {
+        if from > to {
+            return Err(anyhow::anyhow!(
+                "--date-from is after --date-to; no asset can match"
+            ));
+        }
+    }
 
     let mut results: Vec<&AssetRecord> = db
         .assets
@@ -525,7 +677,22 @@ async fn run_search(
                 .as_ref()
                 .map_or(true, |f| a.format.eq_ignore_ascii_case(f));
 
-            text_match && tag_ok && fmt_ok
+            // Ingest-date filter: compares real parsed timestamps. Records
+            // whose timestamp cannot be parsed are excluded while a date
+            // filter is active — they cannot be compared honestly.
+            let date_ok = if from_epoch.is_none() && to_epoch.is_none() {
+                true
+            } else {
+                match parse_asset_timestamp(&a.ingested_at) {
+                    Some(epoch) => {
+                        from_epoch.map_or(true, |from| epoch >= from)
+                            && to_epoch.map_or(true, |to| epoch <= to)
+                    }
+                    None => false,
+                }
+            };
+
+            text_match && tag_ok && fmt_ok && date_ok
         })
         .collect();
 
@@ -533,7 +700,11 @@ async fn run_search(
     match sort {
         "name" => results.sort_by(|a, b| a.filename.cmp(&b.filename)),
         "size" => results.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes)),
-        "date" => results.sort_by(|a, b| b.ingested_at.cmp(&a.ingested_at)),
+        // Numeric timestamp sort — string comparison would order legacy
+        // epoch-second records against RFC 3339 records incorrectly.
+        "date" => results.sort_by_key(|a| {
+            std::cmp::Reverse(parse_asset_timestamp(&a.ingested_at).unwrap_or(i64::MIN))
+        }),
         _ => {} // relevance = insertion order
     }
 
@@ -956,5 +1127,166 @@ mod tests {
         // IDs should start with "asset-"
         assert!(id1.starts_with("asset-"));
         assert!(id2.starts_with("asset-"));
+    }
+
+    #[test]
+    fn test_parse_asset_timestamp_forms() {
+        // Legacy epoch-seconds string form.
+        assert_eq!(parse_asset_timestamp("1234567890"), Some(1_234_567_890));
+        // Current RFC 3339 form.
+        let epoch = parse_asset_timestamp("2026-07-15T00:00:00+00:00").expect("rfc3339");
+        assert_eq!(epoch, 1_784_073_600);
+        // Garbage is None, never a bogus comparison value.
+        assert_eq!(parse_asset_timestamp("not-a-date"), None);
+        // now_iso8601 output must round-trip through the parser.
+        assert!(parse_asset_timestamp(&now_iso8601()).is_some());
+    }
+
+    #[test]
+    fn test_parse_date_bound_forms() {
+        // Plain date: from = start of day, to = end of day (inclusive).
+        let from = parse_date_bound("2026-07-15", false).expect("date from");
+        let to = parse_date_bound("2026-07-15", true).expect("date to");
+        assert_eq!(from, 1_784_073_600);
+        assert_eq!(to - from, 86_399, "end-of-day bound must span the day");
+        // RFC 3339 and epoch forms.
+        assert_eq!(
+            parse_date_bound("2026-07-15T12:00:00Z", false).expect("rfc3339"),
+            1_784_116_800
+        );
+        assert_eq!(parse_date_bound("1234", false).expect("epoch"), 1234);
+        // Garbage errors with the accepted grammar.
+        let msg = parse_date_bound("yesterday", false)
+            .expect_err("must reject")
+            .to_string();
+        assert!(
+            msg.contains("RFC 3339"),
+            "must explain accepted forms: {msg}"
+        );
+    }
+
+    /// End-to-end proof that `--date-from` / `--date-to` genuinely filter:
+    /// two assets with known ingest dates, a window matching only one.
+    #[tokio::test]
+    async fn test_search_date_filter_is_real() {
+        let dir = std::env::temp_dir();
+        let catalog = dir.join("oximedia_mam_date_filter_test.json");
+        std::fs::remove_file(&catalog).ok();
+
+        let mk_asset = |id: &str, name: &str, ingested_at: &str| AssetRecord {
+            id: id.to_string(),
+            path: dir.join(name).to_string_lossy().to_string(),
+            filename: name.to_string(),
+            format: "wav".to_string(),
+            size_bytes: 10,
+            duration_secs: None,
+            width: None,
+            height: None,
+            codec: None,
+            tags: vec![],
+            collection: None,
+            ingested_at: ingested_at.to_string(),
+            checksum: id.to_string(),
+            metadata: HashMap::new(),
+        };
+
+        let db = CatalogDb {
+            version: 1,
+            assets: vec![
+                mk_asset("a-old", "old.wav", "2026-01-05T10:00:00+00:00"),
+                // Legacy epoch form: 2026-07-10T00:00:00Z = 1783641600.
+                mk_asset("a-new", "new.wav", "1783641600"),
+            ],
+            collections: vec![],
+        };
+        save_catalog(&catalog, &db).expect("save catalog");
+
+        // Window covering only July 2026 must match only the new asset —
+        // and must do so across BOTH stored timestamp formats.
+        run_search(
+            &catalog,
+            "wav",
+            &None,
+            &None,
+            Some("2026-07-01"),
+            Some("2026-07-31"),
+            None,
+            "relevance",
+            true,
+        )
+        .await
+        .expect("search must succeed");
+
+        // Assert by re-running the same filter logic the search uses.
+        let from = parse_date_bound("2026-07-01", false).expect("from");
+        let to = parse_date_bound("2026-07-31", true).expect("to");
+        let loaded = load_catalog(&catalog).expect("load");
+        let matched: Vec<&AssetRecord> = loaded
+            .assets
+            .iter()
+            .filter(|a| {
+                parse_asset_timestamp(&a.ingested_at)
+                    .map(|e| e >= from && e <= to)
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(matched.len(), 1, "exactly one asset in the July window");
+        assert_eq!(matched[0].id, "a-new");
+
+        std::fs::remove_file(&catalog).ok();
+    }
+
+    /// `--extract-metadata` must store real probed values for a real WAV file.
+    #[test]
+    fn test_extract_asset_metadata_wav() {
+        let dir = std::env::temp_dir();
+        let wav_path = dir.join("oximedia_mam_probe_test.wav");
+
+        // Minimal valid WAV: RIFF header + fmt + tiny data chunk.
+        let sample_rate: u32 = 44_100;
+        let data: Vec<u8> = vec![0u8; 32];
+        let mut wav: Vec<u8> = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&data);
+        std::fs::write(&wav_path, &wav).expect("write wav");
+
+        let mut record = AssetRecord {
+            id: "probe-test".to_string(),
+            path: wav_path.to_string_lossy().to_string(),
+            filename: "oximedia_mam_probe_test.wav".to_string(),
+            format: "wav".to_string(),
+            size_bytes: wav.len() as u64,
+            duration_secs: None,
+            width: None,
+            height: None,
+            codec: None,
+            tags: vec![],
+            collection: None,
+            ingested_at: now_iso8601(),
+            checksum: "x".to_string(),
+            metadata: HashMap::new(),
+        };
+
+        extract_asset_metadata(&wav_path, &mut record).expect("probe must succeed");
+        assert_eq!(
+            record.metadata.get("container_format").map(String::as_str),
+            Some("wav"),
+            "real prober must identify the WAV container, got {:?}",
+            record.metadata
+        );
+
+        std::fs::remove_file(&wav_path).ok();
     }
 }

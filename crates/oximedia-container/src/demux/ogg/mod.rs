@@ -197,6 +197,16 @@ impl<R: MediaSource> OggDemuxer<R> {
             return Ok(None);
         }
 
+        // `sync_to_page` may have advanced `buffer_pos` toward the end of the
+        // buffer while scanning for the 'OggS' magic; the earlier
+        // `ensure_buffer(MIN_HEADER_SIZE)` was measured from the *old*
+        // buffer_pos. Re-ensure the 27-byte fixed header is available from the
+        // new position before indexing `buffer[buffer_pos + 26]` — a magic
+        // match found near the buffer tail would otherwise read out of bounds.
+        if !self.ensure_buffer(page::MIN_HEADER_SIZE).await? {
+            return Ok(None);
+        }
+
         // Read the segment count to determine page size
         let segment_count = self.buffer[self.buffer_pos + 26] as usize;
         let header_size = page::MIN_HEADER_SIZE + segment_count;
@@ -738,6 +748,20 @@ impl<R: MediaSource> OggDemuxer<R> {
 mod tests {
     use super::*;
     use oximedia_io::MemorySource;
+
+    /// Security regression (P1 #5): the 'OggS' magic appears at the very end of
+    /// the buffer with fewer than 27 trailing bytes. After `sync_to_page`
+    /// advances `buffer_pos`, `buffer[buffer_pos + 26]` must be re-validated
+    /// instead of reading out of bounds.
+    #[tokio::test]
+    async fn probe_magic_near_buffer_tail_no_panic() {
+        let mut data = vec![0u8; 24];
+        data.extend_from_slice(b"OggS"); // magic at offset 24, only 4 bytes left
+        let source = MemorySource::new(Bytes::from(data));
+        let mut demuxer = OggDemuxer::new(source);
+        // Must not panic; a clean Ok/Err either way is acceptable.
+        let _ = demuxer.probe().await;
+    }
 
     /// Creates a minimal valid Ogg page.
     fn create_ogg_page(serial: u32, flags: PageFlags, data: &[u8]) -> Vec<u8> {

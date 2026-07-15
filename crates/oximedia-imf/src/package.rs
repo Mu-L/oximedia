@@ -13,6 +13,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+/// Returns true if `asset` is explicitly identifiable as a Composition
+/// Playlist rather than merely XML-shaped: either via the `asdcpKind=CPL`
+/// PKL `Type` convention (e.g. `text/xml;asdcpKind=CPL`), or via this
+/// crate's own `CPL_<uuid>.xml` filename convention (see
+/// [`ImfPackageBuilder::build`]).
+fn is_cpl_asset(asset: &PklAsset) -> bool {
+    if asset.asset_type().to_ascii_lowercase().contains("cpl") {
+        return true;
+    }
+    asset
+        .original_filename()
+        .is_some_and(|name| name.starts_with("CPL_"))
+}
+
 /// IMF Package (IMP)
 ///
 /// Represents a complete IMF package including CPL, PKL, ASSETMAP, and essence files.
@@ -63,8 +77,13 @@ impl ImfPackage {
             }
         }
 
-        // Load CPLs (simplified - would need to find CPL files from PKL)
-        let composition_playlists = Vec::new();
+        // Load CPLs. The ASSETMAP (SMPTE ST 429-9) does not carry per-asset
+        // MIME types -- it only distinguishes "is this asset the PKL". Asset
+        // *types* live on the PKL's own Asset entries (SMPTE ST 429-8), so
+        // the PKL is the source of truth for "is this an XML asset" while
+        // the ASSETMAP resolves an asset ID to a file path.
+        let composition_playlists =
+            Self::load_composition_playlists(&root_path, &asset_map, &packing_lists)?;
 
         // Create package
         Ok(Self {
@@ -75,6 +94,75 @@ impl ImfPackage {
             output_profile_lists: Vec::new(),
             essence_files: HashMap::new(),
         })
+    }
+
+    /// Scans every loaded [`PackingList`]'s asset entries for XML-typed
+    /// assets, resolves each one's file path via the [`AssetMap`], and
+    /// attempts to parse it as a [`CompositionPlaylist`].
+    ///
+    /// An asset is treated as *authoritatively* a CPL — meaning a resolution
+    /// or parse failure becomes a hard [`ImfError`] instead of being skipped
+    /// — when the PKL marks it with the `asdcpKind=CPL` convention (e.g.
+    /// `text/xml;asdcpKind=CPL`) commonly used by IMF tooling, or when its
+    /// filename matches this crate's own `CPL_<uuid>.xml` naming convention
+    /// (see [`ImfPackageBuilder::build`]). Other XML-typed assets (e.g. an
+    /// OPL, or a sidecar with a generic `text/xml`/`application/xml` type)
+    /// that simply fail to parse as a CPL are skipped rather than treated as
+    /// package corruption, since not every XML asset in a package is a CPL.
+    fn load_composition_playlists(
+        root_path: &Path,
+        asset_map: &AssetMap,
+        packing_lists: &[PackingList],
+    ) -> ImfResult<Vec<CompositionPlaylist>> {
+        let mut composition_playlists = Vec::new();
+
+        for pkl in packing_lists {
+            for asset in pkl.assets() {
+                if !asset.asset_type().to_ascii_lowercase().contains("xml") {
+                    continue;
+                }
+
+                let explicitly_cpl = is_cpl_asset(asset);
+
+                let Some(am_asset) = asset_map.find_asset(asset.id()) else {
+                    if explicitly_cpl {
+                        return Err(ImfError::AssetNotFound(asset.id().to_string()));
+                    }
+                    continue;
+                };
+                let Some(rel_path) = am_asset.primary_path() else {
+                    if explicitly_cpl {
+                        return Err(ImfError::InvalidStructure(format!(
+                            "CPL asset {} has no chunk path in ASSETMAP",
+                            asset.id()
+                        )));
+                    }
+                    continue;
+                };
+                let cpl_path = root_path.join(rel_path);
+
+                let file = match fs::File::open(&cpl_path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        if explicitly_cpl {
+                            return Err(ImfError::from(e));
+                        }
+                        continue;
+                    }
+                };
+
+                match CompositionPlaylist::from_xml(std::io::BufReader::new(file)) {
+                    Ok(cpl) => composition_playlists.push(cpl),
+                    Err(e) => {
+                        if explicitly_cpl {
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(composition_playlists)
     }
 
     /// Get the root path
@@ -522,6 +610,180 @@ mod tests {
 
         assert_eq!(v2.version_number(), 2);
         assert_eq!(v2.previous_version(), Some(prev_id));
+    }
+
+    #[test]
+    fn test_open_reads_back_composition_playlist() {
+        // Real write-then-read-back round trip: build a package on disk with
+        // ImfPackageBuilder (which writes a real CPL_<uuid>.xml via
+        // CompositionPlaylist::to_xml), then reopen the SAME directory with
+        // ImfPackage::open and confirm the CPL survives the round trip
+        // instead of coming back as an empty Vec (the bug being fixed here).
+        let root = std::env::temp_dir().join(format!(
+            "oximedia-imf-package-open-cpl-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+
+        let builder = ImfPackageBuilder::new(&root)
+            .with_title("Round Trip Title".to_string())
+            .with_creator("OxiMedia Test".to_string());
+        let built = builder.build().expect("build should succeed");
+        assert_eq!(
+            built.composition_playlists().len(),
+            1,
+            "builder must return the CPL it just created"
+        );
+
+        let reopened = ImfPackage::open(&root).expect("open should succeed");
+        assert_eq!(
+            reopened.composition_playlists().len(),
+            1,
+            "ImfPackage::open must populate composition_playlists from the on-disk package, not return an empty Vec"
+        );
+        assert_eq!(
+            reopened
+                .primary_cpl()
+                .expect("primary_cpl must be Some after a successful open")
+                .content_title(),
+            "Round Trip Title"
+        );
+        assert_eq!(
+            reopened.primary_cpl().expect("primary cpl").id(),
+            built.primary_cpl().expect("built cpl").id(),
+            "reopened CPL must be the SAME composition (same UUID), not a fabricated stand-in"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_open_errors_on_malformed_explicit_cpl_asset() {
+        // A PKL asset that is unambiguously a CPL (matches this crate's own
+        // CPL_<uuid>.xml naming convention) but whose file contents are not
+        // valid XML must fail ImfPackage::open with a real Err, never a
+        // silent empty-Ok composition_playlists list.
+        let root = std::env::temp_dir().join(format!(
+            "oximedia-imf-package-open-malformed-cpl-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create root dir should succeed");
+
+        let cpl_id = Uuid::new_v4();
+        let pkl_id = Uuid::new_v4();
+
+        let cpl_filename = format!("CPL_{cpl_id}.xml");
+        fs::write(root.join(&cpl_filename), b"not valid xml at all")
+            .expect("writing the corrupt CPL stand-in should succeed");
+
+        let mut pkl = PackingList::new(pkl_id);
+        let cpl_pkl_asset = PklAsset::from_file(
+            cpl_id,
+            &root.join(&cpl_filename),
+            HashAlgorithm::Sha1,
+            "application/xml".to_string(),
+        )
+        .expect("PklAsset::from_file should succeed even for non-XML bytes");
+        pkl.add_asset(cpl_pkl_asset);
+
+        let pkl_filename = format!("PKL_{pkl_id}.xml");
+        {
+            let file =
+                fs::File::create(root.join(&pkl_filename)).expect("create PKL file should succeed");
+            pkl.to_xml(std::io::BufWriter::new(file))
+                .expect("writing PKL XML should succeed");
+        }
+
+        let mut asset_map = AssetMap::new(Uuid::new_v4());
+        let mut pkl_am_asset = AssetMapAsset::new(pkl_id, true);
+        pkl_am_asset.add_chunk(Chunk::new(PathBuf::from(&pkl_filename)));
+        asset_map.add_asset(pkl_am_asset);
+        let mut cpl_am_asset = AssetMapAsset::new(cpl_id, false);
+        cpl_am_asset.add_chunk(Chunk::new(PathBuf::from(&cpl_filename)));
+        asset_map.add_asset(cpl_am_asset);
+
+        {
+            let file = fs::File::create(root.join("ASSETMAP.xml"))
+                .expect("create ASSETMAP file should succeed");
+            asset_map
+                .to_xml(std::io::BufWriter::new(file))
+                .expect("writing ASSETMAP XML should succeed");
+        }
+
+        let result = ImfPackage::open(&root);
+        assert!(
+            result.is_err(),
+            "opening a package whose explicitly-named CPL asset is malformed XML must be a hard error, not an empty-Ok composition_playlists"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_open_ignores_unrelated_xml_asset_that_is_not_a_cpl() {
+        // A generically-typed XML asset that is NOT a CPL (no asdcpKind=CPL,
+        // no CPL_ filename) and fails to parse as one must be silently
+        // skipped rather than failing the whole package open.
+        let root = std::env::temp_dir().join(format!(
+            "oximedia-imf-package-open-nonfatal-xml-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create root dir should succeed");
+
+        let sidecar_id = Uuid::new_v4();
+        let pkl_id = Uuid::new_v4();
+
+        let sidecar_filename = "SIDECAR_NOTES.xml".to_string();
+        fs::write(
+            root.join(&sidecar_filename),
+            b"<Notes>not a composition playlist</Notes>",
+        )
+        .expect("writing the sidecar XML should succeed");
+
+        let mut pkl = PackingList::new(pkl_id);
+        let sidecar_pkl_asset = PklAsset::from_file(
+            sidecar_id,
+            &root.join(&sidecar_filename),
+            HashAlgorithm::Sha1,
+            "text/xml".to_string(),
+        )
+        .expect("PklAsset::from_file should succeed");
+        pkl.add_asset(sidecar_pkl_asset);
+
+        let pkl_filename = format!("PKL_{pkl_id}.xml");
+        {
+            let file =
+                fs::File::create(root.join(&pkl_filename)).expect("create PKL file should succeed");
+            pkl.to_xml(std::io::BufWriter::new(file))
+                .expect("writing PKL XML should succeed");
+        }
+
+        let mut asset_map = AssetMap::new(Uuid::new_v4());
+        let mut pkl_am_asset = AssetMapAsset::new(pkl_id, true);
+        pkl_am_asset.add_chunk(Chunk::new(PathBuf::from(&pkl_filename)));
+        asset_map.add_asset(pkl_am_asset);
+        let mut sidecar_am_asset = AssetMapAsset::new(sidecar_id, false);
+        sidecar_am_asset.add_chunk(Chunk::new(PathBuf::from(&sidecar_filename)));
+        asset_map.add_asset(sidecar_am_asset);
+
+        {
+            let file = fs::File::create(root.join("ASSETMAP.xml"))
+                .expect("create ASSETMAP file should succeed");
+            asset_map
+                .to_xml(std::io::BufWriter::new(file))
+                .expect("writing ASSETMAP XML should succeed");
+        }
+
+        let reopened = ImfPackage::open(&root)
+            .expect("a non-CPL XML sidecar that fails to parse must not fail the whole open");
+        assert!(
+            reopened.composition_playlists().is_empty(),
+            "the sidecar is not a CPL, so no composition playlists should be populated"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

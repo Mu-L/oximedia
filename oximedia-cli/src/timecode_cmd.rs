@@ -79,7 +79,7 @@ pub enum TimecodeCommand {
         fps: String,
     },
 
-    /// Burn timecode overlay into a video file (configuration preview)
+    /// Burn timecode overlay into a video file (not implemented yet: validates parameters, then errors)
     Burn {
         /// Input video file
         #[arg(short, long)]
@@ -394,14 +394,21 @@ fn cmd_from_frames(frames: u64, fps_str: &str, json_output: bool) -> Result<()> 
     Ok(())
 }
 
+/// Validate the burn-in parameters for real, then fail honestly: the CLI has
+/// no reachable video compositor path today, so exiting 0 without writing
+/// `output` would be fabricated success.
+// TODO(0.2.x): implement real timecode burn-in once a frame-level
+// decode → composite → encode path exists in oximedia-transcode (the
+// frame-level executor covers Y4M decode + MPEG-2/FFV1/ProRes encode, but
+// no text-rendering compositor is wired between them yet).
 fn cmd_burn(
     input: &PathBuf,
     output: &PathBuf,
     start: &str,
     fps_str: &str,
     position: &str,
-    font_size: u32,
-    json_output: bool,
+    _font_size: u32,
+    _json_output: bool,
 ) -> Result<()> {
     // Validate input exists
     if !input.exists() {
@@ -428,45 +435,15 @@ fn cmd_burn(
         );
     }
 
-    if json_output {
-        let obj = serde_json::json!({
-            "command": "timecode-burn",
-            "input": input.to_string_lossy(),
-            "output": output.to_string_lossy(),
-            "start_timecode": start_tc.to_string(),
-            "fps": fps_str,
-            "position": position,
-            "font_size": font_size,
-            "status": "configured",
-            "note": "Burn-in requires a video render backend. Parameters validated."
-        });
-        println!("{}", serde_json::to_string_pretty(&obj)?);
-        return Ok(());
-    }
-
-    println!("{}", "Timecode Burn-in Configuration".green().bold());
-    println!("  {} {}", "Input:".cyan(), input.display());
-    println!("  {} {}", "Output:".cyan(), output.display());
-    println!("  {} {}", "Start TC:".cyan(), start_tc.to_string().yellow());
-    println!("  {} {}", "FPS:".cyan(), fps_str);
-    println!("  {} {}", "Position:".cyan(), position);
-    println!("  {} {}pt", "Font size:".cyan(), font_size);
-    println!();
-
-    let input_meta = std::fs::metadata(input)
-        .with_context(|| format!("Cannot access input: {}", input.display()))?;
-    println!("  {} Input file: {} bytes", "✓".green(), input_meta.len());
-    println!();
-    println!(
-        "  {} Burn-in requires video frame access. Configuration is valid.",
-        "!".yellow()
+    anyhow::bail!(
+        "timecode burn-in is not implemented yet: no video compositor path exists in this \
+         build, so no output file was written to {}. Parameters validated (start {}, {} fps, \
+         position {}).",
+        output.display(),
+        start_tc,
+        fps_str,
+        position
     );
-    println!(
-        "  {} Use `oximedia transcode` with filter burn_timecode for full rendering.",
-        "→".blue()
-    );
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

@@ -181,6 +181,10 @@ impl Mpeg2Decoder {
         if width == 0 || height == 0 {
             return Err(Mpeg2Error::InvalidData("zero frame dimension".into()));
         }
+        // Defend against an allocation bomb: reject frame dimensions above the
+        // shared decode ceiling before sizing the Y/Cb/Cr plane allocations.
+        crate::limits::check_dimensions(width as usize, height as usize)
+            .map_err(Mpeg2Error::InvalidData)?;
         let mb_cols = (width as usize).div_ceil(16);
         let mb_rows = (height as usize).div_ceil(16);
         // Coded (padded) luma dimensions, multiple of 16.

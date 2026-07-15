@@ -122,6 +122,71 @@ fn parse_priority(s: &str) -> oximedia_batch::Priority {
     }
 }
 
+/// Parse the `operation` field of a submit config into a real
+/// [`oximedia_batch::BatchOperation`].
+///
+/// Two forms are accepted:
+///
+/// - a shorthand string — `"copy"`, `"move"`, `"transcode"`,
+///   `"quality-check"` — mapped onto the corresponding variant (transcode
+///   reads an optional top-level `"preset"`, quality-check an optional
+///   `"profile"`, copy/move an optional `"overwrite"` bool);
+/// - a full serde object in `BatchOperation`'s external-tag form, e.g.
+///   `{"Transcode": {"preset": "web"}}`, passed straight to serde so every
+///   variant (Analyze, Custom, Pipeline, ...) is reachable.
+///
+/// A missing `operation` field defaults to a copy file-op (documented in the
+/// submit help text); an unrecognized string is an error listing the
+/// supported shorthands.
+fn parse_operation(config: &serde_json::Value) -> Result<oximedia_batch::BatchOperation> {
+    use oximedia_batch::operations::FileOperation;
+    use oximedia_batch::BatchOperation;
+
+    let overwrite = config
+        .get("overwrite")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    let Some(op) = config.get("operation") else {
+        return Ok(BatchOperation::FileOp {
+            operation: FileOperation::Copy { overwrite },
+        });
+    };
+
+    if let Some(s) = op.as_str() {
+        return match s.to_lowercase().as_str() {
+            "copy" => Ok(BatchOperation::FileOp {
+                operation: FileOperation::Copy { overwrite },
+            }),
+            "move" => Ok(BatchOperation::FileOp {
+                operation: FileOperation::Move { overwrite },
+            }),
+            "transcode" => Ok(BatchOperation::Transcode {
+                preset: config
+                    .get("preset")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("default")
+                    .to_string(),
+            }),
+            "quality-check" | "qc" => Ok(BatchOperation::QualityCheck {
+                profile: config
+                    .get("profile")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("default")
+                    .to_string(),
+            }),
+            other => Err(anyhow::anyhow!(
+                "Unknown operation '{other}' in job config. Supported shorthands: copy, move, \
+                 transcode, quality-check; or pass a full BatchOperation object, e.g. \
+                 {{\"Transcode\": {{\"preset\": \"web\"}}}}"
+            )),
+        };
+    }
+
+    serde_json::from_value::<BatchOperation>(op.clone())
+        .context("Config field 'operation' is neither a known shorthand string nor a valid BatchOperation object")
+}
+
 /// Open (or create) a `BatchEngine` backed by the given SQLite database.
 fn open_engine(db: &PathBuf) -> Result<oximedia_batch::BatchEngine> {
     let db_str = db
@@ -153,7 +218,9 @@ async fn cmd_submit(
     let raw = std::fs::read_to_string(config)
         .with_context(|| format!("Cannot read config: {}", config.display()))?;
 
-    // Parse a minimal job definition: { "name": "..." }
+    // Parse the job definition: { "name", "operation", "inputs", "outputs" }
+    // (operation/inputs/outputs optional; see parse_operation for the
+    // accepted operation forms).
     let parsed: serde_json::Value =
         serde_json::from_str(&raw).context("Config file is not valid JSON")?;
 
@@ -163,15 +230,21 @@ async fn cmd_submit(
         .unwrap_or("unnamed-job")
         .to_string();
 
-    let _priority = parse_priority(priority_str);
+    let operation = parse_operation(&parsed)?;
 
-    // Build a BatchJob with a FileOp stub
-    let job = oximedia_batch::BatchJob::new(
-        job_name.clone(),
-        oximedia_batch::BatchOperation::FileOp {
-            operation: oximedia_batch::operations::FileOperation::Copy { overwrite: false },
-        },
-    );
+    // Build the job from the parsed config; --priority is genuinely applied
+    // (visible later in `list`/`report`, and used by the queue ordering).
+    let mut job = oximedia_batch::BatchJob::new(job_name.clone(), operation);
+    job.set_priority(parse_priority(priority_str));
+
+    if let Some(inputs) = parsed.get("inputs") {
+        job.inputs = serde_json::from_value(inputs.clone())
+            .context("Config field 'inputs' is not a valid InputSpec array")?;
+    }
+    if let Some(outputs) = parsed.get("outputs") {
+        job.outputs = serde_json::from_value(outputs.clone())
+            .context("Config field 'outputs' is not a valid OutputSpec array")?;
+    }
 
     let engine = open_engine(db)?;
     let submitted_id = engine
@@ -241,20 +314,52 @@ async fn cmd_status(id: &str, db: &PathBuf, json_output: bool) -> Result<()> {
 // List
 // ---------------------------------------------------------------------------
 
+/// Whether a persisted status string matches the CLI `--state` filter value.
+///
+/// The database stores `Queued`/`Pending`/`Running`/`Completed`/`Failed`/
+/// `Cancelled`; the CLI groups `Queued`+`Pending` under `pending`. Cancelled
+/// jobs only appear under `all`.
+fn state_matches(filter: &str, status: &str) -> bool {
+    match filter {
+        "all" => true,
+        "pending" => matches!(status, "Queued" | "Pending"),
+        "running" => status == "Running",
+        "done" => status == "Completed",
+        "failed" => status == "Failed",
+        _ => true,
+    }
+}
+
 async fn cmd_list(state_filter: &str, db: &PathBuf, json_output: bool) -> Result<()> {
     let engine = open_engine(db)?;
     let jobs = engine
         .list_jobs()
         .map_err(|e| anyhow::anyhow!("List failed: {e}"))?;
 
+    // Resolve each job's persisted state from the database so the --state
+    // filter operates on real data (the in-memory queue state is empty in a
+    // fresh CLI process).
+    let database = engine.database();
+    let jobs_with_state: Vec<(oximedia_batch::BatchJob, String)> = jobs
+        .into_iter()
+        .map(|j| {
+            let state = database
+                .get_job_status_string(&j.id)
+                .unwrap_or_else(|_| "unknown".to_string());
+            (j, state)
+        })
+        .filter(|(_, state)| state_matches(state_filter, state))
+        .collect();
+
     if json_output {
-        let list: Vec<serde_json::Value> = jobs
+        let list: Vec<serde_json::Value> = jobs_with_state
             .iter()
-            .map(|j| {
+            .map(|(j, state)| {
                 serde_json::json!({
                     "id": j.id.as_str(),
                     "name": j.name,
                     "priority": j.priority.to_string(),
+                    "state": state,
                 })
             })
             .collect();
@@ -270,18 +375,36 @@ async fn cmd_list(state_filter: &str, db: &PathBuf, json_output: bool) -> Result
         );
     } else {
         println!("{}", "Batch Jobs".green().bold());
-        println!("{}", "=".repeat(70));
-        if jobs.is_empty() {
-            println!("  No jobs found.");
+        println!("{}", "=".repeat(82));
+        if jobs_with_state.is_empty() {
+            if state_filter == "all" {
+                println!("  No jobs found.");
+            } else {
+                println!("  No jobs found in state '{state_filter}'.");
+            }
         } else {
-            println!("{:<40} {:<20} Priority", "Job ID", "Name");
-            println!("{}", "-".repeat(70));
-            for j in &jobs {
-                println!("{:<40} {:<20} {}", j.id.as_str(), j.name, j.priority);
+            println!("{:<40} {:<20} {:<10} Priority", "Job ID", "Name", "State");
+            println!("{}", "-".repeat(82));
+            for (j, state) in &jobs_with_state {
+                println!(
+                    "{:<40} {:<20} {:<10} {}",
+                    j.id.as_str(),
+                    j.name,
+                    state,
+                    j.priority
+                );
             }
         }
         println!();
-        println!("Total: {} jobs", jobs.len());
+        println!(
+            "Total: {} jobs{}",
+            jobs_with_state.len(),
+            if state_filter == "all" {
+                String::new()
+            } else {
+                format!(" (filtered by state: {state_filter})")
+            }
+        );
     }
 
     Ok(())
@@ -397,6 +520,77 @@ mod tests {
         assert_eq!(parse_priority("unknown"), oximedia_batch::Priority::Normal);
     }
 
+    #[test]
+    fn test_parse_operation_shorthands() {
+        use oximedia_batch::operations::FileOperation;
+        use oximedia_batch::BatchOperation;
+
+        let cfg = serde_json::json!({"operation": "transcode", "preset": "web"});
+        match parse_operation(&cfg).expect("transcode shorthand") {
+            BatchOperation::Transcode { preset } => assert_eq!(preset, "web"),
+            other => panic!("expected Transcode, got {other:?}"),
+        }
+
+        let cfg = serde_json::json!({"operation": "copy", "overwrite": true});
+        match parse_operation(&cfg).expect("copy shorthand") {
+            BatchOperation::FileOp {
+                operation: FileOperation::Copy { overwrite },
+            } => assert!(overwrite),
+            other => panic!("expected FileOp Copy, got {other:?}"),
+        }
+
+        let cfg = serde_json::json!({"operation": "quality-check", "profile": "broadcast"});
+        match parse_operation(&cfg).expect("qc shorthand") {
+            BatchOperation::QualityCheck { profile } => assert_eq!(profile, "broadcast"),
+            other => panic!("expected QualityCheck, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_operation_object_form_and_default() {
+        use oximedia_batch::operations::FileOperation;
+        use oximedia_batch::BatchOperation;
+
+        // Full serde external-tag object form.
+        let cfg = serde_json::json!({"operation": {"Transcode": {"preset": "archive"}}});
+        match parse_operation(&cfg).expect("object form") {
+            BatchOperation::Transcode { preset } => assert_eq!(preset, "archive"),
+            other => panic!("expected Transcode, got {other:?}"),
+        }
+
+        // Missing operation defaults to a copy file-op.
+        let cfg = serde_json::json!({"name": "x"});
+        match parse_operation(&cfg).expect("default") {
+            BatchOperation::FileOp {
+                operation: FileOperation::Copy { overwrite },
+            } => assert!(!overwrite),
+            other => panic!("expected FileOp Copy default, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_operation_rejects_unknown_string() {
+        let cfg = serde_json::json!({"operation": "frobnicate"});
+        let msg = parse_operation(&cfg)
+            .expect_err("unknown shorthand must fail")
+            .to_string();
+        assert!(msg.contains("frobnicate"), "must name the input: {msg}");
+        assert!(msg.contains("transcode"), "must list supported: {msg}");
+    }
+
+    #[test]
+    fn test_state_matches_groups() {
+        assert!(state_matches("all", "Cancelled"));
+        assert!(state_matches("pending", "Queued"));
+        assert!(state_matches("pending", "Pending"));
+        assert!(!state_matches("pending", "Running"));
+        assert!(state_matches("running", "Running"));
+        assert!(state_matches("done", "Completed"));
+        assert!(state_matches("failed", "Failed"));
+        assert!(!state_matches("failed", "Cancelled"));
+        assert!(!state_matches("done", "Failed"));
+    }
+
     #[tokio::test]
     async fn test_submit_missing_config() {
         let cfg = std::env::temp_dir().join("oximedia_batch_missing_config.json");
@@ -425,6 +619,58 @@ mod tests {
         let db = dir.join("oximedia_batch_submit_test.db");
         let result = cmd_submit(&cfg, "high", &db, true).await;
         assert!(result.is_ok(), "unexpected error: {result:?}");
+        std::fs::remove_file(&cfg).ok();
+        std::fs::remove_file(&db).ok();
+    }
+
+    /// End-to-end proof that `--priority` and the config's `operation` are
+    /// genuinely persisted: submit with high priority, then read the job back
+    /// from the same database and inspect it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_submit_persists_priority_and_operation() {
+        let dir = std::env::temp_dir();
+        let cfg = dir.join("oximedia_batch_submit_prio.json");
+        std::fs::write(
+            &cfg,
+            br#"{"name":"prio-job","operation":"transcode","preset":"web"}"#,
+        )
+        .expect("write cfg");
+        let db = dir.join("oximedia_batch_submit_prio.db");
+        std::fs::remove_file(&db).ok();
+
+        cmd_submit(&cfg, "high", &db, true)
+            .await
+            .expect("submit must succeed");
+
+        let engine = open_engine(&db).expect("reopen engine");
+        let jobs = engine.list_jobs().expect("list jobs");
+        let job = jobs
+            .iter()
+            .find(|j| j.name == "prio-job")
+            .expect("submitted job must be persisted");
+        assert_eq!(
+            job.priority,
+            oximedia_batch::Priority::High,
+            "--priority high must be stored on the job"
+        );
+        match &job.operation {
+            oximedia_batch::BatchOperation::Transcode { preset } => {
+                assert_eq!(preset, "web", "config preset must be honoured");
+            }
+            other => panic!("config operation 'transcode' must persist, got {other:?}"),
+        }
+
+        // The state filter must operate on the persisted DB state.
+        let state = engine
+            .database()
+            .get_job_status_string(&job.id)
+            .expect("persisted state");
+        assert!(
+            state_matches("pending", &state),
+            "fresh job state {state} must match 'pending'"
+        );
+        assert!(!state_matches("done", &state));
+
         std::fs::remove_file(&cfg).ok();
         std::fs::remove_file(&db).ok();
     }

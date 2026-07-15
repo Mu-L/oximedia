@@ -28,6 +28,22 @@ use std::io::{Read, Seek, SeekFrom};
 
 use oximedia_core::{CodecId, OxiError};
 
+/// Returns the number of bytes remaining between the current position and the
+/// end of `source`, restoring the original position afterwards.
+///
+/// Used to cap chunk-body allocations: a malformed CAF `chunk_size` (i64, which
+/// may be huge or negative) must not be allowed to drive `vec![0u8; sz]` into
+/// an out-of-memory abort. (This CAF demux is dead code today — the live path
+/// is `crate::caf` — but the cap is cheap and keeps it safe before wiring.)
+fn source_remaining<R: Read + Seek>(source: &mut R) -> Result<u64, std::io::Error> {
+    let cur = source.stream_position()?;
+    let end = source.seek(SeekFrom::End(0))?;
+    if end != cur {
+        source.seek(SeekFrom::Start(cur))?;
+    }
+    Ok(end.saturating_sub(cur))
+}
+
 /// CAF file header magic bytes.
 pub const CAF_MAGIC: &[u8; 4] = b"caff";
 
@@ -285,7 +301,15 @@ impl PacketTable {
         let remainder_frames = i32::from_be_bytes([data[20], data[21], data[22], data[23]]);
 
         let mut offset = 24;
-        let mut entries = Vec::with_capacity(num_packets as usize);
+        // Cap the pre-allocation against the bytes actually available: each
+        // packet entry needs at least two VInt bytes, so `num_packets` can
+        // never legitimately exceed (len - 24) / 2. Without this a malicious
+        // `num_packets` (u64) drives `with_capacity` straight into an OOM.
+        // (This CAF demux is currently dead code — not `mod`-declared in
+        // demux/mod.rs; the live, hardened path is `crate::caf`. Hardened here
+        // regardless so it is safe before anyone wires it in.)
+        let max_entries = data.len().saturating_sub(24) / 2;
+        let mut entries = Vec::with_capacity((num_packets as usize).min(max_entries));
 
         for _ in 0..num_packets {
             let (byte_count, consumed) = decode_vint(&data[offset..]).map_err(|_| {
@@ -455,12 +479,30 @@ impl<R: Read + Seek> CafDemuxer<R> {
                     }
                 }
                 t if t == chunk_type::INFO => {
+                    // Cap the declared chunk size against the bytes actually
+                    // remaining so a malformed negative/huge `chunk_size`
+                    // cannot drive `vec![0u8; sz]` into an OOM.
+                    let remaining = source_remaining(&mut self.source)?;
+                    if chunk_size < 0 || chunk_size as u64 > remaining {
+                        return Err(CafError::MalformedChunk(format!(
+                            "INFO chunk_size {chunk_size} exceeds {remaining} remaining bytes"
+                        )));
+                    }
                     let sz = chunk_size as usize;
                     let mut buf = vec![0u8; sz];
                     self.source.read_exact(&mut buf)?;
                     tags = parse_info_chunk(&buf);
                 }
                 t if t == chunk_type::PAKT => {
+                    // Cap the declared chunk size against the bytes actually
+                    // remaining so a malformed negative/huge `chunk_size`
+                    // cannot drive `vec![0u8; sz]` into an OOM.
+                    let remaining = source_remaining(&mut self.source)?;
+                    if chunk_size < 0 || chunk_size as u64 > remaining {
+                        return Err(CafError::MalformedChunk(format!(
+                            "PAKT chunk_size {chunk_size} exceeds {remaining} remaining bytes"
+                        )));
+                    }
                     let sz = chunk_size as usize;
                     let mut buf = vec![0u8; sz];
                     self.source.read_exact(&mut buf)?;
@@ -806,6 +848,21 @@ fn decode_vint(data: &[u8]) -> Result<(u64, usize), ()> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    /// Security regression (P2 #10, dead-code CAF demux): `num_packets` near
+    /// u64::MAX must not drive `with_capacity` into an OOM; the pre-allocation
+    /// is capped against the available bytes and the loop errors on the first
+    /// truncated VInt.
+    #[test]
+    fn packet_table_parse_huge_num_packets_no_oom() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&u64::MAX.to_be_bytes()); // num_packets
+        data.extend_from_slice(&0i64.to_be_bytes()); // total_frames
+        data.extend_from_slice(&0i32.to_be_bytes()); // priming_frames
+        data.extend_from_slice(&0i32.to_be_bytes()); // remainder_frames
+        // No entry bytes → decode_vint fails immediately.
+        assert!(PacketTable::parse(&data).is_err());
+    }
 
     fn make_pcm_caf(channels: u32, sample_rate: f64, bits: u32) -> Vec<u8> {
         let config = CafMuxConfig::pcm(sample_rate, channels, bits, false);

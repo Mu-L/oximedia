@@ -100,7 +100,10 @@ impl LzwDecoder {
     /// Returns error if decompression fails or data is invalid.
     pub fn decompress(&mut self, data: &[u8], output_size: usize) -> CodecResult<Vec<u8>> {
         self.output.clear();
-        self.output.reserve(output_size);
+        // Defend against a decompression bomb: only pre-reserve a bounded hint
+        // (64 MiB). The buffer can still grow up to `output_size`, but the loop
+        // below stops there, so a tiny stream cannot expand without limit.
+        self.output.reserve(output_size.min(1 << 26));
         self.init_table();
 
         let mut bit_reader = BitReader::new(data);
@@ -126,6 +129,15 @@ impl LzwDecoder {
             if let Some(sequence) = self.get_sequence(code)? {
                 // Output the sequence
                 self.output.extend_from_slice(&sequence);
+
+                // Stop once the expected number of output samples is reached; a
+                // malformed LZW stream may otherwise keep emitting indefinitely
+                // as the dictionary saturates (decompression bomb). The last
+                // sequence may overshoot slightly, so truncate to the target.
+                if self.output.len() >= output_size {
+                    self.output.truncate(output_size);
+                    break;
+                }
 
                 // Add new entry to the table
                 if let Some(prev) = self.prev_code {

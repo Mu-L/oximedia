@@ -5,6 +5,7 @@
 
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// Output format for progress reporting.
@@ -15,6 +16,27 @@ pub enum ProgressFormat {
     Plain,
     /// NDJSON records emitted to stderr (one per tick).
     Json,
+}
+
+/// Process-wide `--quiet` state.
+///
+/// When set, status/banner printers (transcode plan and summary, extract
+/// plan, image status output) suppress their human-oriented stdout text.
+/// Command *results* — probe data, analysis values, `--json` / `--ndjson`
+/// payloads — are never suppressed, and errors always go to stderr.
+static QUIET: AtomicBool = AtomicBool::new(false);
+
+/// Record the global `--quiet` flag. Called once from each binary's `main`.
+pub fn set_quiet(quiet: bool) {
+    QUIET.store(quiet, Ordering::Relaxed);
+}
+
+/// Whether `--quiet` was passed; status/banner printers consult this.
+// TODO(0.2.x): sweep the remaining subcommand handlers (~50 files print
+// decorative banners with bare `println!`) to consult `is_quiet()`; today
+// the guarantee covers logging + transcode/extract/image status output.
+pub fn is_quiet() -> bool {
+    QUIET.load(Ordering::Relaxed)
 }
 
 /// Progress tracker for transcoding operations.

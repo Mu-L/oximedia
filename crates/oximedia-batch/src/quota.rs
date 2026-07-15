@@ -1,6 +1,6 @@
 //! Resource quota management for batch processing.
 //!
-//! [`ResourceQuota`] tracks available CPU and memory budgets for concurrent
+//! [`ResourceQuota`](crate::quota::ResourceQuota) tracks available CPU and memory budgets for concurrent
 //! job execution.  Jobs call `consume` before starting (returns `false` if
 //! resources are insufficient) and `release` after completion.
 //!

@@ -50,6 +50,7 @@ oximedia-captions.workspace = true
 oximedia-timecode.workspace = true
 oximedia-convert.workspace = true
 oximedia-transcode.workspace = true
+oximedia-workflow.workspace = true
 oximedia-colormgmt.workspace = true
 oximedia-image.workspace = true
 oximedia-watermark.workspace = true
@@ -73,12 +74,16 @@ oximedia-dedup.workspace = true
 oximedia-archive-pro.workspace = true
 oximedia-dolbyvision.workspace = true
 oximedia-auto.workspace = true
+oximedia-neural.workspace = true
+oximedia-analytics.workspace = true
+oximedia-cache.workspace = true
 oximedia-ml = { workspace = true, optional = true, features = ["all-pipelines"] }
 chrono.workspace = true
 bytes.workspace = true
 oxiarc-deflate.workspace = true
 tokio = { workspace = true, features = ["full"] }
 pyo3-async-runtimes = { workspace = true }
+async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ndarray.workspace = true

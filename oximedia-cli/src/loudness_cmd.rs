@@ -39,11 +39,11 @@ pub enum LoudnessCommand {
         #[arg(long, default_value = "ebu-r128")]
         target: String,
 
-        /// Sample rate override in Hz (default: 48000)
+        /// Sample rate override in Hz (default: the decoded file's rate)
         #[arg(long)]
         sample_rate: Option<f64>,
 
-        /// Channel count override (default: 2)
+        /// Channel count override (default: the decoded file's channels)
         #[arg(long)]
         channels: Option<usize>,
 
@@ -183,8 +183,24 @@ async fn cmd_analyze(
     }
 
     let standard = parse_standard(target_str)?;
-    let sr = sample_rate.unwrap_or(48000.0);
-    let ch = channels.unwrap_or(2);
+
+    // Decode real audio. Non-WAV/compressed inputs are an honest error —
+    // the old behaviour of metering a block of synthetic silence reported
+    // fabricated metrics/compliance for the file.
+    let audio = crate::decode_helper::decode_wav_f32(input)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "loudness analysis currently supports WAV/PCM input; could not decode {}: {}. \
+             (Compressed-container audio decoding is planned for 0.2.x.)",
+                input.display(),
+                e
+            )
+        })?;
+
+    // Honour explicit overrides; otherwise use the decoded stream's values.
+    let sr = sample_rate.unwrap_or_else(|| f64::from(audio.sample_rate));
+    let ch = channels.unwrap_or(audio.channels as usize).max(1);
 
     // Build and validate meter config
     let config = oximedia_metering::MeterConfig::new(standard, sr, ch);
@@ -192,17 +208,11 @@ async fn cmd_analyze(
         .validate()
         .map_err(|e| anyhow::anyhow!("Invalid meter configuration: {e}"))?;
 
-    // Create the loudness meter; feed synthetic silence to initialise state
-    // (full audio decoding pipeline integration is pending; we demonstrate the
-    // compliance targets and meter initialisation path here).
     let mut meter = oximedia_metering::LoudnessMeter::new(config)
         .map_err(|e| anyhow::anyhow!("Failed to create loudness meter: {e}"))?;
 
-    // Feed a tiny block of silence so metrics() returns finite values for
-    // the gating state (integrated will be -∞ for all-silence, which is
-    // expected and handled by fmt_lufs).
-    let silent: Vec<f32> = vec![0.0_f32; 4800 * ch];
-    meter.process_f32(&silent);
+    // Meter the file's actual samples.
+    meter.process_f32(&audio.samples);
 
     let metrics = meter.metrics();
     let compliance = meter.check_compliance();
@@ -251,8 +261,6 @@ async fn cmd_analyze(
                 "deviation_lu": compliance.deviation_lu,
                 "recommended_gain_db": compliance.recommended_gain_db(),
             },
-            "note": "Full audio decoding pipeline delivers live sample data; \
-                     metrics above reflect meter initialisation state."
         });
         let s = serde_json::to_string_pretty(&result).context("JSON serialization failed")?;
         println!("{s}");
@@ -373,12 +381,6 @@ async fn cmd_analyze(
         }
     }
 
-    println!();
-    println!(
-        "{}",
-        "Note: Live measurements require the audio decoding pipeline.".dimmed()
-    );
-
     Ok(())
 }
 
@@ -401,8 +403,21 @@ async fn cmd_analyze_ndjson(
     }
 
     let standard = parse_standard(target_str)?;
-    let sr = sample_rate.unwrap_or(48000.0);
-    let ch = channels.unwrap_or(2);
+
+    // Decode real audio — same honest-error path as the text/JSON variant.
+    let audio = crate::decode_helper::decode_wav_f32(input)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "loudness analysis currently supports WAV/PCM input; could not decode {}: {}. \
+             (Compressed-container audio decoding is planned for 0.2.x.)",
+                input.display(),
+                e
+            )
+        })?;
+
+    let sr = sample_rate.unwrap_or_else(|| f64::from(audio.sample_rate));
+    let ch = channels.unwrap_or(audio.channels as usize).max(1);
 
     let config = oximedia_metering::MeterConfig::new(standard, sr, ch);
     config
@@ -412,8 +427,7 @@ async fn cmd_analyze_ndjson(
     let mut meter = oximedia_metering::LoudnessMeter::new(config)
         .map_err(|e| anyhow::anyhow!("Failed to create loudness meter: {e}"))?;
 
-    let silent: Vec<f32> = vec![0.0_f32; 4800 * ch];
-    meter.process_f32(&silent);
+    meter.process_f32(&audio.samples);
 
     let metrics = meter.metrics();
     let compliance = meter.check_compliance();
@@ -466,12 +480,30 @@ async fn cmd_check(
     }
 
     let standard = parse_standard(standard_str)?;
-    let config = oximedia_metering::MeterConfig::new(standard, 48000.0, 2);
+
+    // Decode real audio: a compliance verdict for the file must be measured
+    // from the file (the old silence-metering path reported a fabricated
+    // verdict for any input).
+    let audio = crate::decode_helper::decode_wav_f32(input)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "loudness compliance checking currently supports WAV/PCM input; could not decode \
+             {}: {}. (Compressed-container audio decoding is planned for 0.2.x.)",
+                input.display(),
+                e
+            )
+        })?;
+
+    let config = oximedia_metering::MeterConfig::new(
+        standard,
+        f64::from(audio.sample_rate),
+        (audio.channels as usize).max(1),
+    );
     let mut meter = oximedia_metering::LoudnessMeter::new(config)
         .map_err(|e| anyhow::anyhow!("Failed to create loudness meter: {e}"))?;
 
-    let silent: Vec<f32> = vec![0.0_f32; 4800 * 2];
-    meter.process_f32(&silent);
+    meter.process_f32(&audio.samples);
     let compliance = meter.check_compliance();
 
     if json_output {
@@ -733,15 +765,59 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Write a real 16-bit PCM mono WAV containing a sine wave.
+    fn write_sine_wav(path: &std::path::Path, amplitude: f64, seconds: f64) {
+        let sample_rate: u32 = 48_000;
+        let n = (f64::from(sample_rate) * seconds) as usize;
+        let mut pcm: Vec<u8> = Vec::with_capacity(n * 2);
+        for i in 0..n {
+            let t = i as f64 / f64::from(sample_rate);
+            let v = (t * 1000.0 * std::f64::consts::TAU).sin() * amplitude;
+            let s = (v * f64::from(i16::MAX)) as i16;
+            pcm.extend_from_slice(&s.to_le_bytes());
+        }
+        let mut wav: Vec<u8> = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + pcm.len() as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&pcm);
+        std::fs::write(path, &wav).expect("write wav fixture");
+    }
+
     #[tokio::test]
-    async fn test_cmd_analyze_existing_file_json() {
+    async fn test_cmd_analyze_real_wav_json() {
         let dir = std::env::temp_dir();
-        let path = dir.join("oximedia_loudness_test_file.wav");
-        // Write a minimal stub so exists() returns true
-        std::fs::write(&path, b"RIFF").expect("write should succeed");
+        let path = dir.join("oximedia_loudness_test_real.wav");
+        write_sine_wav(&path, 0.5, 1.0);
         let result = cmd_analyze(&path, "ebu-r128", None, None, false, "json").await;
-        // File exists so meter init succeeds; result should be Ok
         assert!(result.is_ok(), "unexpected error: {result:?}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Undecodable input must be an honest error, not a fabricated report
+    /// metered from synthetic silence (the pre-0.2.0 behaviour).
+    #[tokio::test]
+    async fn test_cmd_analyze_undecodable_file_errors() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("oximedia_loudness_test_garbage.wav");
+        std::fs::write(&path, b"RIFF").expect("write should succeed");
+        let err = cmd_analyze(&path, "ebu-r128", None, None, false, "json")
+            .await
+            .expect_err("garbage input must fail honestly");
+        assert!(
+            err.to_string().contains("WAV/PCM"),
+            "error must explain supported input, got: {err}"
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -752,14 +828,35 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// A loud full-scale tone is genuinely non-compliant with EBU R128; the
+    /// strict check must fail — proof that real file samples flow through
+    /// the meter (silence would never trip the loudness gate).
     #[tokio::test]
-    async fn test_cmd_check_existing_file() {
+    async fn test_cmd_check_real_measurement_strict() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("oximedia_loudness_check_loud.wav");
+        write_sine_wav(&path, 0.9, 2.0);
+        let err = cmd_check(&path, "ebu-r128", true, true)
+            .await
+            .expect_err("a ~-3 LUFS tone must fail strict EBU R128 compliance");
+        assert!(
+            err.to_string().contains("comply"),
+            "error must be the compliance failure, got: {err}"
+        );
+        // Non-strict mode reports the same verdict without failing.
+        let result = cmd_check(&path, "ebu-r128", false, true).await;
+        assert!(result.is_ok(), "non-strict must exit Ok: {result:?}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Undecodable input to `check` is an honest error as well.
+    #[tokio::test]
+    async fn test_cmd_check_undecodable_file_errors() {
         let dir = std::env::temp_dir();
         let path = dir.join("oximedia_loudness_check_stub.wav");
         std::fs::write(&path, b"stub").expect("write should succeed");
-        // strict=false so non-compliance is not an error here
         let result = cmd_check(&path, "youtube", false, true).await;
-        assert!(result.is_ok(), "unexpected error: {result:?}");
+        assert!(result.is_err(), "garbage input must fail honestly");
         std::fs::remove_file(&path).ok();
     }
 }

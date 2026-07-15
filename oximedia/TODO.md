@@ -1,7 +1,7 @@
 # oximedia — Facade Crate TODO
 
-**Version: 0.1.9**
-**Status as of: 2026-07-08**
+**Version: 0.2.0 (active, dev branch `0.2.0`) / 0.1.9 (stable, `master`)**
+**Status as of: 2026-07-15**
 
 The `oximedia` facade is the single cargo-add entry point into the entire OxiMedia
 ecosystem. It re-exports approximately 103 workspace library crates behind

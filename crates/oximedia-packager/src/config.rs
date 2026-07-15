@@ -285,6 +285,15 @@ pub struct PackagerConfig {
     /// of deriving variants from the bitrate ladder.
     #[serde(skip)]
     pub variant_set: Option<crate::variant_stream::VariantSet>,
+    /// Real source-media parameters (resolution, framerate, codec) used to
+    /// derive an automatic bitrate ladder when `ladder.auto_generate` is set.
+    ///
+    /// The packager does not invent a source resolution: if this is `None`
+    /// and auto-generation is requested, packaging fails with a clear error
+    /// rather than emitting a ladder unrelated to the real input. Populate it
+    /// from your own probe of the input (or via [`Self::with_source_info`]).
+    #[serde(skip)]
+    pub source_media: Option<crate::ladder::SourceInfo>,
 }
 
 impl PackagerConfig {
@@ -340,6 +349,14 @@ impl PackagerConfig {
     #[must_use]
     pub fn with_variant_set(mut self, vs: crate::variant_stream::VariantSet) -> Self {
         self.variant_set = Some(vs);
+        self
+    }
+
+    /// Set the real source-media parameters used for automatic bitrate ladder
+    /// generation (see [`Self::source_media`]).
+    #[must_use]
+    pub fn with_source_info(mut self, source: crate::ladder::SourceInfo) -> Self {
+        self.source_media = Some(source);
         self
     }
 

@@ -554,12 +554,26 @@ fn decode_vp8l_subchunk(data: &[u8], width: u32, height: u32) -> CodecResult<Vec
 }
 
 /// Decode a VP8L bitstream to RGBA pixels using the existing Vp8lDecoder.
-fn decode_vp8l_to_rgba(vp8l_data: &[u8], _width: u32, _height: u32) -> CodecResult<Vec<u8>> {
+fn decode_vp8l_to_rgba(vp8l_data: &[u8], width: u32, height: u32) -> CodecResult<Vec<u8>> {
     use crate::webp::vp8l_decoder::Vp8lDecoder;
 
     let decoded = Vp8lDecoder::new()
         .decode(vp8l_data)
         .map_err(|e| CodecError::DecoderError(format!("VP8L decode failed: {e}")))?;
+
+    // Defend against an ANMF header that declares different dimensions than the
+    // embedded VP8L image. Downstream consumers index the returned buffer using
+    // the ANMF-declared width/height, so a mismatch (declared larger than the
+    // decoded image) would read out of bounds. Require an exact match.
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| CodecError::InvalidBitstream("ANMF frame dimensions overflow".into()))?;
+    if decoded.pixels.len() != expected {
+        return Err(CodecError::InvalidBitstream(format!(
+            "ANMF declares {width}x{height} but embedded VP8L decoded {} pixels",
+            decoded.pixels.len()
+        )));
+    }
 
     // decoded.pixels is Vec<u32> in ARGB order; convert to RGBA bytes.
     let mut rgba = Vec::with_capacity(decoded.pixels.len() * 4);

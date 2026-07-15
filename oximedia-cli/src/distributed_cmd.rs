@@ -216,6 +216,19 @@ async fn start_coordinator(
     fault_tolerance: bool,
     json_output: bool,
 ) -> Result<()> {
+    // DistributedConfig has no coordinator-side worker cap or state
+    // directory, so these flags cannot configure anything real; warn
+    // instead of silently accepting them.
+    // TODO(0.2.x): add max_workers/data_dir to
+    // oximedia_distributed::DistributedConfig alongside the pending gRPC
+    // server integration, then thread these through.
+    if max_workers.is_some() {
+        eprintln!("warning: --max-workers is not implemented yet and is ignored");
+    }
+    if data_dir.is_some() {
+        eprintln!("warning: --data-dir is not implemented yet and is ignored");
+    }
+
     let config = oximedia_distributed::DistributedConfig {
         coordinator_addr: bind.to_string(),
         heartbeat_interval: std::time::Duration::from_secs(heartbeat_timeout),
@@ -462,9 +475,22 @@ async fn submit_job(
 async fn query_status(
     coordinator: &str,
     job_id: Option<&str>,
-    _watch: bool,
+    watch: bool,
     output_format: &str,
 ) -> Result<()> {
+    // A watch loop would need a live coordinator connection; each CLI
+    // invocation only sees its own in-process (empty) job table today, so
+    // polling it would fabricate liveness. Warn instead of silently
+    // dropping the flag.
+    // TODO(0.2.x): implement a real polling loop once the gRPC client path
+    // to a remote coordinator lands.
+    if watch {
+        eprintln!(
+            "warning: --watch is not implemented yet and is ignored (requires a live \
+             coordinator connection)"
+        );
+    }
+
     let config = oximedia_distributed::DistributedConfig {
         coordinator_addr: coordinator.to_string(),
         ..oximedia_distributed::DistributedConfig::default()

@@ -107,7 +107,10 @@ pub fn decode_subband(
                 // 8-bit prefix `11111111`), read the escape continuation and add
                 // the escape base — the exact inverse of `vlc_encode::write_run`.
                 let run = if run_val < 0 {
-                    (RUN_ESCAPE_BASE + read_escape_value(reader)?) as usize
+                    // Saturating add in usize: `RUN_ESCAPE_BASE + escape` is a
+                    // u32 sum that can overflow for a malformed escape value;
+                    // the result is clamped to `num_coeffs` below anyway.
+                    (RUN_ESCAPE_BASE as usize).saturating_add(read_escape_value(reader)? as usize)
                 } else {
                     run_val as usize
                 };

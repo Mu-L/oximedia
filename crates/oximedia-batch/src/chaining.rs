@@ -1,6 +1,6 @@
 //! Job chaining — dependency-aware sequential job dispatch.
 //!
-//! [`BatchJobChain`] maintains an ordered list of jobs with optional `depends_on`
+//! [`BatchJobChain`](crate::chaining::BatchJobChain) maintains an ordered list of jobs with optional `depends_on`
 //! constraints.  Only jobs whose dependency (if any) has been completed are
 //! considered *ready*.  Calling `next_ready()` pops and returns the first job
 //! that is ready to run.

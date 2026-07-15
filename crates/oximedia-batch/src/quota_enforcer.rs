@@ -1,7 +1,7 @@
 //! Quota enforcement — per-user/tenant job limits, storage quotas,
 //! CPU hour budgets, and violation handling.
 //!
-//! [`QuotaEnforcer`] tracks resource consumption per principal (user or
+//! [`QuotaEnforcer`](crate::quota_enforcer::QuotaEnforcer) tracks resource consumption per principal (user or
 //! tenant) across four axes:
 //!
 //! | Axis | Unit | Description |

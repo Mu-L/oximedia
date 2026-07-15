@@ -611,7 +611,11 @@ fn parse_strf_waveformatex(
         let size = read_u32_le(data, pos + 4) as usize;
         if fourcc == b"strf" {
             let payload_start = pos + 8;
-            if payload_start + 14 <= strl_end {
+            // WAVEFORMATEX reads through offset +15 (bits_per_sample at +14 is a
+            // 2-byte read), so 16 bytes must be present — not 14. `strl_end` is
+            // bounded by the enclosing hdrl (<= data.len()), so a 16-byte check
+            // keeps the direct reads below in range.
+            if payload_start + 16 <= strl_end {
                 let channels = read_u16_le(data, payload_start + 2);
                 let sample_rate = read_u32_le(data, payload_start + 4);
                 let bits_per_sample = read_u16_le(data, payload_start + 14);
@@ -821,6 +825,19 @@ fn read_u64_le(data: &[u8], offset: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Security regression (P1 #7): a `strf` chunk with only 14 payload bytes
+    /// present. `bits_per_sample` is a 2-byte read at offset +14, so 16 bytes
+    /// must be checked — checking 14 lets the read run out of bounds and panic.
+    #[test]
+    fn parse_strf_waveformatex_truncated_no_panic() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"strf");
+        data.extend_from_slice(&100u32.to_le_bytes()); // declared size (ignored for bound)
+        data.extend_from_slice(&[0u8; 14]); // WAVEFORMATEX truncated to 14 bytes
+        let strl_end = data.len(); // payload_start(8) + 14 == data.len()
+        assert!(parse_strf_waveformatex(&data, 0, strl_end).is_none());
+    }
 
     #[test]
     fn rejects_too_short_input() {

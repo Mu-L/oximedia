@@ -370,6 +370,10 @@ pub enum NormalizeError {
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
 
+    /// Audio codec error (e.g. WAV decode/encode failure).
+    #[error("Audio codec error: {0}")]
+    AudioCodec(#[from] oximedia_audio::error::AudioError),
+
     /// Metadata error.
     #[error("Metadata error: {0}")]
     MetadataError(String),

@@ -36,7 +36,7 @@ pub enum EdlCommand {
         level: String,
     },
 
-    /// Re-export an EDL in a different format
+    /// Re-export an EDL (normalized CMX 3600 output)
     Export {
         /// EDL input file
         #[arg(value_name = "FILE")]
@@ -46,7 +46,8 @@ pub enum EdlCommand {
         #[arg(short, long)]
         output: PathBuf,
 
-        /// Target format
+        /// Target format (only cmx3600 is emitted today; other values warn
+        /// and proceed)
         #[arg(long, default_value = "cmx3600")]
         format: String,
 
@@ -93,14 +94,37 @@ pub async fn handle_edl_command(cmd: EdlCommand, json_output: bool) -> Result<()
     }
 }
 
+/// Parse a `--format` name into an `oximedia_edl::EdlFormat`, rejecting
+/// unknown values with the accepted list.
+fn parse_edl_format_name(s: &str) -> Result<oximedia_edl::EdlFormat> {
+    use oximedia_edl::EdlFormat;
+    match s.to_lowercase().as_str() {
+        "cmx3600" | "cmx-3600" => Ok(EdlFormat::Cmx3600),
+        "cmx3400" | "cmx-3400" => Ok(EdlFormat::Cmx3400),
+        "cmx340" | "cmx-340" => Ok(EdlFormat::Cmx340),
+        "gvg" => Ok(EdlFormat::Gvg),
+        "sony-bve9000" | "sonybve9000" | "bve9000" => Ok(EdlFormat::SonyBve9000),
+        other => Err(anyhow::anyhow!(
+            "Unknown EDL format '{}'. Supported: cmx3600, cmx3400, cmx340, gvg, sony-bve9000",
+            other
+        )),
+    }
+}
+
 /// Parse and display an EDL.
+///
+/// `--format` is a validated hint: the parser auto-detects the dialect, and
+/// a detected format that differs from the hint is reported on stderr so the
+/// flag has a real, observable effect instead of being silently dropped.
 async fn parse_edl_file(
     path: &PathBuf,
-    _format: &str,
+    format: &str,
     strict: bool,
     json_output: bool,
 ) -> Result<()> {
     use oximedia_edl::EdlParser;
+
+    let hinted_format = parse_edl_format_name(format)?;
 
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("Cannot read EDL file: {}", path.display()))?;
@@ -111,6 +135,13 @@ async fn parse_edl_file(
     let edl = parser
         .parse(&text)
         .with_context(|| format!("Failed to parse EDL: {}", path.display()))?;
+
+    if edl.format != hinted_format {
+        eprintln!(
+            "note: detected EDL format {} differs from the --format hint {}",
+            edl.format, hinted_format
+        );
+    }
 
     if json_output {
         let events: Vec<serde_json::Value> = edl
@@ -127,7 +158,7 @@ async fn parse_edl_file(
             .collect();
         let obj = serde_json::json!({
             "file": path.to_string_lossy(),
-            "format": format!("{:?}", edl.format),
+            "format": edl.format.to_string(),
             "title": edl.title,
             "event_count": edl.event_count(),
             "duration_seconds": edl.total_duration_seconds(),
@@ -139,7 +170,7 @@ async fn parse_edl_file(
 
     println!("{}", "EDL Parse".green().bold());
     println!("  File:     {}", path.display());
-    println!("  Format:   {:?}", edl.format);
+    println!("  Format:   {}", edl.format);
     if let Some(ref title) = edl.title {
         println!("  Title:    {}", title);
     }
@@ -234,16 +265,32 @@ async fn validate_edl_file(path: &PathBuf, level: &str, json_output: bool) -> Re
     Ok(())
 }
 
-/// Re-export an EDL in a (possibly different) format.
+/// Re-export an EDL.
+///
+/// `--format` is validated for real; requesting a non-CMX-3600 dialect warns
+/// and proceeds, because `oximedia_edl::EdlGenerator` has a single generation
+/// path that always emits CMX 3600 regardless of `Edl::format` — pretending a
+/// dialect conversion happened would be fabricated output.
+// TODO(0.2.x): grow per-dialect writers in oximedia-edl (generator.rs has no
+// format branching today), then honour --format here for real.
 async fn export_edl(
     path: &PathBuf,
     output: &PathBuf,
-    _format: &str,
+    format: &str,
     comments: bool,
     clip_names: bool,
     json_output: bool,
 ) -> Result<()> {
     use oximedia_edl::{EdlGenerator, EdlParser};
+
+    let target_format = parse_edl_format_name(format)?;
+    if target_format != oximedia_edl::EdlFormat::Cmx3600 {
+        eprintln!(
+            "warning: EDL export currently always emits the CMX 3600 dialect; --format {} is \
+             ignored",
+            target_format
+        );
+    }
 
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("Cannot read EDL file: {}", path.display()))?;

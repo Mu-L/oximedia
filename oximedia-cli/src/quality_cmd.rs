@@ -11,7 +11,8 @@ use clap::Subcommand;
 use colored::Colorize;
 use oximedia_core::PixelFormat;
 use oximedia_quality::{Frame, MetricType, QualityAssessor};
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Subcommand enum
@@ -155,25 +156,199 @@ fn parse_metrics(metrics_str: &str) -> Result<Vec<MetricType>> {
     Ok(result)
 }
 
-/// Create a synthetic grey frame of the given size (for demonstration when real
-/// frame decoding is pending integration).
-fn make_grey_frame(width: usize, height: usize) -> Result<Frame> {
-    let mut frame = Frame::new(width, height, PixelFormat::Gray8)
-        .map_err(|e| anyhow::anyhow!("Failed to allocate frame: {e}"))?;
-    // Fill luma plane with mid-grey (128)
-    frame.luma_mut().fill(128);
+/// BT.601 integer luma of one RGB pixel: `y = (299*r + 587*g + 114*b) / 1000`.
+///
+/// Weights sum to 1000, so the result is already in `0..=255`; the clamp is
+/// defensive only. Matches the conversion used by `probe --quality-snapshot`.
+fn bt601_luma(r: u8, g: u8, b: u8) -> u8 {
+    let y = (299 * i32::from(r) + 587 * i32::from(g) + 114 * i32::from(b)) / 1_000;
+    y.clamp(0, 255) as u8
+}
+
+/// Convert packed RGB24 bytes into a single-plane `Gray8` quality [`Frame`].
+///
+/// All video/image quality metrics read `frame.planes[0]` (the luma plane),
+/// so a full RGB→YUV conversion is unnecessary.
+fn rgb24_to_gray_frame(rgb: &[u8], width: u32, height: u32) -> Result<Frame> {
+    if width == 0 || height == 0 {
+        return Err(anyhow::anyhow!(
+            "decoded frame has zero dimensions ({width}x{height})"
+        ));
+    }
+    let pixel_count = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| anyhow::anyhow!("frame dimensions overflow: {width}x{height}"))?;
+    let expected_len = pixel_count
+        .checked_mul(3)
+        .ok_or_else(|| anyhow::anyhow!("frame dimensions overflow: {width}x{height}"))?;
+    if rgb.len() < expected_len {
+        return Err(anyhow::anyhow!(
+            "RGB buffer too short: got {} bytes, need {expected_len} for {width}x{height}",
+            rgb.len()
+        ));
+    }
+
+    let mut frame = Frame::new(width as usize, height as usize, PixelFormat::Gray8)
+        .map_err(|e| anyhow::anyhow!("failed to allocate Gray8 frame: {e}"))?;
+    let luma = frame.luma_mut();
+    for (px, out) in rgb[..expected_len].chunks_exact(3).zip(luma.iter_mut()) {
+        *out = bt601_luma(px[0], px[1], px[2]);
+    }
     Ok(frame)
 }
 
-/// Create a synthetic noisy frame (luma alternates 120/136) for distorted demo.
-fn make_noisy_frame(width: usize, height: usize) -> Result<Frame> {
-    let mut frame = Frame::new(width, height, PixelFormat::Gray8)
-        .map_err(|e| anyhow::anyhow!("Failed to allocate frame: {e}"))?;
-    let luma = frame.luma_mut();
-    for (i, px) in luma.iter_mut().enumerate() {
-        *px = if i % 2 == 0 { 120 } else { 136 };
+/// Decode frame 0 of `path` and return it as a `Gray8` quality [`Frame`].
+///
+/// This is a **real decode** of the actual media content via
+/// [`crate::frame_extract::extract_video_frame_rgb`] (Y4M natively;
+/// MP4/MKV/WebM/TS through the demuxer + AV1/VP9/VP8 pipeline). Audio-only or
+/// undecodable input yields an honest error — never a synthetic stand-in.
+async fn decode_gray_frame(path: &Path) -> Result<Frame> {
+    let (rgb, width, height) = crate::frame_extract::extract_video_frame_rgb(path, 0)
+        .await
+        .with_context(|| format!("Failed to decode a video frame from {}", path.display()))?;
+    rgb24_to_gray_frame(&rgb, width, height)
+}
+
+/// Nearest-neighbour resize of a single-plane `Gray8` frame to `dw`x`dh`.
+///
+/// Full-reference metrics require identical dimensions; when a distorted input
+/// was encoded at a different resolution than the reference, it is resampled to
+/// the reference size before assessment (standard full-reference practice).
+fn resize_gray_frame(src: &Frame, dw: usize, dh: usize) -> Result<Frame> {
+    let mut out = Frame::new(dw, dh, PixelFormat::Gray8)
+        .map_err(|e| anyhow::anyhow!("failed to allocate resized frame: {e}"))?;
+    let (sw, sh) = (src.width, src.height);
+    if sw == 0 || sh == 0 {
+        return Err(anyhow::anyhow!("source frame has zero dimensions"));
     }
-    Ok(frame)
+    let src_luma = src.luma();
+    let dst = out.luma_mut();
+    for y in 0..dh {
+        let sy = (y * sh / dh).min(sh - 1);
+        for x in 0..dw {
+            let sx = (x * sw / dw).min(sw - 1);
+            dst[y * dw + x] = src_luma[sy * sw + sx];
+        }
+    }
+    Ok(out)
+}
+
+/// Outcome of one metric: a real score, or a reason it could not be computed
+/// (e.g. a no-reference size guard on a small frame). Never fabricated.
+struct MetricScore {
+    metric: MetricType,
+    score: Option<f64>,
+    reason: Option<String>,
+    components: HashMap<String, f64>,
+}
+
+/// Result of a full-reference `compare` over two real decoded frames.
+struct CompareOutcome {
+    width: usize,
+    height: usize,
+    distorted_resized: bool,
+    scores: Vec<MetricScore>,
+}
+
+/// Result of a no-reference `analyze` over one real decoded frame.
+struct AnalyzeOutcome {
+    width: usize,
+    height: usize,
+    scores: Vec<MetricScore>,
+}
+
+/// Decode both inputs and compute the requested full-reference metrics on the
+/// ACTUAL pixels. Per-metric failures degrade gracefully (recorded with a
+/// reason); a whole-input decode failure returns an honest error.
+async fn compare_scores(
+    reference: &Path,
+    distorted: &Path,
+    metrics: &[MetricType],
+) -> Result<CompareOutcome> {
+    let ref_frame = decode_gray_frame(reference).await.with_context(|| {
+        format!(
+            "Cannot assess quality: reference {} did not yield a decodable video frame",
+            reference.display()
+        )
+    })?;
+    let (width, height) = (ref_frame.width, ref_frame.height);
+
+    let mut dist_frame = decode_gray_frame(distorted).await.with_context(|| {
+        format!(
+            "Cannot assess quality: distorted {} did not yield a decodable video frame",
+            distorted.display()
+        )
+    })?;
+
+    let mut distorted_resized = false;
+    if dist_frame.width != width || dist_frame.height != height {
+        dist_frame = resize_gray_frame(&dist_frame, width, height)?;
+        distorted_resized = true;
+    }
+
+    let assessor = QualityAssessor::new();
+    let mut scores = Vec::with_capacity(metrics.len());
+    for &metric in metrics {
+        match assessor.assess(&ref_frame, &dist_frame, metric) {
+            Ok(s) => scores.push(MetricScore {
+                metric,
+                score: Some(s.score),
+                reason: None,
+                components: s.components.clone(),
+            }),
+            Err(e) => scores.push(MetricScore {
+                metric,
+                score: None,
+                reason: Some(e.to_string()),
+                components: HashMap::new(),
+            }),
+        }
+    }
+
+    Ok(CompareOutcome {
+        width,
+        height,
+        distorted_resized,
+        scores,
+    })
+}
+
+/// Decode the input and compute the requested no-reference metrics on the
+/// ACTUAL frame. Per-metric size-guard failures degrade gracefully.
+async fn analyze_scores(input: &Path, metrics: &[MetricType]) -> Result<AnalyzeOutcome> {
+    let frame = decode_gray_frame(input).await.with_context(|| {
+        format!(
+            "Cannot analyze quality: {} did not yield a decodable video frame",
+            input.display()
+        )
+    })?;
+    let (width, height) = (frame.width, frame.height);
+
+    let assessor = QualityAssessor::new();
+    let mut scores = Vec::with_capacity(metrics.len());
+    for &metric in metrics {
+        match assessor.assess_no_reference(&frame, metric) {
+            Ok(s) => scores.push(MetricScore {
+                metric,
+                score: Some(s.score),
+                reason: None,
+                components: s.components.clone(),
+            }),
+            Err(e) => scores.push(MetricScore {
+                metric,
+                score: None,
+                reason: Some(e.to_string()),
+                components: HashMap::new(),
+            }),
+        }
+    }
+
+    Ok(AnalyzeOutcome {
+        width,
+        height,
+        scores,
+    })
 }
 
 /// Metric display name and scale description.
@@ -232,31 +407,22 @@ async fn cmd_compare(
         }
     }
 
-    // Build synthetic reference and distorted frames for metric demonstration.
-    // (Real pixel-accurate assessment requires frame decoding pipeline integration.)
-    let ref_frame = make_grey_frame(width, height).context("Failed to create reference frame")?;
-    let dist_frame = make_noisy_frame(width, height).context("Failed to create distorted frame")?;
-
-    let assessor = QualityAssessor::new();
-    let mut scores: Vec<(MetricType, f64, std::collections::HashMap<String, f64>)> = Vec::new();
-
-    for &metric in &metrics {
-        let score = assessor
-            .assess(&ref_frame, &dist_frame, metric)
-            .map_err(|e| anyhow::anyhow!("Metric {metric:?} calculation failed: {e}"))?;
-        scores.push((metric, score.score, score.components.clone()));
-    }
+    // Decode a real frame from each input and assess on the ACTUAL pixels.
+    let _ = (width, height); // legacy args; real frame dimensions are used now.
+    let outcome = compare_scores(reference.as_path(), distorted.as_path(), &metrics).await?;
 
     if output_format == "json" {
-        let results: Vec<serde_json::Value> = scores
+        let results: Vec<serde_json::Value> = outcome
+            .scores
             .iter()
-            .map(|(metric, score, components)| {
-                let (name, scale) = metric_display_info(*metric);
+            .map(|ms| {
+                let (name, scale) = metric_display_info(ms.metric);
                 serde_json::json!({
                     "metric": name,
-                    "score": score,
+                    "score": ms.score,
+                    "unavailable": ms.reason.as_deref(),
                     "scale": scale,
-                    "components": components,
+                    "components": ms.components,
                 })
             })
             .collect();
@@ -264,9 +430,9 @@ async fn cmd_compare(
             "command": "quality compare",
             "reference": reference.display().to_string(),
             "distorted": distorted.display().to_string(),
-            "frame_dimensions": { "width": width, "height": height },
+            "frame_dimensions": { "width": outcome.width, "height": outcome.height },
+            "distorted_resized_to_reference": outcome.distorted_resized,
             "metrics": results,
-            "note": "Scores computed on synthetic frames; wire video decoder for pixel-accurate results."
         });
         let s = serde_json::to_string_pretty(&output).context("JSON serialization failed")?;
         println!("{s}");
@@ -278,28 +444,36 @@ async fn cmd_compare(
     println!("{}", "=".repeat(60));
     println!("{:20} {}", "Reference:", reference.display());
     println!("{:20} {}", "Distorted:", distorted.display());
-    println!("{:20} {}×{}", "Frame size:", width, height);
+    println!(
+        "{:20} {}×{} (decoded frame 0)",
+        "Frame size:", outcome.width, outcome.height
+    );
+    if outcome.distorted_resized {
+        println!(
+            "{:20} {}",
+            "Note:",
+            "distorted frame resized to reference resolution for comparison".dimmed()
+        );
+    }
     println!();
     println!("{}", "Results".cyan().bold());
     println!("{}", "-".repeat(60));
     println!("{:<12} {:>12}  Scale", "Metric", "Score");
     println!("{}", "-".repeat(60));
 
-    for (metric, score, _components) in &scores {
-        let (name, scale) = metric_display_info(*metric);
-        let score_str = format!("{score:.4}").yellow().to_string();
-        println!("{:<12} {:>12}  {}", name, score_str, scale.dimmed());
+    for ms in &outcome.scores {
+        let (name, scale) = metric_display_info(ms.metric);
+        match ms.score {
+            Some(score) => {
+                let score_str = format!("{score:.4}").yellow().to_string();
+                println!("{:<12} {:>12}  {}", name, score_str, scale.dimmed());
+            }
+            None => {
+                let reason = ms.reason.as_deref().unwrap_or("unavailable");
+                println!("{:<12} {:>12}  {}", name, "n/a".dimmed(), reason.dimmed());
+            }
+        }
     }
-
-    println!();
-    println!(
-        "{}",
-        "Note: Scores are computed on synthetic frames for demonstration.".dimmed()
-    );
-    println!(
-        "{}",
-        "Integrate the video decoder pipeline for pixel-accurate results.".dimmed()
-    );
 
     Ok(())
 }
@@ -330,22 +504,21 @@ async fn cmd_compare_ndjson(
     }
 
     let metrics = parse_metrics(metrics_str)?;
-    let ref_frame = make_grey_frame(width, height).context("Failed to create reference frame")?;
-    let dist_frame = make_noisy_frame(width, height).context("Failed to create distorted frame")?;
-    let assessor = QualityAssessor::new();
+    let _ = (width, height); // legacy args; real frame dimensions are used now.
+    let outcome = compare_scores(reference.as_path(), distorted.as_path(), &metrics).await?;
 
     let mut writer = crate::output::NdjsonWriter::new(std::io::stdout());
-    for &metric in &metrics {
-        let score = assessor
-            .assess(&ref_frame, &dist_frame, metric)
-            .map_err(|e| anyhow::anyhow!("Metric {metric:?} calculation failed: {e}"))?;
-        let (name, scale) = metric_display_info(metric);
+    for ms in &outcome.scores {
+        let (name, scale) = metric_display_info(ms.metric);
         let record = serde_json::json!({
             "metric": name,
-            "score": score.score,
+            "score": ms.score,
+            "unavailable": ms.reason.as_deref(),
             "scale": scale,
             "reference": reference.display().to_string(),
             "distorted": distorted.display().to_string(),
+            "width": outcome.width,
+            "height": outcome.height,
         });
         writer
             .emit(&record)
@@ -369,20 +542,19 @@ async fn cmd_analyze_ndjson(input: &PathBuf, metrics_str: &str) -> Result<()> {
         }
     }
 
-    let frame = make_grey_frame(1920, 1080).context("Failed to create analysis frame")?;
-    let assessor = QualityAssessor::new();
+    let outcome = analyze_scores(input.as_path(), &metrics).await?;
 
     let mut writer = crate::output::NdjsonWriter::new(std::io::stdout());
-    for &metric in &metrics {
-        let score = assessor
-            .assess_no_reference(&frame, metric)
-            .map_err(|e| anyhow::anyhow!("Metric {metric:?} failed: {e}"))?;
-        let (name, scale) = metric_display_info(metric);
+    for ms in &outcome.scores {
+        let (name, scale) = metric_display_info(ms.metric);
         let record = serde_json::json!({
             "metric": name,
-            "score": score.score,
+            "score": ms.score,
+            "unavailable": ms.reason.as_deref(),
             "scale": scale,
             "input": input.display().to_string(),
+            "width": outcome.width,
+            "height": outcome.height,
         });
         writer
             .emit(&record)
@@ -411,17 +583,8 @@ async fn cmd_analyze(input: &PathBuf, metrics_str: &str, output_format: &str) ->
         }
     }
 
-    // Synthetic frame (grey) for no-reference metric demonstration
-    let frame = make_grey_frame(1920, 1080).context("Failed to create analysis frame")?;
-    let assessor = QualityAssessor::new();
-
-    let mut scores: Vec<(MetricType, f64)> = Vec::new();
-    for &metric in &metrics {
-        let score = assessor
-            .assess_no_reference(&frame, metric)
-            .map_err(|e| anyhow::anyhow!("Metric {metric:?} failed: {e}"))?;
-        scores.push((metric, score.score));
-    }
+    // Decode a real frame from the input and score no-reference metrics on it.
+    let outcome = analyze_scores(input.as_path(), &metrics).await?;
 
     let file_size = std::fs::metadata(input)
         .with_context(|| format!("Cannot stat: {}", input.display()))
@@ -429,13 +592,15 @@ async fn cmd_analyze(input: &PathBuf, metrics_str: &str, output_format: &str) ->
         .unwrap_or(0);
 
     if output_format == "json" {
-        let results: Vec<serde_json::Value> = scores
+        let results: Vec<serde_json::Value> = outcome
+            .scores
             .iter()
-            .map(|(metric, score)| {
-                let (name, scale) = metric_display_info(*metric);
+            .map(|ms| {
+                let (name, scale) = metric_display_info(ms.metric);
                 serde_json::json!({
                     "metric": name,
-                    "score": score,
+                    "score": ms.score,
+                    "unavailable": ms.reason.as_deref(),
                     "scale": scale,
                 })
             })
@@ -444,8 +609,8 @@ async fn cmd_analyze(input: &PathBuf, metrics_str: &str, output_format: &str) ->
             "command": "quality analyze",
             "input": input.display().to_string(),
             "file_size_bytes": file_size,
+            "frame_dimensions": { "width": outcome.width, "height": outcome.height },
             "metrics": results,
-            "note": "Scores computed on synthetic frames; wire video decoder for pixel-accurate results."
         });
         let s = serde_json::to_string_pretty(&output).context("JSON serialization failed")?;
         println!("{s}");
@@ -456,27 +621,33 @@ async fn cmd_analyze(input: &PathBuf, metrics_str: &str, output_format: &str) ->
     println!("{}", "=".repeat(60));
     println!("{:20} {}", "Input:", input.display());
     println!("{:20} {} bytes", "File size:", file_size);
+    println!(
+        "{:20} {}×{} (decoded frame 0)",
+        "Frame size:", outcome.width, outcome.height
+    );
     println!();
     println!("{}", "Results".cyan().bold());
     println!("{}", "-".repeat(60));
     println!("{:<14} {:>10}  Scale", "Metric", "Score");
     println!("{}", "-".repeat(60));
 
-    for (metric, score) in &scores {
-        let (name, scale) = metric_display_info(*metric);
-        println!(
-            "{:<14} {:>10.4}  {}",
-            name,
-            score.to_string().yellow(),
-            scale.dimmed()
-        );
+    for ms in &outcome.scores {
+        let (name, scale) = metric_display_info(ms.metric);
+        match ms.score {
+            Some(score) => {
+                println!(
+                    "{:<14} {:>10.4}  {}",
+                    name,
+                    score.to_string().yellow(),
+                    scale.dimmed()
+                );
+            }
+            None => {
+                let reason = ms.reason.as_deref().unwrap_or("unavailable");
+                println!("{:<14} {:>10}  {}", name, "n/a".dimmed(), reason.dimmed());
+            }
+        }
     }
-
-    println!();
-    println!(
-        "{}",
-        "Note: Scores are computed on synthetic frames for demonstration.".dimmed()
-    );
 
     Ok(())
 }
@@ -759,19 +930,155 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_make_grey_frame() {
-        let frame = make_grey_frame(320, 240).expect("should succeed");
-        assert_eq!(frame.width, 320);
-        assert_eq!(frame.height, 240);
-        assert!(frame.luma().iter().all(|&p| p == 128));
+    /// Write a single-frame C420jpeg Y4M whose luma is produced by `luma_fn`
+    /// and whose chroma is neutral (U=V=128). With neutral chroma the real
+    /// YUV→RGB→BT.601-luma round-trip is exact, so the decoded Gray8 frame
+    /// equals `luma_fn` — a deterministic real-decode fixture.
+    fn write_y4m_frame(
+        name: &str,
+        w: usize,
+        h: usize,
+        luma_fn: impl Fn(usize, usize) -> u8,
+    ) -> PathBuf {
+        let mut data = Vec::new();
+        data.extend_from_slice(format!("YUV4MPEG2 W{w} H{h} F25:1 Ip C420jpeg\n").as_bytes());
+        data.extend_from_slice(b"FRAME\n");
+        for y in 0..h {
+            for x in 0..w {
+                data.push(luma_fn(x, y));
+            }
+        }
+        let chroma_len = w.div_ceil(2) * h.div_ceil(2);
+        data.extend(std::iter::repeat_n(128u8, chroma_len * 2));
+        let path = std::env::temp_dir().join(format!(
+            "oximedia_quality_{}_{}.y4m",
+            name,
+            std::process::id()
+        ));
+        std::fs::write(&path, &data).expect("write Y4M fixture");
+        path
     }
 
     #[test]
-    fn test_make_noisy_frame() {
-        let frame = make_noisy_frame(320, 240).expect("should succeed");
-        assert_eq!(frame.width, 320);
-        assert_eq!(frame.height, 240);
+    fn test_bt601_luma_grey_identity() {
+        for v in [0u8, 1, 64, 128, 200, 255] {
+            assert_eq!(bt601_luma(v, v, v), v);
+        }
+    }
+
+    #[test]
+    fn test_rgb24_to_gray_frame_pixel_exact() {
+        let (w, h) = (5u32, 3u32);
+        let mut rgb = Vec::new();
+        for i in 0..(w * h) as usize {
+            rgb.extend_from_slice(&[
+                (i * 3 % 256) as u8,
+                (i * 5 % 256) as u8,
+                (i * 7 % 256) as u8,
+            ]);
+        }
+        let frame = rgb24_to_gray_frame(&rgb, w, h).expect("convert");
+        assert_eq!(frame.width, 5);
+        assert_eq!(frame.height, 3);
+        for (i, &luma) in frame.luma().iter().enumerate() {
+            let px = &rgb[i * 3..i * 3 + 3];
+            assert_eq!(luma, bt601_luma(px[0], px[1], px[2]));
+        }
+    }
+
+    /// Quality-bar proof: comparing two DIFFERENT real images yields different
+    /// scores than comparing identical ones — the metrics run on the ACTUAL
+    /// decoded pixels (the old code returned the same scores for any input).
+    #[tokio::test]
+    async fn test_compare_identical_vs_different_real_frames() {
+        let a = write_y4m_frame("cmp_a", 96, 96, |x, y| ((x * 7 + y * 13) % 251) as u8);
+        let a_copy = write_y4m_frame("cmp_acopy", 96, 96, |x, y| ((x * 7 + y * 13) % 251) as u8);
+        let b = write_y4m_frame("cmp_b", 96, 96, |_, _| 128);
+
+        let metrics = vec![MetricType::Psnr, MetricType::Ssim];
+        let identical = compare_scores(&a, &a_copy, &metrics)
+            .await
+            .expect("compare identical");
+        let different = compare_scores(&a, &b, &metrics)
+            .await
+            .expect("compare different");
+
+        std::fs::remove_file(&a).ok();
+        std::fs::remove_file(&a_copy).ok();
+        std::fs::remove_file(&b).ok();
+
+        // Real, not hardcoded 1920x1080.
+        assert_eq!(identical.width, 96);
+        assert_eq!(identical.height, 96);
+
+        let score = |o: &CompareOutcome, m: MetricType| -> f64 {
+            o.scores
+                .iter()
+                .find(|s| s.metric == m)
+                .and_then(|s| s.score)
+                .expect("metric score present")
+        };
+        let psnr_id = score(&identical, MetricType::Psnr);
+        let psnr_diff = score(&different, MetricType::Psnr);
+        let ssim_id = score(&identical, MetricType::Ssim);
+        let ssim_diff = score(&different, MetricType::Ssim);
+
+        assert!(
+            psnr_id > psnr_diff,
+            "PSNR identical ({psnr_id}) must exceed different ({psnr_diff})"
+        );
+        assert!(
+            ssim_id > ssim_diff,
+            "SSIM identical ({ssim_id}) must exceed different ({ssim_diff})"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_analyze_real_frame_scores() {
+        let img = write_y4m_frame("an_real", 96, 96, |x, y| ((x * 7 + y * 13) % 251) as u8);
+        let metrics = vec![MetricType::Blur, MetricType::Noise, MetricType::Blockiness];
+        let outcome = analyze_scores(&img, &metrics)
+            .await
+            .expect("analyze real frame");
+        std::fs::remove_file(&img).ok();
+
+        assert_eq!(outcome.width, 96);
+        assert_eq!(outcome.height, 96);
+        for ms in &outcome.scores {
+            let s = ms
+                .score
+                .unwrap_or_else(|| panic!("{:?} should score: {:?}", ms.metric, ms.reason));
+            assert!(s.is_finite(), "{:?} score must be finite", ms.metric);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_analyze_audio_only_errors_honestly() {
+        // A WAV carries no video frame — analyze must honestly error, never
+        // fabricate a score on a synthetic frame.
+        let path =
+            std::env::temp_dir().join(format!("oximedia_quality_audio_{}.wav", std::process::id()));
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&36u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&8000u32.to_le_bytes());
+        wav.extend_from_slice(&16000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&0u32.to_le_bytes());
+        std::fs::write(&path, &wav).expect("write wav");
+
+        let result = analyze_scores(&path, &[MetricType::Blur]).await;
+        std::fs::remove_file(&path).ok();
+        assert!(
+            result.is_err(),
+            "audio-only input must not yield fabricated scores"
+        );
     }
 
     #[test]
@@ -825,11 +1132,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_cmd_compare_psnr_ssim_json() {
-        let dir = std::env::temp_dir();
-        let ref_path = dir.join("oximedia_quality_ref2.mkv");
-        let dist_path = dir.join("oximedia_quality_dist2.mkv");
-        std::fs::write(&ref_path, b"ref").expect("write ok");
-        std::fs::write(&dist_path, b"dist").expect("write ok");
+        let ref_path =
+            write_y4m_frame("cmd_cmp_ref", 96, 96, |x, y| ((x * 7 + y * 13) % 251) as u8);
+        let dist_path = write_y4m_frame("cmd_cmp_dist", 96, 96, |_, _| 128);
         let result = cmd_compare(&ref_path, &dist_path, "psnr,ssim", "json", 64, 64).await;
         assert!(result.is_ok(), "unexpected error: {result:?}");
         std::fs::remove_file(&ref_path).ok();
@@ -849,9 +1154,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cmd_analyze_no_reference_json() {
-        let dir = std::env::temp_dir();
-        let path = dir.join("oximedia_quality_analyze_test.mkv");
-        std::fs::write(&path, b"stub").expect("write ok");
+        let path = write_y4m_frame("cmd_analyze", 96, 96, |x, y| ((x * 5 + y * 11) % 241) as u8);
         let result = cmd_analyze(&path, "blur,noise", "json").await;
         assert!(result.is_ok(), "unexpected error: {result:?}");
         std::fs::remove_file(&path).ok();

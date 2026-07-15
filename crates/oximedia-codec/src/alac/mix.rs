@@ -68,10 +68,14 @@ pub fn unmix_stereo(
 ) {
     if mix_res != 0 {
         let res = i64::from(mix_res);
+        // Defend against a shift overflow: `mix_bits` comes from the frame
+        // header and shifting an i64 by >= 64 panics. Valid ALAC mix_bits is
+        // small (<= 31), so clamping to 63 never affects a well-formed stream.
+        let shift = mix_bits.min(63);
         for j in 0..num {
             let uj = i64::from(u[j]);
             let vj = i64::from(v[j]);
-            let l = uj + vj - ((res * vj) >> mix_bits);
+            let l = uj + vj - ((res * vj) >> shift);
             let r = l - vj;
             interleaved[2 * j] = l as i32;
             interleaved[2 * j + 1] = r as i32;

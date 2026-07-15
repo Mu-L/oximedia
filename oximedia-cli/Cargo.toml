@@ -13,17 +13,25 @@ readme = "README.md"
 [lints]
 workspace = true
 
+# doc = false on every [[bin]]: the `oximedia` bin's rustdoc output would
+# collide with the workspace's `oximedia` facade *library* docs under
+# target/doc/oximedia (cargo #6313 — bin/lib doc name collisions are
+# last-write-wins); the other bins are excluded for consistency (binary
+# docs carry no API surface).
 [[bin]]
 name = "oximedia"
 path = "src/main.rs"
+doc = false
 
 [[bin]]
 name = "oximedia-ff"
 path = "src/bin/oximedia-ff.rs"
+doc = false
 
 [[bin]]
 name = "oximedia-cv2"
 path = "src/bin/oximedia-cv2.rs"
+doc = false
 
 [dependencies]
 oximedia-compat-cv2.workspace = true

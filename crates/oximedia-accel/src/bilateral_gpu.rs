@@ -8,7 +8,7 @@
 //! This module provides:
 //! - [`bilateral_cpu`] — single-channel scalar reference implementation
 //!   (always available, deterministic, used by tests).
-//! - [`BilateralGpu`] — WebGPU dispatcher gated on `feature = "webgpu"` that
+//! - `BilateralGpu` — WebGPU dispatcher gated on `feature = "webgpu"` that
 //!   submits the [`crate::shaders::bilateral::BILATERAL_WGSL`] compute shader.
 //!
 //! Both paths take an f32 single-channel buffer.  Multi-channel images should

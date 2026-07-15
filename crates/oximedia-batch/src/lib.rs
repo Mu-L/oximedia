@@ -113,7 +113,7 @@ use std::sync::Arc;
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
-/// Configuration for graceful shutdown of [`BatchEngine`].
+/// Configuration for graceful shutdown of `BatchEngine` (requires the `sqlite` feature).
 #[derive(Debug, Clone)]
 pub struct ShutdownConfig {
     /// How long to wait (in milliseconds) for in-progress jobs to finish
@@ -160,7 +160,7 @@ impl ShutdownState {
     }
 }
 
-/// Summary returned by [`BatchEngine::request_shutdown`].
+/// Summary returned by `BatchEngine::request_shutdown` (requires the `sqlite` feature).
 #[derive(Debug, Clone)]
 pub struct ShutdownReport {
     /// Number of jobs that finished cleanly during the drain window.

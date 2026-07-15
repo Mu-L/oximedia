@@ -7,6 +7,7 @@ description = "Video and image forensics and tampering detection for OxiMedia"
 keywords = ["forensics", "tampering", "video", "multimedia", "detection"]
 categories = ["multimedia::video", "multimedia"]
 license.workspace = true
+rust-version.workspace = true
 readme = "README.md"
 homepage.workspace = true
 repository.workspace = true

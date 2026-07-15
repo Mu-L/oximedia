@@ -1,7 +1,7 @@
 # oximedia-cli — Command-Line Interface TODO
 
-**Version: 0.1.9**
-**Status as of: 2026-07-08**
+**Version: 0.2.0 (active, dev branch `0.2.0`) / 0.1.9 (stable, `master`)**
+**Status as of: 2026-07-15**
 
 The `oximedia-cli` crate is the primary user-facing entry point to the OxiMedia
 Sovereign Media Framework. It ships **two binaries** from a single crate — the
@@ -371,38 +371,150 @@ tabs, `↑`/`↓` navigate, `Enter` show details.
   lossless stand-in; finish the PNG/JPEG output encoders.
   (Done: real container probe + demux + codec decode pipeline; PNG via PngEncoder,
   JPEG via JpegEncoder; synthetic frame generator removed; log updated to show actual input path.)
-- [ ] `transcode.rs` — `-vf`/`-af`/`-ss`/`-t`/`-r`/`--threads`/`--resume`
-  fields on `TranscodeOptions` are marked `#[allow(dead_code)]` and never
-  read by `transcode()`/`transcode_single_pass()`/`transcode_two_pass()`;
-  `--map` isn't even threaded from `main.rs` into `TranscodeOptions` in
-  the first place. Wire seek/duration trimming, arbitrary filter-chain
-  application, thread-count, resume-from-partial, and stream mapping into
-  the real `oximedia_transcode::TranscodePipeline` builder (likely needs
-  new builder methods for several of these). Affects both `oximedia
-  transcode` and the shared FFmpeg-compat execution path (`oximedia ff` /
-  `oximedia-ff`), since both call the same `transcode::transcode()`.
-  (Found during the 2026-07-14 TODO content audit; confirmed present since
-  the 0.1.0 commit `5e1fd8c7`, not a recent regression.) **Update
-  (2026-07-14, later same day):** `--normalize-audio` — originally listed
-  here — has SHIPPED (see "Completed" above) and is no longer part of this
-  gap. Ready-to-implement per-flag designs for the remainder now live in
-  "CLI Flag Wiring Investigation (2026-07-14)" below.
+- [x] `transcode.rs` — flag wiring RESOLVED (0.2.0 pass, final state
+  verified 2026-07-15): `--map` / `-ss` / `-t` are wired for real through
+  `oximedia_transcode::TranscodePipelineBuilder`
+  (`stream_map`/`start_time_secs`/`duration_secs`, applied in
+  `apply_trim_and_map`, transcode.rs); `-vf scale=W:H` / `-af volume=…` /
+  `-r` are wired into the real frame-level pipeline
+  (`video_scale`/`audio_gain_db`/`output_fps`; unsupported filters fail
+  with a clear error naming the supported set); `--threads` warns and
+  proceeds (nothing to parallelize; transcode.rs ~line 434); `--resume`
+  was REMOVED from the CLI surface (see the investigation section below).
+  Covered by `tests/transcode_trim_map.rs` and transcode.rs unit tests.
+  Both `oximedia transcode` and the shared FFmpeg-compat path benefit
+  since they call the same `transcode::transcode()`. **Also in the 0.2.0
+  pass (2026-07-15):** `--audio-bitrate` and `--preset` — previously
+  parsed, echoed in the transcode plan, and silently unused — now warn
+  and proceed (no audio-bitrate knob exists in oximedia-transcode's
+  lossless audio encoders; no wired encoder has a speed-preset knob), and
+  their misleading plan echoes were removed.
 - [x] `probe --hash` — SHIPPED. `main.rs::run()` now forwards the real
   `hash` value (previously `hash: _hash`) into `probe_file(..., hash,
   ...)`, which takes a genuine `compute_hash: bool` parameter
   (`handlers/inspect.rs:24`) threaded through to a real hash/fingerprint
   computation. (Implemented after the 2026-07-14 TODO content audit that
   originally found it discarded.)
-- [ ] `probe --quality-snapshot` — still discarded in `main.rs::run()`
-  (`quality_snapshot: _quality_snapshot`); `probe_file()` has no parameter
-  for it. Wire to a quick no-reference quality metric, or remove the flag
-  if descoped. Ready-to-implement design (frame-0 decode via
-  `frame_extract::extract_video_frame_rgb`, BT.601 luma conversion, all 5
-  `oximedia-quality` no-reference metrics) recorded in "CLI Flag Wiring
-  Investigation (2026-07-14)" below, item 3. (Found during the 2026-07-14
-  TODO content audit.)
+- [x] `probe --quality-snapshot` — SHIPPED (verified 2026-07-15):
+  `main.rs::run()` forwards `quality_snapshot` into `probe_file()`, which
+  threads it to the real frame-0 no-reference analysis in
+  `src/quality_snapshot.rs` (all 5 `oximedia-quality` metrics with
+  per-metric size-guard honesty); covered by
+  `tests/probe_quality_snapshot.rs`.
 
-### CLI Flag Wiring Investigation (2026-07-14)
+### CLI Flag Wiring Investigation (2026-07-14) — CLOSED 2026-07-15
+
+**Status update (2026-07-15, 0.2.0 wave):** every flag investigated below
+has been resolved. Final dispositions:
+
+| Flag | Disposition |
+|------|-------------|
+| `transcode --map` | SHIPPED — real `StreamMap` selection incl. packet `stream_index` remap in the drain loop |
+| `transcode -ss` / `-t` | SHIPPED — real seek (seekable demuxers) / read-and-discard fallback + duration cutoff |
+| `transcode -vf` | SHIPPED narrow — `scale=W:H` real via frame-level `video_scale`; other filters = clear error |
+| `transcode -af` | SHIPPED narrow — `volume=N`/`NdB` real via `audio_gain_db`; other filters = clear error |
+| `transcode -r` | SHIPPED — real `output_fps` through `FpsResamplingDecoder` on the frame-level path |
+| `transcode --threads` | warn-and-proceed (single-threaded pipeline; stderr warning, transcode.rs) |
+| `transcode --preset` | warn-and-proceed for non-default values (no wired encoder has a speed knob); plan echo removed (2026-07-15) |
+| `transcode --audio-bitrate` | warn-and-proceed (lossless audio encoders have no bitrate knob); plan echo removed (2026-07-15) |
+| `transcode --resume` | REMOVED from the CLI surface — see item 6 below |
+| `probe --quality-snapshot` | SHIPPED — real frame-0 no-reference metrics (`src/quality_snapshot.rs`) |
+
+**`--resume` disposition record — decision confirmed by the user,
+2026-07-15; closed.** The user explicitly left the a)/b) choice in item 6
+undecided at the time and did not want warn-and-proceed auto-applied. The
+0.2.0 wiring pass implemented option (b): the flag is gone from
+`TranscodeOptions` and the clap surface, and
+`tests/transcode_trim_map.rs:326,340` assert clap now rejects it and that
+`transcode --help` no longer advertises it. If resume-from-partial support
+is ever wanted, re-add the flag together with real checkpoint persistence
+(see the `ConversionCheckpoint` precedent noted in item 6). The user was
+subsequently shown the actual diff (commit `d3d556f1`) and confirmed on
+2026-07-15 that removal (option b) — the current shipped state, where
+clap rejects `--resume` as an unrecognized argument — is correct and
+final. **Disposition confirmed by user 2026-07-15; closed.**
+
+---
+
+#### Main.rs flag-threading audit — resolved 2026-07-15 (0.2.0 wave)
+
+A second audit covered every other parsed-but-dropped flag reaching the
+subcommand handlers. Dispositions (wired-real entries have tests):
+
+| Flag | Disposition |
+|------|-------------|
+| `validate --loudness-check` | WIRED REAL — decodes WAV via `decode_helper::decode_wav_f32`, meters EBU R128 (`check_loudness`, src/validate.rs), reports deviation/true-peak issues; undecodable audio = visible warning issue. `tests/validate_loudness_check.rs` |
+| `validate --gamut-check` | warn-and-proceed — no YUV-level analysis path exists (`src/validate.rs::validate_files`; TODO(0.2.x) for EBU R103 legal-range check) |
+| `mam ingest --extract-metadata` | WIRED REAL — `MultiFormatProber` fills container format/codec/dimensions/duration on the asset record (`extract_asset_metadata`, src/mam_cmd.rs) |
+| `mam ingest --generate-proxy` | warn-and-proceed — no proxy-output policy on the ingest surface; points at the real `oximedia proxy generate` (TODO(0.2.x) in src/mam_cmd.rs) |
+| `mam search --date-from/--date-to` | WIRED REAL — RFC 3339 / date / epoch bounds filter on parsed ingest timestamps; `ingested_at` now written as real RFC 3339 with legacy epoch-string compat (`parse_asset_timestamp`/`parse_date_bound`) |
+| `batch-engine submit --priority` | WIRED REAL — `job.set_priority(...)` persisted to SQLite (test: `test_submit_persists_priority_and_operation`) |
+| `batch-engine submit --config` | WIRED REAL — `operation` (shorthand string or serde `BatchOperation` object), `inputs`, `outputs` all honoured (`parse_operation`, src/batch_cmd.rs) |
+| `batch-engine list --state` | WIRED REAL — filters on the persisted DB status via `get_job_status_string`; listing now shows a State column (`state_matches`) |
+| `workflow create --source/--destination` | WIRED REAL — persisted into the workflow definition JSON (`WorkflowDef.source/.destination`, serde-default for old files) and displayed |
+| `workflow --db` (submit/status/list/cancel/logs/run) | warn-and-proceed — no persistence layer wired (`warn_db_unwired`, src/workflow_cmd.rs; TODO(0.2.x): back with oximedia-workflow sqlite) |
+| `collab export --include-edits` | warn-and-proceed — sessions do not track edit events (TODO(0.2.x) in src/collab_cmd.rs) |
+| `edl parse --format` | WIRED as validated hint — unknown names error with the accepted list; a detected-format mismatch is reported on stderr (`parse_edl_format_name`) |
+| `edl export --format` | validated + warn-and-proceed for non-cmx3600 — `oximedia_edl::EdlGenerator` has a single CMX 3600 generation path (TODO(0.2.x) in src/edl_cmd.rs) |
+| `drm info --license` | warn-and-proceed — no license-metadata reader exists (TODO(0.2.x) in src/drm_cmd.rs) |
+| `cloud upload --multipart` | warn-and-proceed — backends auto-select multipart by file size; no force knob exposed (TODO(0.2.x) in src/cloud_cmd.rs) |
+| `recommend codec --bitrate/--resolution` | WIRED REAL — resolution validated (WxH), and with both inputs a deterministic bits-per-pixel assessment section is added to text+JSON output (`assess_bitrate`, tested) |
+| `distributed start-coordinator --max-workers/--data-dir` | warn-and-proceed — `DistributedConfig` has no such fields (TODO(0.2.x) in src/distributed_cmd.rs) |
+| `distributed status --watch` | warn-and-proceed — needs a live coordinator connection; polling the in-process empty job table would fabricate liveness (TODO(0.2.x)) |
+| `renderfarm init --data-dir` | warn-and-proceed — `CoordinatorConfig` has no state-directory field (TODO(0.2.x) in src/renderfarm_cmd.rs) |
+
+Related honesty fixes shipped in the same pass (2026-07-15):
+
+- `subtitle extract` now delegates to the real Matroska/WebM subtitle
+  demux shared with `captions extract` (was: printed a success-looking
+  banner and wrote nothing). `subtitle burn` and `timecode burn` validate
+  their inputs, then fail honestly — no compositor path exists (TODO(0.2.x)
+  markers in src/subtitle_cmd.rs / src/timecode_cmd.rs). Tests:
+  `tests/subtitle_timecode_honesty.rs`.
+- `loudness analyze` / `loudness analyze --ndjson` / `loudness check` now
+  decode the file's real samples (WAV/PCM) instead of metering a block of
+  synthetic silence and presenting the result as the file's
+  metrics/compliance; undecodable input is an honest error (src/loudness_cmd.rs).
+- `extract`'s completion summary reports the real written-frame count
+  returned by `extract_frames_impl` (was: `frames.unwrap_or(100)/every`
+  — a fabricated estimate).
+- Global `--quiet` is now real: `progress::set_quiet/is_quiet` gate the
+  status/banner stdout of transcode (plan/summary/two-pass banner),
+  extract (plan/summary), and image convert; probe/audio results and
+  `--json`/`--ndjson` payloads are never suppressed. Help text documents
+  the exact coverage. Tests: `tests/quiet_flag.rs`. TODO(0.2.x): sweep the
+  remaining ~50 handlers (marker in src/progress.rs).
+- Debug-format leaks fixed where a Display path exists: probe text/csv
+  container format (src/handlers/inspect.rs), EDL format (src/edl_cmd.rs),
+  benchmark codec/preset lists (join), graphics template params (k=v
+  join). Left as `{:?}` (clean single-word enum Debug; Display impls
+  would require foreign-crate changes outside this pass's ownership):
+  src/aaf_cmd.rs:179 (`track.track_type`), src/color_cmd.rs:209-211,
+  src/distributed_cmd.rs (`JobStatus`), src/farm_cmd.rs (`Priority`),
+  src/repair_cmd.rs:330 (`issue_type`), src/virtual_cmd.rs
+  (`WorkflowType`/`QualityMode`), src/profiler_cmd.rs (`ProfilingMode`).
+- `Cargo.toml`: `doc = false` on all three `[[bin]]` targets (the
+  `oximedia` bin's rustdoc collided with the `oximedia` facade library
+  docs — cargo #6313).
+- Dependency note: `oximedia-workflow` (already unused before this pass)
+  and `oximedia-recommend` (its decorative `RecommendationEngine::new()`
+  construction was removed with the bitrate-assessment wiring) are
+  currently unreferenced in `src/`; both stay declared as the planned
+  backing for the workflow-persistence and recommend-engine TODO(0.2.x)
+  items above. Revisit during the next /unused-deps audit if those plans
+  change.
+- `README.md`: replaced the fabricated sectioned batch-TOML schema with
+  the real flat `BatchConfig` schema (`patterns` required), replaced the
+  invented exit codes 4 "Unsupported format"/5 "Patent codec" with the
+  real `OxiExitCode` table (0-4), rewrote transcode examples to the real
+  re-encode matrix (old examples showed VP9/AV1 encodes that error at
+  runtime), fixed `probe -V` → `--detail`, documented `--quiet`'s real
+  coverage, and refreshed the global-options table.
+
+---
+
+Original investigation notes follow (kept for the record; the design
+details below informed the shipped implementations).
 
 Design-level follow-up on the six flags left open above (`transcode`'s
 `-vf`/`-af`/`-ss`/`-t`/`-r`/`--threads`/`--resume`/`--map`, and `probe
@@ -628,7 +740,7 @@ subagent** (rather than the default model), given the scale and
 exploratory nature of proving out an unproven subsystem. Until then: same
 "warn and proceed" treatment as `--threads`.
 
-#### 6. `--resume` — no real design exists, disposition undecided
+#### 6. `--resume` — no real design exists, disposition confirmed by user 2026-07-15; closed
 
 `TranscodeJob::resume()` (`crates/oximedia-transcode/src/transcode_job.rs:185-189`)
 is a bare in-memory status-enum flip (`Paused`→`Running`) with no
@@ -647,8 +759,10 @@ not adaptable without new per-file fields. `--resume` is undocumented
 anywhere user-facing except its own `--help` string ("Resume from
 previous incomplete encode").
 
-**Disposition explicitly left open by the user — do not recommend one
-option over the other, record both as pending a decision:**
+**Disposition confirmed by the user, 2026-07-15; closed.** The user was
+shown the actual diff (commit `d3d556f1`) and confirmed that option (b) —
+remove the flag entirely — is correct and final. Both options are
+recorded below for historical context:
 - (a) Reject with a clear error when passed — consistent with "warn and
   proceed" elsewhere would actually argue for a *warning* here too, but
   `--resume` implies a stronger promise (avoiding redundant work) than
@@ -778,7 +892,12 @@ option over the other, record both as pending a decision:**
   flags are `transcode`'s `-vf`/`-af`/`-ss`/`-t`/`-r`/`--threads`/
   `--resume`/`--map` and `probe`'s `--quality-snapshot` — ready-to-
   implement design notes for each are in "CLI Flag Wiring Investigation
-  (2026-07-14)" above.
+  (2026-07-14)" above. **Update (2026-07-15, 0.2.0 wave):** ALL of those
+  are now resolved (shipped, warn-and-proceed, or removed) — see the
+  closure tables at the top of "CLI Flag Wiring Investigation
+  (2026-07-14) — CLOSED 2026-07-15" above, which also cover the second
+  audit of every other parsed-but-dropped flag (validate/mam/batch-engine/
+  workflow/collab/edl/drm/cloud/recommend/distributed/renderfarm).
 - **Resolved:** a dedicated `tests/` directory now exists (36 files,
   verified 2026-07-14) — `assert_cmd`/`predicates`-driven integration tests
   covering help/version smoke, JSON strict output, NDJSON, exit codes,

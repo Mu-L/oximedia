@@ -30,26 +30,34 @@
 //!
 //! ## Codec Feature Matrix
 //!
-//! Full encode/decode support, bit-depth, and chroma subsampling per codec:
+//! Full encode/decode support, bit-depth, and chroma subsampling per codec.
+//! `✓✓` means encode and decode both produce/consume real pixel or sample
+//! data; a decode column of "parse-only" means the bitstream/header parses
+//! but pixel or sample reconstruction is not implemented and the decoder
+//! returns an honest `Err` rather than fabricated output. **This table is a
+//! quick reference only — [`docs/codec_status.md`](
+//! https://github.com/cool-japan/oximedia/blob/master/docs/codec_status.md)
+//! in the workspace root is the authoritative, re-audited-against-source
+//! matrix.**
 //!
 //! | Codec | Encode | Decode | Bit Depths | Chroma |
 //! |-------|--------|--------|------------|--------|
-//! | AV1 | ✓ | ✓ | 8, 10, 12 | 4:2:0, 4:4:4 |
-//! | VP9 | ✓ | ✓ | 8, 10 | 4:2:0 |
-//! | VP8 | ✓ | ✓ | 8 | 4:2:0 |
+//! | AV1 | ✓ | keyframe/intra ✓ (8-bit 4:2:0 profile 0, bit-exact vs dav1d/aomdec incl. deblock, CDEF and loop restoration; superres, film grain, palette, intrabc, qmatrix, 10/12-bit and inter are honest `Err`) | 8 | 4:2:0 |
+//! | VP9 | ✓ | keyframe/intra ✓ (8-bit 4:2:0, bit-exact vs libvpx); inter not yet (honest `Err`) | 8 | 4:2:0 |
+//! | VP8 | ✓ | keyframe/intra ✓ (full RFC 6386 pipeline); inter not yet (honest `Err`) | 8 | 4:2:0 |
 //! | Theora | ✓ | ✓ | 8 | 4:2:0 |
 //! | MJPEG | ✓ | ✓ | 8 | 4:2:0, 4:2:2, 4:4:4 |
 //! | APV | ✓ | ✓ | 8, 10, 12 | 4:2:0, 4:2:2, 4:4:4 |
 //! | FFV1 | ✓ | ✓ | 8 | 4:2:0, 4:2:2, 4:4:4 |
 //! | H.263 | ✓ | ✓ | 8 | 4:2:0 |
-//! | ProRes 422 | — | ✓ | 10 | 4:2:2 |
+//! | ProRes 422 | ✓ | ✓ | 10 | 4:2:2 |
 //! | JPEG-XL | ✓ | ✓ | 8, 10, 12 | 4:2:0, 4:2:2, 4:4:4 |
-//! | AVIF/AV1 | ✓ | ✓ | 8, 10, 12 | 4:2:0, 4:4:4 |
+//! | AVIF/AV1 | ✓ | not supported (honest `Err`; depends on the AV1 decoder gap) | 8, 10, 12 | 4:2:0, 4:4:4 |
 //! | APNG/PNG | ✓ | ✓ | 8, 16 | RGBA, Grayscale |
 //! | GIF | ✓ | ✓ | 8 | Paletted |
-//! | WebP | ✓ | ✓ | 8 | 4:2:0 (lossy), lossless |
-//! | Opus | ✓ | ✓ | — | Mono/Stereo/Surround |
-//! | Vorbis | ✓ | ✓ | — | Mono/Stereo/Surround |
+//! | WebP | ✓ | ✓ (lossless VP8L only; no lossy VP8 WebP decode) | 8 | 4:2:0 (lossy), lossless |
+//! | Opus | ✓ (CELT + SILK; Hybrid encode not implemented) | ✓ (CELT + SILK + Hybrid) | — | Mono/Stereo/Surround |
+//! | Vorbis | ✓ | not yet (honest `Err`; headers parse) | — | Mono/Stereo/Surround |
 //! | FLAC | ✓ | ✓ | 16, 24 | Mono/Stereo/Multi |
 //! | PCM | ✓ | ✓ | 8, 16, 24, 32, f32 | Any |
 //!
@@ -57,7 +65,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! oximedia-codec = { version = "0.1.9", features = ["av1", "vp9", "opus", "jpegxl"] }
+//! oximedia-codec = { version = "0.2.0", features = ["av1", "vp9", "opus", "jpegxl"] }
 //! ```
 //!
 //! Available features: `av1` (default), `vp9`, `vp8`, `theora`, `h263`, `opus`,
@@ -313,6 +321,14 @@ pub mod silk;
 
 // Standalone CELT frame decoding types
 pub mod celt;
+
+// Shared decode-safety limits (allocation / dimension ceilings). Declared
+// unconditionally (no `#[cfg]`) because the PNG/GIF codecs below, as well as
+// several feature-gated decoders (dnxhd, jpegls, mpeg2, prores, jpegxs),
+// need it regardless of whether the `image-io` feature (which gates the
+// `image` module further down) is enabled.
+#[path = "util/limits.rs"]
+pub(crate) mod limits;
 
 // PNG codec
 pub mod png;

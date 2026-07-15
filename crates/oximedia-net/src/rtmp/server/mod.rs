@@ -218,11 +218,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_relay_manager_forward_updates_stats() {
+    async fn test_relay_manager_forward_to_unreachable_is_honest() {
+        // Forwarding to a target that cannot be reached must NOT fabricate
+        // forwarded bytes. The background forwarder attempts a real outbound
+        // RTMP connection; when it fails the target is marked unhealthy and
+        // `bytes_forwarded` stays 0 (nothing actually left the process).
         let relay = RelayManager::new();
-        relay
-            .add_target("live/s", "rtmp://r.example.com/live/s")
-            .await;
+        // Port 1 on localhost is closed → connect fails fast (ECONNREFUSED).
+        let url = "rtmp://127.0.0.1:1/live/s";
+        relay.add_target("live/s", url).await;
 
         let packet = MediaPacket {
             packet_type: MediaPacketType::Video,
@@ -232,8 +236,24 @@ mod tests {
         };
         relay.forward("live/s", &packet).await;
 
-        let stats = relay.stats("live/s").await;
-        assert_eq!(stats[0].bytes_forwarded, 500);
+        // Wait for the connection attempt to resolve (and fail).
+        let mut marked_unhealthy = false;
+        for _ in 0..100 {
+            let stats = relay.stats("live/s").await;
+            if !stats[0].active {
+                marked_unhealthy = true;
+                assert_eq!(
+                    stats[0].bytes_forwarded, 0,
+                    "no bytes may be reported forwarded to an unreachable target"
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            marked_unhealthy,
+            "forwarding to an unreachable target must mark it unhealthy, not fake success"
+        );
     }
 
     #[tokio::test]

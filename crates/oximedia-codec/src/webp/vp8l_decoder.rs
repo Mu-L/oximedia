@@ -477,6 +477,17 @@ impl HuffmanTree {
         let peek = br.peek_bits(u32::from(self.lut_bits))?;
         let entry = self.lut[peek as usize];
 
+        // Defend against an incomplete Huffman table: an unfilled first-level
+        // slot has `bits == 0`, which would advance the reader by zero bits and
+        // spin the decode loop forever (CPU bomb). A real symbol's code length
+        // is always >= 1, so a zero here means the code did not cover this
+        // prefix — malformed input.
+        if entry.bits == 0 {
+            return Err(CodecError::InvalidBitstream(
+                "incomplete Huffman code (zero-length symbol)".into(),
+            ));
+        }
+
         if entry.bits <= self.lut_bits {
             br.advance(u32::from(entry.bits));
             Ok(entry.value)
@@ -498,6 +509,13 @@ impl HuffmanTree {
                 ));
             }
             let entry2 = self.lut2[offset + idx2];
+            // Same incomplete-code defence as the first level: a zero-length
+            // second-level slot would advance zero bits and spin forever.
+            if entry2.bits == 0 {
+                return Err(CodecError::InvalidBitstream(
+                    "incomplete Huffman code (zero-length second-level symbol)".into(),
+                ));
+            }
             br.advance(u32::from(entry2.bits));
             Ok(entry2.value)
         }
@@ -672,8 +690,20 @@ impl Vp8lDecoder {
         let mut width = self.width;
         let height = self.height;
 
+        // VP8L permits at most 4 transforms, each type used at most once.
+        // Defend against a malformed stream chaining transforms without bound —
+        // each one decodes an entropy-coded sub-image, so an unbounded chain is
+        // a CPU / memory bomb.
+        let mut seen_types = 0u8;
         while br.read_bit()? {
             let transform_type = br.read_bits(2)?;
+            let type_bit = 1u8 << transform_type;
+            if seen_types & type_bit != 0 {
+                return Err(CodecError::InvalidBitstream(
+                    "duplicate VP8L transform type".into(),
+                ));
+            }
+            seen_types |= type_bit;
             match transform_type {
                 0 => {
                     // PREDICTOR_TRANSFORM
@@ -1304,6 +1334,23 @@ use super::vp8l_pixel::{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incomplete_huffman_code_errors_not_cpu_bomb() {
+        // Regression: an incomplete Huffman table leaves a zero-length LUT slot;
+        // decoding a symbol that lands there used to advance the bit reader by 0
+        // bits and spin the decode loop forever (CPU bomb). It must now error.
+        // Code lengths [1,0,0,0] assign only symbol 0 (code "0"); a "1" bit
+        // (LSB-first byte 0x01) lands in the unfilled slot lut[1].
+        let tree = HuffmanTree::build(&[1, 0, 0, 0], 4).expect("tree builds");
+        let data = [0x01u8, 0x00, 0x00, 0x00, 0x00];
+        let mut br = Vp8lBitReader::new(&data);
+        let result = tree.read_symbol(&mut br);
+        assert!(
+            result.is_err(),
+            "incomplete Huffman code must error, got {result:?}"
+        );
+    }
 
     // -- Header tests -------------------------------------------------------
 

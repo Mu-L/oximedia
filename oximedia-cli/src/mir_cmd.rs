@@ -75,25 +75,30 @@ pub enum MirCommand {
 /// Handle MIR subcommand dispatch.
 pub async fn handle_mir_command(command: MirCommand, json_output: bool) -> Result<()> {
     match command {
-        MirCommand::Tempo { input, detailed } => handle_tempo(&input, detailed, json_output),
+        MirCommand::Tempo { input, detailed } => handle_tempo(&input, detailed, json_output).await,
         MirCommand::Key { input, algorithm } => {
-            handle_key(&input, algorithm.as_deref(), json_output)
+            handle_key(&input, algorithm.as_deref(), json_output).await
         }
         MirCommand::Segment {
             input,
             output,
             min_duration,
-        } => handle_segment(&input, output.as_ref(), min_duration, json_output),
-        MirCommand::Chords { input, hop_size } => handle_chords(&input, hop_size, json_output),
+        } => handle_segment(&input, output.as_ref(), min_duration, json_output).await,
+        MirCommand::Chords { input, hop_size } => {
+            handle_chords(&input, hop_size, json_output).await
+        }
         MirCommand::Analyze {
             input,
             output,
             format,
-        } => handle_analyze(
-            &input,
-            output.as_ref(),
-            if json_output { "json" } else { &format },
-        ),
+        } => {
+            handle_analyze(
+                &input,
+                output.as_ref(),
+                if json_output { "json" } else { &format },
+            )
+            .await
+        }
     }
 }
 
@@ -101,47 +106,78 @@ pub async fn handle_mir_command(command: MirCommand, json_output: bool) -> Resul
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Generate test audio samples from a file path.
+/// Decode the real audio content of `input` into mono f32 samples.
 ///
-/// In a fully integrated pipeline, this would decode the audio file.
-/// For now, we generate a synthetic signal to demonstrate the MIR pipeline.
-fn load_audio_samples(input: &PathBuf) -> Result<(Vec<f32>, f32)> {
+/// This performs an **actual decode** of the file (never a synthetic stand-in
+/// signal): the shared [`crate::decode_helper::decode_wav_f32`] pipeline
+/// demuxes and PCM-decodes WAV/RIFF audio, and the interleaved result is
+/// downmixed to a single mono channel for MIR analysis.
+///
+/// Returns `(mono_samples, sample_rate_hz)`.
+///
+/// # Errors
+///
+/// Returns an honest error — never a fabricated tone — when:
+/// - the file does not exist,
+/// - the container/codec is not decodable here (only WAV/RIFF PCM is wired
+///   into the CLI audio-decode path; other formats must be converted first),
+/// - the decoded stream contains no samples (e.g. a video-only file).
+async fn load_audio_samples(input: &PathBuf) -> Result<(Vec<f32>, f32)> {
     if !input.exists() {
         return Err(anyhow::anyhow!("Input file not found: {}", input.display()));
     }
 
-    // Read file size as a proxy for duration
-    let file_size = std::fs::metadata(input)
-        .context("Failed to read file metadata")?
-        .len();
+    let decoded = match crate::decode_helper::decode_wav_f32(input.as_path()).await {
+        Ok(audio) => audio,
+        Err(crate::decode_helper::DecodeError::UnsupportedFormat(msg)) => {
+            return Err(anyhow::anyhow!(
+                "Cannot decode '{}' for MIR analysis: {msg}. \
+                 MIR decodes WAV/RIFF PCM audio; convert the input to WAV first \
+                 (for example: `oximedia audio --input {} --output out.wav`).",
+                input.display(),
+                input.display()
+            ));
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "Failed to decode audio from '{}': {e}",
+                input.display()
+            ));
+        }
+    };
 
-    let sample_rate = 44100.0_f32;
-    // Estimate duration: assume ~176400 bytes/sec for 16-bit stereo 44.1k
-    let estimated_duration = (file_size as f32 / 176_400.0).max(1.0).min(300.0);
-    let num_samples = (estimated_duration * sample_rate) as usize;
-
-    // Generate a synthetic signal with some musical characteristics
-    // A simple tone at 440 Hz with amplitude modulation to simulate beats
-    let mut samples = Vec::with_capacity(num_samples);
-    let freq = 440.0_f32;
-    let beat_freq = 2.0_f32; // ~120 BPM
-
-    for i in 0..num_samples {
-        let t = i as f32 / sample_rate;
-        let carrier = (2.0 * std::f32::consts::PI * freq * t).sin();
-        let envelope = 0.5 + 0.5 * (2.0 * std::f32::consts::PI * beat_freq * t).sin();
-        samples.push(carrier * envelope * 0.5);
+    let mono = downmix_to_mono(&decoded.samples, decoded.channels);
+    if mono.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No audio samples were decoded from '{}' (empty or non-audio stream).",
+            input.display()
+        ));
     }
 
-    Ok((samples, sample_rate))
+    Ok((mono, decoded.sample_rate as f32))
+}
+
+/// Average interleaved multi-channel PCM down to a single mono channel.
+///
+/// Mono input is returned unchanged. For `n`-channel interleaved input each
+/// output sample is the arithmetic mean of the `n` channel samples in a frame.
+fn downmix_to_mono(interleaved: &[f32], channels: u32) -> Vec<f32> {
+    if channels <= 1 {
+        return interleaved.to_vec();
+    }
+    let ch = channels as usize;
+    interleaved
+        .chunks(ch)
+        .map(|frame| frame.iter().copied().sum::<f32>() / frame.len() as f32)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
 // Command handlers
 // ---------------------------------------------------------------------------
 
-fn handle_tempo(input: &PathBuf, detailed: bool, json_output: bool) -> Result<()> {
-    let (samples, sample_rate) = load_audio_samples(input)?;
+async fn handle_tempo(input: &PathBuf, detailed: bool, json_output: bool) -> Result<()> {
+    let (samples, sample_rate) = load_audio_samples(input).await?;
 
     let config = MirConfig {
         enable_beat_tracking: true,
@@ -209,8 +245,8 @@ fn handle_tempo(input: &PathBuf, detailed: bool, json_output: bool) -> Result<()
     Ok(())
 }
 
-fn handle_key(input: &PathBuf, algorithm: Option<&str>, json_output: bool) -> Result<()> {
-    let (samples, sample_rate) = load_audio_samples(input)?;
+async fn handle_key(input: &PathBuf, algorithm: Option<&str>, json_output: bool) -> Result<()> {
+    let (samples, sample_rate) = load_audio_samples(input).await?;
 
     let algo = algorithm.unwrap_or("krumhansl");
 
@@ -266,13 +302,13 @@ fn handle_key(input: &PathBuf, algorithm: Option<&str>, json_output: bool) -> Re
     Ok(())
 }
 
-fn handle_segment(
+async fn handle_segment(
     input: &PathBuf,
     output: Option<&PathBuf>,
     min_duration: Option<f64>,
     json_output: bool,
 ) -> Result<()> {
-    let (samples, sample_rate) = load_audio_samples(input)?;
+    let (samples, sample_rate) = load_audio_samples(input).await?;
 
     let config = MirConfig {
         enable_beat_tracking: false,
@@ -392,8 +428,8 @@ fn handle_segment(
     Ok(())
 }
 
-fn handle_chords(input: &PathBuf, hop_size: Option<u32>, json_output: bool) -> Result<()> {
-    let (samples, sample_rate) = load_audio_samples(input)?;
+async fn handle_chords(input: &PathBuf, hop_size: Option<u32>, json_output: bool) -> Result<()> {
+    let (samples, sample_rate) = load_audio_samples(input).await?;
 
     let hop = hop_size.unwrap_or(512);
 
@@ -498,8 +534,8 @@ fn handle_chords(input: &PathBuf, hop_size: Option<u32>, json_output: bool) -> R
     Ok(())
 }
 
-fn handle_analyze(input: &PathBuf, output: Option<&PathBuf>, format: &str) -> Result<()> {
-    let (samples, sample_rate) = load_audio_samples(input)?;
+async fn handle_analyze(input: &PathBuf, output: Option<&PathBuf>, format: &str) -> Result<()> {
+    let (samples, sample_rate) = load_audio_samples(input).await?;
 
     // Enable all features for full analysis
     let config = MirConfig::default();
@@ -652,33 +688,88 @@ fn handle_analyze(input: &PathBuf, output: Option<&PathBuf>, format: &str) -> Re
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_load_audio_samples_missing_file() {
+    /// Write a minimal 16-bit mono PCM WAV whose amplitude is pulsed at
+    /// `beat_hz` beats/second — a real click track. Different `beat_hz` values
+    /// produce genuinely different onset timing, so a real beat tracker must
+    /// report different tempi (a fabricated fixed tone could not).
+    fn write_click_wav(name: &str, beat_hz: f32, duration_secs: f32) -> PathBuf {
+        let sample_rate: u32 = 44_100;
+        let num_samples = (sample_rate as f32 * duration_secs) as u32;
+        let bits_per_sample: u16 = 16;
+        let channels: u16 = 1;
+        let byte_rate = sample_rate * u32::from(channels) * u32::from(bits_per_sample / 8);
+        let block_align = channels * (bits_per_sample / 8);
+        let data_size = num_samples * u32::from(channels) * u32::from(bits_per_sample / 8);
+        let file_size = 36 + data_size;
+
+        let mut buf = Vec::with_capacity(44 + data_size as usize);
+        buf.extend_from_slice(b"RIFF");
+        buf.extend_from_slice(&file_size.to_le_bytes());
+        buf.extend_from_slice(b"WAVE");
+        buf.extend_from_slice(b"fmt ");
+        buf.extend_from_slice(&16u32.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        buf.extend_from_slice(&channels.to_le_bytes());
+        buf.extend_from_slice(&sample_rate.to_le_bytes());
+        buf.extend_from_slice(&byte_rate.to_le_bytes());
+        buf.extend_from_slice(&block_align.to_le_bytes());
+        buf.extend_from_slice(&bits_per_sample.to_le_bytes());
+        buf.extend_from_slice(b"data");
+        buf.extend_from_slice(&data_size.to_le_bytes());
+
+        for i in 0..num_samples {
+            let t = i as f32 / sample_rate as f32;
+            // Fraction of the current beat period [0,1).
+            let beat_phase = (t * beat_hz).fract();
+            // Short percussive burst (first 5% of each beat) with a linear decay.
+            let env = if beat_phase < 0.05 {
+                1.0 - beat_phase / 0.05
+            } else {
+                0.0
+            };
+            let carrier = (2.0 * std::f32::consts::PI * 440.0 * t).sin();
+            let sample = env * carrier;
+            let pcm = (sample * 32_767.0) as i16;
+            buf.extend_from_slice(&pcm.to_le_bytes());
+        }
+
+        let path =
+            std::env::temp_dir().join(format!("oximedia_mir_{}_{}.wav", name, std::process::id()));
+        std::fs::write(&path, &buf).expect("write click WAV fixture");
+        path
+    }
+
+    #[tokio::test]
+    async fn test_load_audio_samples_missing_file() {
         let path = PathBuf::from("/nonexistent/audio.wav");
-        let result = load_audio_samples(&path);
+        let result = load_audio_samples(&path).await;
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_load_audio_samples_from_temp_file() {
-        let dir = std::env::temp_dir();
-        let path = dir.join("oximedia_mir_test.wav");
-        // Create a small dummy file
-        std::fs::write(&path, vec![0u8; 1024]).expect("should write temp file");
-
-        let result = load_audio_samples(&path);
-        assert!(result.is_ok());
+    #[tokio::test]
+    async fn test_load_audio_samples_real_wav_decodes() {
+        let path = write_click_wav("decode", 2.0, 2.0);
+        let result = load_audio_samples(&path).await;
+        assert!(result.is_ok(), "real WAV must decode: {result:?}");
         let (samples, sr) = result.expect("should load samples");
         assert!(!samples.is_empty());
         assert!((sr - 44100.0).abs() < f32::EPSILON);
-
-        // Cleanup
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
     }
 
-    #[test]
-    fn test_mir_config_selective() {
-        let config = MirConfig {
+    #[tokio::test]
+    async fn test_load_audio_samples_non_wav_errors_honestly() {
+        // A non-WAV file must produce an honest error, never a fabricated tone.
+        let path =
+            std::env::temp_dir().join(format!("oximedia_mir_notawav_{}.mkv", std::process::id()));
+        std::fs::write(&path, b"\x1a\x45\xdf\xa3not a wav").expect("write fake mkv");
+        let result = load_audio_samples(&path).await;
+        assert!(result.is_err(), "non-WAV input must error, not synthesize");
+        std::fs::remove_file(&path).ok();
+    }
+
+    fn beat_only_config() -> MirConfig {
+        MirConfig {
             enable_beat_tracking: true,
             enable_key_detection: false,
             enable_chord_recognition: false,
@@ -690,7 +781,50 @@ mod tests {
             enable_rhythm_features: false,
             enable_harmonic_analysis: false,
             ..MirConfig::default()
-        };
+        }
+    }
+
+    /// Quality-bar proof: two DIFFERENT real audio files (different beat rates
+    /// written to WAV) must yield DIFFERENT tempo estimates. The old fabricated
+    /// 440 Hz / 2 Hz tone produced identical results for every input.
+    #[tokio::test]
+    async fn test_tempo_differs_for_different_wavs() {
+        let slow = write_click_wav("slow", 2.0, 8.0); // ~120 BPM click track
+        let fast = write_click_wav("fast", 3.0, 8.0); // ~180 BPM click track
+
+        let (slow_samples, slow_sr) = load_audio_samples(&slow).await.expect("decode slow WAV");
+        let (fast_samples, fast_sr) = load_audio_samples(&fast).await.expect("decode fast WAV");
+
+        let analyzer = MirAnalyzer::new(beat_only_config());
+        let slow_res = analyzer
+            .analyze(&slow_samples, slow_sr)
+            .expect("analyze slow");
+        let fast_res = analyzer
+            .analyze(&fast_samples, fast_sr)
+            .expect("analyze fast");
+
+        let slow_bpm = slow_res.tempo.map(|t| t.bpm);
+        let fast_bpm = fast_res.tempo.map(|t| t.bpm);
+
+        std::fs::remove_file(&slow).ok();
+        std::fs::remove_file(&fast).ok();
+
+        match (slow_bpm, fast_bpm) {
+            (Some(s), Some(f)) => {
+                assert!(s.is_finite() && s > 0.0, "slow bpm invalid: {s}");
+                assert!(f.is_finite() && f > 0.0, "fast bpm invalid: {f}");
+                assert!(
+                    (s - f).abs() > 1.0,
+                    "tempo must differ for different click tracks: slow={s} fast={f}"
+                );
+            }
+            other => panic!("both files must yield a tempo estimate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mir_config_selective() {
+        let config = beat_only_config();
         assert!(config.enable_beat_tracking);
         assert!(!config.enable_key_detection);
     }

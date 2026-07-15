@@ -327,6 +327,18 @@ impl<R: MediaSource> MatroskaDemuxer<R> {
         // Parse segment children
         self.parse_segment_children().await?;
 
+        // `parse_segment_children` stops at the first Cluster (so headers
+        // can be parsed without buffering the whole file), so it only ever
+        // sees a Cues element that precedes every Cluster. Muxers that
+        // write Cues in the trailer (this crate's own `MatroskaMuxer`
+        // included, matching common streaming-muxer practice) leave `cues`
+        // empty at this point even though a valid seek index exists later
+        // in the file. Recover it now, without disturbing the read
+        // position used for subsequent packet reading.
+        if self.cues.is_empty() {
+            self.resolve_cues_via_seek_head().await?;
+        }
+
         // Build stream info
         self.build_streams();
 
@@ -405,6 +417,172 @@ impl<R: MediaSource> MatroskaDemuxer<R> {
         }
 
         Ok(())
+    }
+
+    /// Attempts to locate and parse the Cues (seek index) element when it
+    /// was not found by the pre-Cluster metadata scan in
+    /// [`Self::parse_segment_children`].
+    ///
+    /// Matroska muxers commonly write Cues in the trailer, after every
+    /// Cluster (this crate's own `MatroskaMuxer` does exactly that, since
+    /// cluster byte positions for the cue table aren't known until each
+    /// cluster has actually been written). `parse_segment_children` stops
+    /// at the first Cluster to avoid buffering the whole file into memory,
+    /// so it only ever sees Cues written *before* every Cluster. This
+    /// method recovers Cues written later by:
+    ///
+    /// 1. Following the `SeekHead` (if one was parsed) directly to the
+    ///    Cues element's byte offset -- an O(1) jump.
+    /// 2. Falling back to a bounded linear scan over top-level elements,
+    ///    skipping past Cluster contents, looking for a trailing Cues
+    ///    element -- used only when no `SeekHead` entry for Cues is
+    ///    available (e.g. a foreign file that omits `SeekHead`).
+    ///
+    /// Either way, the source position and read buffer are fully restored
+    /// to their pre-call state before returning, so the normal cluster
+    /// reading that resumes right after header parsing is unaffected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only for I/O failures. A Cues element that cannot
+    /// be located is not an error: the demuxer simply falls back to its
+    /// existing "no cues available" behavior (seek-to-segment-start).
+    async fn resolve_cues_via_seek_head(&mut self) -> OxiResult<()> {
+        if !self.source.is_seekable() {
+            return Ok(());
+        }
+
+        // Save state so this side-excursion is invisible to the caller.
+        let saved_position = self.position;
+        let saved_buffer = std::mem::take(&mut self.buffer);
+        let saved_eof = self.eof;
+        let saved_cluster = std::mem::take(&mut self.current_cluster);
+
+        let cues_offset = self
+            .seek_entries
+            .iter()
+            .find(|entry| entry.id == element_id::CUES)
+            .map(|entry| self.segment_start + entry.position);
+
+        let found = if let Some(offset) = cues_offset {
+            self.try_parse_cues_at(offset).await?
+        } else {
+            false
+        };
+
+        if !found {
+            self.scan_for_trailing_cues().await?;
+        }
+
+        // Restore demuxer state so normal cluster reading is unaffected,
+        // regardless of whether Cues were found.
+        self.source.seek(SeekFrom::Start(saved_position)).await?;
+        self.position = saved_position;
+        self.buffer = saved_buffer;
+        self.eof = saved_eof;
+        self.current_cluster = saved_cluster;
+
+        Ok(())
+    }
+
+    /// Attempts to parse a Cues element at an exact absolute byte offset,
+    /// as pointed to by a `SeekHead` entry.
+    ///
+    /// Returns `Ok(true)` if a Cues element was found and parsed into
+    /// `self.cues`, `Ok(false)` if the offset didn't actually contain one
+    /// (a stale or foreign `SeekHead`), and `Err` only on I/O failure.
+    async fn try_parse_cues_at(&mut self, offset: u64) -> OxiResult<bool> {
+        self.seek_to_position(offset).await?;
+        self.ensure_buffer(12).await?;
+        if self.buffer.is_empty() {
+            return Ok(false);
+        }
+
+        let element = {
+            let mut parser = MatroskaParser::new(&self.buffer);
+            let Ok(element) = parser.read_element() else {
+                return Ok(false);
+            };
+            element
+        };
+
+        if element.id != element_id::CUES || element.is_unbounded() {
+            return Ok(false);
+        }
+
+        #[allow(clippy::cast_possible_truncation)]
+        let data_size = element.size as usize;
+        let total_size = element.header_size + data_size;
+        self.ensure_buffer(total_size).await?;
+        if self.buffer.len() < total_size {
+            return Ok(false);
+        }
+
+        let element_data = &self.buffer[element.header_size..total_size];
+        self.cues = parser::parse_cues(element_data, element.size)?;
+        Ok(true)
+    }
+
+    /// Bounded fallback: linearly scans top-level elements from the start
+    /// of the segment, skipping over Cluster contents element-by-element,
+    /// looking for a Cues element written without a `SeekHead` to point to
+    /// it.
+    ///
+    /// This walks every element in the file once (an O(n) cost proportional
+    /// to file size), so it is only used when [`Self::resolve_cues_via_seek_head`]
+    /// has no `SeekHead` entry to follow directly. Gives up silently
+    /// (leaving `self.cues` empty) at EOF or on the first parse error,
+    /// rather than failing the whole probe -- a file with no usable Cues is
+    /// simply not seekable by timestamp, which is not itself an error.
+    async fn scan_for_trailing_cues(&mut self) -> OxiResult<()> {
+        self.seek_to_position(self.segment_start).await?;
+
+        loop {
+            self.ensure_buffer(12).await?;
+            if self.buffer.is_empty() {
+                return Ok(());
+            }
+
+            let element = {
+                let mut parser = MatroskaParser::new(&self.buffer);
+                let Ok(element) = parser.read_element() else {
+                    return Ok(());
+                };
+                element
+            };
+
+            if element.id == element_id::CUES && !element.is_unbounded() {
+                #[allow(clippy::cast_possible_truncation)]
+                let data_size = element.size as usize;
+                let total_size = element.header_size + data_size;
+                self.ensure_buffer(total_size).await?;
+                if self.buffer.len() < total_size {
+                    return Ok(());
+                }
+                let element_data = &self.buffer[element.header_size..total_size];
+                self.cues = parser::parse_cues(element_data, element.size)?;
+                return Ok(());
+            }
+
+            // Unbounded elements (Cluster, when streamed) have no declared
+            // size -- step past just the header and let the loop walk
+            // their children (Timestamp/SimpleBlock/BlockGroup/etc.) one at
+            // a time via their own declared sizes below, exactly like the
+            // normal packet-reading path does in `read_next_block`.
+            if element.is_unbounded() {
+                self.consume_buffer(element.header_size);
+                continue;
+            }
+
+            #[allow(clippy::cast_possible_truncation)]
+            let data_size = element.size as usize;
+            let total_size = element.header_size + data_size;
+            self.ensure_buffer(total_size).await?;
+            if self.buffer.len() < total_size {
+                return Ok(());
+            }
+            self.consume_buffer(total_size);
+        }
     }
 
     /// Builds stream info from parsed tracks.

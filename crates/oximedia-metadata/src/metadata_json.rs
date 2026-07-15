@@ -69,17 +69,36 @@ fn to_hex(data: &[u8]) -> String {
     data.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Decode a lowercase hex string into bytes.
+/// Decode a hex string into bytes.
+///
+/// Operates on the raw bytes rather than `&str` slices: a multibyte UTF-8
+/// character in the (attacker-controlled) hex field would otherwise straddle
+/// the `i*2` offset and panic on `&s[i*2..i*2+2]` (a char-boundary panic
+/// reachable via the public `from_json`). Any non-ASCII-hex byte is rejected.
 fn from_hex(s: &str) -> Result<Vec<u8>, Error> {
-    if s.len() % 2 != 0 {
+    let bytes = s.as_bytes();
+    if bytes.len() % 2 != 0 {
         return Err(Error::ParseError("hex string has odd length".to_string()));
     }
-    (0..s.len() / 2)
-        .map(|i| {
-            u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
-                .map_err(|_| Error::ParseError(format!("invalid hex byte at position {}", i * 2)))
-        })
-        .collect()
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for i in 0..bytes.len() / 2 {
+        let hi = hex_nibble(bytes[i * 2])
+            .ok_or_else(|| Error::ParseError(format!("invalid hex byte at position {}", i * 2)))?;
+        let lo = hex_nibble(bytes[i * 2 + 1])
+            .ok_or_else(|| Error::ParseError(format!("invalid hex byte at position {}", i * 2)))?;
+        out.push((hi << 4) | lo);
+    }
+    Ok(out)
+}
+
+/// Map a single ASCII hex digit byte to its 0..=15 value, or `None`.
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 // ─── Serialization ────────────────────────────────────────────────────────────
@@ -653,5 +672,19 @@ mod tests {
         let m2 = round_trip(&m);
         assert_eq!(m2.fields().len(), 3);
         assert_eq!(m2.get("TRCK").and_then(MetadataValue::as_integer), Some(7));
+    }
+
+    #[test]
+    fn from_hex_rejects_multibyte_char_without_panic() {
+        // Regression: a multibyte UTF-8 character in the (attacker-controlled)
+        // hex field used to straddle the `i*2` byte offset and panic on
+        // `&s[i*2..i*2+2]`. `from_hex` now operates on raw bytes and returns a
+        // clean Err — reachable through the public `from_json`.
+        assert!(from_hex("aa€b").is_err());
+        assert!(from_hex("€€").is_err());
+        // Odd byte length is still rejected cleanly.
+        assert!(from_hex("abc").is_err());
+        // Valid mixed-case hex still decodes (no regression to the happy path).
+        assert_eq!(from_hex("dEadBEef").unwrap(), vec![0xDE, 0xAD, 0xBE, 0xEF]);
     }
 }

@@ -17,7 +17,7 @@ use tempfile::TempDir;
 /// Current workspace version (`version.workspace = true` in Cargo.toml).
 /// Kept as a constant so a single edit updates every assertion below when
 /// the branch/version is bumped.
-const EXPECTED_VERSION: &str = "0.1.9";
+const EXPECTED_VERSION: &str = "0.2.0";
 
 fn oximedia() -> Command {
     Command::cargo_bin("oximedia").expect("oximedia binary should exist")

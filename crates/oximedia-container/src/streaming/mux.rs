@@ -695,6 +695,18 @@ impl CmafChunkedEncoder {
     }
 
     /// Builds moof+mdat boxes for the current pending samples.
+    ///
+    /// Uses a two-pass build for `trun.data_offset`, mirroring the pattern in
+    /// [`crate::mux::cmaf::CmafMuxer::emit_segment`]: the `moof` is first
+    /// assembled with a placeholder offset of `0` purely to measure its total
+    /// size, then rebuilt with the real offset. Because `tfhd` sets
+    /// `default-base-is-moof` (flags `0x020000`), `trun.data_offset` is
+    /// relative to the first byte of `moof`; the `mdat` box header is always
+    /// 8 bytes, so the first sample byte sits at `moof.len() + 8`. Leaving
+    /// the placeholder unpatched (as a previous revision of this function
+    /// did) produces a `trun` that always points at offset 0 — i.e. at the
+    /// `moof` box's own size field — which is not a valid low-latency
+    /// fragment.
     fn build_chunk_boxes(&self) -> Vec<u8> {
         use crate::mux::cmaf::{write_box, write_full_box, write_u32_be, write_u64_be};
 
@@ -708,53 +720,57 @@ impl CmafChunkedEncoder {
             mdat_payload.extend_from_slice(&sample.data);
         }
 
-        // Build trun entries
-        // flags: data_offset_present (0x1) | duration_present (0x100) | size_present (0x200)
-        let trun_flags: u32 = 0x000301;
-        let mut trun_content = Vec::new();
-        trun_content.extend_from_slice(&write_u32_be(self.pending_samples.len() as u32));
-        // data_offset placeholder (will be patched)
-        trun_content.extend_from_slice(&write_u32_be(0));
-        for sample in &self.pending_samples {
-            trun_content.extend_from_slice(&write_u32_be(sample.duration));
-            trun_content.extend_from_slice(&write_u32_be(sample.data.len() as u32));
-        }
-        let trun = write_full_box(b"trun", 0, trun_flags, &trun_content);
-
-        // Build tfhd
         let track_id = self.pending_samples.first().map_or(1, |s| s.track_id);
-        let mut tfhd_content = Vec::new();
-        tfhd_content.extend_from_slice(&write_u32_be(track_id));
-        let tfhd = write_full_box(b"tfhd", 0, 0x020000, &tfhd_content);
-
-        // Build tfdt
         let base_dts = self.pending_samples.first().map_or(0, |s| s.dts);
-        let mut tfdt_content = Vec::new();
-        tfdt_content.extend_from_slice(&write_u64_be(base_dts));
-        let tfdt = write_full_box(b"tfdt", 1, 0, &tfdt_content);
 
-        // Build traf
-        let mut traf_content = Vec::new();
-        traf_content.extend(tfhd);
-        traf_content.extend(tfdt);
-        traf_content.extend(trun);
-        let traf = write_box(b"traf", &traf_content);
+        // Builds the complete moof for a given trun.data_offset value. Every
+        // other field is independent of the offset, so this can be called
+        // twice: once with a placeholder to measure the moof size, then again
+        // with the real, now-known offset.
+        let build_moof = |data_offset: u32| -> Vec<u8> {
+            // flags: data_offset_present (0x1) | duration_present (0x100) | size_present (0x200)
+            let trun_flags: u32 = 0x000301;
+            let mut trun_content = Vec::new();
+            trun_content.extend_from_slice(&write_u32_be(self.pending_samples.len() as u32));
+            trun_content.extend_from_slice(&write_u32_be(data_offset));
+            for sample in &self.pending_samples {
+                trun_content.extend_from_slice(&write_u32_be(sample.duration));
+                trun_content.extend_from_slice(&write_u32_be(sample.data.len() as u32));
+            }
+            let trun = write_full_box(b"trun", 0, trun_flags, &trun_content);
 
-        // Build mfhd
-        let mut mfhd_content = Vec::new();
-        mfhd_content.extend_from_slice(&write_u32_be(self.chunk_sequence));
-        let mfhd = write_full_box(b"mfhd", 0, 0, &mfhd_content);
+            let mut tfhd_content = Vec::new();
+            tfhd_content.extend_from_slice(&write_u32_be(track_id));
+            let tfhd = write_full_box(b"tfhd", 0, 0x020000, &tfhd_content);
 
-        // Build moof
-        let mut moof_content = Vec::new();
-        moof_content.extend(mfhd);
-        moof_content.extend(traf);
-        let moof = write_box(b"moof", &moof_content);
+            let mut tfdt_content = Vec::new();
+            tfdt_content.extend_from_slice(&write_u64_be(base_dts));
+            let tfdt = write_full_box(b"tfdt", 1, 0, &tfdt_content);
 
-        // Build mdat
+            let mut traf_content = Vec::new();
+            traf_content.extend(tfhd);
+            traf_content.extend(tfdt);
+            traf_content.extend(trun);
+            let traf = write_box(b"traf", &traf_content);
+
+            let mut mfhd_content = Vec::new();
+            mfhd_content.extend_from_slice(&write_u32_be(self.chunk_sequence));
+            let mfhd = write_full_box(b"mfhd", 0, 0, &mfhd_content);
+
+            let mut moof_content = Vec::new();
+            moof_content.extend(mfhd);
+            moof_content.extend(traf);
+            write_box(b"moof", &moof_content)
+        };
+
+        // Pass 1: measure moof size with a placeholder data_offset.
+        let moof_placeholder = build_moof(0);
+        // Pass 2: rebuild with the real, now-known offset.
+        let data_offset = moof_placeholder.len() as u32 + 8;
+        let moof = build_moof(data_offset);
+
         let mdat = write_box(b"mdat", &mdat_payload);
 
-        // Combine
         let mut output = Vec::with_capacity(moof.len() + mdat.len());
         output.extend(moof);
         output.extend(mdat);
@@ -959,6 +975,13 @@ impl CmafChunkWriter {
     // ── Internal helpers ───────────────────────────────────────────────────
 
     /// Serialises `sample` into a `moof`+`mdat` box pair.
+    ///
+    /// Uses the same two-pass `trun.data_offset` patch as
+    /// [`CmafChunkedEncoder::build_chunk_boxes`] and
+    /// [`crate::mux::cmaf::CmafMuxer::emit_segment`]: `moof` is built once
+    /// with a placeholder offset to measure its size, then rebuilt with the
+    /// real offset (`moof.len() + 8`, since `tfhd` sets
+    /// `default-base-is-moof` and the `mdat` header is 8 bytes).
     fn build_chunk(&mut self, sample: &CmafSample) -> CmafChunkOwned {
         use crate::mux::cmaf::{write_box, write_full_box, write_u32_be, write_u64_be};
 
@@ -972,50 +995,61 @@ impl CmafChunkWriter {
         // ── mdat ──────────────────────────────────────────────────────────
         let mdat = write_box(b"mdat", &sample.data);
 
-        // ── trun (track run box) ──────────────────────────────────────────
-        // flags: data-offset-present (0x001) | sample-duration-present (0x100)
-        //        | sample-size-present (0x200)
-        let trun_flags: u32 = 0x0000_0301;
-        let mut trun_content = Vec::new();
-        trun_content.extend_from_slice(&write_u32_be(1_u32)); // sample_count
-        trun_content.extend_from_slice(&write_u32_be(0_u32)); // data_offset (placeholder)
-        trun_content.extend_from_slice(&write_u32_be(sample.duration));
-        trun_content.extend_from_slice(&write_u32_be(sample.data.len() as u32));
-        let trun = write_full_box(b"trun", 0, trun_flags, &trun_content);
-
-        // ── tfhd (track fragment header) ─────────────────────────────────
-        // flags: default-base-is-moof (0x020000)
-        let mut tfhd_content = Vec::new();
-        tfhd_content.extend_from_slice(&write_u32_be(track_id));
-        let tfhd = write_full_box(b"tfhd", 0, 0x0002_0000, &tfhd_content);
-
-        // ── tfdt (track fragment decode time, version 1 = 64-bit) ────────
         let dts: u64 = if sample.pts >= 0 {
             sample.pts as u64
         } else {
             0
         };
-        let mut tfdt_content = Vec::new();
-        tfdt_content.extend_from_slice(&write_u64_be(dts));
-        let tfdt = write_full_box(b"tfdt", 1, 0, &tfdt_content);
 
-        // ── traf (track fragment) ─────────────────────────────────────────
-        let mut traf_content = Vec::new();
-        traf_content.extend_from_slice(&tfhd);
-        traf_content.extend_from_slice(&tfdt);
-        traf_content.extend_from_slice(&trun);
-        let traf = write_box(b"traf", &traf_content);
+        // Builds the complete moof for a given trun.data_offset value; see
+        // the two-pass explanation on the doc comment above.
+        let build_moof = |data_offset: u32| -> Vec<u8> {
+            // ── trun (track run box) ────────────────────────────────────
+            // flags: data-offset-present (0x001) | sample-duration-present (0x100)
+            //        | sample-size-present (0x200)
+            let trun_flags: u32 = 0x0000_0301;
+            let mut trun_content = Vec::new();
+            trun_content.extend_from_slice(&write_u32_be(1_u32)); // sample_count
+            trun_content.extend_from_slice(&write_u32_be(data_offset));
+            trun_content.extend_from_slice(&write_u32_be(sample.duration));
+            trun_content.extend_from_slice(&write_u32_be(sample.data.len() as u32));
+            let trun = write_full_box(b"trun", 0, trun_flags, &trun_content);
 
-        // ── mfhd (movie fragment header) ─────────────────────────────────
-        let mut mfhd_content = Vec::new();
-        mfhd_content.extend_from_slice(&write_u32_be(sequence_number));
-        let mfhd = write_full_box(b"mfhd", 0, 0, &mfhd_content);
+            // ── tfhd (track fragment header) ────────────────────────────
+            // flags: default-base-is-moof (0x020000)
+            let mut tfhd_content = Vec::new();
+            tfhd_content.extend_from_slice(&write_u32_be(track_id));
+            let tfhd = write_full_box(b"tfhd", 0, 0x0002_0000, &tfhd_content);
 
-        // ── moof (movie fragment) ─────────────────────────────────────────
-        let mut moof_content = Vec::new();
-        moof_content.extend_from_slice(&mfhd);
-        moof_content.extend_from_slice(&traf);
-        let moof = write_box(b"moof", &moof_content);
+            // ── tfdt (track fragment decode time, version 1 = 64-bit) ───
+            let mut tfdt_content = Vec::new();
+            tfdt_content.extend_from_slice(&write_u64_be(dts));
+            let tfdt = write_full_box(b"tfdt", 1, 0, &tfdt_content);
+
+            // ── traf (track fragment) ────────────────────────────────────
+            let mut traf_content = Vec::new();
+            traf_content.extend_from_slice(&tfhd);
+            traf_content.extend_from_slice(&tfdt);
+            traf_content.extend_from_slice(&trun);
+            let traf = write_box(b"traf", &traf_content);
+
+            // ── mfhd (movie fragment header) ─────────────────────────────
+            let mut mfhd_content = Vec::new();
+            mfhd_content.extend_from_slice(&write_u32_be(sequence_number));
+            let mfhd = write_full_box(b"mfhd", 0, 0, &mfhd_content);
+
+            // ── moof (movie fragment) ─────────────────────────────────────
+            let mut moof_content = Vec::new();
+            moof_content.extend_from_slice(&mfhd);
+            moof_content.extend_from_slice(&traf);
+            write_box(b"moof", &moof_content)
+        };
+
+        // Pass 1: measure moof size with a placeholder data_offset.
+        let moof_placeholder = build_moof(0);
+        // Pass 2: rebuild with the real, now-known offset.
+        let data_offset = moof_placeholder.len() as u32 + 8;
+        let moof = build_moof(data_offset);
 
         // ── combine ───────────────────────────────────────────────────────
         let mut data = Vec::with_capacity(moof.len() + mdat.len());
@@ -1037,6 +1071,55 @@ impl CmafChunkWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Finds the first direct child box named `fourcc` within `data[start..end]`.
+    ///
+    /// Returns the absolute `(start, end)` byte range of the matched box
+    /// (including its own 8-byte header), or `None` if no such child exists
+    /// before `end`. Used to walk the `moof > traf > trun` hierarchy in
+    /// structural tests without hardcoding byte offsets that would silently
+    /// go stale if box contents change.
+    fn find_child_box(
+        data: &[u8],
+        start: usize,
+        end: usize,
+        fourcc: &[u8; 4],
+    ) -> Option<(usize, usize)> {
+        let mut offset = start;
+        while offset + 8 <= end {
+            let size = u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize;
+            if size < 8 || offset + size > end {
+                break;
+            }
+            if &data[offset + 4..offset + 8] == fourcc {
+                return Some((offset, offset + size));
+            }
+            offset += size;
+        }
+        None
+    }
+
+    /// Extracts the `trun.data_offset` field (a `u32`, per version-0 `trun`)
+    /// from a `moof` box located at `data[moof_start..moof_end]`, descending
+    /// through its first `traf` child.
+    fn trun_data_offset(data: &[u8], moof_start: usize, moof_end: usize) -> u32 {
+        let (traf_start, traf_end) = find_child_box(data, moof_start + 8, moof_end, b"traf")
+            .expect("moof must contain a traf box");
+        let (trun_start, _trun_end) = find_child_box(data, traf_start + 8, traf_end, b"trun")
+            .expect("traf must contain a trun box");
+        // trun layout: [size:4][fourcc:4][version:1][flags:3][sample_count:4][data_offset:4]...
+        let field_start = trun_start + 8 + 4 + 4;
+        u32::from_be_bytes(
+            data[field_start..field_start + 4]
+                .try_into()
+                .expect("4 bytes"),
+        )
+    }
 
     #[test]
     fn test_streaming_config_default() {
@@ -1306,6 +1389,43 @@ mod tests {
         assert_eq!(chunk.chunk_index, 0);
     }
 
+    // 4a. trun.data_offset must be patched to the real mdat payload offset,
+    // not left at the placeholder 0. This is a structural read-back test:
+    // it parses the produced moof/traf/trun boxes and mdat position, then
+    // proves the two agree (both as a numeric equality AND by confirming the
+    // sample bytes are actually found at that exact offset).
+    #[test]
+    fn test_chunked_encoder_data_offset_is_patched() {
+        let config = CmafChunkedConfig::new().with_mode(CmafChunkMode::LowLatencyChunked);
+        let mut encoder = CmafChunkedEncoder::new(config, 90000);
+        encoder.push_sample(make_sample(0, 3000, true));
+        let chunk = encoder.pop_chunk().expect("should have chunk");
+
+        let (moof_start, moof_end) =
+            find_child_box(&chunk.data, 0, chunk.data.len(), b"moof").expect("moof present");
+        let (mdat_start, mdat_end) =
+            find_child_box(&chunk.data, 0, chunk.data.len(), b"mdat").expect("mdat present");
+        assert_eq!(moof_start, 0, "moof must be the first box");
+        assert_eq!(mdat_start, moof_end, "mdat must immediately follow moof");
+
+        let data_offset = trun_data_offset(&chunk.data, moof_start, moof_end);
+        assert_ne!(
+            data_offset, 0,
+            "data_offset must not be left at the unpatched placeholder value"
+        );
+        assert_eq!(
+            data_offset as usize,
+            moof_end - moof_start + 8,
+            "data_offset must equal moof size + 8-byte mdat header"
+        );
+
+        // The offset must point at the real sample bytes: mdat's payload
+        // (100 bytes of 0xAA, per make_sample) starts at mdat_start + 8.
+        assert_eq!(mdat_start + 8, moof_start + data_offset as usize);
+        let sample_bytes = &chunk.data[moof_start + data_offset as usize..mdat_end];
+        assert_eq!(sample_bytes, vec![0xAAu8; 100].as_slice());
+    }
+
     #[test]
     fn test_chunk_indices_increment() {
         let config = CmafChunkedConfig::new().with_mode(CmafChunkMode::LowLatencyChunked);
@@ -1399,6 +1519,31 @@ mod tests {
             chunk.data.windows(4).any(|w| w == b"mdat"),
             "chunk must contain mdat box"
         );
+    }
+
+    // trun.data_offset must be patched for CmafChunkWriter's output too
+    // (same underlying bug/fix as CmafChunkedEncoder, different call site).
+    #[test]
+    fn test_chunk_writer_data_offset_is_patched() {
+        let mut writer = CmafChunkWriter::new(500);
+        let s = make_cmaf_sample(0, 3000, true); // 256 bytes of 0xBB, see make_cmaf_sample
+        let chunk = writer.write_sample(&s).expect("should return chunk");
+
+        let (moof_start, moof_end) =
+            find_child_box(&chunk.data, 0, chunk.data.len(), b"moof").expect("moof present");
+        let (mdat_start, mdat_end) =
+            find_child_box(&chunk.data, 0, chunk.data.len(), b"mdat").expect("mdat present");
+        assert_eq!(mdat_start, moof_end, "mdat must immediately follow moof");
+
+        let data_offset = trun_data_offset(&chunk.data, moof_start, moof_end);
+        assert_ne!(
+            data_offset, 0,
+            "data_offset must not stay at the placeholder"
+        );
+        assert_eq!(data_offset as usize, moof_end - moof_start + 8);
+
+        let sample_bytes = &chunk.data[moof_start + data_offset as usize..mdat_end];
+        assert_eq!(sample_bytes, vec![0xBBu8; 256].as_slice());
     }
 
     #[test]

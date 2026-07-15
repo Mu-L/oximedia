@@ -1,26 +1,33 @@
 //! VP8 codec implementation.
 //!
-//! This module provides a pure Rust VP8 bitstream parser and building
-//! blocks based on RFC 6386. VP8 is a royalty-free video codec developed
-//! by Google as part of the `WebM` project.
+//! This module provides a pure Rust VP8 decoder (key frames), encoder
+//! building blocks, and bitstream primitives based on RFC 6386. VP8 is a
+//! royalty-free video codec developed by Google as part of the `WebM`
+//! project.
 //!
-//! # Honest status: bitstream parsing only (decode deferred to 0.2.0)
+//! # Honest status: key frames decode to pixels; inter frames not yet
 //!
-//! Per `docs/codec_status.md`, full VP8 pixel reconstruction is **not
-//! implemented** in this release. What works today:
+//! Key-frame (intra) decoding is **fully implemented**: `Vp8Decoder`
+//! reconstructs real YUV 4:2:0 pixels via the complete RFC 6386 intra
+//! pipeline — boolean entropy decoding, full key-frame header parsing
+//! (segmentation, loop-filter parameters, quantiser indices, token
+//! probability updates), macroblock mode and DCT-token decoding,
+//! per-segment dequantisation, inverse DCT/WHT, every 16x16/4x4/chroma
+//! intra prediction mode, and both (simple + normal) in-loop deblocking
+//! filters. The pipeline is ported from the production-verified
+//! `oximedia-image` WebP/VP8 decoder (a WebP lossy image *is* a VP8 key
+//! frame).
 //!
-//! - Boolean arithmetic decoder for entropy coding
-//! - Frame header parsing for keyframes and inter frames
-//! - 4x4 DCT/IDCT and WHT transform primitives
-//! - Intra prediction helper routines (DC, V, H, TM modes)
-//! - Motion-compensation helper routines
-//! - Loop filter (deblocking) primitives
+//! Inter frames (P-frames) need motion-vector entropy decoding and
+//! golden/altref reference-frame management, which are **not implemented**;
+//! `Vp8Decoder::send_packet` returns an honest
+//! [`CodecError`](crate::error::CodecError)`::UnsupportedFeature` error for
+//! them instead of fabricating pixel data.
 //!
-//! These primitives are not yet wired into an end-to-end reconstruction
-//! pipeline, so `Vp8Decoder::send_packet` parses the frame header (making
-//! dimensions and output format available) and then returns an honest
-//! [`CodecError`](crate::error::CodecError)`::UnsupportedFeature` error
-//! instead of fabricating pixel data.
+//! This module also exposes standalone primitives (boolean decoder,
+//! DCT/WHT transforms, prediction, motion-compensation and loop-filter
+//! helpers) that predate the key-frame pipeline and remain available as
+//! public building blocks.
 //!
 //! # Codec Details
 //!
@@ -49,7 +56,7 @@
 //! let config = DecoderConfig::default();
 //! let mut decoder = Vp8Decoder::new(config)?;
 //!
-//! // Parse a frame header directly
+//! // Parse a frame header directly (tag + start code + dimensions).
 //! let header_data = [
 //!     0x10, 0x00, 0x00,       // frame tag
 //!     0x9D, 0x01, 0x2A,       // sync code
@@ -60,13 +67,19 @@
 //! assert_eq!(header.width, 320);
 //! assert_eq!(header.height, 240);
 //!
-//! // Pixel reconstruction is not implemented (parse-only, see module
-//! // docs): send_packet parses the header — dimensions become available —
-//! // and then reports the gap honestly instead of emitting fake frames.
+//! // Full decode needs the compressed header/token partitions too; this
+//! // 10-byte stub has none, so decoding reports a bitstream error while
+//! // stream dimensions stay available. A complete key-frame payload
+//! // (e.g. the `VP8 ` chunk of a lossy WebP) decodes to real pixels.
 //! let result = decoder.send_packet(&header_data, 0);
-//! assert!(matches!(result, Err(CodecError::UnsupportedFeature(_))));
+//! assert!(matches!(result, Err(CodecError::InvalidBitstream(_))));
 //! assert_eq!(decoder.dimensions(), Some((320, 240)));
 //! assert!(decoder.receive_frame()?.is_none());
+//!
+//! // Inter frames are not implemented yet: honest error, no fake frames.
+//! let inter = [0x11, 0x00, 0x00, 0x00];
+//! let result = decoder.send_packet(&inter, 1);
+//! assert!(matches!(result, Err(CodecError::UnsupportedFeature(_))));
 //! # Ok(())
 //! # }
 //! ```
@@ -81,6 +94,7 @@ mod dct;
 mod decoder;
 mod encoder;
 mod frame_header;
+mod keyframe;
 mod loopfilter;
 mod mb_mode;
 mod motion;

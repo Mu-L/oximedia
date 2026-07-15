@@ -4,7 +4,6 @@
 //! `oximedia-denoise` crate's `Denoiser` and `DenoiseConfig`.
 
 use anyhow::{Context, Result};
-use colored::Colorize;
 use std::path::PathBuf;
 
 /// Options for the `denoise` command.
@@ -19,59 +18,35 @@ pub struct DenoiseOptions {
 }
 
 /// Entry point called from `main.rs`.
-pub async fn run_denoise(opts: DenoiseOptions, json_output: bool) -> Result<()> {
+///
+/// Validates the denoise configuration against the real `oximedia-denoise`
+/// engine, then returns an honest error: the [`oximedia_denoise::Denoiser`]
+/// operates on decoded [`oximedia_codec::VideoFrame`]s, so producing an output
+/// file requires a full decode → denoise → encode video pipeline that is not
+/// yet wired into the CLI. No output file is produced or claimed.
+pub async fn run_denoise(opts: DenoiseOptions, _json_output: bool) -> Result<()> {
     use oximedia_denoise::Denoiser;
 
+    // Validate arguments and configuration up front so bad flags still surface
+    // their specific error (mode/strength) rather than the pipeline message.
     let mode = parse_mode(&opts.mode)?;
-
     let config = build_config(mode, opts.strength, opts.preserve_grain)?;
+    let _denoiser =
+        Denoiser::new(config).with_context(|| "Failed to initialise Denoiser".to_string())?;
 
-    let _denoiser = Denoiser::new(config.clone())?;
-
-    if json_output {
-        let obj = serde_json::json!({
-            "operation": "denoise",
-            "input": opts.input.to_string_lossy(),
-            "output": opts.output.to_string_lossy(),
-            "mode": opts.mode,
-            "strength": opts.strength,
-            "spatial": opts.spatial,
-            "temporal": opts.temporal,
-            "preserve_grain": opts.preserve_grain,
-            "temporal_window": config.temporal_window,
-            "preserve_edges": config.preserve_edges,
-        });
-        println!("{}", serde_json::to_string_pretty(&obj)?);
-        return Ok(());
-    }
-
-    println!("{}", "Video Denoise".green().bold());
-    println!("  Input:          {}", opts.input.display());
-    println!("  Output:         {}", opts.output.display());
-    println!("  Mode:           {}", mode_label(&opts.mode).cyan());
-    println!("  Strength:       {:.2}", opts.strength);
-    println!(
-        "  Spatial:        {}",
-        if opts.spatial { "yes" } else { "no" }
-    );
-    println!(
-        "  Temporal:       {}",
-        if opts.temporal { "yes" } else { "no" }
-    );
-    println!(
-        "  Preserve grain: {}",
-        if opts.preserve_grain { "yes" } else { "no" }
-    );
-    println!("  Temporal win:   {} frames", config.temporal_window);
-    println!("  Preserve edges: {}", config.preserve_edges);
-
-    println!(
-        "\n{} Denoiser configured. Full frame-pipeline processing requires I/O integration.",
-        "Note:".yellow()
-    );
-    println!("{} {}", "Would write:".dimmed(), opts.output.display());
-
-    Ok(())
+    // TODO(0.2.x): wire decode(input) → Denoiser::process(frame) per frame → encode(output).
+    Err(anyhow::anyhow!(
+        "denoise: the video frame pipeline is not yet wired to the CLI. The denoise engine \
+         processes decoded frames, so reading '{}' and writing '{}' requires a decode -> \
+         denoise -> encode pipeline (planned for 0.2.x). Validated denoise configuration \
+         (mode '{}', strength {:.2}, spatial={}, temporal={}); no output written.",
+        opts.input.display(),
+        opts.output.display(),
+        opts.mode,
+        opts.strength,
+        opts.spatial,
+        opts.temporal
+    ))
 }
 
 /// Map CLI mode string to `DenoiseMode`.
@@ -86,17 +61,6 @@ fn parse_mode(mode: &str) -> Result<oximedia_denoise::DenoiseMode> {
             "Unknown denoise mode '{}'. Use: fast, balanced, quality, grain-aware",
             other
         ),
-    }
-}
-
-/// Human-readable mode label.
-fn mode_label(mode: &str) -> &'static str {
-    match mode.to_lowercase().as_str() {
-        "fast" => "Fast",
-        "balanced" => "Balanced",
-        "quality" => "Quality",
-        "grain-aware" | "grain_aware" => "Grain-Aware",
-        _ => "Unknown",
     }
 }
 
@@ -126,4 +90,38 @@ fn build_config(
         .with_context(|| "Invalid denoise configuration")?;
 
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opts(mode: &str, output: PathBuf) -> DenoiseOptions {
+        DenoiseOptions {
+            input: std::env::temp_dir().join("oximedia_denoise_in.mp4"),
+            output,
+            mode: mode.to_string(),
+            strength: 0.5,
+            spatial: true,
+            temporal: true,
+            preserve_grain: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn denoise_is_honest_error_and_writes_nothing() {
+        let output = std::env::temp_dir().join("oximedia_denoise_out.mp4");
+        std::fs::remove_file(&output).ok();
+
+        let result = run_denoise(opts("balanced", output.clone()), false).await;
+        assert!(result.is_err(), "denoise must return an honest error");
+        assert!(!output.exists(), "no output file may be produced");
+    }
+
+    #[tokio::test]
+    async fn denoise_invalid_mode_errors() {
+        let output = std::env::temp_dir().join("oximedia_denoise_badmode_out.mp4");
+        let result = run_denoise(opts("bogus-mode", output), false).await;
+        assert!(result.is_err(), "invalid mode must error");
+    }
 }

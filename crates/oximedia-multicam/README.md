@@ -1,6 +1,6 @@
 # oximedia-multicam
 
-**Status: [Stable]** | Version: 0.1.9 | Tests: extensively tested | Updated: 2026-07-08
+**Status: [Stable]** | Version: 0.2.0 | Tests: extensively tested | Updated: 2026-07-14
 
 Multi-camera synchronization, switching, and editing for OxiMedia. Provides comprehensive multi-camera production capabilities including temporal synchronization, AI-based automatic switching, multi-view composition, color matching, and spatial alignment.
 

@@ -90,4 +90,4 @@ Copyright (c) COOLJAPAN OU (Team Kitasan). All rights reserved.
 
 Part of the [OxiMedia](https://github.com/cool-japan/oximedia) Sovereign Media Framework.
 
-Version: 0.1.9 — 2026-07-08 — extensively tested
+Version: 0.2.0 — 2026-07-15 — extensively tested

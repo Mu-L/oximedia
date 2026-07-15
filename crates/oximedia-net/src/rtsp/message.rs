@@ -15,6 +15,15 @@ use crate::error::NetError;
 /// RTSP protocol version handled by this implementation.
 pub const RTSP_VERSION: &str = "RTSP/1.0";
 
+/// Upper bound on an RTSP message body (`Content-Length`).
+///
+/// RTSP bodies are normally small (SDP descriptions, parameter lists). This
+/// cap rejects a hostile peer that advertises an enormous `Content-Length`
+/// (e.g. `18446744073709551615`) purely to force an integer overflow or an
+/// unbounded allocation in the parser. 16 MiB is far larger than any
+/// legitimate RTSP payload.
+pub const MAX_RTSP_BODY_LEN: usize = 16 * 1024 * 1024;
+
 /// RTSP request method (RFC 2326 §10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Method {
@@ -467,13 +476,26 @@ pub fn try_parse_response(buf: &[u8]) -> Result<ParseStatus, NetError> {
         .transpose()?
         .unwrap_or(0);
 
-    if buf.len() < body_start + content_length {
+    // Reject an absurd Content-Length before any pointer arithmetic: a peer
+    // sending `Content-Length: 18446744073709551615` would otherwise make
+    // `body_start + content_length` wrap and yield a start>end slice range.
+    if content_length > MAX_RTSP_BODY_LEN {
+        return Err(NetError::Protocol(format!(
+            "RTSP Content-Length {content_length} exceeds maximum {MAX_RTSP_BODY_LEN}"
+        )));
+    }
+    // Checked add so a length near usize::MAX cannot overflow the end offset.
+    let body_end = body_start
+        .checked_add(content_length)
+        .ok_or_else(|| NetError::Protocol("RTSP response body length overflow".into()))?;
+
+    if buf.len() < body_end {
         return Ok(ParseStatus::NeedMore);
     }
 
-    let body = buf[body_start..body_start + content_length].to_vec();
+    let body = buf[body_start..body_end].to_vec();
     Ok(ParseStatus::Parsed {
-        consumed: body_start + content_length,
+        consumed: body_end,
         response: Response {
             status,
             reason: reason.to_string(),
@@ -548,13 +570,26 @@ pub fn try_parse_request(buf: &[u8]) -> Result<RequestParseStatus, ParseError> {
         .transpose()?
         .unwrap_or(0);
 
-    if buf.len() < body_start + content_length {
+    // Reject an absurd Content-Length before any pointer arithmetic: a peer
+    // sending `Content-Length: 18446744073709551615` would otherwise make
+    // `body_start + content_length` wrap and yield a start>end slice range.
+    if content_length > MAX_RTSP_BODY_LEN {
+        return Err(NetError::Protocol(format!(
+            "RTSP Content-Length {content_length} exceeds maximum {MAX_RTSP_BODY_LEN}"
+        )));
+    }
+    // Checked add so a length near usize::MAX cannot overflow the end offset.
+    let body_end = body_start
+        .checked_add(content_length)
+        .ok_or_else(|| NetError::Protocol("RTSP request body length overflow".into()))?;
+
+    if buf.len() < body_end {
         return Ok(RequestParseStatus::NeedMore);
     }
 
-    let body = buf[body_start..body_start + content_length].to_vec();
+    let body = buf[body_start..body_end].to_vec();
     Ok(RequestParseStatus::Complete {
-        consumed: body_start + content_length,
+        consumed: body_end,
         request: Request {
             method,
             uri,
@@ -936,5 +971,31 @@ mod tests {
         assert_eq!(status_reason(461), "Unsupported Transport");
         assert_eq!(status_reason(501), "Not Implemented");
         assert_eq!(status_reason(503), "Service Unavailable");
+    }
+
+    #[test]
+    fn oversized_content_length_response_is_rejected_not_panic() {
+        // `Content-Length` == u64::MAX would make `body_start + content_length`
+        // wrap; the parser must reject it cleanly rather than panic.
+        let wire = b"RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: 18446744073709551615\r\n\r\n";
+        let result = try_parse_response(wire);
+        assert!(result.is_err(), "oversized Content-Length must be an error");
+    }
+
+    #[test]
+    fn oversized_content_length_request_is_rejected_not_panic() {
+        // Same wrap attack on the request path (server/connection.rs feed).
+        let wire =
+            b"ANNOUNCE rtsp://cam/ RTSP/1.0\r\nCSeq: 1\r\nContent-Length: 18446744073709551615\r\n\r\n";
+        let result = try_parse_request(wire);
+        assert!(result.is_err(), "oversized Content-Length must be an error");
+    }
+
+    #[test]
+    fn content_length_over_cap_is_rejected() {
+        // A value that parses fine but exceeds MAX_RTSP_BODY_LEN (16 MiB).
+        let over = MAX_RTSP_BODY_LEN + 1;
+        let wire = format!("RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: {over}\r\n\r\n");
+        assert!(try_parse_response(wire.as_bytes()).is_err());
     }
 }

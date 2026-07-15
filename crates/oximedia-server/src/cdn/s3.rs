@@ -143,7 +143,7 @@ pub fn partition_into_parts(data: &[u8], part_size: usize) -> Vec<&[u8]> {
 
 /// S3 CDN uploader.
 ///
-/// Wraps the `oximedia-storage` [`S3Storage`](oximedia_storage::s3::S3Storage)
+/// Wraps the `oximedia-storage` `S3Storage` (`oximedia_storage::s3::S3Storage`, requires the `s3` feature on `oximedia-storage`)
 /// backend to upload media assets to an S3-compatible endpoint.  Under the
 /// `cdn-aws` feature every operation performs real network I/O; otherwise the
 /// uploader falls back to a pure-Rust log-only path.
@@ -166,7 +166,7 @@ impl S3CdnUploader {
     /// Creates a new `S3CdnUploader` from CDN configuration.
     ///
     /// Under the `cdn-aws` feature this constructs a real
-    /// [`S3Storage`](oximedia_storage::s3::S3Storage) client from the supplied
+    /// `S3Storage` (`oximedia_storage::s3::S3Storage`, requires the `s3` feature on `oximedia-storage`) client from the supplied
     /// credentials and region.  Without the feature the uploader operates in
     /// log-only mode.
     ///
@@ -291,7 +291,7 @@ impl S3CdnUploader {
     /// Upload raw bytes to S3 using the default [`MultipartConfig`].
     ///
     /// Under the `cdn-aws` feature the bytes are streamed to the
-    /// [`S3Storage`](oximedia_storage::s3::S3Storage) backend, which selects
+    /// `S3Storage` (`oximedia_storage::s3::S3Storage`, requires the `s3` feature on `oximedia-storage`) backend, which selects
     /// single-part or multipart upload automatically.
     ///
     /// Returns the public URL of the uploaded object.

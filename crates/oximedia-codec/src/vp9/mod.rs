@@ -11,6 +11,7 @@
 //! - `frame` - Frame types and structures
 //! - `inter` - Inter prediction modes and context
 //! - `intra` - Intra prediction modes and functions
+//! - `kf` - Real keyframe/intra-only frame decoding (bit-exact vs libvpx)
 //! - `loopfilter` - Loop filter parameters
 //! - `mv` - Motion vector types
 //! - `mvref` - Motion vector reference building
@@ -31,6 +32,7 @@ mod encoder;
 mod frame;
 mod inter;
 mod intra;
+mod kf;
 mod loopfilter;
 mod mv;
 mod mvref;

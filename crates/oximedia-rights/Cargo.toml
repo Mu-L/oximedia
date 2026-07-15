@@ -3,6 +3,7 @@ name = "oximedia-rights"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 description = "Content rights and licensing management for OxiMedia"
 keywords = ["drm", "rights", "multimedia", "security", "media"]
 categories = ["multimedia"]

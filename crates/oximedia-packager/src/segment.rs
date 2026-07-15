@@ -46,6 +46,31 @@ impl BytesMutExt for BytesMut {
     }
 }
 
+/// MPEG-2 systems CRC-32 polynomial (ISO/IEC 13818-1 Annex A / §2.4.4.10).
+const MPEG2_CRC32_POLY: u32 = 0x04C1_1DB7;
+
+/// Compute the MPEG-2 systems CRC-32 over `data`.
+///
+/// PSI sections (PAT/PMT) carry a `CRC_32` field computed with the MPEG-2
+/// parameters (ISO/IEC 13818-1 §2.4.4.10): polynomial [`MPEG2_CRC32_POLY`],
+/// initial value `0xFFFF_FFFF`, MSB-first, with no input/output reflection and
+/// no final XOR. Strict/broadcast demuxers reject sections whose CRC does not
+/// match, so this must be a real computation rather than a zero placeholder.
+fn mpeg2_crc32(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &byte in data {
+        crc ^= u32::from(byte) << 24;
+        for _ in 0..8 {
+            crc = if crc & 0x8000_0000 != 0 {
+                (crc << 1) ^ MPEG2_CRC32_POLY
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
+}
+
 /// Segment generator.
 pub struct SegmentGenerator {
     config: SegmentConfig,
@@ -224,8 +249,11 @@ impl SegmentGenerator {
         output.put_u16(0x0001);
         output.put_u16(0xE100); // PMT PID = 256
 
-        // CRC32 (placeholder)
-        output.put_u32(0x00000000);
+        // CRC_32 over the section: from the table_id byte through the end of
+        // the section data, i.e. all bytes after the 4-byte TS header and the
+        // 1-byte pointer_field (ISO/IEC 13818-1 §2.4.4.10).
+        let crc = mpeg2_crc32(&output[5..]);
+        output.put_u32(crc);
 
         // Padding
         let padding = TS_PACKET_SIZE - output.len();
@@ -271,8 +299,11 @@ impl SegmentGenerator {
         output.put_u16(0xE101); // Elementary PID
         output.put_u16(0xF000); // ES info length
 
-        // CRC32 (placeholder)
-        output.put_u32(0x00000000);
+        // CRC_32 over the section: from the table_id byte through the end of
+        // the section data, i.e. all bytes after the 4-byte TS header and the
+        // 1-byte pointer_field (ISO/IEC 13818-1 §2.4.4.10).
+        let crc = mpeg2_crc32(&output[5..]);
+        output.put_u32(crc);
 
         // Padding
         let padding = TS_PACKET_SIZE - output.len();
@@ -539,5 +570,52 @@ mod tests {
         let path = generator.get_segment_path();
 
         assert_eq!(path, "segment_0.ts");
+    }
+
+    #[test]
+    fn test_mpeg2_crc32_known_answer() {
+        // Canonical CRC-32/MPEG-2 check value (CRC RevEng catalogue): the CRC
+        // of the ASCII string "123456789" is 0x0376_E6E7. This pins the poly,
+        // init value and bit order to the MPEG-2 systems definition.
+        assert_eq!(mpeg2_crc32(b"123456789"), 0x0376_E6E7);
+    }
+
+    #[test]
+    fn test_pat_crc32_computed_and_matches_section() {
+        let generator = SegmentGenerator::new(SegmentConfig::default());
+        let mut out = BytesMut::new();
+        generator
+            .write_pat(&mut out)
+            .expect("write_pat should succeed");
+
+        // PAT: 4-byte TS header + pointer_field, then a section with
+        // section_length = 13 → section body (incl. CRC) spans indices 5..21;
+        // the CRC occupies the final 4 bytes at indices 17..21.
+        let crc = u32::from_be_bytes([out[17], out[18], out[19], out[20]]);
+        assert_ne!(crc, 0, "PAT CRC32 must be computed, not a zero placeholder");
+        assert_eq!(
+            crc,
+            mpeg2_crc32(&out[5..17]),
+            "PAT CRC32 must match the section it covers"
+        );
+    }
+
+    #[test]
+    fn test_pmt_crc32_computed_and_matches_section() {
+        let generator = SegmentGenerator::new(SegmentConfig::default());
+        let mut out = BytesMut::new();
+        generator
+            .write_pmt(&mut out)
+            .expect("write_pmt should succeed");
+
+        // PMT: section_length = 18 → section body (incl. CRC) spans indices
+        // 5..26; the CRC occupies the final 4 bytes at indices 22..26.
+        let crc = u32::from_be_bytes([out[22], out[23], out[24], out[25]]);
+        assert_ne!(crc, 0, "PMT CRC32 must be computed, not a zero placeholder");
+        assert_eq!(
+            crc,
+            mpeg2_crc32(&out[5..22]),
+            "PMT CRC32 must match the section it covers"
+        );
     }
 }

@@ -195,15 +195,27 @@ impl<R> Mp4Demuxer<R> {
 impl<R: MediaSource> Mp4Demuxer<R> {
     /// Reads exactly `n` bytes from source into a new `Vec<u8>`.
     async fn read_n(&mut self, n: usize) -> OxiResult<Vec<u8>> {
-        let mut buf = vec![0u8; n];
+        // Never allocate `n` bytes up front: a malformed 64-bit extended box
+        // size (the `moov` path, unlike `ftyp`, is uncapped) can declare `n`
+        // near usize::MAX and drive `vec![0u8; n]` straight into an OOM/abort.
+        // Instead grow the buffer only as bytes actually arrive — doubling but
+        // never past `n` — so a truncated source errors out with UnexpectedEof
+        // long before any giant allocation is realized.
+        const INITIAL_CAP: usize = 64 * 1024;
+        let mut buf: Vec<u8> = vec![0u8; n.min(INITIAL_CAP)];
         let mut filled = 0usize;
         while filled < n {
+            if filled == buf.len() {
+                let new_len = buf.len().saturating_mul(2).clamp(filled + 1, n);
+                buf.resize(new_len, 0);
+            }
             let count = self.source.read(&mut buf[filled..]).await?;
             if count == 0 {
                 return Err(OxiError::UnexpectedEof);
             }
             filled += count;
         }
+        buf.truncate(n);
         self.position += n as u64;
         Ok(buf)
     }
@@ -957,6 +969,28 @@ fn build_sample_table(track: &TrakBox) -> Vec<SampleInfo> {
 mod tests {
     use super::*;
     use oximedia_io::MemorySource;
+
+    /// Security regression (P0 #3): a `moov` box declaring a 64-bit extended
+    /// size near u64::MAX must error out cleanly rather than driving `read_n`'s
+    /// `vec![0u8; n]` into an OOM/abort. The read grows incrementally, so a
+    /// truncated body hits EOF long before any giant allocation.
+    #[tokio::test]
+    async fn oversized_moov_extended_size_errors_without_oom() {
+        let mut data = Vec::new();
+        // Valid small ftyp box (16 bytes total).
+        data.extend_from_slice(&16u32.to_be_bytes());
+        data.extend_from_slice(b"ftyp");
+        data.extend_from_slice(b"isom");
+        data.extend_from_slice(&0u32.to_be_bytes());
+        // moov box with size32 == 1 (extended) and a huge 64-bit size, no body.
+        data.extend_from_slice(&1u32.to_be_bytes());
+        data.extend_from_slice(b"moov");
+        data.extend_from_slice(&0xFFFF_FFFF_FFFF_FF00u64.to_be_bytes());
+
+        let source = MemorySource::from_vec(data);
+        let mut demuxer = Mp4Demuxer::new(source);
+        assert!(demuxer.probe().await.is_err());
+    }
 
     /// Builds a minimal valid MP4 binary in memory with one AV1 video track.
     ///

@@ -245,6 +245,23 @@ impl UpstreamKeyer {
     }
 }
 
+/// State of an in-progress downstream-keyer auto-transition.
+///
+/// Tracks a linear ramp of the key mix level from `start_mix` to
+/// `target_mix` over `duration_frames`, advanced by
+/// [`DownstreamKeyer::advance_transition`].
+#[derive(Debug, Clone, Copy)]
+struct DskTransition {
+    /// Total duration of the transition, in frames (always >= 1).
+    duration_frames: u32,
+    /// Frames elapsed so far within the transition.
+    elapsed_frames: u32,
+    /// Mix level (0.0-1.0) at the moment the transition started.
+    start_mix: f32,
+    /// Mix level (0.0-1.0) the transition is ramping toward.
+    target_mix: f32,
+}
+
 /// Downstream keyer (DSK) - applied after M/E processing, not affected by transitions.
 pub struct DownstreamKeyer {
     config: KeyerConfig,
@@ -256,6 +273,11 @@ pub struct DownstreamKeyer {
     gain: f32,
     /// Invert key
     invert: bool,
+    /// Current settled key mix level (0.0 = fully off, 1.0 = fully on).
+    /// Updated by [`Self::advance_transition`] while a transition is active.
+    mix: f32,
+    /// Active auto-transition, if one is currently in progress.
+    transition: Option<DskTransition>,
 }
 
 impl DownstreamKeyer {
@@ -270,6 +292,8 @@ impl DownstreamKeyer {
             clip: 0.5,
             gain: 1.0,
             invert: false,
+            mix: 0.0,
+            transition: None,
         }
     }
 
@@ -334,16 +358,77 @@ impl DownstreamKeyer {
     }
 
     /// Auto-transition DSK on or off.
+    ///
+    /// Starts a linear ramp of the key mix level toward the opposite
+    /// on-air state, completing after `duration_frames` frames. The
+    /// logical [`is_on_air`](Self::is_on_air) state reflects the *target*
+    /// of the transition immediately — matching real DSK hardware, where
+    /// the tally lamp reflects the commanded state right away — while the
+    /// actual mix level ramps over time. Call
+    /// [`advance_transition`](Self::advance_transition) once per rendered
+    /// frame to progress it and read back the current mix level.
+    ///
+    /// A `duration_frames` of `0` completes the transition immediately
+    /// (the mix snaps straight to the target, avoiding a divide-by-zero
+    /// ramp rate).
+    ///
+    /// Calling this again while a transition is already in progress
+    /// reverses direction from the current (partially-ramped) mix level,
+    /// as on real switcher hardware.
     pub fn auto_transition(&mut self, duration_frames: u32) -> Result<(), KeyerError> {
-        // In a real implementation, this would:
-        // 1. Start an automatic transition
-        // 2. Fade the DSK on or off over duration_frames
-        // 3. Update on_air state when complete
-
-        // For now, just toggle immediately
+        let target_mix = if self.config.on_air { 0.0 } else { 1.0 };
         self.config.on_air = !self.config.on_air;
-        let _ = duration_frames; // Suppress unused warning
+
+        if duration_frames == 0 {
+            self.mix = target_mix;
+            self.transition = None;
+            return Ok(());
+        }
+
+        self.transition = Some(DskTransition {
+            duration_frames,
+            elapsed_frames: 0,
+            start_mix: self.mix,
+            target_mix,
+        });
         Ok(())
+    }
+
+    /// Advances any in-progress auto-transition by `frames` frames and
+    /// returns the resulting key mix level (`0.0..=1.0`).
+    ///
+    /// If no transition is active, returns the current (settled) mix level
+    /// unchanged. Once the transition's `duration_frames` have elapsed the
+    /// mix snaps exactly to the target and the transition is cleared.
+    pub fn advance_transition(&mut self, frames: u32) -> f32 {
+        if let Some(t) = self.transition.as_mut() {
+            t.elapsed_frames = t.elapsed_frames.saturating_add(frames);
+            if t.elapsed_frames >= t.duration_frames {
+                self.mix = t.target_mix;
+                self.transition = None;
+            } else {
+                // Linear interpolation of the mix level across the transition.
+                let progress = t.elapsed_frames as f32 / t.duration_frames as f32;
+                self.mix = t.start_mix + (t.target_mix - t.start_mix) * progress;
+            }
+        }
+        self.mix
+    }
+
+    /// Current key mix level (`0.0..=1.0`): `0.0` = fully off, `1.0` =
+    /// fully on. During an active auto-transition this is the value last
+    /// computed by [`advance_transition`](Self::advance_transition); call
+    /// that method to progress it.
+    #[must_use]
+    pub fn mix_level(&self) -> f32 {
+        self.mix
+    }
+
+    /// Whether an auto-transition is currently in progress (i.e. the mix
+    /// level has not yet reached its target).
+    #[must_use]
+    pub fn is_transitioning(&self) -> bool {
+        self.transition.is_some()
     }
 
     /// Process video through the DSK.
@@ -651,6 +736,94 @@ mod tests {
 
         dsk.auto_transition(30).expect("should succeed in test");
         assert!(!dsk.is_on_air());
+    }
+
+    #[test]
+    fn test_auto_transition_progresses_mix_over_duration_rather_than_jumping() {
+        let mut dsk = DownstreamKeyer::new(0, 1, 2);
+        assert_eq!(dsk.mix_level(), 0.0);
+
+        dsk.auto_transition(10).expect("should succeed in test");
+        // on_air reflects the target immediately (tally semantics)...
+        assert!(dsk.is_on_air());
+        assert!(dsk.is_transitioning());
+        // ...but the mix level must NOT have jumped straight to 1.0.
+        assert_eq!(
+            dsk.mix_level(),
+            0.0,
+            "mix must not jump instantly; it must ramp via advance_transition"
+        );
+
+        let quarter = dsk.advance_transition(2);
+        assert!(
+            (quarter - 0.2).abs() < 1e-6,
+            "expected mix ≈ 0.2 after 2/10 frames, got {quarter}"
+        );
+        assert!(dsk.is_transitioning());
+
+        let mid = dsk.advance_transition(3);
+        assert!(
+            (mid - 0.5).abs() < 1e-6,
+            "expected mix ≈ 0.5 halfway through transition, got {mid}"
+        );
+        assert!(dsk.is_transitioning());
+
+        let end = dsk.advance_transition(5);
+        assert!(
+            (end - 1.0).abs() < 1e-6,
+            "expected mix = 1.0 at end of transition, got {end}"
+        );
+        assert!(
+            !dsk.is_transitioning(),
+            "transition must be cleared once complete"
+        );
+    }
+
+    #[test]
+    fn test_auto_transition_overshoot_frames_clamp_to_target() {
+        let mut dsk = DownstreamKeyer::new(0, 1, 2);
+        dsk.auto_transition(10).expect("should succeed in test");
+        // Advance far past the configured duration in one call.
+        let mix = dsk.advance_transition(1000);
+        assert_eq!(
+            mix, 1.0,
+            "overshooting frames must clamp to the target, not overshoot past 1.0"
+        );
+        assert!(!dsk.is_transitioning());
+    }
+
+    #[test]
+    fn test_auto_transition_zero_duration_completes_immediately() {
+        let mut dsk = DownstreamKeyer::new(0, 1, 2);
+        dsk.auto_transition(0).expect("should succeed in test");
+        assert!(dsk.is_on_air());
+        assert_eq!(dsk.mix_level(), 1.0);
+        assert!(!dsk.is_transitioning());
+    }
+
+    #[test]
+    fn test_auto_transition_reversed_mid_flight_starts_from_current_mix() {
+        let mut dsk = DownstreamKeyer::new(0, 1, 2);
+        dsk.auto_transition(10).expect("should succeed in test");
+        let mid = dsk.advance_transition(5);
+        assert!((mid - 0.5).abs() < 1e-6);
+
+        // Reverse direction mid-flight (like pressing Auto again on real
+        // hardware): must ramp from wherever the mix currently sits, not
+        // jump back to 0.0 or 1.0 first.
+        dsk.auto_transition(10).expect("should succeed in test");
+        assert!(!dsk.is_on_air());
+        assert_eq!(
+            dsk.mix_level(),
+            mid,
+            "reversed transition must start from the current mix"
+        );
+
+        let end = dsk.advance_transition(10);
+        assert!(
+            (end - 0.0).abs() < 1e-6,
+            "expected mix to reach 0.0 fading off-air, got {end}"
+        );
     }
 
     // -----------------------------------------------------------------------

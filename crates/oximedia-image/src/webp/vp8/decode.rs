@@ -25,6 +25,9 @@ use super::tables::{
 use super::transform::{add_residual, idct4x4, iwht4x4};
 use crate::error::{ImageError, ImageResult};
 
+#[cfg(test)]
+mod test_fixtures;
+
 /// Number of pixels of border padding kept around each plane.
 ///
 /// VP8 prediction reads up to one pixel left / above and (for sub-block modes)
@@ -37,7 +40,8 @@ const BORDER: usize = 32;
 struct MbInfo {
     /// Whole-block luma mode (`DC/V/H/TM/B_PRED`).
     y_mode: usize,
-    /// `true` if the macroblock carried no non-zero coefficients.
+    /// `true` if the macroblock carried no coefficient tokens at all
+    /// (libvpx `eobtotal == 0`); such MBs skip interior loop-filter edges.
     skip_coeff: bool,
     /// Effective loop-filter level for this macroblock.
     filter_level: i32,
@@ -306,26 +310,20 @@ impl<'a> Decoder<'a> {
         // 25 sub-blocks: index 24 = Y2, 0..16 = Y, 16..20 = U, 20..24 = V.
         let mut coeffs = [[0i32; 16]; 25];
         let has_y2;
-        let mut any_nonzero = false;
+        let mut any_tokens = false;
         if skip_coeff {
-            // Skipped MB: clear the non-zero context for all sub-blocks.
-            // The Y2 context is preserved across a skipped non-B_PRED MB.
-            for c in 0..8 {
-                left_nz[c] = false;
-                self.above_nz[mb_x * 9 + c] = false;
-            }
-            if y_mode == B_PRED {
-                left_nz[8] = false;
-                self.above_nz[mb_x * 9 + 8] = false;
-            }
+            // Skipped MB: RFC 6386 reference decoder `reset_mb_context` /
+            // libvpx `vp8_reset_mb_tokens_context` (see
+            // `reset_skipped_mb_context`).
+            reset_skipped_mb_context(y_mode, left_nz, &mut self.above_nz, mb_x * 9);
             has_y2 = y_mode != B_PRED;
         } else {
             let dq = self.dequant[segment_id as usize];
             let part = mb_y % self.token_bd.len();
-            let (y2_present, nonzero) =
+            let (y2_present, tokens) =
                 self.decode_residuals(mb_x, y_mode, &dq, &mut coeffs, part, left_nz);
             has_y2 = y2_present;
-            any_nonzero = nonzero;
+            any_tokens = tokens;
         }
 
         // --- reconstruction ---
@@ -350,7 +348,7 @@ impl<'a> Decoder<'a> {
         let filter_level = self.compute_mb_filter_level(segment_id, y_mode);
         self.mb_info[mb_idx] = MbInfo {
             y_mode,
-            skip_coeff: skip_coeff || !any_nonzero,
+            skip_coeff: skip_coeff || !any_tokens,
             filter_level,
         };
         #[cfg(test)]
@@ -390,8 +388,10 @@ impl<'a> Decoder<'a> {
 
     /// Decodes the DCT-token residuals for one macroblock.
     ///
-    /// Returns `(has_y2, any_nonzero)`. Coefficients are written dequantised
-    /// into `coeffs` in raster order per sub-block.
+    /// Returns `(has_y2, any_tokens)` where `any_tokens` is the libvpx
+    /// `eobtotal != 0` condition (RFC 6386 §13; see `decode_block`).
+    /// Coefficients are written dequantised into `coeffs` in raster order
+    /// per sub-block.
     fn decode_residuals(
         &mut self,
         mb_x: usize,
@@ -402,7 +402,7 @@ impl<'a> Decoder<'a> {
         left_nz: &mut [bool; 9],
     ) -> (bool, bool) {
         let has_y2 = y_mode != B_PRED;
-        let mut any_nonzero = false;
+        let mut any_tokens = false;
         let coeff_probs = &self.header.coeff_probs;
 
         #[cfg(test)]
@@ -429,7 +429,7 @@ impl<'a> Decoder<'a> {
             );
             left_nz[8] = nz;
             self.above_nz[mb_x * 9 + 8] = nz;
-            any_nonzero |= nz;
+            any_tokens |= nz;
         }
 
         // Luma block type: 0 when Y2 carries DC, else 3 (coeff 0 included).
@@ -453,7 +453,7 @@ impl<'a> Decoder<'a> {
                 );
                 self.above_nz[mb_x * 9 + col] = nz;
                 left_nz[r] = nz;
-                any_nonzero |= nz;
+                any_tokens |= nz;
             }
         }
 
@@ -486,12 +486,12 @@ impl<'a> Decoder<'a> {
                     );
                     self.above_nz[a_idx] = nz;
                     left_nz[l_idx] = nz;
-                    any_nonzero |= nz;
+                    any_tokens |= nz;
                 }
             }
         }
 
-        (has_y2, any_nonzero)
+        (has_y2, any_tokens)
     }
 
     /// Reconstructs a whole-16x16-predicted luma macroblock.
@@ -550,6 +550,18 @@ impl<'a> Decoder<'a> {
         let stride = self.planes.y_stride;
         let mb_off = self.planes.y_origin + mb_y * 16 * stride + mb_x * 16;
 
+        // VP8 above-right quirk (RFC 6386 §12.3; libvpx decodeframe.c
+        // "propagate the above right state"; libwebp frame_dec.c "replicate
+        // the top-right samples on the rows below"): every col==3 sub-block,
+        // on EVERY sub-block row of the macroblock (not just r == 0), uses
+        // the SAME four above-right samples — the pixels above-right of the
+        // *whole* macroblock. Rows r > 0 must NOT read their geometric
+        // above-right neighbour (a sub-block one row up in the MB to the
+        // right, which has not been decoded yet at this point) and must NOT
+        // fall back to replicating `above[3]` either; they reuse this one
+        // shared value, computed once per macroblock.
+        let mb_top_right = self.compute_mb_top_right(mb_x, mb_y, mb_off, stride);
+
         // Each 4x4 sub-block is predicted then immediately reconstructed so
         // later sub-blocks see the correct neighbours.
         for r in 0..4 {
@@ -558,9 +570,11 @@ impl<'a> Decoder<'a> {
                 let sb_off = mb_off + r * 4 * stride + col * 4;
                 let have_up = mb_y > 0 || r > 0;
                 let have_left = mb_x > 0 || col > 0;
-                let have_up_right = self.subblock_has_up_right(mb_x, mb_y, r, col);
-                let edge =
-                    self.gather_subblock_edge(sb_off, stride, have_up, have_left, have_up_right);
+                // Interior columns read their above-right samples straight
+                // from the plane (already reconstructed this frame); the
+                // rightmost column always uses the macroblock-shared value.
+                let top_right = if col == 3 { Some(&mb_top_right) } else { None };
+                let edge = self.gather_subblock_edge(sb_off, stride, have_up, have_left, top_right);
                 predict_subblock(
                     &mut self.planes.y,
                     sb_off,
@@ -575,31 +589,54 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    /// Determines whether a 4x4 sub-block has valid above-right samples.
-    fn subblock_has_up_right(&self, mb_x: usize, mb_y: usize, r: usize, col: usize) -> bool {
-        if r == 0 {
-            // Top sub-block row: above-right is in the macroblock above-right.
-            if col < 3 {
-                mb_y > 0
-            } else {
-                // Rightmost column: needs the MB to the upper-right.
-                mb_y > 0 && mb_x + 1 < self.mb_cols
-            }
+    /// Computes the four above-right samples shared by every col==3 4x4
+    /// sub-block of a B_PRED macroblock (RFC 6386 §12.3 edge handling).
+    ///
+    /// On the frame's top macroblock row these are the synthetic top border
+    /// (127). Otherwise they come from the row directly above the
+    /// macroblock: the above-right macroblock's bottom-left-ish pixels when
+    /// one exists to the right, or a replication of the last available
+    /// pixel when this macroblock is at the frame's right edge.
+    fn compute_mb_top_right(
+        &self,
+        mb_x: usize,
+        mb_y: usize,
+        mb_off: usize,
+        stride: usize,
+    ) -> [i32; 4] {
+        if mb_y == 0 {
+            return [127; 4];
+        }
+        let above_row = mb_off - stride;
+        let p = &self.planes.y;
+        if mb_x + 1 < self.mb_cols {
+            [
+                i32::from(p[above_row + 16]),
+                i32::from(p[above_row + 17]),
+                i32::from(p[above_row + 18]),
+                i32::from(p[above_row + 19]),
+            ]
         } else {
-            // Interior rows: above-right belongs to a sub-block in this MB,
-            // which has not yet been reconstructed for col == 3.
-            col < 3
+            [i32::from(p[above_row + 15]); 4]
         }
     }
 
     /// Gathers the 8 above + 4 left + corner edge samples for a 4x4 block.
+    ///
+    /// `top_right` overrides the four above-right samples; it is supplied
+    /// for col==3 sub-blocks, which all share the macroblock's above-right
+    /// pixels regardless of sub-block row (see `reconstruct_bpred` /
+    /// `compute_mb_top_right`). For interior columns (`None`) the
+    /// above-right samples are read straight from the plane, which is
+    /// always valid once `have_up` holds: they belong to this macroblock's
+    /// own above row or an already-reconstructed sub-block.
     fn gather_subblock_edge(
         &self,
         sb_off: usize,
         stride: usize,
         have_up: bool,
         have_left: bool,
-        have_up_right: bool,
+        top_right: Option<&[i32; 4]>,
     ) -> SubBlockEdge {
         let plane = &self.planes.y;
         let mut above = [127i32; 8];
@@ -615,19 +652,23 @@ impl<'a> Decoder<'a> {
             for (c, a) in above.iter_mut().take(4).enumerate() {
                 *a = i32::from(plane[sb_off - stride + c]);
             }
-            if have_up_right {
-                for c in 4..8 {
-                    above[c] = i32::from(plane[sb_off - stride + c]);
-                }
-            } else {
-                // Replicate the last above sample when the above-right block
-                // is unavailable (RFC 6386 §12.3 edge behaviour).
-                for c in 4..8 {
-                    above[c] = above[3];
+            match top_right {
+                Some(tr) => above[4..8].copy_from_slice(tr),
+                None => {
+                    for c in 4..8 {
+                        above[c] = i32::from(plane[sb_off - stride + c]);
+                    }
                 }
             }
         } else {
             corner = 127;
+            // On the frame's top edge the above-right samples are the top
+            // border value (127) too; `above` already holds that default,
+            // and the shared macroblock value agrees ([127; 4] when
+            // mb_y == 0), so this only re-affirms the default.
+            if let Some(tr) = top_right {
+                above[4..8].copy_from_slice(tr);
+            }
         }
         if have_left {
             for (r, l) in left.iter_mut().enumerate() {
@@ -933,12 +974,51 @@ fn build_dequant(header: &FrameHeader) -> [DequantFactors; 4] {
     out
 }
 
+/// Resets the token-context state for a fully-skipped macroblock.
+///
+/// RFC 6386's reference decoder `reset_mb_context` clears the above/left
+/// non-zero context for every sub-block *except* Y2 unconditionally: "we
+/// have to preserve the context of the second order block if this mode
+/// would not have updated it". libvpx's `vp8_reset_mb_tokens_context`
+/// mirrors this: it always clears the Y (0..4), U (4..6) and V (6..8)
+/// context, but only clears the Y2 context (index 8) `if (mode != B_PRED &&
+/// mode != SPLITMV)` — B_PRED (and SPLITMV, not applicable to a
+/// key-frame-only decoder) never carries a Y2 block, so its Y2 context must
+/// survive a skip untouched, ready for the next non-B_PRED neighbour.
+fn reset_skipped_mb_context(
+    y_mode: usize,
+    left_nz: &mut [bool; 9],
+    above_nz: &mut [bool],
+    above_base: usize,
+) {
+    for c in 0..8 {
+        left_nz[c] = false;
+        above_nz[above_base + c] = false;
+    }
+    if y_mode != B_PRED {
+        left_nz[8] = false;
+        above_nz[above_base + 8] = false;
+    }
+}
+
 /// Decodes one sub-block of DCT coefficient tokens (RFC 6386 §13).
 ///
 /// `block_type` selects the probability plane; `ctx` is the initial token
 /// context (0..2); `first_coeff` is the starting zig-zag position (1 for luma
 /// when a Y2 block carries DC). Coefficients are written dequantised into
-/// `out` in raster order. Returns `true` if any coefficient is non-zero.
+/// `out` in raster order.
+///
+/// Returns `true` when the block carried any token at all, i.e. its
+/// end-of-block position exceeds `first_coeff` (libvpx `eob > first_coeff`).
+/// This is deliberately NOT "any coefficient is non-zero": a block can code
+/// one or more literal-zero tokens before EOB (the entropy context forces a
+/// real token — zero or not — to follow a literal zero, since an EOB can
+/// never immediately follow one), and libvpx counts such a block as coded.
+/// The distinction matters because this return value feeds both the
+/// above/left entropy context handed to neighbouring blocks and — summed
+/// across all 25 sub-blocks of a macroblock — the loop filter's
+/// `eobtotal == 0` skip decision; using "any non-zero coefficient" instead
+/// under-counts blocks that end in literal zeros and desyncs both.
 #[allow(clippy::too_many_arguments)]
 fn decode_block(
     bd: &mut BoolDecoder<'_>,
@@ -950,7 +1030,6 @@ fn decode_block(
     ac_factor: i32,
     out: &mut [i32; 16],
 ) -> bool {
-    let mut nonzero = false;
     let mut prev_ctx = ctx;
     let mut i = first_coeff;
     // `skip_eob` mirrors the libvpx semantics: after a literal 0 token the EOB
@@ -1001,14 +1080,14 @@ fn decode_block(
             let factor = if i == 0 { dc_factor } else { ac_factor };
             let zz = ZIGZAG[i];
             out[zz] = signed * factor;
-            nonzero = true;
             // Token context for the next coefficient: 1 for |v|==1, else 2.
             prev_ctx = if abs_value == 1 { 1 } else { 2 };
             skip_eob = false;
         }
         i += 1;
     }
-    nonzero
+    // End-of-block position past the first coefficient <=> tokens present.
+    i > first_coeff
 }
 
 /// Decodes a category token's extra bits and adds the category base.
@@ -1207,5 +1286,248 @@ mod tests {
             first_partition_size: 1,
             num_token_partitions: 1,
         }
+    }
+
+    /// Builds a minimal header with a chosen macroblock grid (multiples of
+    /// 16), for tests that need more than one macroblock.
+    fn make_header(width: u32, height: u32) -> FrameHeader {
+        FrameHeader {
+            width,
+            height,
+            ..make_minimal_header()
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Fix 1 pin: B_PRED above-right propagation (RFC 6386 §12.3; libvpx
+    // "propagate the above right state").
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_mb_top_right_is_border_127_on_frame_top_row() {
+        let header = make_header(32, 32);
+        let data = [0u8; 32];
+        let bd = BoolDecoder::new(&data);
+        let dec = Decoder::new(&header, bd, &data).expect("decoder construction");
+        let stride = dec.planes.y_stride;
+        let mb_off = dec.planes.y_origin;
+        assert_eq!(dec.compute_mb_top_right(0, 0, mb_off, stride), [127; 4]);
+    }
+
+    #[test]
+    fn test_mb_top_right_propagates_to_interior_rows_not_above3() {
+        // mb_cols = 2, mb_rows = 2 so macroblock (0, 1) has both a row
+        // above it and a macroblock to its upper-right.
+        let header = make_header(32, 32);
+        let data = [0u8; 32];
+        let bd = BoolDecoder::new(&data);
+        let mut dec = Decoder::new(&header, bd, &data).expect("decoder construction");
+
+        let stride = dec.planes.y_stride;
+        let mb_off = dec.planes.y_origin + 16 * stride; // macroblock (0, 1)
+        let above_row = mb_off - stride;
+
+        // Sentinel values at the macroblock's shared above-right position
+        // (columns 16..20 relative to mb_off: inside macroblock (1, 0)).
+        dec.planes.y[above_row + 16] = 201;
+        dec.planes.y[above_row + 17] = 202;
+        dec.planes.y[above_row + 18] = 203;
+        dec.planes.y[above_row + 19] = 204;
+
+        let mb_top_right = dec.compute_mb_top_right(0, 1, mb_off, stride);
+        assert_eq!(
+            mb_top_right,
+            [201, 202, 203, 204],
+            "mb_y>0 with a macroblock to the upper-right must read its top row"
+        );
+
+        // Interior sub-block row r=2, col=3. Its "directly above" row is the
+        // bottom row of sub-block (r=1, col=3) within this MB; poke a
+        // DIFFERENT sentinel there so above[3] cannot be confused with the
+        // propagated above-right value.
+        let sb_off = mb_off + 2 * 4 * stride + 3 * 4;
+        for c in 0..4 {
+            dec.planes.y[sb_off - stride + c] = 40 + c as u8; // above[3] == 43
+        }
+
+        let edge = dec.gather_subblock_edge(sb_off, stride, true, true, Some(&mb_top_right));
+        assert_eq!(
+            edge.above[4], 201,
+            "col==3, r>0 must reuse the shared value"
+        );
+        assert_eq!(edge.above[5], 202);
+        assert_eq!(edge.above[6], 203);
+        assert_eq!(edge.above[7], 204);
+        assert_ne!(
+            edge.above[4], edge.above[3],
+            "must NOT fall back to replicating above[3] (the pre-fix bug)"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Fix 2 pin: Y2 skip-context polarity (RFC 6386 reference decoder
+    // `reset_mb_context`; libvpx `vp8_reset_mb_tokens_context`).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_reset_skipped_mb_context_preserves_y2_for_bpred() {
+        let mut left_nz = [true; 9];
+        let mut above_nz = [true; 9];
+        reset_skipped_mb_context(B_PRED, &mut left_nz, &mut above_nz, 0);
+        assert_eq!(&left_nz[0..8], &[false; 8], "Y/U/V context always clears");
+        assert_eq!(&above_nz[0..8], &[false; 8], "Y/U/V context always clears");
+        assert!(
+            left_nz[8],
+            "Y2 context must be PRESERVED for a skipped B_PRED MB"
+        );
+        assert!(
+            above_nz[8],
+            "Y2 context must be PRESERVED for a skipped B_PRED MB"
+        );
+    }
+
+    #[test]
+    fn test_reset_skipped_mb_context_clears_y2_for_non_bpred() {
+        let mut left_nz = [true; 9];
+        let mut above_nz = [true; 9];
+        reset_skipped_mb_context(DC_PRED, &mut left_nz, &mut above_nz, 0);
+        assert!(
+            !left_nz[8],
+            "Y2 context must be CLEARED for a skipped non-B_PRED MB"
+        );
+        assert!(
+            !above_nz[8],
+            "Y2 context must be CLEARED for a skipped non-B_PRED MB"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Fix 3 pin: eob-based `decode_block` return value (libvpx
+    // `eob > first_coeff`, not "any coefficient is non-zero").
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_decode_block_counts_trailing_literal_zero_as_a_token() {
+        // Hand-derived deterministic bitstream: a synthetic probability
+        // table forces the first tree decision (node 0, "is EOB") to
+        // decode `true` ("not EOB": prob=1 against a mid-range initial
+        // `value`) and the immediately following decision (node 2, "is it
+        // a literal DCT_0") to decode `false` (DCT_0: prob=255, which
+        // barely shrinks `range`, keeping `value` comfortably below
+        // `big_split`). `first_coeff = 15` means this single DCT_0 token
+        // already exhausts the block (i becomes 16 with no EOB ever
+        // decoded) — the smallest possible repro of "tokens present, all
+        // zero-valued".
+        let mut probs = [[[[255u8; 11]; 3]; 8]; 4];
+        let band = COEFF_BANDS[15];
+        probs[0][band][0][0] = 1; // node 0 (EOB test) -> forced "not EOB"
+                                  // probs[0][band][0][1] stays 255 (node 2, DCT_0 selection) -> DCT_0.
+
+        let data = [0x40u8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let mut bd = BoolDecoder::new(&data);
+        let mut out = [0i32; 16];
+        let has_tokens = decode_block(&mut bd, &probs, 0, 0, 15, 1, 1, &mut out);
+
+        assert!(
+            has_tokens,
+            "a block whose only token is a literal zero must still report tokens present"
+        );
+        assert_eq!(out, [0i32; 16], "no coefficient value is actually non-zero");
+    }
+
+    // ------------------------------------------------------------------
+    // End-to-end regression: real reference-encoder bitstreams, verified
+    // bit-exact against libwebp's `dwebp -yuv` reference reconstruction.
+    // Both fixtures exercise B_PRED (fix 1) and multi-token-partition /
+    // literal-zero-heavy coefficient decode (fixes 2 and 3).
+    // ------------------------------------------------------------------
+
+    /// Builds the expected RGBA buffer from libwebp-reference YUV 4:2:0
+    /// planes using the same nearest-neighbour chroma upsampling and
+    /// `ycbcr_to_rgb` conversion this decoder's own `finish()` applies, so
+    /// the whole pipeline (prediction, transforms, loop filter, chroma
+    /// upsampling, colour conversion) is checked in one comparison.
+    fn expected_rgba_from_yuv420(
+        y: &[u8],
+        u: &[u8],
+        v: &[u8],
+        width: usize,
+        height: usize,
+    ) -> Vec<u8> {
+        let cw = (width + 1) / 2;
+        let mut rgba = vec![0u8; width * height * 4];
+        for row in 0..height {
+            let uv_row = row / 2;
+            for col in 0..width {
+                let yy = i32::from(y[row * width + col]);
+                let uu = i32::from(u[uv_row * cw + col / 2]);
+                let vv = i32::from(v[uv_row * cw + col / 2]);
+                let (r, g, b) = ycbcr_to_rgb(yy, uu, vv);
+                let o = (row * width + col) * 4;
+                rgba[o] = r;
+                rgba[o + 1] = g;
+                rgba[o + 2] = b;
+                rgba[o + 3] = 255;
+            }
+        }
+        rgba
+    }
+
+    /// Asserts a decoded RGBA buffer matches the libwebp-reference
+    /// reconstruction byte-for-byte, with a diagnostic pinpointing the
+    /// first mismatched pixel.
+    fn assert_rgba_bit_exact(tag: &str, got: &[u8], want: &[u8], width: usize) {
+        assert_eq!(got.len(), want.len(), "{tag}: buffer size mismatch");
+        if let Some(i) = (0..got.len()).find(|&i| got[i] != want[i]) {
+            let px = i / 4;
+            panic!(
+                "{tag}: first RGBA mismatch at byte {i} (pixel {px}, x={}, y={}, channel {}): got {}, want {}",
+                px % width,
+                px / width,
+                i % 4,
+                got[i],
+                want[i],
+            );
+        }
+    }
+
+    #[test]
+    fn test_decode_cwebp_textured_48x40_bit_exact_vs_libwebp_reference() {
+        use super::test_fixtures as fx;
+        // B_PRED-heavy, cwebp(libwebp)-encoded lossy WebP key frame (q70,
+        // textured). Height 40 is not a macroblock multiple, exercising
+        // bottom-row cropping too.
+        let img = decode_vp8_keyframe(&fx::TEX48X40_VP8)
+            .expect("a valid cwebp-encoded key frame must decode");
+        assert_eq!(img.width, 48);
+        assert_eq!(img.height, 40);
+        let expected = expected_rgba_from_yuv420(
+            &fx::TEX48X40_EXPECTED_Y,
+            &fx::TEX48X40_EXPECTED_U,
+            &fx::TEX48X40_EXPECTED_V,
+            48,
+            40,
+        );
+        assert_rgba_bit_exact("tex48x40", &img.rgba, &expected, 48);
+    }
+
+    #[test]
+    fn test_decode_libvpx_multi_partition_48x48_bit_exact_vs_libwebp_reference() {
+        use super::test_fixtures as fx;
+        // libvpx(ffmpeg -c:v libvpx -slices 4)-encoded key frame with four
+        // DCT token partitions: exercises the multi-partition decode path
+        // with real libvpx encoder choices (distinct from cwebp's).
+        let img = decode_vp8_keyframe(&fx::VPX_KEYFRAME_VP8)
+            .expect("a valid libvpx-encoded key frame must decode");
+        assert_eq!(img.width, 48);
+        assert_eq!(img.height, 48);
+        let expected = expected_rgba_from_yuv420(
+            &fx::VPX_KF_EXPECTED_Y,
+            &fx::VPX_KF_EXPECTED_U,
+            &fx::VPX_KF_EXPECTED_V,
+            48,
+            48,
+        );
+        assert_rgba_bit_exact("vpx_kf", &img.rgba, &expected, 48);
     }
 }

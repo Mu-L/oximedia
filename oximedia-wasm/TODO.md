@@ -1,6 +1,6 @@
 # OxiMedia WASM — Development Roadmap
 
-**Version: 0.1.9**
+**Version: 0.2.0 (active, dev branch `0.2.0`) / 0.1.9 (stable, `master`)**
 **Status: 76 modules wired into `lib.rs` and exported; 3 dishonest decoder
 classes removed from the public surface, plus a 4th dishonest decode path
 found and fixed inside `media_player` (see "Removed" / "AV1 decode audit"

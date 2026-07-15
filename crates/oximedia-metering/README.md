@@ -1,6 +1,6 @@
 # oximedia-metering
 
-**Status: [Stable]** | Version: 0.1.9 | Tests: extensively tested | Updated: 2026-07-08
+**Status: [Stable]** | Version: 0.2.0 | Tests: extensively tested | Updated: 2026-07-14
 
 Professional broadcast audio metering for OxiMedia, implementing ITU-R BS.1770-4, EBU R128, and ATSC A/85 loudness standards.
 

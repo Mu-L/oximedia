@@ -1,6 +1,6 @@
 # oximedia-mixer
 
-**Status: [Stable]** | Version: 0.1.9 | Tests: extensively tested | Updated: 2026-07-08
+**Status: [Stable]** | Version: 0.2.0 | Tests: extensively tested | Updated: 2026-07-14
 
 Professional audio mixer with automation for OxiMedia, providing a full digital audio mixing console with 100+ channels, comprehensive effects, and full parameter automation.
 

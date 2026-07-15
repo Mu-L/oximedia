@@ -201,6 +201,150 @@ pub fn probe_media(data: &[u8]) -> Result<JsValue, JsValue> {
         })
 }
 
+/// Result of hashing raw content bytes via [`probe_hash`].
+///
+/// Provides real, deterministic digests of the input bytes using
+/// dependency-free algorithms, so the WASM bundle's dependency footprint
+/// and size stay unchanged. These mirror the pure-Rust routines in
+/// `oximedia-py`'s `media_hash` module (CRC-32 ISO 3309 + FNV-1a 64-bit),
+/// giving the browser build parity with that capability -- unlike the
+/// Python module (which is not yet registered with `#[pymodule]`), this
+/// one is wired up to a real, callable entry point.
+///
+/// For cryptographic-strength whole-file hashing (SHA-256), see the CLI's
+/// `oximedia probe --hash`, which delegates to `oximedia-archive-pro`'s
+/// `ChecksumGenerator`. That crate pulls in `tokio`/`rayon`/`walkdir` for
+/// file-system streaming and is not part of the WASM dependency graph, so
+/// it is intentionally not used here.
+#[wasm_bindgen]
+#[derive(Clone, Debug)]
+pub struct WasmHashResult {
+    crc32_hex: String,
+    fnv1a64_hex: String,
+    simple128_hex: String,
+    byte_length: usize,
+}
+
+#[wasm_bindgen]
+impl WasmHashResult {
+    /// Returns the CRC-32 (ISO 3309 / ITU-T V.42) digest as 8 lowercase hex
+    /// characters.
+    #[must_use]
+    pub fn crc32(&self) -> String {
+        self.crc32_hex.clone()
+    }
+
+    /// Returns the FNV-1a 64-bit digest as 16 lowercase hex characters.
+    #[must_use]
+    pub fn fnv1a64(&self) -> String {
+        self.fnv1a64_hex.clone()
+    }
+
+    /// Returns a 128-bit composite digest (FNV-1a of the bytes forward,
+    /// concatenated with FNV-1a of the bytes reversed) as 32 lowercase hex
+    /// characters -- a longer identifier with lower collision probability
+    /// than either hash alone.
+    #[must_use]
+    pub fn simple128(&self) -> String {
+        self.simple128_hex.clone()
+    }
+
+    /// Returns the number of input bytes that were hashed.
+    #[must_use]
+    pub fn byte_length(&self) -> usize {
+        self.byte_length
+    }
+}
+
+/// Computes a real, deterministic content hash/fingerprint of `data`.
+///
+/// This is the WASM-side counterpart of the CLI's `oximedia probe --hash`
+/// flag and of `oximedia-py`'s `media_hash` module: given the same input
+/// bytes, all three report the same CRC-32 and FNV-1a 64-bit digests (the
+/// CLI additionally reports a SHA-256 digest via `oximedia-archive-pro`,
+/// which is out of scope for the WASM build -- see the [`WasmHashResult`]
+/// docs).
+///
+/// Unlike [`probe_format`], which only needs the first few header bytes,
+/// this hashes every byte passed in -- callers wanting a whole-file digest
+/// must pass the complete file contents, not just a header sniff.
+///
+/// # Arguments
+///
+/// * `data` - The complete byte buffer to hash (e.g. an entire file loaded
+///   into a `Uint8Array`).
+///
+/// # JavaScript Example
+///
+/// ```javascript
+/// import * as oximedia from 'oximedia-wasm';
+///
+/// const response = await fetch('video.webm');
+/// const data = new Uint8Array(await response.arrayBuffer());
+/// const hash = oximedia.probe_hash(data);
+/// console.log('CRC32:', hash.crc32());
+/// console.log('FNV1a64:', hash.fnv1a64());
+/// console.log('bytes hashed:', hash.byte_length());
+/// ```
+#[wasm_bindgen]
+pub fn probe_hash(data: &[u8]) -> WasmHashResult {
+    let fnv_forward = fnv1a_64(data);
+    let fnv_reversed = fnv1a_64_reversed(data);
+    WasmHashResult {
+        crc32_hex: format!("{:08x}", crc32(data)),
+        fnv1a64_hex: format!("{fnv_forward:016x}"),
+        simple128_hex: format!("{fnv_forward:016x}{fnv_reversed:016x}"),
+        byte_length: data.len(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pure-Rust hash helpers (no external deps; algorithm-for-algorithm mirrors
+// oximedia-py's `media_hash.rs` so the two builds agree on digests for the
+// same input bytes).
+// ---------------------------------------------------------------------------
+
+/// Computes CRC-32 (ISO 3309 / ITU-T V.42) of `data`.
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &byte in data {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0xEDB8_8320;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    !crc
+}
+
+/// Computes the FNV-1a 64-bit hash of `data`.
+fn fnv1a_64(data: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for &byte in data {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+/// Computes the FNV-1a 64-bit hash of `data` read back-to-front (the
+/// second half of [`probe_hash`]'s 128-bit composite digest).
+fn fnv1a_64_reversed(data: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for &byte in data.iter().rev() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,5 +423,58 @@ mod tests {
         // We test via the underlying container::probe_format to avoid JsValue in native.
         let data = [0xFF; 16];
         assert!(crate::container::probe_format(&data).is_err());
+    }
+
+    #[test]
+    fn test_probe_hash_deterministic() {
+        let data = b"hello wasm hashing";
+        let h1 = probe_hash(data);
+        let h2 = probe_hash(data);
+        assert_eq!(h1.crc32(), h2.crc32());
+        assert_eq!(h1.fnv1a64(), h2.fnv1a64());
+        assert_eq!(h1.simple128(), h2.simple128());
+        assert_eq!(h1.byte_length(), data.len());
+    }
+
+    #[test]
+    fn test_probe_hash_differs_for_different_input() {
+        let h1 = probe_hash(b"input one");
+        let h2 = probe_hash(b"input two");
+        assert_ne!(h1.crc32(), h2.crc32());
+        assert_ne!(h1.fnv1a64(), h2.fnv1a64());
+        assert_ne!(h1.simple128(), h2.simple128());
+    }
+
+    #[test]
+    fn test_probe_hash_matches_known_crc32_check_value() {
+        // CRC-32 (ISO 3309 / "CRC-32/ISO-HDLC", the zlib/PKZIP variant used
+        // here: poly 0xEDB88320 reflected, init 0xFFFFFFFF, final XOR) of
+        // the ASCII string "123456789" is the well-known check value
+        // 0xCBF43926, used across implementations to validate correctness.
+        let h = probe_hash(b"123456789");
+        assert_eq!(h.crc32(), "cbf43926");
+    }
+
+    #[test]
+    fn test_probe_hash_empty_input() {
+        let h = probe_hash(b"");
+        assert_eq!(h.byte_length(), 0);
+        assert_eq!(h.crc32().len(), 8);
+        assert_eq!(h.fnv1a64().len(), 16);
+        assert_eq!(h.simple128().len(), 32);
+    }
+
+    #[test]
+    fn test_probe_hash_simple128_is_concat_of_forward_and_reversed_fnv() {
+        let data = b"asymmetric payload";
+        let h = probe_hash(data);
+        let mut reversed = data.to_vec();
+        reversed.reverse();
+        let expected = format!(
+            "{}{}",
+            probe_hash(data).fnv1a64(),
+            probe_hash(&reversed).fnv1a64()
+        );
+        assert_eq!(h.simple128(), expected);
     }
 }

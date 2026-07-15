@@ -423,13 +423,24 @@ impl RtmpClient {
 
         self.session.bytes_received += buf.len() as u64;
 
-        // Parse S0+S1
+        // Parse S0+S1 (captures the server's S1 timestamp + random data,
+        // needed below to build C2's echo payload).
         self.handshake.parse_s0s1(&buf[..1 + HANDSHAKE_SIZE])?;
 
-        // Parse S2
-        self.handshake.parse_s2(&buf[1 + HANDSHAKE_SIZE..])?;
-
-        // Send C2
+        // Simple RTMP handshake, client role, in protocol order:
+        //   1. send C0+C1                (generate_c0c1 -> VersionSent)
+        //   2. receive S0+S1+S2          (parse_s0s1, above)
+        //   3. send C2 (echo of S1)      (generate_c2   -> AckSent)
+        //   4. validate S2 (echo of C1)  (parse_s2      -> Done)
+        //
+        // Step 3 MUST run before step 4: `generate_c2` marks the
+        // intermediate `AckSent` state and `parse_s2` marks the terminal
+        // `Done` state. Calling `parse_s2` first and `generate_c2` second
+        // (the previous, buggy order) clobbered `Done` back down to
+        // `AckSent` after a fully successful handshake, so `is_done()`
+        // permanently returned false and every client handshake failed
+        // with "Handshake incomplete" even though both sides had
+        // completed the exchange correctly.
         let c2 = self.handshake.generate_c2();
         timeout(self.config.write_timeout, stream.write_all(&c2))
             .await
@@ -437,6 +448,10 @@ impl RtmpClient {
             .map_err(|e| NetError::handshake(format!("Failed to send C2: {e}")))?;
 
         self.session.bytes_sent += c2.len() as u64;
+
+        // Validate S2 (echo of our C1) - this is the final handshake step
+        // and transitions the state machine to `Done`.
+        self.handshake.parse_s2(&buf[1 + HANDSHAKE_SIZE..])?;
 
         // Verify handshake is done
         if !self.handshake.is_done() {
@@ -1629,5 +1644,112 @@ mod client_spec_tests {
         client.record_send(512);
         assert_eq!(client.stats().bytes_sent, 1536);
         assert_eq!(client.stats().packets_sent, 2);
+    }
+}
+
+/// Regression coverage for a real handshake-ordering bug in
+/// [`RtmpClient::perform_handshake`]: the driver used to call `parse_s2()`
+/// (which transitions the state machine to `Done`) *before* `generate_c2()`
+/// (which transitions it to `AckSent`). Because `generate_c2` ran last, it
+/// clobbered the terminal `Done` state back down to `AckSent`, so
+/// `is_done()` permanently returned `false` after a fully successful
+/// handshake and every real RTMP publish/ingest loopback (e.g. OBS/ffmpeg
+/// against `oximedia-net`'s server) failed with "Handshake incomplete".
+#[cfg(test)]
+mod handshake_ordering_regression_tests {
+    use super::*;
+    use crate::rtmp::handshake::C0_SIZE;
+    use tokio::net::TcpListener;
+
+    /// Drives the *real* client handshake driver (`RtmpClient::perform_handshake`,
+    /// private but reachable here since this module is a descendant of `client`)
+    /// against a minimal server built directly on the `Handshake` primitives -
+    /// mirroring `server::connection::ServerConnection::perform_handshake`
+    /// byte-for-byte - over a genuine 127.0.0.1 TCP loopback socket. Asserts
+    /// both sides finish in the `Done` state and that the C2/S2 echo payloads
+    /// are byte-exact (C2 echoes S1's random data, S2 echoes C1's).
+    #[tokio::test]
+    async fn test_client_server_handshake_loopback_both_sides_reach_done() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral loopback listener");
+        let addr = listener
+            .local_addr()
+            .expect("bound listener must have a local address");
+
+        // Server task: mirrors `ServerConnection::perform_handshake`'s byte
+        // sequence exactly (receive C0+C1 -> send S0+S1+S2 -> receive C2),
+        // using the same `Handshake` primitives, over the real socket.
+        let server_task = tokio::spawn(async move {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .expect("accept incoming loopback connection");
+            let mut server_hs = Handshake::new();
+            server_hs.set_epoch(0x1234_5678);
+
+            let mut c0c1 = vec![0u8; C0_SIZE + HANDSHAKE_SIZE];
+            socket
+                .read_exact(&mut c0c1)
+                .await
+                .expect("read C0+C1 from client");
+            server_hs.parse_c0c1(&c0c1).expect("parse C0+C1");
+
+            let s0s1s2 = server_hs.generate_s0s1s2();
+            socket
+                .write_all(&s0s1s2)
+                .await
+                .expect("write S0+S1+S2 to client");
+
+            let mut c2 = vec![0u8; HANDSHAKE_SIZE];
+            socket
+                .read_exact(&mut c2)
+                .await
+                .expect("read C2 from client");
+            server_hs.parse_c2(&c2).expect("parse C2");
+
+            (server_hs.is_done(), c0c1, s0s1s2, c2)
+        });
+
+        // Client side: exercise the real (now-fixed) driver directly, exactly
+        // as `RtmpClient::connect` does internally.
+        let mut client = RtmpClient::new();
+        client.stream = Some(
+            TcpStream::connect(addr)
+                .await
+                .expect("connect to loopback listener"),
+        );
+        client
+            .perform_handshake()
+            .await
+            .expect("client handshake must complete successfully");
+
+        assert!(
+            client.handshake.is_done(),
+            "client handshake state must be Done after a successful exchange"
+        );
+
+        let (server_done, c0c1, s0s1s2, c2) = server_task.await.expect("server task panicked");
+        assert!(
+            server_done,
+            "server handshake state must also be Done after a successful exchange"
+        );
+
+        // C2 must echo S1's random payload (not fabricated or swapped).
+        let s1_random = &s0s1s2[C0_SIZE + 8..C0_SIZE + HANDSHAKE_SIZE];
+        let c2_random = &c2[8..HANDSHAKE_SIZE];
+        assert_eq!(
+            c2_random, s1_random,
+            "C2 random payload must echo the server's S1 random payload"
+        );
+
+        // S2 must echo C1's random payload (not fabricated or swapped).
+        let c1_random = &c0c1[C0_SIZE + 8..C0_SIZE + HANDSHAKE_SIZE];
+        let s2_start = C0_SIZE + HANDSHAKE_SIZE;
+        let s2_random = &s0s1s2[s2_start + 8..s2_start + HANDSHAKE_SIZE];
+        assert_eq!(
+            s2_random, c1_random,
+            "S2 random payload must echo the client's C1 random payload"
+        );
     }
 }

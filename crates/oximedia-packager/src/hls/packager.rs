@@ -90,17 +90,34 @@ impl HlsPackager {
         Ok(())
     }
 
-    /// Generate bitrate ladder from source.
+    /// Generate a bitrate ladder from the real source-media parameters supplied
+    /// via [`crate::config::PackagerConfig::source_media`].
+    ///
+    /// Rungs are derived from the actual source resolution, framerate and codec:
+    /// [`LadderGenerator`] caps rungs at or below the source resolution and
+    /// labels each rung with the source codec. If no source info was provided,
+    /// this returns an error instead of fabricating a resolution — the caller
+    /// must either supply source info via `with_source_info(..)` or provide an
+    /// explicit ladder via `with_ladder(..)` and set `auto_generate = false`.
+    ///
+    /// TODO(0.2.x): when `input` refers to a readable media file, probe it via
+    /// `oximedia-container` (`DetailedContainerInfo`) to auto-populate
+    /// `source_media` instead of requiring the caller to pass it.
     async fn generate_ladder_from_source(
         &self,
-        _input: &str,
+        input: &str,
     ) -> PackagerResult<crate::config::BitrateLadder> {
-        // In a real implementation, this would analyze the input file
-        // For now, use a default 1080p source
-        let source = SourceInfo::new(1920, 1080, 30.0, "av1".to_string());
+        let source = self.config.source_media.clone().ok_or_else(|| {
+            PackagerError::invalid_config(format!(
+                "automatic bitrate ladder requested (ladder.auto_generate = true) but no source \
+                 media info is available for '{input}'; call with_source_info(SourceInfo::new(..)) \
+                 with the real resolution/framerate/codec, or supply an explicit ladder via \
+                 with_ladder(..) and set auto_generate = false"
+            ))
+        })?;
 
-        let generator = LadderGenerator::new(source).with_codec("av1");
-
+        let codec = source.codec.clone();
+        let generator = LadderGenerator::new(source).with_codec(&codec);
         generator.generate()
     }
 
@@ -377,6 +394,14 @@ impl HlsPackagerBuilder {
         self
     }
 
+    /// Set the real source-media parameters used to derive an automatic bitrate
+    /// ladder (resolution, framerate, codec).
+    #[must_use]
+    pub fn with_source_info(mut self, source: SourceInfo) -> Self {
+        self.config.source_media = Some(source);
+        self
+    }
+
     /// Build the packager.
     pub fn build(self) -> PackagerResult<HlsPackager> {
         HlsPackager::new(self.config)
@@ -411,5 +436,50 @@ mod tests {
             .expect("should succeed in test");
 
         assert_eq!(packager.config.segment.format, SegmentFormat::MpegTs);
+    }
+
+    #[tokio::test]
+    async fn test_ladder_derived_from_source_caps_at_source_resolution() {
+        // A 720p source must not yield rungs above 720p, and every rung must be
+        // labelled with the real source codec (vp9 here), not a hardcoded av1.
+        let mut config = PackagerConfig::default();
+        config.output.directory = std::env::temp_dir().join("oximedia-pkg-hls-ladder-test");
+        config.source_media = Some(SourceInfo::new(1280, 720, 30.0, "vp9".to_string()));
+        let packager = HlsPackager::new(config).expect("packager should build");
+
+        let ladder = packager
+            .generate_ladder_from_source("dummy_input.mkv")
+            .await
+            .expect("ladder should derive from source info");
+
+        assert!(!ladder.entries.is_empty(), "ladder must have rungs");
+        for entry in &ladder.entries {
+            assert!(
+                entry.height <= 720,
+                "rung height {} exceeds source height 720",
+                entry.height
+            );
+            assert!(
+                entry.width <= 1280,
+                "rung width {} exceeds source width 1280",
+                entry.width
+            );
+            assert_eq!(entry.codec, "vp9", "rung codec must match source codec");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ladder_without_source_info_is_honest_error() {
+        // auto_generate defaults to true; with no source_media the packager must
+        // refuse rather than fabricate a 1080p/av1 ladder unrelated to the input.
+        let mut config = PackagerConfig::default();
+        config.output.directory = std::env::temp_dir().join("oximedia-pkg-hls-noladder-test");
+        let packager = HlsPackager::new(config).expect("packager should build");
+
+        let result = packager.generate_ladder_from_source("dummy.mkv").await;
+        assert!(
+            result.is_err(),
+            "must not fabricate a ladder without real source info"
+        );
     }
 }

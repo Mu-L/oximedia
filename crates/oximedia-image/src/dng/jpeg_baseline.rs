@@ -530,6 +530,10 @@ fn decode_scan(
     if width == 0 || height == 0 {
         return Err(ImageError::compression("Baseline JPEG: zero-sized image"));
     }
+    // Defend against an allocation bomb: width/height drive the MCU-padded
+    // per-component plane allocations below. Reject frames above the decode
+    // ceiling before any plane is sized.
+    crate::limits::check_dimensions(width, height).map_err(ImageError::InvalidFormat)?;
 
     // Maximum sampling factors define the MCU geometry.
     let h_max = scan

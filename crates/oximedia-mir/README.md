@@ -1,6 +1,6 @@
 # oximedia-mir
 
-**Status: [Stable]** | Version: 0.1.9 | Tests: extensively tested | Updated: 2026-07-08
+**Status: [Stable]** | Version: 0.2.0 | Tests: extensively tested | Updated: 2026-07-14
 
 Music Information Retrieval (MIR) system for OxiMedia, providing comprehensive music analysis including tempo, beat, key, chord, melody, structure, genre, mood, and spectral features.
 

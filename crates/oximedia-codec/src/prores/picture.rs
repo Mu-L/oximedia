@@ -132,6 +132,12 @@ pub fn parse_slice_header(
     }
     // High nibble of byte 0 is slice_header_size (in bytes / 1).
     let header_size = payload[0] >> 4;
+    // ProRes quant_scale is 1..=224. An out-of-range value no longer crashes
+    // the dequantiser (it now computes in i64 and saturates to i32), so the
+    // strict range check is deferred to avoid rejecting streams whose exact
+    // valid range is unverified.
+    // TODO(0.2.x): enforce quant_scale in 1..=224 once a FrameError string
+    // variant exists and the valid encoder range is confirmed.
     let quant_scale = payload[1];
     let luma_data_size = u16::from_be_bytes([payload[2], payload[3]]);
     let cb_data_size = u16::from_be_bytes([payload[4], payload[5]]);

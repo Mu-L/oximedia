@@ -102,7 +102,7 @@ fn options_for(
         crf: None,
         threads: 0,
         overwrite: true,
-        resume: false,
+        map: Vec::new(),
         normalize_audio,
         progress_format: ProgressFormat::Plain,
     }

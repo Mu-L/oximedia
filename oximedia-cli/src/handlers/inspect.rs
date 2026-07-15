@@ -13,6 +13,10 @@ use tracing::info;
 /// * `show_streams` - Whether to list individual stream details
 /// * `compute_hash` - Whether to compute a real SHA-256 content hash of the
 ///   full file (`--hash`), via `oximedia_archive_pro::checksum::ChecksumGenerator`
+/// * `quality_snapshot` - Whether to compute a quick no-reference quality
+///   snapshot (`--quality-snapshot`) on a real decode of frame 0, via
+///   `crate::quality_snapshot`. Never fails the probe: audio-only or
+///   undecodable inputs yield an "unavailable" section with a reason.
 /// * `output_format` - Output format: "text", "json", or "csv"
 /// * `show_chapters` - Whether to show chapter information
 /// * `show_metadata` - Whether to dump all metadata key/value pairs
@@ -22,6 +26,7 @@ pub(crate) async fn probe_file(
     verbose: bool,
     show_streams: bool,
     compute_hash: bool,
+    quality_snapshot: bool,
     output_format: &str,
     show_chapters: bool,
     show_metadata: bool,
@@ -77,6 +82,18 @@ pub(crate) async fn probe_file(
                 None
             };
 
+            // Optionally compute a quick no-reference quality snapshot on a
+            // real decode of frame 0 (`--quality-snapshot`). Deliberately
+            // infallible: failures (audio-only file, unsupported container,
+            // decode error) are encoded inside the snapshot itself so the
+            // probe as a whole still succeeds — the same graceful-degradation
+            // approach `--hash` takes.
+            let quality: Option<crate::quality_snapshot::QualitySnapshot> = if quality_snapshot {
+                Some(crate::quality_snapshot::compute_quality_snapshot(path).await)
+            } else {
+                None
+            };
+
             // NDJSON: emit a single record and return before the regular branches.
             if ndjson {
                 colored::control::set_override(false);
@@ -92,6 +109,9 @@ pub(crate) async fn probe_file(
                         "algorithm": "sha256",
                         "value": hash,
                     });
+                }
+                if let Some(ref quality) = quality {
+                    record["quality_snapshot"] = quality.to_json();
                 }
                 let mut writer = crate::output::NdjsonWriter::new(std::io::stdout());
                 writer
@@ -140,31 +160,40 @@ pub(crate) async fn probe_file(
                         });
                     }
 
+                    if let Some(ref quality) = quality {
+                        probe_json["quality_snapshot"] = quality.to_json();
+                    }
+
                     let json_str = serde_json::to_string_pretty(&probe_json)
                         .context("Failed to serialize probe result")?;
                     println!("{}", json_str);
                 }
                 "csv" => {
+                    // Build header and row incrementally so the optional
+                    // `--hash` and `--quality-snapshot` columns compose in
+                    // any combination (hash column layout is unchanged).
+                    let mut header = String::from("file,container,confidence,file_size");
+                    let mut row = format!(
+                        "{},{:?},{:.4},{}",
+                        path.display(),
+                        result.format,
+                        result.confidence,
+                        file_size
+                    );
+
                     if let Some(ref hash) = hash_hex {
-                        println!("file,container,confidence,file_size,hash_sha256");
-                        println!(
-                            "{},{:?},{:.4},{},{}",
-                            path.display(),
-                            result.format,
-                            result.confidence,
-                            file_size,
-                            hash
-                        );
-                    } else {
-                        println!("file,container,confidence,file_size");
-                        println!(
-                            "{},{:?},{:.4},{}",
-                            path.display(),
-                            result.format,
-                            result.confidence,
-                            file_size
-                        );
+                        header.push_str(",hash_sha256");
+                        row.push(',');
+                        row.push_str(hash);
                     }
+
+                    if let Some(ref quality) = quality {
+                        header.push_str(crate::quality_snapshot::CSV_HEADER_SUFFIX);
+                        row.push_str(&quality.csv_cells());
+                    }
+
+                    println!("{header}");
+                    println!("{row}");
 
                     if show_streams {
                         println!();
@@ -177,7 +206,7 @@ pub(crate) async fn probe_file(
                     println!("{}", "Format Information".green().bold());
                     println!("{}", "=".repeat(50));
                     println!("{:20} {}", "File:", file_name);
-                    println!("{:20} {:?}", "Container:", result.format);
+                    println!("{:20} {}", "Container:", result.format);
                     println!("{:20} {:.1}%", "Confidence:", result.confidence * 100.0);
                     println!("{:20} {} bytes", "File size:", file_size);
                     if let Some(ref hash) = hash_hex {
@@ -194,6 +223,40 @@ pub(crate) async fn probe_file(
                             &buffer[..16.min(buffer.len())]
                         );
                         println!("{:20} {} KB read", "Header bytes:", bytes_read / 1024);
+                    }
+
+                    if let Some(ref quality) = quality {
+                        println!(
+                            "\n{}",
+                            "Quality Snapshot (no-reference, frame 0)".cyan().bold()
+                        );
+                        println!("{}", "-".repeat(50));
+                        if quality.available {
+                            if let (Some(w), Some(h)) = (quality.width, quality.height) {
+                                println!("{:20} {}x{}", "Frame size:", w, h);
+                            }
+                            for (_key, name, scale, outcome) in quality.metric_rows() {
+                                let label = format!("{name}:");
+                                match outcome.score {
+                                    Some(score) => {
+                                        println!("{:20} {:<10.4} {}", label, score, scale.dimmed());
+                                    }
+                                    None => {
+                                        let why =
+                                            outcome.unavailable.as_deref().unwrap_or("unavailable");
+                                        println!(
+                                            "{:20} {}",
+                                            label,
+                                            format!("n/a ({why})").dimmed()
+                                        );
+                                    }
+                                }
+                            }
+                        } else {
+                            let why = quality.reason.as_deref().unwrap_or("unknown");
+                            println!("{:20} no", "Available:");
+                            println!("{:20} {}", "Reason:", why);
+                        }
                     }
 
                     if show_streams {
@@ -226,7 +289,7 @@ pub(crate) async fn probe_file(
                         println!("{}", "-".repeat(50));
                         println!("{:<24} {}", "filename:", file_name);
                         println!("{:<24} {}", "file_size:", file_size);
-                        println!("{:<24} {:?}", "detected_format:", result.format);
+                        println!("{:<24} {}", "detected_format:", result.format);
                         println!();
                         println!(
                             "{}",

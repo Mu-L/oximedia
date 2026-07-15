@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+rust-version.workspace = true
 homepage.workspace = true
 repository.workspace = true
 description = "Plugin system for OxiMedia - dynamic codec loading"
@@ -16,7 +17,7 @@ workspace = true
 
 [dependencies]
 oximedia-core.workspace = true
-oximedia-codec = { workspace = true, default-features = false }
+oximedia-codec = { workspace = true, default-features = false, features = ["image-io"] }
 thiserror.workspace = true
 tracing.workspace = true
 serde = { workspace = true, features = ["derive"] }

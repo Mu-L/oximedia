@@ -401,35 +401,26 @@ impl OpusEncoder {
                 }
             }
             OpusMode::Hybrid => {
-                // For hybrid mode, encode with both and combine
-                // This is a simplified implementation
-                if let (Some(silk), Some(celt)) = (&mut self.silk, &mut self.celt) {
-                    let mut silk_data = vec![0u8; max_packet_size / 2];
-                    let mut celt_data = vec![0u8; max_packet_size / 2];
-
-                    let silk_bytes = silk.encode(samples, &mut silk_data, self.frame_size)?;
-                    let celt_bytes = celt.encode(samples, &mut celt_data, self.frame_size)?;
-
-                    // Combine SILK and CELT data
-                    // In real implementation, this would be more sophisticated
-                    let total_bytes = 1 + silk_bytes + celt_bytes;
-                    if total_bytes > max_packet_size {
-                        return Err(CodecError::BufferTooSmall {
-                            needed: total_bytes,
-                            have: max_packet_size,
-                        });
-                    }
-
-                    packet[1..1 + silk_bytes].copy_from_slice(&silk_data[..silk_bytes]);
-                    packet[1 + silk_bytes..1 + silk_bytes + celt_bytes]
-                        .copy_from_slice(&celt_data[..celt_bytes]);
-
-                    total_bytes
-                } else {
-                    return Err(CodecError::Internal(
-                        "Hybrid encoders not initialized".to_string(),
-                    ));
-                }
+                // Real Opus hybrid-mode encode requires SILK (low band) and
+                // CELT (high band) to share a *single* range-coded
+                // bitstream per RFC 6716 §4.5 — SILK is encoded first, then
+                // CELT continues coding into the same range coder from
+                // wherever SILK left off, so a decoder can run the inverse
+                // process on one shared stream (this crate's own decode
+                // side, `opus/hybrid.rs`, implements exactly that).
+                //
+                // What used to live here instead independently encoded the
+                // full frame with SILK and with CELT into two side-by-side
+                // byte ranges of one packet. That is not a real hybrid
+                // frame — it is two unrelated bitstreams concatenated — and
+                // no compliant Opus decoder (including this crate's own)
+                // can parse it back into audio. Fail honestly instead of
+                // emitting a packet nothing can decode.
+                return Err(CodecError::UnsupportedFeature(
+                    "Opus hybrid-mode encode not implemented; use CELT or SILK mode \
+                     (OpusEncoderConfig::with_mode) instead of Hybrid"
+                        .to_string(),
+                ));
             }
         };
 
@@ -805,5 +796,53 @@ mod tests {
             encoder.dtx_silence_frames() > 0,
             "dtx_silence_frames must be > 0 after sustained silence with DTX"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Hybrid mode: was a fake SILK+CELT concatenation; now an honest Err.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_hybrid_mode_encode_returns_honest_unsupported_error() {
+        let config = OpusEncoderConfig::new(48000, 1, 64000).with_mode(OpusMode::Hybrid);
+        let mut encoder = OpusEncoder::new(config).expect("encoder creation");
+        let frame_size = encoder.frame_size();
+        let silence = vec![0.0f32; frame_size];
+
+        let result = encoder.encode(&silence);
+        assert!(
+            matches!(result, Err(CodecError::UnsupportedFeature(_))),
+            "Opus hybrid-mode encode must return an honest UnsupportedFeature error \
+             instead of fabricating a non-decodable concatenated packet, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_hybrid_mode_error_message_names_the_gap() {
+        let config = OpusEncoderConfig::new(48000, 1, 64000).with_mode(OpusMode::Hybrid);
+        let mut encoder = OpusEncoder::new(config).expect("encoder creation");
+        let frame_size = encoder.frame_size();
+        let silence = vec![0.0f32; frame_size];
+
+        let err = match encoder.encode(&silence) {
+            Err(e) => e,
+            Ok(_) => panic!("hybrid encode must not fabricate a packet"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("hybrid-mode encode not implemented"),
+            "error must name the limitation clearly, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_hybrid_mode_never_emits_a_packet() {
+        // No caller may ever receive Ok(Some(_)) from a hybrid-mode encode
+        // (that would mean a non-decodable packet reached the output).
+        let config = OpusEncoderConfig::new(48000, 2, 64000).with_mode(OpusMode::Hybrid);
+        let mut encoder = OpusEncoder::new(config).expect("encoder creation");
+        let frame_size = encoder.frame_size();
+        let silence = vec![0.0f32; frame_size * 2]; // stereo: 2 channels interleaved
+        assert!(encoder.encode(&silence).is_err());
     }
 }

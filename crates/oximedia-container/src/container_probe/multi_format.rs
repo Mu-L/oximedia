@@ -166,10 +166,13 @@ impl MultiFormatProber {
                 }
                 info.streams.push(s);
             }
-            let advance = 12 + chunk_size as usize;
-            if advance == 0 {
+            // `12 + chunk_size` can itself overflow usize before the checked
+            // offset advance below (chunk_size is an untrusted u64 read from the
+            // file). Fold the header constant into a checked add so an oversized
+            // chunk_size stops the scan cleanly instead of wrapping/panicking.
+            let Some(advance) = 12usize.checked_add(chunk_size as usize) else {
                 break;
-            }
+            };
             match offset.checked_add(advance) {
                 Some(new_offset) => offset = new_offset,
                 None => break,
@@ -261,5 +264,24 @@ impl MultiFormatProber {
                 ..Default::default()
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Security regression (P1 #8): `probe_caf` advances by `12 + chunk_size`
+    /// where `chunk_size` is an untrusted u64. A size near u64::MAX must not
+    /// overflow that add (panic in debug / wrap in release).
+    #[test]
+    fn probe_caf_oversized_chunk_size_no_panic() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"caff"); // magic → dispatches to probe_caf
+        data.extend_from_slice(&[0, 1, 0, 0]); // version + flags
+        data.extend_from_slice(b"free"); // a chunk type
+        data.extend_from_slice(&u64::MAX.to_be_bytes()); // huge chunk_size
+                                                         // Must not panic; the scan stops cleanly on the overflowing advance.
+        let _ = MultiFormatProber::probe(&data);
     }
 }

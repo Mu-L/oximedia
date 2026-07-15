@@ -1,6 +1,6 @@
 # oximedia-repair
 
-**Status: [Stable]** | Version: 0.1.9 | Tests: extensively tested | Updated: 2026-07-08
+**Status: [Stable]** | Version: 0.2.0 | Tests: extensively tested | Updated: 2026-07-14
 
 Media file repair and recovery tools for OxiMedia. Provides comprehensive tools for detecting and repairing corrupted media files, with support for multiple container formats and recovery modes.
 

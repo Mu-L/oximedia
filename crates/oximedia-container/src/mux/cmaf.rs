@@ -253,6 +253,19 @@ impl CmafMuxer {
         id
     }
 
+    /// Overrides the starting sequence number used for the next emitted
+    /// media segment's `mfhd.sequence_number`.
+    ///
+    /// Intended for callers that expose their own configurable starting
+    /// sequence number (e.g. [`crate::fragment::mp4::FragmentedMp4Config`])
+    /// and need the `moof` boxes this muxer produces to actually carry that
+    /// value instead of always starting from `1`. Call before the first
+    /// [`write_media_segment`](Self::write_media_segment) /
+    /// [`flush_segment`](Self::flush_segment) to take effect predictably.
+    pub(crate) fn set_sequence_number(&mut self, n: u32) {
+        self.sequence_number = n;
+    }
+
     // ─── Init segment ─────────────────────────────────────────────────────
 
     /// Writes the CMAF initialization segment (`ftyp` + `moov`).
@@ -905,16 +918,53 @@ fn build_dinf() -> Vec<u8> {
 
 // ─── Box writing primitives ──────────────────────────────────────────────────
 
-/// Writes a standard box: `[size:u32 BE][fourcc:4][content]`.
+/// Builds the header bytes (8 or 16 bytes, per ISO/IEC 14496-12 §4.2) for a
+/// box whose payload is `payload_len` bytes.
 ///
-/// If `content.len() + 8 > u32::MAX` the box size overflows — callers must
-/// ensure reasonable content sizes.
+/// Returns the standard 8-byte header (`size:u32` + `type:4`) when the total
+/// box size fits in a 32-bit field. Otherwise returns the 16-byte
+/// `largesize` header: a `size` field of `1` (the sentinel meaning "the real
+/// size follows as a 64-bit field"), the 4-byte type, and an 8-byte
+/// big-endian `largesize` carrying the true total size.
+///
+/// This used to be inlined as `(content.len() + 8) as u32`, which silently
+/// wraps for any payload at or beyond ~4 GiB — a `mdat` box size any long or
+/// high-bitrate progressive MP4 can realistically reach — producing a box
+/// header that lies about its own length while every byte of `content` was
+/// still written after it. Splitting the size decision out as a pure
+/// function of `payload_len` (mirroring
+/// `crate::mux::mp4::basic::box_header_for_len`) also lets the 4 GiB
+/// boundary be exercised in tests without allocating gigabytes of data.
+fn box_header_for_len(fourcc: &[u8; 4], payload_len: u64) -> Vec<u8> {
+    let small_total = 8u64.saturating_add(payload_len);
+    if let Ok(size) = u32::try_from(small_total) {
+        let mut header = Vec::with_capacity(8);
+        header.extend_from_slice(&size.to_be_bytes());
+        header.extend_from_slice(fourcc);
+        header
+    } else {
+        let large_total = 16u64.saturating_add(payload_len);
+        let mut header = Vec::with_capacity(16);
+        header.extend_from_slice(&1u32.to_be_bytes());
+        header.extend_from_slice(fourcc);
+        header.extend_from_slice(&large_total.to_be_bytes());
+        header
+    }
+}
+
+/// Writes a standard box: `[size:u32 BE][fourcc:4][content]`, or the
+/// ISO/IEC 14496-12 §4.2 `largesize` form when `content` is too big for a
+/// 32-bit size field (see [`box_header_for_len`]).
+///
+/// This is the shared box-emission primitive for `CmafMuxer`, the CMAF
+/// chunked encoders in `crate::streaming::mux`, and
+/// `crate::mux::mp4::writer` (both its fragmented `moof`/`mdat` path and the
+/// progressive muxer's single, potentially very large `mdat`), so fixing the
+/// size computation here covers all of them.
 #[must_use]
 pub fn write_box(fourcc: &[u8; 4], content: &[u8]) -> Vec<u8> {
-    let size = (content.len() + 8) as u32;
-    let mut out = Vec::with_capacity(size as usize);
-    out.extend_from_slice(&size.to_be_bytes());
-    out.extend_from_slice(fourcc);
+    #[allow(clippy::cast_possible_truncation)]
+    let mut out = box_header_for_len(fourcc, content.len() as u64);
     out.extend_from_slice(content);
     out
 }
@@ -1000,6 +1050,79 @@ mod tests {
         assert_eq!(&b[0..4], &13u32.to_be_bytes());
         assert_eq!(&b[4..8], b"test");
         assert_eq!(&b[8..], b"hello");
+    }
+
+    // 3a. box_header_for_len: small payload uses the standard 8-byte header.
+    #[test]
+    fn test_box_header_for_len_small_uses_32_bit_field() {
+        let header = box_header_for_len(b"mdat", 100);
+        assert_eq!(header.len(), 8);
+        assert_eq!(&header[0..4], &108u32.to_be_bytes());
+        assert_eq!(&header[4..8], b"mdat");
+    }
+
+    // 3b. box_header_for_len: exactly at the u32 boundary still uses the
+    // 8-byte header (total size == u32::MAX must not tip into largesize).
+    #[test]
+    fn test_box_header_for_len_boundary_fits_in_u32() {
+        let payload_len = u64::from(u32::MAX) - 8;
+        let header = box_header_for_len(b"mdat", payload_len);
+        assert_eq!(
+            header.len(),
+            8,
+            "boundary case must still use the 8-byte header"
+        );
+        assert_eq!(&header[0..4], &u32::MAX.to_be_bytes());
+    }
+
+    // 3c. box_header_for_len: one byte past the boundary must switch to the
+    // ISO/IEC 14496-12 largesize form instead of wrapping (the previous
+    // `(content.len() + 8) as u32` implementation would silently wrap here).
+    #[test]
+    fn test_box_header_for_len_over_4gib_uses_largesize() {
+        let payload_len = u64::from(u32::MAX) - 7;
+        let header = box_header_for_len(b"mdat", payload_len);
+        assert_eq!(
+            header.len(),
+            16,
+            "must switch to the 16-byte largesize header"
+        );
+        assert_eq!(&header[0..4], &1u32.to_be_bytes());
+        assert_eq!(&header[4..8], b"mdat");
+        let largesize = u64::from_be_bytes(
+            header[8..16]
+                .try_into()
+                .expect("largesize field is exactly 8 bytes"),
+        );
+        assert_eq!(largesize, 16 + payload_len);
+    }
+
+    // 3d. box_header_for_len: well over 4 GiB (a realistic size for a long
+    // or high-bitrate progressive-MP4 mdat) also uses largesize correctly.
+    #[test]
+    fn test_box_header_for_len_well_over_4gib() {
+        let payload_len = 5_000_000_000u64; // ~5 GB
+        let header = box_header_for_len(b"mdat", payload_len);
+        assert_eq!(header.len(), 16);
+        assert_eq!(&header[0..4], &1u32.to_be_bytes());
+        let largesize = u64::from_be_bytes(
+            header[8..16]
+                .try_into()
+                .expect("largesize field is exactly 8 bytes"),
+        );
+        assert_eq!(largesize, 16 + payload_len);
+    }
+
+    // 3e. write_box itself must still delegate correctly for realistic
+    // (small) payloads after the box_header_for_len extraction.
+    #[test]
+    fn test_write_box_small_payload_unaffected_by_largesize_path() {
+        let content = vec![0xCDu8; 1000];
+        let b = write_box(b"free", &content);
+        assert_eq!(b.len(), 8 + 1000);
+        assert_eq!(&b[0..4], &(1008u32).to_be_bytes());
+        assert_eq!(&b[4..8], b"free");
+        assert_eq!(&b[8..], content.as_slice());
     }
 
     // 4. write_full_box structure

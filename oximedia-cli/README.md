@@ -28,11 +28,14 @@ Analyze media files and display format information:
 # Basic probe
 oximedia probe -i video.mkv
 
-# Verbose output with technical details
-oximedia probe -i video.mkv -V
+# Detailed output / machine-readable JSON
+oximedia probe -i video.mkv --detail
+oximedia probe -i video.mkv --format json
 
-# Show stream information
+# Show stream information, content hash, quality snapshot
 oximedia probe -i video.mkv --streams
+oximedia probe -i video.mkv --hash
+oximedia probe -i video.mkv --quality-snapshot
 ```
 
 ### Info
@@ -74,26 +77,35 @@ Rejected Codecs (Patent-Encumbered):
 
 ### Transcode
 
-Convert media files between formats:
+Remux, trim, select streams, and re-encode within the supported codec
+matrix. Real re-encode targets today: **video** mjpeg, apv, mpeg2, ffv1,
+prores, rawvideo (from Y4M/raw-decodable sources); **audio** flac, pcm,
+alac, opus (from WAV/FLAC-decodable sources). AV1/VP9/VP8 and
+vorbis/aac/mp3 parse but fail with a precise unsupported-encode error —
+full patent-free video re-encode is a 0.2.x roadmap item. Omitting
+`--codec`/`--audio-codec` performs a stream copy.
 
 ```bash
-# Basic transcode to VP9
-oximedia transcode -i input.mkv -o output.webm --codec vp9
+# Stream-copy remux (no re-encode)
+oximedia transcode -i input.mkv -o output.mkv
 
-# With bitrate control
-oximedia transcode -i input.mkv -o output.webm --codec vp9 --bitrate 2M
+# Audio re-encode: WAV -> FLAC (sample-exact, verified in tests)
+oximedia transcode -i input.wav -o output.flac
 
-# With quality control (CRF)
-oximedia transcode -i input.mkv -o output.webm --codec av1 --crf 30
+# Video re-encode: Y4M -> MPEG-2 elementary stream
+oximedia transcode -i input.y4m -o output.m2v --codec mpeg2
 
-# With scaling
-oximedia transcode -i input.mkv -o output.webm --scale 1280:720
+# Seek and duration trim (works on the stream-copy path too)
+oximedia transcode -i input.mkv -o output.mkv --ss 00:01:00 -t 30
 
-# Two-pass encoding
-oximedia transcode -i input.mkv -o output.webm --codec vp9 --two-pass
+# Stream selection (FFmpeg-style -map selectors)
+oximedia transcode -i input.mkv -o output.mkv --map 0:a
 
-# Seek and duration
-oximedia transcode -i input.mkv -o output.webm --ss 00:01:00 -t 30
+# Frame-rate conversion on the frame-level path
+oximedia transcode -i input.y4m -o output.m2v --codec mpeg2 -r 25
+
+# EBU R128 loudness normalization during transcode
+oximedia transcode -i input.wav -o output.flac --normalize-audio
 ```
 
 ### Extract
@@ -146,11 +158,13 @@ The CLI supports FFmpeg-style options for familiarity:
 | `--codec` | `-c:v` | Video codec |
 | `--audio-codec` | `-c:a` | Audio codec |
 | `--bitrate` | `-b:v` | Video bitrate |
-| `--audio-bitrate` | `-b:a` | Audio bitrate |
-| `--video-filter` | `-vf` | Video filter chain |
+| `--audio-bitrate` | `-b:a` | Audio bitrate (not implemented yet: warns and proceeds) |
+| `--video-filter` | `-vf` | Video filter (`scale=W:H` supported; others error clearly) |
+| `--audio-filter` | `-af` | Audio filter (`volume=N`/`volume=NdB` supported; others error clearly) |
+| `--map` | `-map` | Stream selection (`0:v`, `0:a:1`, `-0:s`, ...; repeatable) |
 | `--ss` | `-ss` | Start time (seek) |
 | `-t` | `-t` | Duration |
-| `-r` | `-r` | Frame rate |
+| `-r` | `-r` | Output frame rate (frame-level encode path) |
 | `-y` | `-y` | Overwrite output |
 
 ## Companion Binaries
@@ -172,9 +186,13 @@ companion binaries:
 
 | Option | Description |
 |--------|-------------|
-| `-v`, `--verbose` | Increase verbosity (can stack: -v, -vv, -vvv) |
-| `-q`, `--quiet` | Suppress all output except errors |
-| `--no-color` | Disable colored output |
+| `-v`, `--verbose` | Increase log verbosity (can stack: -v, -vv, -vvv) |
+| `-q`, `--quiet` | Suppress logs and status/banner stdout (transcode/extract/image paths); command results, `--json` output, and errors still print |
+| `--no-color` | Disable colored output (also honours `NO_COLOR`, `CLICOLOR=0`, `TERM=dumb`) |
+| `--json` | Structured JSON output on stdout |
+| `--ndjson` | One NDJSON record per item (conflicts with `--json`) |
+| `--log-format json` | Structured JSON log output |
+| `--progress <plain\|json>` | Progress reporting format |
 
 ## Examples
 
@@ -182,51 +200,58 @@ companion binaries:
 # Probe a file
 oximedia probe -i video.mkv
 
-# Convert MP4 to WebM (VP9 + Opus)
-oximedia transcode -i video.mp4 -o video.webm --codec vp9 --audio-codec opus
+# Remux Matroska -> Matroska with only the audio streams kept
+oximedia transcode -i video.mkv -o audio_only.mkv --map 0:a
 
-# High quality AV1 encoding
-oximedia transcode -i video.mkv -o video.webm --codec av1 --crf 20 --preset slow
+# Encode WAV to lossless FLAC with EBU R128 normalization
+oximedia transcode -i mix.wav -o mix.flac --normalize-audio
 
-# Extract thumbnails (1 per minute)
-oximedia extract video.mkv thumb_%03d.jpg --every 1800 --format jpg
+# Extract every 30th frame as JPEG
+oximedia extract video.mkv thumb_%03d.jpg --every 30 --format jpg
 
-# Batch convert all MKV files to WebM
+# Batch process all files matched by config patterns, 8 jobs in parallel
 oximedia batch videos/ output/ convert.toml -j 8
 ```
 
 ## Config File Format (TOML)
 
-For batch processing:
+For batch processing. The schema is flat (no sections); `patterns` is
+required, everything else optional:
 
 ```toml
-[output]
-format = "webm"
-video_codec = "vp9"
-audio_codec = "opus"
+# Which files in the input directory to process (required)
+patterns = ["*.mkv", "*.webm"]
+# Optional excludes
+exclude = ["*.tmp.mkv"]
 
-[video]
-bitrate = "2M"
-crf = 30
-preset = "medium"
-
-[audio]
-bitrate = "128k"
-
-[processing]
+# Codec/quality settings (all optional; omit codecs for stream copy)
+video_codec = "mpeg2"
+audio_codec = "flac"
+video_bitrate = "2M"
 scale = "1920:-1"
+preset = "medium"
+two_pass = false
+crf = 6
+threads = 0
+
+# Output naming and traversal
+output_extension = "mkv"
+overwrite = false
+recursive = true
 ```
 
 ## Exit Codes
 
-| Code | Description |
-|------|-------------|
+Derived from `src/exit_codes.rs` (`OxiExitCode`); these are the only codes
+the binary returns:
+
+| Code | Meaning |
+|------|---------|
 | 0 | Success |
-| 1 | General error |
-| 2 | Invalid arguments |
-| 3 | File not found |
-| 4 | Unsupported format |
-| 5 | Patent-encumbered codec detected |
+| 1 | Unclassified runtime error |
+| 2 | Command-line usage error (clap) |
+| 3 | IO / file-system error (e.g. missing input file) |
+| 4 | Input validation error |
 
 ## Policy
 
@@ -238,4 +263,4 @@ scale = "1920:-1"
 
 Apache-2.0
 
-Version: 0.1.9 — 2026-07-08 — extensively tested
+Version: 0.2.0 — 2026-07-15

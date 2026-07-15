@@ -433,11 +433,26 @@ fn parse_sof0(data: &[u8]) -> ImageResult<SofHeader> {
     if data.len() < 6 {
         return Err(ImageError::invalid_format("SOF0 too short"));
     }
+    let precision = data[0];
+    let height = u16::from_be_bytes([data[1], data[2]]);
+    let width = u16::from_be_bytes([data[3], data[4]]);
+    let components = data[5];
+    // Defend against an allocation bomb: SOF0 declares 16-bit width/height and
+    // a component count that drive a `width*height*components` buffer during
+    // scan decode. Reject frames above the decode ceiling, and component counts
+    // outside baseline JPEG's 1..=4, before anything is allocated from them.
+    crate::limits::check_dimensions(width as usize, height as usize)
+        .map_err(ImageError::InvalidFormat)?;
+    if components == 0 || components > 4 {
+        return Err(ImageError::invalid_format(format!(
+            "SOF0 component count {components} out of range 1..=4"
+        )));
+    }
     Ok(SofHeader {
-        precision: data[0],
-        height: u16::from_be_bytes([data[1], data[2]]),
-        width: u16::from_be_bytes([data[3], data[4]]),
-        components: data[5],
+        precision,
+        height,
+        width,
+        components,
     })
 }
 
@@ -625,7 +640,11 @@ impl JpegDecoder {
         let mcu_cols = ((width + 7) / 8) as usize;
         let mcu_rows = ((height + 7) / 8) as usize;
         let n_comp = components as usize;
-        let mut out = vec![128u8; (width * height) as usize * n_comp];
+        // Dimensions are SOF-validated, but size the buffer with checked usize
+        // math so the `width*height` u32 product cannot wrap and under-allocate.
+        let out_len = crate::limits::checked_dims(width as usize, height as usize, n_comp, 1)
+            .map_err(ImageError::InvalidFormat)?;
+        let mut out = vec![128u8; out_len];
 
         let dc_table = huff_dc[0]
             .as_ref()
@@ -1199,6 +1218,22 @@ pub fn write_jpeg(path: &Path, frame: &ImageFrame, quality: u8) -> ImageResult<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_sof0_rejects_oversized_and_bad_component_count() {
+        // Regression: SOF0 declares 16-bit width/height and a component count
+        // that size a `width*height*components` decode buffer. Oversized frames
+        // and out-of-range component counts must be rejected before allocation.
+        // Layout: precision, height(2 BE), width(2 BE), components.
+        let oversized = [8u8, 0xFF, 0xFF, 0xFF, 0xFF, 3];
+        assert!(parse_sof0(&oversized).is_err());
+
+        let bad_components = [8u8, 0x00, 0x10, 0x00, 0x10, 0]; // 16x16, 0 comps
+        assert!(parse_sof0(&bad_components).is_err());
+
+        let ok = [8u8, 0x00, 0x10, 0x00, 0x10, 3]; // 16x16, 3 comps
+        assert!(parse_sof0(&ok).is_ok());
+    }
 
     #[test]
     fn test_jpeg_soi_marker() {

@@ -52,7 +52,7 @@ pub enum SubtitleCommand {
         format: String,
     },
 
-    /// Burn subtitles into video
+    /// Burn subtitles into video (not implemented yet: validates inputs, then errors)
     Burn {
         /// Input video file
         #[arg(short, long)]
@@ -96,7 +96,7 @@ pub enum SubtitleCommand {
 }
 
 /// Handle subtitle command dispatch.
-pub async fn handle_subtitle_command(command: SubtitleCommand, _json_output: bool) -> Result<()> {
+pub async fn handle_subtitle_command(command: SubtitleCommand, json_output: bool) -> Result<()> {
     match command {
         SubtitleCommand::Convert {
             input,
@@ -110,7 +110,7 @@ pub async fn handle_subtitle_command(command: SubtitleCommand, _json_output: boo
             output,
             track,
             format,
-        } => extract_subtitles(&input, &output, track, &format).await,
+        } => extract_subtitles(&input, &output, track, &format, json_output).await,
         SubtitleCommand::Burn {
             input,
             subtitle,
@@ -306,42 +306,59 @@ async fn convert_subtitles(
 }
 
 /// Extract subtitles from a container.
+///
+/// Delegates to the proven real Matroska/WebM subtitle demux shared with
+/// `oximedia captions extract` (`crate::captions_cmd::run_captions_extract`),
+/// which genuinely parses EBML track headers and subtitle block payloads.
+/// Containers other than Matroska/WebM fail with an honest, actionable error
+/// instead of pretending an extraction happened.
 async fn extract_subtitles(
     input: &PathBuf,
     output: &PathBuf,
     track: usize,
     format: &str,
+    json_output: bool,
 ) -> Result<()> {
     if !input.exists() {
         return Err(anyhow::anyhow!("Input file not found: {}", input.display()));
     }
 
-    println!("{}", "Subtitle Extraction".green().bold());
-    println!("{}", "=".repeat(60));
-    println!("{:20} {}", "Input:", input.display());
-    println!("{:20} {}", "Output:", output.display());
-    println!("{:20} {}", "Track:", track);
-    println!("{:20} {}", "Format:", format);
-    println!();
+    // Validate the requested output format against this command's documented
+    // surface (srt, vtt, ass) before delegating; the shared captions exporter
+    // accepts more formats, but `subtitle extract --help` only promises these.
+    match format.to_lowercase().as_str() {
+        "srt" | "vtt" | "webvtt" | "ass" => {}
+        other => {
+            return Err(anyhow::anyhow!(
+                "Unknown subtitle output format '{}'. Supported: srt, vtt, ass",
+                other
+            ));
+        }
+    }
 
-    println!(
-        "{}",
-        "Note: Container demuxing pipeline not yet integrated.".yellow()
-    );
-    println!(
-        "{}",
-        "Subtitle parsers are ready; demuxing will enable extraction from containers.".dimmed()
-    );
-
-    Ok(())
+    let opts = crate::captions_cmd::CaptionsExtractOptions {
+        input: input.clone(),
+        output: output.clone(),
+        format: format.to_string(),
+        track,
+    };
+    crate::captions_cmd::run_captions_extract(opts, json_output).await
 }
 
 /// Burn subtitles into video.
+///
+/// Validates the inputs for real (existence + subtitle parse), then fails
+/// honestly: the CLI has no reachable video compositor path today, so
+/// claiming a burn-in succeeded would be fabricated output.
+// TODO(0.2.x): implement real subtitle burn-in once a frame-level
+// decode → composite → encode path exists in oximedia-transcode (the
+// frame-level executor now covers Y4M decode + MPEG-2/FFV1/ProRes encode,
+// but no text-rendering compositor is wired between them yet).
 async fn burn_subtitles(
     input: &PathBuf,
     subtitle: &PathBuf,
     output: &PathBuf,
-    font_size: u32,
+    _font_size: u32,
     format: Option<&str>,
 ) -> Result<()> {
     if !input.exists() {
@@ -359,49 +376,21 @@ async fn burn_subtitles(
 
     let sub_format = format.unwrap_or_else(|| detect_format(subtitle).unwrap_or("srt"));
 
-    // Verify subtitle file is parseable
+    // Verify the subtitle file is parseable so format errors surface first.
     let text = tokio::fs::read_to_string(subtitle)
         .await
         .context("Failed to read subtitle file")?;
     let subs = parse_subtitles(&text, sub_format)?;
 
-    println!("{}", "Subtitle Burn-in".green().bold());
-    println!("{}", "=".repeat(60));
-    println!("{:20} {}", "Input video:", input.display());
-    println!("{:20} {}", "Subtitle:", subtitle.display());
-    println!("{:20} {}", "Output:", output.display());
-    println!("{:20} {}", "Format:", sub_format);
-    println!("{:20} {}px", "Font size:", font_size);
-    println!("{:20} {}", "Subtitle count:", subs.len());
-    println!();
-
-    if !subs.is_empty() {
-        println!("{}", "Preview (first 3 subtitles)".cyan().bold());
-        println!("{}", "-".repeat(60));
-        for sub in subs.iter().take(3) {
-            println!(
-                "  [{} --> {}] {}",
-                format_srt_timestamp(sub.start_time),
-                format_srt_timestamp(sub.end_time),
-                sub.text
-            );
-        }
-        if subs.len() > 3 {
-            println!("  ... and {} more", subs.len() - 3);
-        }
-        println!();
-    }
-
-    println!(
-        "{}",
-        "Note: Video encoding pipeline not yet integrated.".yellow()
+    anyhow::bail!(
+        "subtitle burn-in is not implemented yet: no video compositor path exists in this \
+         build, so no output file was written to {}. The subtitle file parsed successfully \
+         ({} {} cue(s)); use `oximedia subtitle convert` / `oximedia subtitle sync` for \
+         subtitle-side processing, or mux the track as soft subtitles instead.",
+        output.display(),
+        subs.len(),
+        sub_format
     );
-    println!(
-        "{}",
-        "Subtitle renderer is ready; video pipeline will enable burn-in.".dimmed()
-    );
-
-    Ok(())
 }
 
 /// Adjust subtitle timing.

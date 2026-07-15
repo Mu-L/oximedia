@@ -25,7 +25,7 @@ oximedia-colormgmt = { workspace = true }
 oximedia-io = { workspace = true }
 oximedia-transcode = { workspace = true }
 oximedia-container = { workspace = true }
-oximedia-codec = { workspace = true }
+oximedia-codec = { workspace = true, features = ["image-io"] }
 oximedia-audio = { workspace = true }
 oximedia-image = { workspace = true }
 oximedia-subtitle = { workspace = true }

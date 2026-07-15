@@ -368,7 +368,16 @@ fn decode_value(
                 let d = read_u32(&data[offset + 4..offset + 8], big_endian);
                 Some(ExifValue::Rational(n, d))
             } else {
-                let mut list = Vec::with_capacity(count as usize);
+                // Defend against a `with_capacity` allocation bomb: the RATIONAL
+                // list `count` (u32) is attacker-controlled. Bound the
+                // reservation to what the remaining input can back (8 bytes per
+                // entry); the loop's own `pos + 8 > data.len()` guard stops it.
+                let cap = crate::limits::safe_capacity(
+                    count as usize,
+                    8,
+                    data.len().saturating_sub(offset),
+                );
+                let mut list = Vec::with_capacity(cap);
                 for i in 0..count as usize {
                     let pos = offset + i * 8;
                     if pos + 8 > data.len() {

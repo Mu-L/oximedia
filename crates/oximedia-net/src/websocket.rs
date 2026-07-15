@@ -9,6 +9,15 @@ use sha1::{Digest, Sha1};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
+/// Maximum accepted WebSocket frame payload length.
+///
+/// RFC 6455 allows a 64-bit length field, so a peer can advertise a payload up
+/// to `u64::MAX`. Without a cap, `offset + payload_len` overflows (yielding a
+/// start>end slice panic) and the subsequent `to_vec()` would try to allocate
+/// an astronomical buffer. 64 MiB is far larger than any control/media frame we
+/// exchange.
+pub const MAX_WS_FRAME_PAYLOAD: usize = 64 * 1024 * 1024;
+
 /// WebSocket opcode as defined in RFC 6455 §5.2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WsOpcode {
@@ -183,6 +192,15 @@ impl WsFrame {
             raw_len
         };
 
+        // Reject an absurd frame length before allocating or slicing: the
+        // 64-bit extended length lets a peer request up to u64::MAX bytes,
+        // which would overflow `offset + payload_len` and demand a giant alloc.
+        if payload_len > MAX_WS_FRAME_PAYLOAD {
+            return Err(NetError::protocol(format!(
+                "WebSocket frame payload {payload_len} exceeds maximum {MAX_WS_FRAME_PAYLOAD}"
+            )));
+        }
+
         // Masking key (4 bytes if mask bit set)
         let mask: Option<[u8; 4]> = if is_masked {
             if data.len() < offset + 4 {
@@ -200,12 +218,16 @@ impl WsFrame {
             None
         };
 
-        // Payload
-        if data.len() < offset + payload_len {
+        // Payload. `checked_add` guards the (already capped) length against any
+        // residual overflow before slicing.
+        let payload_end = offset
+            .checked_add(payload_len)
+            .ok_or_else(|| NetError::protocol("WebSocket frame length overflow"))?;
+        if data.len() < payload_end {
             return Ok(None);
         }
-        let mut payload = data[offset..offset + payload_len].to_vec();
-        offset += payload_len;
+        let mut payload = data[offset..payload_end].to_vec();
+        offset = payload_end;
 
         // Unmask if needed
         if let Some(key) = mask {
@@ -670,6 +692,26 @@ mod tests {
         let data = [0x81u8, 0x0A, 0x01, 0x02]; // FIN+Text, len=10, only 2 bytes of payload
         let result = WsFrame::decode(&data).expect("no error");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn frame_decode_gigantic_length_is_rejected_not_panic() {
+        // FIN+binary, 64-bit extended length = u64::MAX, no mask, no payload.
+        // `offset + payload_len` would overflow and panic on the slice; the
+        // decoder must reject it cleanly.
+        let mut data = vec![0x82u8, 0x7F];
+        data.extend_from_slice(&u64::MAX.to_be_bytes());
+        let result = WsFrame::decode(&data);
+        assert!(result.is_err(), "gigantic frame length must be an error");
+    }
+
+    #[test]
+    fn frame_decode_over_cap_length_is_rejected() {
+        // A length that fits in usize but exceeds MAX_WS_FRAME_PAYLOAD.
+        let over = (MAX_WS_FRAME_PAYLOAD as u64) + 1;
+        let mut data = vec![0x82u8, 0x7F];
+        data.extend_from_slice(&over.to_be_bytes());
+        assert!(WsFrame::decode(&data).is_err());
     }
 
     #[test]

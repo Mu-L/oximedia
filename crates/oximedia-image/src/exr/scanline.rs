@@ -22,6 +22,11 @@ pub(crate) fn read_scanline_data(
     width: u32,
     height: u32,
 ) -> ImageResult<Vec<u8>> {
+    // Defend against an allocation bomb and the `(width*height) as usize` u32
+    // multiply wrap: reject dimensions above the decode ceiling before sizing
+    // the output buffer.
+    crate::limits::check_dimensions(width as usize, height as usize)
+        .map_err(ImageError::InvalidFormat)?;
     let pixel_count = (width * height) as usize;
     let bytes_per_pixel = header
         .channels

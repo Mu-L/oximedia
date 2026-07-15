@@ -394,6 +394,13 @@ pub fn read_dpx(path: &Path, frame_number: u32) -> ImageResult<ImageFrame> {
     // Read header
     let header = read_header(&mut file, endian)?;
 
+    // Defend against an allocation bomb: the DPX header carries 32-bit
+    // width/height that feed every `width*height*components` pixel-buffer
+    // allocation in the readers below. Cap them once, here, against the shared
+    // decode ceiling so a tiny header cannot request a multi-GB buffer.
+    crate::limits::check_dimensions(header.image.width as usize, header.image.height as usize)
+        .map_err(ImageError::InvalidFormat)?;
+
     // Validate
     if header.image.element_count == 0 || header.image.element_count > 8 {
         return Err(ImageError::invalid_format("Invalid element count"));
@@ -1749,6 +1756,25 @@ fn write_filled_data(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_dpx_rejects_oversized_dimensions() {
+        // Regression: the DPX header carries 32-bit width/height that size every
+        // pixel-buffer allocation. A header declaring enormous dimensions must
+        // be rejected (allocation bomb) rather than requesting multiple GB.
+        let mut buf = vec![0u8; 4096];
+        // Magic "SDPX" (big-endian) selects the big-endian header reader.
+        buf[0..4].copy_from_slice(&DPX_MAGIC_BE.to_be_bytes());
+        // width @ offset 772, height @ offset 776 (big-endian), both enormous.
+        buf[772..776].copy_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+        buf[776..780].copy_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+
+        let path = std::env::temp_dir().join("oximedia_dpx_oversized_test.dpx");
+        std::fs::write(&path, &buf).expect("write temp dpx");
+        let result = read_dpx(&path, 0);
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_err(), "oversized DPX dimensions must be rejected");
+    }
 
     // --- 10-bit packing Method A ---
 

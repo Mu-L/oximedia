@@ -1,6 +1,6 @@
 # oximedia-playout
 
-**Status: [Stable]** | Version: 0.1.9 | Tests: extensively tested | Updated: 2026-07-08
+**Status: [Stable]** | Version: 0.2.0 | Tests: extensively tested | Updated: 2026-07-14
 
 Professional broadcast playout server with frame-accurate timing, 24/7 reliability, and comprehensive output support.
 

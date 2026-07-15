@@ -508,7 +508,13 @@ fn parse_iloc(b: &HeifBox) -> ImageResult<Vec<HeifItemLocation>> {
         count
     };
 
-    let mut locations = Vec::with_capacity(item_count as usize);
+    // Defend against a `with_capacity` allocation bomb: `item_count` (u32) is
+    // attacker-controlled and each iloc entry needs several input bytes. Bound
+    // the reservation to what the remaining payload can back; the loop below
+    // already `break`s on truncated input.
+    let cap =
+        crate::limits::safe_capacity(item_count as usize, 2, payload.len().saturating_sub(pos));
+    let mut locations = Vec::with_capacity(cap);
 
     for _ in 0..item_count {
         let item_id = if version < 2 {
@@ -713,6 +719,27 @@ pub fn parse_heif(data: &[u8]) -> ImageResult<HeifContainer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_iloc_huge_item_count_no_oom() {
+        // Regression: a malformed iloc declaring item_count = u32::MAX used to
+        // `Vec::with_capacity(~4.29e9)` before the read loop (allocation bomb,
+        // ~172 GB). The reservation is now bounded to what the payload can back
+        // and the loop breaks immediately on truncated input.
+        // FullBox: version 2, flags 0; payload: offset/length sizes,
+        // base/index sizes, then a u32 item_count of 0xFFFF_FFFF and no entries.
+        let mut data = vec![2u8, 0, 0, 0]; // version 2, flags 0
+        data.push(0x00); // offset_size | length_size
+        data.push(0x00); // base_offset_size | index_size
+        data.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes()); // item_count
+        let b = HeifBox {
+            box_type: *b"iloc",
+            data,
+        };
+        // Returns promptly with a bounded (empty) result — never OOM or panic.
+        let locations = parse_iloc(&b).expect("parse_iloc must not error");
+        assert!(locations.is_empty());
+    }
 
     /// Build a minimal ftyp box for testing.
     fn minimal_ftyp(brand: &[u8; 4]) -> Vec<u8> {

@@ -5,11 +5,13 @@
 //! - Filter chain construction
 //! - Format detection
 //! - Multi-pass encoding
-//! - Resume capability
+//! - Stream selection (`--map`, FFmpeg-style selectors)
+//! - Seek and duration trimming (`-ss` / `-t`)
 
 use crate::progress::{ProgressFormat, TranscodeProgress};
 use anyhow::{anyhow, Context, Result};
 use colored::Colorize;
+use oximedia_transcode::StreamMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
@@ -25,25 +27,31 @@ pub struct TranscodeOptions {
     pub video_bitrate: Option<String>,
     pub audio_bitrate: Option<String>,
     pub scale: Option<String>,
-    #[allow(dead_code)]
+    /// Video filtergraph string (`-vf`); `scale=W:H` is wired into the real
+    /// frame-level pipeline, other filters fail with a clear error.
     pub video_filter: Option<String>,
-    /// Audio filtergraph string (e.g. `"loudnorm=I=-23:TP=-2:LRA=11,volume=0.5"`).
-    #[allow(dead_code)]
+    /// Audio filtergraph string (`-af`); `volume=N`/`volume=NdB` is wired
+    /// into the real frame-level pipeline, other filters fail clearly.
     pub audio_filter: Option<String>,
-    #[allow(dead_code)]
+    /// Start time (`-ss`) in any FFmpeg duration format
+    /// (`HH:MM:SS.mmm`, plain seconds, `Nh`/`Nm`/`Ns`).
     pub start_time: Option<String>,
-    #[allow(dead_code)]
+    /// Output duration limit (`-t`), measured from the seek point, in any
+    /// FFmpeg duration format.
     pub duration: Option<String>,
-    #[allow(dead_code)]
+    /// Output frame rate (`-r`), e.g. "30", "23.976", "30000/1001"; wired
+    /// into the frame-level pipeline's frame-rate converter.
     pub framerate: Option<String>,
     pub preset: String,
     pub two_pass: bool,
     pub crf: Option<u32>,
-    #[allow(dead_code)]
+    /// Thread count (`--threads`). Has no effect in the packet-level
+    /// stream-copy pipeline; a non-zero value triggers a stderr warning.
     pub threads: usize,
     pub overwrite: bool,
-    #[allow(dead_code)]
-    pub resume: bool,
+    /// FFmpeg-style `--map` stream selectors (e.g. `"0:v"`, `"0:a:1"`,
+    /// `"-0:s"`). Empty keeps every stream.
+    pub map: Vec<String>,
     /// Apply EBU R128 loudness normalization to the audio track during
     /// transcode (`--normalize-audio`). When `true`, `transcode_single_pass`
     /// and `transcode_two_pass` attach an `oximedia_transcode::NormalizationConfig`
@@ -55,9 +63,19 @@ pub struct TranscodeOptions {
     pub progress_format: ProgressFormat,
 }
 
-/// Supported video codecs (patent-free only).
+/// Video codec targets accepted by `-c:v`.
+///
+/// MJPEG/APV/MPEG-2/rawvideo have real encode pipelines; AV1/VP9/VP8 and
+/// FFV1/ProRes parse here so the pipeline can return a precise
+/// unsupported-codec error instead of a generic "unknown codec".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoCodec {
+    Mjpeg,
+    Apv,
+    Mpeg2,
+    Ffv1,
+    ProRes,
+    RawVideo,
     Av1,
     Vp9,
     Vp8,
@@ -67,19 +85,35 @@ impl VideoCodec {
     /// Parse codec from string.
     pub fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
+            "mjpeg" | "motion-jpeg" | "motion_jpeg" => Ok(Self::Mjpeg),
+            "apv" => Ok(Self::Apv),
+            "mpeg2" | "mpeg2video" => Ok(Self::Mpeg2),
+            "ffv1" => Ok(Self::Ffv1),
+            "prores" => Ok(Self::ProRes),
+            "rawvideo" | "raw" => Ok(Self::RawVideo),
             "av1" | "libaom-av1" => Ok(Self::Av1),
             "vp9" | "libvpx-vp9" => Ok(Self::Vp9),
             "vp8" | "libvpx" => Ok(Self::Vp8),
-            _ => Err(anyhow!("Unsupported video codec: {}", s)),
+            _ => Err(anyhow!(
+                "Unsupported video codec: {} (supported for re-encode: mjpeg, apv, mpeg2, ffv1, \
+                 prores, rawvideo)",
+                s
+            )),
         }
     }
 
-    /// Get codec name.
+    /// Get codec name (as understood by the transcode pipeline).
     pub fn name(&self) -> &'static str {
         match self {
-            Self::Av1 => "AV1",
-            Self::Vp9 => "VP9",
-            Self::Vp8 => "VP8",
+            Self::Mjpeg => "mjpeg",
+            Self::Apv => "apv",
+            Self::Mpeg2 => "mpeg2",
+            Self::Ffv1 => "ffv1",
+            Self::ProRes => "prores",
+            Self::RawVideo => "rawvideo",
+            Self::Av1 => "av1",
+            Self::Vp9 => "vp9",
+            Self::Vp8 => "vp8",
         }
     }
 
@@ -87,17 +121,35 @@ impl VideoCodec {
     #[allow(dead_code)]
     pub fn default_crf(&self) -> u32 {
         match self {
-            Self::Av1 => 30, // 0-255 range
-            Self::Vp9 => 31, // 0-63 range
-            Self::Vp8 => 10, // 0-63 range
+            Self::Mjpeg => 85,                // JPEG quality 1-100 (higher = better)
+            Self::Apv => 22,                  // qp 0-63 (lower = better)
+            Self::Mpeg2 => 6,                 // qscale 1-31 (lower = better)
+            Self::Ffv1 | Self::RawVideo => 0, // lossless — no quality knob
+            Self::ProRes => 0,                // qscale auto
+            Self::Av1 => 30,                  // 0-255 range
+            Self::Vp9 => 31,                  // 0-63 range
+            Self::Vp8 => 10,                  // 0-63 range
         }
     }
 
     /// Validate CRF value for this codec.
     pub fn validate_crf(&self, crf: u32) -> Result<()> {
         let max = match self {
+            Self::Mjpeg => 100,
+            Self::Apv | Self::Vp9 | Self::Vp8 => 63,
+            Self::Mpeg2 => 31,
+            Self::Ffv1 | Self::RawVideo => {
+                if crf > 0 {
+                    eprintln!(
+                        "{} --crf has no effect for lossless codec {}; ignored",
+                        "Warning:".yellow().bold(),
+                        self.name()
+                    );
+                }
+                return Ok(());
+            }
+            Self::ProRes => 31,
             Self::Av1 => 255,
-            Self::Vp9 | Self::Vp8 => 63,
         };
 
         if crf > max {
@@ -113,13 +165,17 @@ impl VideoCodec {
     }
 }
 
-/// Supported audio codecs.
+/// Audio codec targets accepted by `-c:a`.
+///
+/// FLAC/PCM/ALAC/Opus have real encode pipelines; Vorbis/AAC/MP3 parse here
+/// so the pipeline can return a precise unsupported-codec error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioCodec {
     Opus,
     Vorbis,
     Flac,
     Pcm,
+    Alac,
     Aac,
     Mp3,
 }
@@ -132,21 +188,26 @@ impl AudioCodec {
             "vorbis" | "libvorbis" => Ok(Self::Vorbis),
             "flac" => Ok(Self::Flac),
             "pcm" | "pcm_s16le" | "pcm_s24le" | "pcm_f32le" | "wav" => Ok(Self::Pcm),
+            "alac" => Ok(Self::Alac),
             "aac" | "libfdk_aac" => Ok(Self::Aac),
             "mp3" | "libmp3lame" | "lame" => Ok(Self::Mp3),
-            _ => Err(anyhow!("Unsupported audio codec: {}", s)),
+            _ => Err(anyhow!(
+                "Unsupported audio codec: {} (supported for re-encode: flac, pcm, alac, opus)",
+                s
+            )),
         }
     }
 
-    /// Get codec name.
+    /// Get codec name (as understood by the transcode pipeline).
     pub fn name(&self) -> &'static str {
         match self {
-            Self::Opus => "Opus",
-            Self::Vorbis => "Vorbis",
-            Self::Flac => "FLAC",
-            Self::Pcm => "PCM",
-            Self::Aac => "AAC",
-            Self::Mp3 => "MP3",
+            Self::Opus => "opus",
+            Self::Vorbis => "vorbis",
+            Self::Flac => "flac",
+            Self::Pcm => "pcm",
+            Self::Alac => "alac",
+            Self::Aac => "aac",
+            Self::Mp3 => "mp3",
         }
     }
 }
@@ -199,6 +260,83 @@ impl EncoderPreset {
     }
 }
 
+/// `-ss` / `-t` / `--map` values parsed into pipeline-ready form.
+#[derive(Debug, Clone, Default)]
+struct TrimAndMap {
+    /// `-ss` start time in seconds.
+    start_secs: Option<f64>,
+    /// `-t` duration in seconds (measured from the seek point).
+    duration_secs: Option<f64>,
+    /// Parsed `--map` stream selectors.
+    stream_map: Vec<StreamMap>,
+}
+
+/// Parse the `-ss` / `-t` / `--map` option strings.
+///
+/// Timecodes go through `oximedia_compat_ffmpeg::parse_duration`, which
+/// accepts every FFmpeg duration form (`HH:MM:SS.mmm`, `MM:SS`, plain
+/// seconds, `Nh`/`Nm`/`Ns`). Map selectors go through
+/// `oximedia_transcode::StreamMap::parse`, whose errors list the accepted
+/// selector grammar.
+fn parse_trim_and_map(options: &TranscodeOptions) -> Result<TrimAndMap> {
+    let start_secs = options
+        .start_time
+        .as_deref()
+        .map(|s| {
+            oximedia_compat_ffmpeg::parse_duration(s)
+                .map(|d| d.as_secs_f64())
+                .map_err(|e| anyhow!("invalid start time (-ss) '{s}': {e}"))
+        })
+        .transpose()?;
+
+    let duration_secs = options
+        .duration
+        .as_deref()
+        .map(|s| {
+            oximedia_compat_ffmpeg::parse_duration(s)
+                .map(|d| d.as_secs_f64())
+                .map_err(|e| anyhow!("invalid duration (-t) '{s}': {e}"))
+        })
+        .transpose()?;
+
+    if let Some(duration) = duration_secs {
+        if duration <= 0.0 {
+            return Err(anyhow!(
+                "duration (-t) must be greater than zero, got {duration}"
+            ));
+        }
+    }
+
+    let stream_map = options
+        .map
+        .iter()
+        .map(|s| StreamMap::parse(s).map_err(|e| anyhow!("{e}")))
+        .collect::<Result<Vec<StreamMap>>>()?;
+
+    Ok(TrimAndMap {
+        start_secs,
+        duration_secs,
+        stream_map,
+    })
+}
+
+/// Apply parsed `-ss` / `-t` / `--map` values to a pipeline builder.
+fn apply_trim_and_map(
+    mut builder: oximedia_transcode::TranscodePipelineBuilder,
+    trim_and_map: &TrimAndMap,
+) -> oximedia_transcode::TranscodePipelineBuilder {
+    if !trim_and_map.stream_map.is_empty() {
+        builder = builder.stream_map(trim_and_map.stream_map.clone());
+    }
+    if let Some(start) = trim_and_map.start_secs {
+        builder = builder.start_time_secs(start);
+    }
+    if let Some(duration) = trim_and_map.duration_secs {
+        builder = builder.duration_secs(duration);
+    }
+    builder
+}
+
 /// Main transcode function.
 pub async fn transcode(mut options: TranscodeOptions) -> Result<()> {
     info!("Starting transcode operation");
@@ -243,6 +381,20 @@ pub async fn transcode(mut options: TranscodeOptions) -> Result<()> {
     let audio_codec = parse_audio_codec(&options)?;
     let preset = EncoderPreset::from_str(&options.preset)?;
 
+    // None of the wired encoders (MPEG-2/FFV1/ProRes/raw video; lossless
+    // audio) expose a speed/quality preset knob, so a non-default preset
+    // cannot take real effect; warn instead of silently dropping it. The
+    // value is still validated above so typos fail loudly.
+    // TODO(0.2.x): map EncoderPreset onto real encoder speed knobs when a
+    // codec with a genuine speed/quality tradeoff (AV1/VP9 encode) lands.
+    if options.preset != "medium" {
+        eprintln!(
+            "{} --preset '{}' has no effect in this pipeline; ignored",
+            "Warning:".yellow().bold(),
+            options.preset
+        );
+    }
+
     // Validate CRF if specified
     if let Some(crf) = options.crf {
         if let Some(codec) = video_codec {
@@ -257,11 +409,20 @@ pub async fn transcode(mut options: TranscodeOptions) -> Result<()> {
         None
     };
 
-    let audio_bitrate = if let Some(ref br) = options.audio_bitrate {
-        Some(parse_bitrate(br)?)
-    } else {
-        None
-    };
+    // The wired audio encoders are lossless (FLAC/ALAC/PCM) and the Opus
+    // path exposes no bitrate knob yet, so `-b:a` cannot take real effect.
+    // Validate the value's syntax, then warn instead of silently dropping
+    // an explicit request.
+    // TODO(0.2.x): wire --audio-bitrate through to the Opus encoder once
+    // oximedia-transcode's audio adapters expose a bitrate parameter.
+    if let Some(ref br) = options.audio_bitrate {
+        parse_bitrate(br)?;
+        eprintln!(
+            "{} --audio-bitrate is not implemented yet and is ignored (the wired audio \
+             encoders are lossless; no bitrate knob exists)",
+            "Warning:".yellow().bold()
+        );
+    }
 
     // Parse scale if specified
     let scale_dimensions = if let Some(ref scale) = options.scale {
@@ -270,16 +431,34 @@ pub async fn transcode(mut options: TranscodeOptions) -> Result<()> {
         None
     };
 
-    // Print transcode plan
-    print_transcode_plan(
-        &options,
-        video_codec,
-        audio_codec,
-        preset,
-        video_bitrate,
-        audio_bitrate,
-        scale_dimensions,
-    );
+    // Parse -ss / -t / --map up front so invalid values fail before any
+    // output is created.
+    let trim_and_map = parse_trim_and_map(&options)?;
+
+    // Parse -vf / -af / -r / --scale into frame-level filters, failing on
+    // anything the pipeline cannot really apply.
+    let frame_filters = parse_frame_filters(&options, scale_dimensions)?;
+
+    // The packet/frame pipelines are single-threaded — there is nothing for
+    // a thread-count knob to parallelize, so be honest instead of silently
+    // dropping an explicit request (0 is the "auto" default).
+    if options.threads != 0 {
+        eprintln!(
+            "{} --threads has no effect in this pipeline; ignored",
+            "Warning:".yellow().bold()
+        );
+    }
+
+    // Print transcode plan (status output; suppressed by --quiet)
+    if !crate::progress::is_quiet() {
+        print_transcode_plan(
+            &options,
+            video_codec,
+            audio_codec,
+            video_bitrate,
+            scale_dimensions,
+        );
+    }
 
     // Perform the transcode
     if options.two_pass {
@@ -290,7 +469,8 @@ pub async fn transcode(mut options: TranscodeOptions) -> Result<()> {
             audio_codec,
             preset,
             video_bitrate,
-            scale_dimensions,
+            &frame_filters,
+            &trim_and_map,
         )
         .await?;
     } else {
@@ -301,7 +481,8 @@ pub async fn transcode(mut options: TranscodeOptions) -> Result<()> {
             audio_codec,
             preset,
             video_bitrate,
-            scale_dimensions,
+            &frame_filters,
+            &trim_and_map,
         )
         .await?;
     }
@@ -362,6 +543,10 @@ async fn check_output(path: &Path, overwrite: bool) -> Result<()> {
 }
 
 /// Parse video codec from options.
+///
+/// Without an explicit `-c:v`, Matroska-family outputs default to stream
+/// copy (`None`) — re-encoding is opt-in — while raw-video containers
+/// (`.y4m`, `.m2v`) imply their only possible codec.
 fn parse_video_codec(options: &TranscodeOptions) -> Result<Option<VideoCodec>> {
     if let Some(ref codec) = options.video_codec {
         Ok(Some(VideoCodec::from_str(codec)?))
@@ -369,8 +554,8 @@ fn parse_video_codec(options: &TranscodeOptions) -> Result<Option<VideoCodec>> {
         // Auto-detect from output extension
         if let Some(ext) = options.output.extension() {
             match ext.to_str() {
-                Some("webm") => Ok(Some(VideoCodec::Vp9)),
-                Some("mkv") => Ok(Some(VideoCodec::Av1)),
+                Some("y4m") => Ok(Some(VideoCodec::RawVideo)),
+                Some("m2v") | Some("mpv") => Ok(Some(VideoCodec::Mpeg2)),
                 _ => Ok(None),
             }
         } else {
@@ -380,6 +565,10 @@ fn parse_video_codec(options: &TranscodeOptions) -> Result<Option<VideoCodec>> {
 }
 
 /// Parse audio codec from options.
+///
+/// Without an explicit `-c:a`, audio-only container extensions imply their
+/// codec (FFmpeg semantics: `out.flac` means "encode to FLAC"), while
+/// Matroska-family outputs default to stream copy (`None`).
 fn parse_audio_codec(options: &TranscodeOptions) -> Result<Option<AudioCodec>> {
     if let Some(ref codec) = options.audio_codec {
         Ok(Some(AudioCodec::from_str(codec)?))
@@ -387,9 +576,22 @@ fn parse_audio_codec(options: &TranscodeOptions) -> Result<Option<AudioCodec>> {
         // Auto-detect from output extension
         if let Some(ext) = options.output.extension() {
             match ext.to_str() {
-                Some("webm") | Some("mkv") => Ok(Some(AudioCodec::Opus)),
                 Some("flac") => Ok(Some(AudioCodec::Flac)),
                 Some("wav") => Ok(Some(AudioCodec::Pcm)),
+                Some("caf") => Ok(Some(AudioCodec::Alac)),
+                Some("ogg") | Some("oga") | Some("opus") => {
+                    // Only imply an Opus encode when the input is a
+                    // decodable audio source; Ogg→Ogg stays a stream copy.
+                    let in_ext = options
+                        .input
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(str::to_lowercase);
+                    match in_ext.as_deref() {
+                        Some("wav" | "flac") => Ok(Some(AudioCodec::Opus)),
+                        _ => Ok(None),
+                    }
+                }
                 Some("mp4") | Some("m4a") => Ok(Some(AudioCodec::Aac)),
                 Some("mp3") => Ok(Some(AudioCodec::Mp3)),
                 _ => Ok(None),
@@ -437,15 +639,176 @@ fn parse_scale(s: &str) -> Result<(Option<u32>, Option<u32>)> {
     Ok((width, height))
 }
 
+/// Frame filters resolved from `-vf` / `-af` / `-r` / `--scale`.
+#[derive(Debug, Clone, Default)]
+struct FrameFilters {
+    /// Output resolution from `--scale` or `-vf scale=…`.
+    scale: Option<oximedia_transcode::ScaleSpec>,
+    /// Audio gain in dB from `-af volume=…`.
+    gain_db: Option<f64>,
+    /// Output frame rate from `-r`.
+    fps: Option<(u32, u32)>,
+}
+
+/// Parse a `-vf` filtergraph. Only `scale=W:H` (or `WxH`) is implemented;
+/// anything else fails loudly rather than being silently dropped.
+fn parse_video_filter(vf: &str) -> Result<(Option<u32>, Option<u32>)> {
+    let vf = vf.trim();
+    if vf.contains(',') {
+        return Err(anyhow!(
+            "-vf filter chains are not supported yet; use a single 'scale=W:H' filter"
+        ));
+    }
+    let Some(args) = vf.strip_prefix("scale=") else {
+        let name = vf.split('=').next().unwrap_or(vf);
+        return Err(anyhow!(
+            "video filter '{name}' is not supported yet (supported: scale=W:H)"
+        ));
+    };
+    let normalized = args.replace(['x', 'X'], ":");
+    parse_scale(&normalized)
+}
+
+/// Parse an `-af` filtergraph. Only `volume=<gain>` is implemented, in
+/// FFmpeg's two forms: `volume=0.5` (linear ratio) and `volume=-6dB`.
+fn parse_audio_filter(af: &str) -> Result<f64> {
+    let af = af.trim();
+    if af.contains(',') {
+        return Err(anyhow!(
+            "-af filter chains are not supported yet; use a single 'volume=…' filter"
+        ));
+    }
+    let Some(value) = af.strip_prefix("volume=") else {
+        let name = af.split('=').next().unwrap_or(af);
+        return Err(anyhow!(
+            "audio filter '{name}' is not supported yet (supported: volume=N or volume=NdB)"
+        ));
+    };
+    let value = value.trim();
+    if let Some(db) = value
+        .strip_suffix("dB")
+        .or_else(|| value.strip_suffix("db"))
+        .or_else(|| value.strip_suffix("DB"))
+    {
+        let db: f64 = db
+            .trim()
+            .parse()
+            .with_context(|| format!("invalid -af volume gain '{value}'"))?;
+        return Ok(db);
+    }
+    let linear: f64 = value
+        .parse()
+        .with_context(|| format!("invalid -af volume value '{value}'"))?;
+    if linear <= 0.0 {
+        return Err(anyhow!(
+            "-af volume ratio must be positive, got {linear} (use e.g. volume=0.5)"
+        ));
+    }
+    Ok(20.0 * linear.log10())
+}
+
+/// Parse `-r` frame-rate strings: "30", "23.976", "30000/1001".
+fn parse_framerate(r: &str) -> Result<(u32, u32)> {
+    let r = r.trim();
+    if let Some((num, den)) = r.split_once('/') {
+        let num: u32 = num.trim().parse().context("invalid -r numerator")?;
+        let den: u32 = den.trim().parse().context("invalid -r denominator")?;
+        if num == 0 || den == 0 {
+            return Err(anyhow!("-r frame rate must be positive, got {r}"));
+        }
+        return Ok((num, den));
+    }
+    let fps: f64 = r
+        .parse()
+        .with_context(|| format!("invalid -r value '{r}'"))?;
+    if !(fps.is_finite() && fps > 0.0 && fps <= 1000.0) {
+        return Err(anyhow!("-r frame rate must be in (0, 1000], got {r}"));
+    }
+    // Represent decimals exactly enough via a /1000 base (23.976 → 23976/1000).
+    let num = (fps * 1000.0).round() as u32;
+    let (num, den) = if num % 1000 == 0 {
+        (num / 1000, 1)
+    } else {
+        (num, 1000)
+    };
+    Ok((num, den))
+}
+
+/// Resolve `--scale`, `-vf`, `-af`, and `-r` into pipeline-ready filters.
+fn parse_frame_filters(
+    options: &TranscodeOptions,
+    scale_dimensions: Option<(Option<u32>, Option<u32>)>,
+) -> Result<FrameFilters> {
+    let vf_scale = options
+        .video_filter
+        .as_deref()
+        .map(parse_video_filter)
+        .transpose()?;
+
+    if scale_dimensions.is_some() && vf_scale.is_some() {
+        return Err(anyhow!(
+            "both --scale and -vf scale were given; use one of them"
+        ));
+    }
+
+    let scale = vf_scale
+        .or(scale_dimensions)
+        .map(|(width, height)| {
+            if width.is_none() && height.is_none() {
+                Err(anyhow!("scale needs at least one concrete dimension"))
+            } else {
+                Ok(oximedia_transcode::ScaleSpec { width, height })
+            }
+        })
+        .transpose()?;
+
+    let gain_db = options
+        .audio_filter
+        .as_deref()
+        .map(parse_audio_filter)
+        .transpose()?;
+
+    let fps = options
+        .framerate
+        .as_deref()
+        .map(parse_framerate)
+        .transpose()?;
+
+    Ok(FrameFilters {
+        scale,
+        gain_db,
+        fps,
+    })
+}
+
+/// Apply resolved frame filters to a pipeline builder.
+fn apply_frame_filters(
+    mut builder: oximedia_transcode::TranscodePipelineBuilder,
+    filters: &FrameFilters,
+) -> oximedia_transcode::TranscodePipelineBuilder {
+    if let Some(scale) = &filters.scale {
+        builder = builder.video_scale(scale.clone());
+    }
+    if let Some(db) = filters.gain_db {
+        builder = builder.audio_gain_db(db);
+    }
+    if let Some((num, den)) = filters.fps {
+        builder = builder.output_fps(num, den);
+    }
+    builder
+}
+
 /// Print the transcode plan before starting.
-#[allow(clippy::too_many_arguments)]
+///
+/// Only settings that genuinely reach the pipeline are echoed here — a plan
+/// line implying an effect that will not happen would be fabricated output
+/// (which is why `--preset` / `--audio-bitrate` are absent: both warn on
+/// stderr instead until a real encoder knob exists).
 fn print_transcode_plan(
     options: &TranscodeOptions,
     video_codec: Option<VideoCodec>,
     audio_codec: Option<AudioCodec>,
-    preset: EncoderPreset,
     video_bitrate: Option<u64>,
-    audio_bitrate: Option<u64>,
     scale: Option<(Option<u32>, Option<u32>)>,
 ) {
     println!("{}", "Transcode Plan".cyan().bold());
@@ -461,14 +824,8 @@ fn print_transcode_plan(
         println!("{:20} {}", "Audio Codec:", codec.name());
     }
 
-    println!("{:20} {:?}", "Preset:", preset);
-
     if let Some(bitrate) = video_bitrate {
         println!("{:20} {} bps", "Video Bitrate:", bitrate);
-    }
-
-    if let Some(bitrate) = audio_bitrate {
-        println!("{:20} {} bps", "Audio Bitrate:", bitrate);
     }
 
     if let Some((w, h)) = scale {
@@ -488,19 +845,31 @@ fn print_transcode_plan(
         println!("{:20} {}", "CRF:", crf);
     }
 
+    if let Some(ref start) = options.start_time {
+        println!("{:20} {}", "Seek (-ss):", start);
+    }
+
+    if let Some(ref duration) = options.duration {
+        println!("{:20} {}", "Duration (-t):", duration);
+    }
+
+    if !options.map.is_empty() {
+        println!("{:20} {}", "Stream Map:", options.map.join(", "));
+    }
+
     println!("{}", "=".repeat(60));
     println!();
 }
 
 /// Perform single-pass transcode using the real `oximedia_transcode` pipeline.
-#[allow(dead_code)]
 async fn transcode_single_pass(
     options: &TranscodeOptions,
     video_codec: Option<VideoCodec>,
     audio_codec: Option<AudioCodec>,
     _preset: EncoderPreset,
     video_bitrate: Option<u64>,
-    scale: Option<(Option<u32>, Option<u32>)>,
+    filters: &FrameFilters,
+    trim_and_map: &TrimAndMap,
 ) -> Result<()> {
     use oximedia_transcode::TranscodePipeline;
 
@@ -520,6 +889,12 @@ async fn transcode_single_pass(
     if let Some(ac) = audio_codec {
         builder = builder.audio_codec(ac.name().to_lowercase());
     }
+
+    // Apply -ss / -t / --map.
+    builder = apply_trim_and_map(builder, trim_and_map);
+
+    // Apply -vf scale / --scale, -af volume, -r.
+    builder = apply_frame_filters(builder, filters);
 
     // Apply EBU R128 loudness normalization when requested via
     // `--normalize-audio`. Mirrors the working pattern in
@@ -554,18 +929,6 @@ async fn transcode_single_pass(
         builder = builder.quality(qconfig);
     }
 
-    // Apply resolution scaling when a scale is given with both dimensions.
-    if let Some((Some(_w), Some(_h))) = scale {
-        // Resolution scaling is applied inside the pipeline when video codec
-        // params carry width/height overrides.  Here we just note it in the log;
-        // the QualityConfig / resolution fields on TranscodePipeline are wired
-        // inside the pipeline executor.
-        debug!(
-            "Scale requested: {:?} — applied via pipeline codec config",
-            scale
-        );
-    }
-
     let mut pipeline = builder
         .build()
         .context("Failed to build transcode pipeline")?;
@@ -593,14 +956,14 @@ async fn transcode_single_pass(
 }
 
 /// Perform two-pass transcode using the real `oximedia_transcode` pipeline.
-#[allow(dead_code)]
 async fn transcode_two_pass(
     options: &TranscodeOptions,
     video_codec: Option<VideoCodec>,
     audio_codec: Option<AudioCodec>,
     preset: EncoderPreset,
     video_bitrate: Option<u64>,
-    scale: Option<(Option<u32>, Option<u32>)>,
+    filters: &FrameFilters,
+    trim_and_map: &TrimAndMap,
 ) -> Result<()> {
     use oximedia_transcode::{MultiPassMode, TranscodePipeline};
 
@@ -618,6 +981,12 @@ async fn transcode_two_pass(
     if let Some(ac) = audio_codec {
         builder = builder.audio_codec(ac.name().to_lowercase());
     }
+
+    // Apply -ss / -t / --map (same wiring as the single-pass path).
+    builder = apply_trim_and_map(builder, trim_and_map);
+
+    // Apply -vf scale / --scale, -af volume, -r.
+    builder = apply_frame_filters(builder, filters);
 
     // Apply EBU R128 loudness normalization when requested via
     // `--normalize-audio` (same pattern as the single-pass path above).
@@ -641,15 +1010,12 @@ async fn transcode_two_pass(
         builder = builder.quality(qconfig);
     }
 
-    // Scale hint (logged; applied inside pipeline codec config).
-    if let Some((Some(_w), Some(_h))) = scale {
-        debug!("Two-pass scale hint: {:?}", scale);
-    }
-
     // Silence unused-variable warnings for `preset` by logging it.
     debug!("Encoder preset: {:?}", preset);
 
-    println!("\n{}", "Two-pass transcode starting...".yellow().bold());
+    if !crate::progress::is_quiet() {
+        println!("\n{}", "Two-pass transcode starting...".yellow().bold());
+    }
 
     let mut pipeline = builder
         .build()
@@ -675,8 +1041,15 @@ async fn transcode_two_pass(
 }
 
 /// Print transcode summary after completion.
+///
+/// The output-file metadata read stays even under `--quiet` so a missing
+/// output still fails loudly; only the status text is suppressed.
 async fn print_transcode_summary(output: &Path) -> Result<()> {
     let metadata = fs::metadata(output).context("Failed to read output file metadata")?;
+
+    if crate::progress::is_quiet() {
+        return Ok(());
+    }
 
     println!();
     println!("{}", "Transcode Complete".green().bold());
@@ -720,6 +1093,85 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_video_filter_scale_forms() {
+        assert_eq!(
+            parse_video_filter("scale=640:480").expect("colon form"),
+            (Some(640), Some(480))
+        );
+        assert_eq!(
+            parse_video_filter("scale=640x480").expect("x form"),
+            (Some(640), Some(480))
+        );
+        assert_eq!(
+            parse_video_filter("scale=320:-1").expect("free axis"),
+            (Some(320), None)
+        );
+    }
+
+    #[test]
+    fn test_parse_video_filter_rejects_unknown_and_chains() {
+        let msg = parse_video_filter("hflip")
+            .expect_err("hflip must be rejected")
+            .to_string();
+        assert!(msg.contains("hflip"), "must name the filter: {msg}");
+        assert!(
+            parse_video_filter("scale=1:1,hflip").is_err(),
+            "chains must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_parse_audio_filter_volume_forms() {
+        let db = parse_audio_filter("volume=-6dB").expect("dB form");
+        assert!((db + 6.0).abs() < 1e-9);
+        let db = parse_audio_filter("volume=0.5").expect("linear form");
+        assert!(
+            (db + 6.0206).abs() < 0.001,
+            "0.5 linear ≈ -6.02 dB, got {db}"
+        );
+        let db = parse_audio_filter("volume=2.0").expect("boost");
+        assert!((db - 6.0206).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_parse_audio_filter_rejects_unknown() {
+        let msg = parse_audio_filter("loudnorm=I=-23")
+            .expect_err("loudnorm must be rejected")
+            .to_string();
+        assert!(msg.contains("loudnorm"), "must name the filter: {msg}");
+        assert!(
+            parse_audio_filter("volume=0").is_err(),
+            "zero ratio invalid"
+        );
+        assert!(parse_audio_filter("volume=-1").is_err(), "negative ratio");
+    }
+
+    #[test]
+    fn test_parse_framerate_forms() {
+        assert_eq!(parse_framerate("30").expect("integer"), (30, 1));
+        assert_eq!(parse_framerate("23.976").expect("decimal"), (23_976, 1_000));
+        assert_eq!(
+            parse_framerate("30000/1001").expect("rational"),
+            (30_000, 1_001)
+        );
+        assert!(parse_framerate("0").is_err());
+        assert!(parse_framerate("abc").is_err());
+        assert!(parse_framerate("10/0").is_err());
+    }
+
+    #[test]
+    fn test_frame_filters_conflict_between_scale_and_vf() {
+        let mut options = options_fixture();
+        options.scale = Some("640:480".to_string());
+        options.video_filter = Some("scale=320:240".to_string());
+        let scale_dims = Some((Some(640), Some(480)));
+        assert!(
+            parse_frame_filters(&options, scale_dims).is_err(),
+            "--scale together with -vf scale must be rejected"
+        );
+    }
+
+    #[test]
     fn test_video_codec_parsing() {
         assert_eq!(
             VideoCodec::from_str("av1").expect("av1 should parse"),
@@ -733,7 +1185,39 @@ mod tests {
             VideoCodec::from_str("vp8").expect("vp8 should parse"),
             VideoCodec::Vp8
         );
+        assert_eq!(
+            VideoCodec::from_str("mjpeg").expect("mjpeg should parse"),
+            VideoCodec::Mjpeg
+        );
+        assert_eq!(
+            VideoCodec::from_str("apv").expect("apv should parse"),
+            VideoCodec::Apv
+        );
+        assert_eq!(
+            VideoCodec::from_str("mpeg2").expect("mpeg2 should parse"),
+            VideoCodec::Mpeg2
+        );
+        assert_eq!(
+            VideoCodec::from_str("ffv1").expect("ffv1 should parse"),
+            VideoCodec::Ffv1
+        );
+        assert_eq!(
+            VideoCodec::from_str("prores").expect("prores should parse"),
+            VideoCodec::ProRes
+        );
+        assert_eq!(
+            VideoCodec::from_str("rawvideo").expect("rawvideo should parse"),
+            VideoCodec::RawVideo
+        );
         assert!(VideoCodec::from_str("h264").is_err());
+    }
+
+    #[test]
+    fn test_audio_codec_parsing_alac() {
+        assert_eq!(
+            AudioCodec::from_str("alac").expect("alac should parse"),
+            AudioCodec::Alac
+        );
     }
 
     #[test]
@@ -796,5 +1280,119 @@ mod tests {
         assert!(vp9.validate_crf(31).is_ok());
         assert!(vp9.validate_crf(63).is_ok());
         assert!(vp9.validate_crf(64).is_err());
+    }
+
+    // ── parse_trim_and_map ────────────────────────────────────────────────
+
+    /// `TranscodeOptions` with every field at its CLI default.
+    fn options_fixture() -> TranscodeOptions {
+        TranscodeOptions {
+            input: PathBuf::from("in.mkv"),
+            output: PathBuf::from("out.mkv"),
+            preset_name: None,
+            video_codec: None,
+            audio_codec: None,
+            video_bitrate: None,
+            audio_bitrate: None,
+            scale: None,
+            video_filter: None,
+            audio_filter: None,
+            start_time: None,
+            duration: None,
+            framerate: None,
+            preset: "medium".to_string(),
+            two_pass: false,
+            crf: None,
+            threads: 0,
+            overwrite: false,
+            map: Vec::new(),
+            normalize_audio: false,
+            progress_format: ProgressFormat::Plain,
+        }
+    }
+
+    #[test]
+    fn test_parse_trim_and_map_defaults() {
+        let parsed = parse_trim_and_map(&options_fixture()).expect("defaults should parse cleanly");
+        assert_eq!(parsed.start_secs, None);
+        assert_eq!(parsed.duration_secs, None);
+        assert!(parsed.stream_map.is_empty());
+    }
+
+    #[test]
+    fn test_parse_trim_and_map_timecode_formats() {
+        let mut options = options_fixture();
+        options.start_time = Some("00:01:30.500".to_string());
+        options.duration = Some("2.5".to_string());
+        let parsed = parse_trim_and_map(&options).expect("timecodes should parse");
+        let start = parsed.start_secs.expect("start must be set");
+        let duration = parsed.duration_secs.expect("duration must be set");
+        assert!(
+            (start - 90.5).abs() < 1e-9,
+            "HH:MM:SS.mmm form, got {start}"
+        );
+        assert!(
+            (duration - 2.5).abs() < 1e-9,
+            "plain seconds, got {duration}"
+        );
+
+        // Unit-suffix form.
+        options.start_time = Some("2m".to_string());
+        let parsed = parse_trim_and_map(&options).expect("unit suffix should parse");
+        let start = parsed.start_secs.expect("start must be set");
+        assert!(
+            (start - 120.0).abs() < 1e-9,
+            "'2m' must be 120 s, got {start}"
+        );
+    }
+
+    #[test]
+    fn test_parse_trim_and_map_rejects_bad_timecodes() {
+        let mut options = options_fixture();
+        options.start_time = Some("not-a-time".to_string());
+        let msg = parse_trim_and_map(&options)
+            .expect_err("bad -ss must be rejected")
+            .to_string();
+        assert!(msg.contains("-ss"), "error must name the flag, got: {msg}");
+
+        let mut options = options_fixture();
+        options.duration = Some("xyz".to_string());
+        let msg = parse_trim_and_map(&options)
+            .expect_err("bad -t must be rejected")
+            .to_string();
+        assert!(msg.contains("-t"), "error must name the flag, got: {msg}");
+    }
+
+    #[test]
+    fn test_parse_trim_and_map_rejects_zero_duration() {
+        let mut options = options_fixture();
+        options.duration = Some("0".to_string());
+        assert!(
+            parse_trim_and_map(&options).is_err(),
+            "-t 0 must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_parse_trim_and_map_selectors() {
+        let mut options = options_fixture();
+        options.map = vec!["0:a".to_string(), "-0:s".to_string()];
+        let parsed = parse_trim_and_map(&options).expect("valid selectors should parse");
+        assert_eq!(parsed.stream_map.len(), 2);
+        assert!(!parsed.stream_map[0].negative);
+        assert!(parsed.stream_map[1].negative);
+    }
+
+    #[test]
+    fn test_parse_trim_and_map_rejects_bad_selector_with_syntax_help() {
+        let mut options = options_fixture();
+        options.map = vec!["0:x".to_string()];
+        let msg = parse_trim_and_map(&options)
+            .expect_err("invalid selector must be rejected")
+            .to_string();
+        assert!(
+            msg.contains("valid --map selectors"),
+            "error must list the accepted grammar, got: {msg}"
+        );
     }
 }

@@ -1,7 +1,7 @@
 # oximedia-benchmarks TODO
 
-**Version: 0.1.3**
-**Status as of: 2026-04-15**
+**Version: 0.2.0 (active, dev branch `0.2.0`) / 0.1.9 (stable, `master`)**
+**Status as of: 2026-07-15**
 
 Criterion-based performance regression suite for the OxiMedia ecosystem. The
 `oximedia-benchmarks` crate (`publish = false`) aggregates benchmarks that
@@ -206,4 +206,4 @@ explicit acceptance bar.
 | WASM benchmark adapter                    | Replay a subset of CPU benches inside `oximedia-wasm` via `wasm-bindgen-test` timers.       |
 | GPU cross-vendor bench                    | Run `oximedia-gpu` suites on NVIDIA / AMD / Apple / Intel via the wgpu backend.             |
 
-*Last updated: 2026-04-15 - v0.1.3, oximedia-benchmarks summary*
+*Last updated: 2026-07-14 - v0.2.0 (dev; last stable v0.1.9), oximedia-benchmarks summary*

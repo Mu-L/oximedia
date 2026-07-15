@@ -23,10 +23,14 @@
 /// matrix in matching raster order. `qscale` is 1..=224.
 #[must_use]
 pub fn dequantize_block(quantized: &[i32; 64], matrix: &[u8; 64], qscale: u8) -> [i32; 64] {
-    let qscale = i32::from(qscale);
+    let qscale = i64::from(qscale);
     let mut out = [0i32; 64];
     for i in 0..64 {
-        out[i] = quantized[i] * i32::from(matrix[i]) * qscale;
+        // Compute in i64 and saturate to i32: `coeff * matrix * qscale` can
+        // overflow i32 for adversarial coefficient magnitudes. Mirrors the
+        // MPEG-2 dequantiser's i64 + clamp path.
+        let v = i64::from(quantized[i]) * i64::from(matrix[i]) * qscale;
+        out[i] = v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
     }
     out
 }

@@ -1,6 +1,6 @@
 # oximedia-proxy
 
-**Status: [Stable]** | Version: 0.1.9 | Tests: extensively tested | Updated: 2026-07-08
+**Status: [Stable]** | Version: 0.2.0 | Tests: extensively tested | Updated: 2026-07-14
 
 Proxy and offline editing workflow system for OxiMedia. Provides comprehensive proxy workflow management including generation, linking, conforming, and complete offline-to-online pipeline support.
 

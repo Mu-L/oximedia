@@ -43,6 +43,16 @@ pub(crate) fn read_exr_header(file: &mut File) -> ImageResult<ExrHeader> {
                 let y_min = file.read_i32::<LittleEndian>()?;
                 let x_max = file.read_i32::<LittleEndian>()?;
                 let y_max = file.read_i32::<LittleEndian>()?;
+                // Defend against an i32 wrap → gigantic width/height. The data
+                // window is inclusive, so a well-formed one has max >= min.
+                // A reversed window makes `x_max - x_min + 1` negative, which
+                // casts to an enormous u32 dimension downstream (allocation
+                // bomb / OOB). Reject it at parse time.
+                if x_max < x_min || y_max < y_min {
+                    return Err(ImageError::invalid_format(
+                        "EXR dataWindow has max coordinate below min",
+                    ));
+                }
                 header.data_window = (x_min, y_min, x_max, y_max);
             }
             "displayWindow" => {
@@ -85,6 +95,16 @@ pub(crate) fn read_exr_header(file: &mut File) -> ImageResult<ExrHeader> {
                         header.attributes.insert(name, AttributeValue::Float(value));
                     }
                     "string" => {
+                        // Defend against an allocation bomb: `size` is an
+                        // attacker-controlled u32 and `vec![0u8; size]` would
+                        // allocate it up front, before `read_exact`. EXR string
+                        // attributes are small, so cap the declared size.
+                        const MAX_EXR_STRING_BYTES: usize = 1 << 26; // 64 MiB
+                        if size > MAX_EXR_STRING_BYTES {
+                            return Err(ImageError::invalid_format(format!(
+                                "EXR string attribute size {size} exceeds {MAX_EXR_STRING_BYTES} bytes"
+                            )));
+                        }
                         let mut sbuf = vec![0u8; size];
                         file.read_exact(&mut sbuf)?;
                         let s = String::from_utf8_lossy(&sbuf)

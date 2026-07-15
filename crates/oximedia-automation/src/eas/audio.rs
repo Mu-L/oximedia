@@ -1,6 +1,6 @@
 //! EAS audio alert insertion.
 
-use crate::Result;
+use crate::{AutomationError, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing::{debug, info};
@@ -111,18 +111,52 @@ impl EasAudioInsertion {
     }
 
     /// Load TTS audio for message.
+    ///
+    /// # Safety / honesty note
+    ///
+    /// This is **not implemented**. An earlier revision returned
+    /// `Ok(Vec::new())` (silence) for any message, which let
+    /// [`Self::compose_message`] ship a complete-looking Emergency Alert
+    /// System audio message — correct attention tone, correct
+    /// end-of-message tone — around a **silent gap** where the actual
+    /// spoken emergency message belongs. For EAS this is worse than a
+    /// visible failure: a downstream broadcaster could air a "successful"
+    /// alert that tells the public nothing. This now fails loudly instead
+    /// of fabricating silence.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`AutomationError::Eas`]: real TTS synthesis/loading
+    /// is not implemented.
+    // TODO(0.2.x): real TTS integration — synthesize or load pre-recorded
+    // audio for `message` (see `config.tts_audio_path`). An EAS message
+    // MUST NOT ship with a silent spoken-message gap.
     pub fn load_tts_audio(&self, message: &str) -> Result<Vec<f32>> {
         debug!("Loading TTS audio for message: {}", message);
 
-        // In a real implementation, this would:
-        // 1. Generate or load pre-recorded TTS audio
-        // 2. Return the audio samples
-
-        // For now, return empty samples
-        Ok(Vec::new())
+        Err(AutomationError::Eas(
+            "TTS audio not available: real text-to-speech synthesis/loading is not \
+             implemented"
+                .to_string(),
+        ))
     }
 
     /// Compose complete EAS audio message.
+    ///
+    /// # Safety / honesty note
+    ///
+    /// The spoken message is always requested via [`Self::load_tts_audio`]
+    /// — composition is **not** gated on `config.tts_audio_path` being
+    /// set, because a missing/unset path is not a legitimate reason to
+    /// ship an EAS message with a silent body. Until real TTS exists (see
+    /// [`Self::load_tts_audio`]), this function always propagates that
+    /// error and therefore cannot return `Ok` with a silent gap where the
+    /// emergency message belongs.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the [`AutomationError::Eas`] from
+    /// [`Self::load_tts_audio`] since real TTS is not implemented.
     pub fn compose_message(&self, message: &str) -> Result<Vec<f32>> {
         info!("Composing complete EAS audio message");
 
@@ -134,10 +168,10 @@ impl EasAudioInsertion {
         // Add silence (1 second)
         audio.extend(vec![0.0; 48000]);
 
-        // Add TTS message
-        if let Some(ref _tts_path) = self.config.tts_audio_path {
-            audio.extend(self.load_tts_audio(message)?);
-        }
+        // Add TTS message. Unconditional (not gated on tts_audio_path being
+        // set): an EAS message must never ship with a silently-skipped
+        // spoken body.
+        audio.extend(self.load_tts_audio(message)?);
 
         // Add silence (1 second)
         audio.extend(vec![0.0; 48000]);
@@ -192,13 +226,48 @@ mod tests {
     }
 
     #[test]
-    fn test_compose_message() {
+    fn test_compose_message_is_honest_err_not_silent_success() {
+        // CHANGED: this test previously pinned the fabricated (and, for an
+        // *Emergency Alert System*, unsafe) behavior — compose_message()
+        // used to return Ok() with a complete-looking tone/silence/tone
+        // structure while the actual spoken emergency message was silent,
+        // because load_tts_audio() fabricated empty samples. Real TTS is
+        // not implemented, so compose_message() must now fail loudly
+        // instead of shipping a silent "successful" alert.
         let config = EasAudioConfig::default();
         let insertion = EasAudioInsertion::new(config);
 
-        let audio = insertion
-            .compose_message("Test message")
-            .expect("compose_message should succeed");
-        assert!(!audio.is_empty());
+        let result = insertion.compose_message("Test message");
+
+        assert!(
+            result.is_err(),
+            "an EAS message with a silent spoken body must never report success"
+        );
+        assert!(matches!(result.unwrap_err(), AutomationError::Eas(_)));
+    }
+
+    #[test]
+    fn test_load_tts_audio_is_honest_err() {
+        let config = EasAudioConfig::default();
+        let insertion = EasAudioInsertion::new(config);
+
+        let result = insertion.load_tts_audio("Test message");
+
+        assert!(
+            result.is_err(),
+            "load_tts_audio must not fabricate empty/silent samples as if TTS succeeded"
+        );
+    }
+
+    #[test]
+    fn test_compose_message_fails_even_without_configured_tts_path() {
+        // The spoken message is mandatory regardless of whether
+        // `tts_audio_path` is configured — an unset path is not a
+        // legitimate reason to silently skip the emergency message.
+        let mut config = EasAudioConfig::default();
+        config.tts_audio_path = None;
+        let insertion = EasAudioInsertion::new(config);
+
+        assert!(insertion.compose_message("Test message").is_err());
     }
 }

@@ -8,6 +8,7 @@ keywords = ["storage", "cloud", "s3", "multimedia", "media"]
 categories = ["multimedia", "filesystem"]
 readme = "README.md"
 license.workspace = true
+rust-version.workspace = true
 homepage.workspace = true
 repository.workspace = true
 

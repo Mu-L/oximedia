@@ -250,6 +250,12 @@ fn parse_aspect_mode(s: &str) -> Result<oximedia_scaling::AspectRatioMode> {
 }
 
 /// Handle upscale or downscale.
+///
+/// Validates the input, target dimensions and algorithm/aspect selection
+/// against the real `oximedia-scaling` engine, then returns an honest error:
+/// producing a scaled output file requires a decode → scale → encode pipeline
+/// (the pixel-level scalers exist, but the file-level codec plumbing is not yet
+/// wired into the CLI). No output file is produced or claimed.
 #[allow(clippy::too_many_arguments)]
 async fn handle_scale(
     input: &PathBuf,
@@ -259,7 +265,7 @@ async fn handle_scale(
     algorithm: &str,
     aspect: &str,
     direction: &str,
-    json_output: bool,
+    _json_output: bool,
 ) -> Result<()> {
     if !input.exists() {
         return Err(anyhow::anyhow!("Input file not found: {}", input.display()));
@@ -281,61 +287,22 @@ async fn handle_scale(
         ));
     }
 
-    let mode = parse_scaling_mode(algorithm)?;
-    let aspect_mode = parse_aspect_mode(aspect)?;
+    // Validate the algorithm and aspect selections (real enum parsing).
+    let _mode = parse_scaling_mode(algorithm)?;
+    let _aspect_mode = parse_aspect_mode(aspect)?;
 
-    let params = oximedia_scaling::ScalingParams::new(width, height)
-        .with_mode(mode)
-        .with_aspect_ratio(aspect_mode);
-
-    let scaler = oximedia_scaling::VideoScaler::new(params);
-
-    let file_size = std::fs::metadata(input)
-        .context("Failed to read file metadata")?
-        .len();
-
-    if json_output {
-        let result = serde_json::json!({
-            "command": direction,
-            "input": input.display().to_string(),
-            "output": output.display().to_string(),
-            "file_size": file_size,
-            "target_width": width,
-            "target_height": height,
-            "algorithm": algorithm,
-            "aspect_mode": aspect,
-            "scaler_params": {
-                "width": scaler.params().width,
-                "height": scaler.params().height,
-                "mode": format!("{}", scaler.params().mode),
-            },
-            "status": "configured",
-        });
-        let json_str =
-            serde_json::to_string_pretty(&result).context("Failed to serialize scaling config")?;
-        println!("{}", json_str);
-    } else {
-        let title = if direction == "upscale" {
-            "Video Upscale"
-        } else {
-            "Video Downscale"
-        };
-        println!("{}", title.green().bold());
-        println!("{}", "=".repeat(60));
-        println!("{:20} {}", "Input:", input.display());
-        println!("{:20} {}", "Output:", output.display());
-        println!("{:20} {} bytes", "File size:", file_size);
-        println!("{:20} {}x{}", "Target:", width, height);
-        println!("{:20} {}", "Algorithm:", algorithm);
-        println!("{:20} {}", "Aspect mode:", aspect);
-        println!();
-        println!(
-            "{}",
-            "Scaling pipeline configured. Awaiting frame input.".dimmed()
-        );
-    }
-
-    Ok(())
+    // TODO(0.2.x): decode(input) → scale each frame/plane → encode(output).
+    Err(anyhow::anyhow!(
+        "{}: the scaling pipeline is not yet wired to the CLI. Producing '{}' requires a \
+         decode -> scale -> encode pipeline (planned for 0.2.x). Validated {}x{} '{}' ({}) \
+         target; no output written.",
+        direction,
+        output.display(),
+        width,
+        height,
+        algorithm,
+        aspect
+    ))
 }
 
 /// Analyze scaling quality.
@@ -414,65 +381,41 @@ async fn handle_analyze(
 }
 
 /// Compare scaling algorithms.
+///
+/// Returns an honest error: writing per-algorithm comparison outputs requires
+/// the same decode → scale → encode pipeline that is not yet wired into the
+/// CLI. No comparison files are produced.
 async fn handle_compare(
     input: &PathBuf,
     width: u32,
     height: u32,
     output_dir: Option<&std::path::Path>,
-    json_output: bool,
+    _json_output: bool,
 ) -> Result<()> {
     if !input.exists() {
         return Err(anyhow::anyhow!("Input file not found: {}", input.display()));
     }
 
-    let algorithms = ["bilinear", "bicubic", "lanczos"];
+    let dest = output_dir
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "<none>".to_string());
 
-    if json_output {
-        let comparisons: Vec<serde_json::Value> = algorithms
-            .iter()
-            .map(|alg| {
-                serde_json::json!({
-                    "algorithm": alg,
-                    "target": format!("{}x{}", width, height),
-                })
-            })
-            .collect();
-        let result = serde_json::json!({
-            "command": "compare",
-            "input": input.display().to_string(),
-            "target": format!("{}x{}", width, height),
-            "output_dir": output_dir.map(|p| p.display().to_string()),
-            "comparisons": comparisons,
-            "status": "configured",
-        });
-        let json_str =
-            serde_json::to_string_pretty(&result).context("Failed to serialize comparison")?;
-        println!("{}", json_str);
-    } else {
-        println!("{}", "Scaling Algorithm Comparison".green().bold());
-        println!("{}", "=".repeat(60));
-        println!("{:20} {}", "Input:", input.display());
-        println!("{:20} {}x{}", "Target:", width, height);
-        if let Some(d) = output_dir {
-            println!("{:20} {}", "Output dir:", d.display());
-        }
-        println!();
-        println!("{}", "Algorithms to compare".cyan().bold());
-        println!("{}", "-".repeat(60));
-        for alg in &algorithms {
-            println!("  - {} ({}x{})", alg, width, height);
-        }
-        println!();
-        println!(
-            "{}",
-            "Comparison pipeline configured. Awaiting frame input.".dimmed()
-        );
-    }
-
-    Ok(())
+    // TODO(0.2.x): decode(input) → scale with each algorithm → encode into output_dir.
+    Err(anyhow::anyhow!(
+        "compare: the scaling pipeline is not yet wired to the CLI. Emitting per-algorithm \
+         {}x{} comparison files (output dir: {}) requires a decode -> scale -> encode pipeline \
+         (planned for 0.2.x). No output written.",
+        width,
+        height,
+        dest
+    ))
 }
 
 /// Batch scale multiple files.
+///
+/// Validates the input directory and algorithm, then returns an honest error:
+/// batch scaling requires the decode → scale → encode pipeline that is not yet
+/// wired into the CLI. No files are produced.
 #[allow(clippy::too_many_arguments)]
 async fn handle_batch(
     input_dir: &PathBuf,
@@ -480,8 +423,8 @@ async fn handle_batch(
     width: u32,
     height: u32,
     algorithm: &str,
-    ext: Option<&str>,
-    json_output: bool,
+    _ext: Option<&str>,
+    _json_output: bool,
 ) -> Result<()> {
     if !input_dir.exists() {
         return Err(anyhow::anyhow!(
@@ -490,36 +433,18 @@ async fn handle_batch(
         ));
     }
 
-    let _ = parse_scaling_mode(algorithm)?;
+    let _mode = parse_scaling_mode(algorithm)?;
 
-    if json_output {
-        let result = serde_json::json!({
-            "command": "batch",
-            "input_dir": input_dir.display().to_string(),
-            "output_dir": output_dir.display().to_string(),
-            "target": format!("{}x{}", width, height),
-            "algorithm": algorithm,
-            "extension_filter": ext,
-            "status": "configured",
-        });
-        let json_str =
-            serde_json::to_string_pretty(&result).context("Failed to serialize batch config")?;
-        println!("{}", json_str);
-    } else {
-        println!("{}", "Batch Scaling".green().bold());
-        println!("{}", "=".repeat(60));
-        println!("{:20} {}", "Input dir:", input_dir.display());
-        println!("{:20} {}", "Output dir:", output_dir.display());
-        println!("{:20} {}x{}", "Target:", width, height);
-        println!("{:20} {}", "Algorithm:", algorithm);
-        if let Some(e) = ext {
-            println!("{:20} .{}", "Filter:", e);
-        }
-        println!();
-        println!("{}", "Batch scaling pipeline configured.".dimmed());
-    }
-
-    Ok(())
+    // TODO(0.2.x): enumerate input_dir → decode -> scale -> encode each file into output_dir.
+    Err(anyhow::anyhow!(
+        "batch: the scaling pipeline is not yet wired to the CLI. Scaling files from '{}' into \
+         '{}' at {}x{} requires a decode -> scale -> encode pipeline (planned for 0.2.x). \
+         No output written.",
+        input_dir.display(),
+        output_dir.display(),
+        width,
+        height
+    ))
 }
 
 #[cfg(test)]
@@ -561,5 +486,75 @@ mod tests {
         let scaler = oximedia_scaling::VideoScaler::new(params);
         let (w, h) = scaler.calculate_dimensions(3840, 2160);
         assert_eq!((w, h), (1920, 1080));
+    }
+
+    #[tokio::test]
+    async fn upscale_is_honest_error_and_writes_nothing() {
+        let dir = std::env::temp_dir();
+        let input = dir.join("oximedia_scaling_up_in.png");
+        std::fs::write(&input, b"\x89PNG dummy input").expect("write dummy input");
+        let output = dir.join("oximedia_scaling_up_out.png");
+        std::fs::remove_file(&output).ok();
+
+        let result = handle_scale(
+            &input,
+            &output,
+            1920,
+            1080,
+            "lanczos",
+            "letterbox",
+            "upscale",
+            false,
+        )
+        .await;
+        assert!(result.is_err(), "upscale must return an honest error");
+        assert!(!output.exists(), "no output file may be produced");
+
+        std::fs::remove_file(&input).ok();
+    }
+
+    #[tokio::test]
+    async fn upscale_invalid_algorithm_errors_no_output() {
+        let dir = std::env::temp_dir();
+        let input = dir.join("oximedia_scaling_badalg_in.png");
+        std::fs::write(&input, b"dummy").expect("write dummy input");
+        let output = dir.join("oximedia_scaling_badalg_out.png");
+        std::fs::remove_file(&output).ok();
+
+        let result = handle_scale(
+            &input,
+            &output,
+            100,
+            100,
+            "bogus",
+            "letterbox",
+            "upscale",
+            false,
+        )
+        .await;
+        assert!(result.is_err(), "invalid algorithm must error");
+        assert!(!output.exists(), "no output file may be produced");
+
+        std::fs::remove_file(&input).ok();
+    }
+
+    #[tokio::test]
+    async fn compare_is_honest_error() {
+        let dir = std::env::temp_dir();
+        let input = dir.join("oximedia_scaling_cmp_in.png");
+        std::fs::write(&input, b"dummy").expect("write dummy input");
+
+        let result = handle_compare(&input, 1280, 720, None, false).await;
+        assert!(result.is_err(), "compare must return an honest error");
+
+        std::fs::remove_file(&input).ok();
+    }
+
+    #[tokio::test]
+    async fn batch_is_honest_error() {
+        let dir = std::env::temp_dir();
+        let out = dir.join("oximedia_scaling_batch_out");
+        let result = handle_batch(&dir, &out, 640, 480, "lanczos", None, false).await;
+        assert!(result.is_err(), "batch must return an honest error");
     }
 }

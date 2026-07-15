@@ -203,6 +203,20 @@ impl PyProxyGenerator {
     }
 
     /// Generate a proxy for a source file.
+    ///
+    /// Delegates to the real `oximedia_transcode::TranscodePipeline` to
+    /// actually transcode `original_path` into `proxy_path`. If the output
+    /// container is not one the pipeline can honestly produce, or the
+    /// pipeline itself fails, this returns a real `PyErr` — it never writes
+    /// a placeholder/marker file in place of a real proxy.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PyValueError` if `original_path` does not exist or
+    /// `proxy_path`'s extension is not one of the containers the pipeline
+    /// can produce (`mkv`, `webm`, `ogg`, `oga`, `opus`). Returns
+    /// `PyRuntimeError` if directory creation, the async runtime, or the
+    /// transcode pipeline itself fails.
     fn generate(&mut self, original_path: &str, proxy_path: &str) -> PyResult<PyProxyFile> {
         let orig = std::path::Path::new(original_path);
         if !orig.exists() {
@@ -214,6 +228,21 @@ impl PyProxyGenerator {
         let orig_meta = std::fs::metadata(orig)
             .map_err(|e| PyRuntimeError::new_err(format!("Metadata error: {e}")))?;
 
+        // Determine whether the output extension is supported by TranscodePipeline
+        // *before* touching the filesystem, so an unsupported request has no
+        // side effects (no directory created, no file written).
+        let out_ext = std::path::Path::new(proxy_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_lowercase)
+            .unwrap_or_default();
+        if !matches!(out_ext.as_str(), "mkv" | "webm" | "ogg" | "oga" | "opus") {
+            return Err(PyValueError::new_err(format!(
+                "Unsupported proxy output container '.{out_ext}' for '{proxy_path}'; the \
+                 transcode pipeline currently supports: mkv, webm, ogg, oga, opus"
+            )));
+        }
+
         // Ensure the proxy output directory exists.
         if let Some(parent) = std::path::Path::new(proxy_path).parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
@@ -223,77 +252,39 @@ impl PyProxyGenerator {
             }
         }
 
-        // Determine whether the output extension is supported by TranscodePipeline.
-        let out_ext = std::path::Path::new(proxy_path)
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_lowercase)
-            .unwrap_or_default();
-        let pipeline_supported =
-            matches!(out_ext.as_str(), "mkv" | "webm" | "ogg" | "oga" | "opus");
+        // Run the real transcode pipeline in a current-thread async runtime.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to create async runtime: {e}")))?;
 
-        let actual_size: u64 = if pipeline_supported {
-            // Run the transcode pipeline in a current-thread async runtime.
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
+        let input_pb = std::path::PathBuf::from(original_path);
+        let output_pb = std::path::PathBuf::from(proxy_path);
+
+        let run_result = rt.block_on(async {
+            let mut pipeline = TranscodePipeline::builder()
+                .input(input_pb)
+                .output(output_pb)
+                .track_progress(false)
                 .build()
-                .map_err(|e| {
-                    PyRuntimeError::new_err(format!("Failed to create async runtime: {e}"))
-                })?;
+                .map_err(|e| format!("Pipeline build error: {e}"))?;
+            pipeline
+                .execute()
+                .await
+                .map_err(|e| format!("Pipeline exec error: {e}"))
+        });
 
-            let input_pb = std::path::PathBuf::from(original_path);
-            let output_pb = std::path::PathBuf::from(proxy_path);
-
-            let run_result = rt.block_on(async {
-                let mut pipeline = TranscodePipeline::builder()
-                    .input(input_pb)
-                    .output(output_pb)
-                    .track_progress(false)
-                    .build()
-                    .map_err(|e| format!("Pipeline build error: {e}"))?;
-                pipeline
-                    .execute()
-                    .await
-                    .map_err(|e| format!("Pipeline exec error: {e}"))
-            });
-
-            match run_result {
-                Ok(transcode_out) => transcode_out.file_size,
-                Err(e) => {
-                    // Pipeline failed — fall back to a size estimate so the caller
-                    // still gets a result, but surface the warning via a placeholder file.
-                    let scale = self.config.scale_factor();
-                    let quality_factor = match self.config.quality.as_str() {
-                        "low" => 0.1,
-                        "high" => 0.5,
-                        _ => 0.25,
-                    };
-                    let estimated =
-                        (orig_meta.len() as f64 * scale * scale * quality_factor) as u64;
-                    // Write a marker file so the path is not empty.
-                    let content = format!(
-                        "PROXY:original={original_path},resolution={},quality={},codec={},error={e}",
-                        self.config.resolution, self.config.quality, self.config.codec
-                    );
-                    std::fs::write(proxy_path, &content).ok();
-                    estimated
-                }
+        let actual_size = match run_result {
+            Ok(transcode_out) => transcode_out.file_size,
+            Err(e) => {
+                // Real pipeline failure — never paper over it with a fabricated
+                // result. Best-effort clean up any partial output the failed
+                // attempt may have left behind, then propagate a real error.
+                let _ = std::fs::remove_file(proxy_path);
+                return Err(PyRuntimeError::new_err(format!(
+                    "Proxy generation failed for '{original_path}' -> '{proxy_path}': {e}"
+                )));
             }
-        } else {
-            // Unsupported container — write a descriptor stub so the proxy_path exists.
-            let scale = self.config.scale_factor();
-            let quality_factor = match self.config.quality.as_str() {
-                "low" => 0.1,
-                "high" => 0.5,
-                _ => 0.25,
-            };
-            let content = format!(
-                "PROXY:original={original_path},resolution={},quality={},codec={}",
-                self.config.resolution, self.config.quality, self.config.codec
-            );
-            std::fs::write(proxy_path, &content)
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to write proxy: {e}")))?;
-            (orig_meta.len() as f64 * scale * scale * quality_factor) as u64
         };
 
         let proxy_file = PyProxyFile {
@@ -472,5 +463,173 @@ mod tests {
         let formats = list_proxy_formats();
         assert_eq!(formats.len(), 2);
         assert!(formats[0].contains_key("codec"));
+    }
+
+    /// Unique per-call temp path so parallel tests never collide. Preserves
+    /// `name`'s extension (if any) at the very end of the filename, since
+    /// `generate()` dispatches on `Path::extension()`.
+    fn unique_tmp(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::path::Path::new(name);
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+        let filename = match path.extension().and_then(|e| e.to_str()) {
+            Some(ext) => format!("oximedia-py-proxy-gen-{stem}-{nanos}.{ext}"),
+            None => format!("oximedia-py-proxy-gen-{stem}-{nanos}"),
+        };
+        std::env::temp_dir().join(filename)
+    }
+
+    /// Like `.expect()`, but never touches `PyErr`'s `Debug`/`Display` impl.
+    /// Those internally require the Python GIL; in a bare `cargo test` /
+    /// `nextest` process for this crate (no embedded Python interpreter),
+    /// formatting a `PyErr` while already unwinding from a failed `.expect()`
+    /// triggers a second panic ("interpreter not initialized") and aborts
+    /// the process (SIGABRT) instead of printing a readable message. This
+    /// panics with just `msg` on `Err`, which is always safe.
+    trait PyResultTestExt<T> {
+        fn expect_ok(self, msg: &str) -> T;
+    }
+
+    impl<T> PyResultTestExt<T> for PyResult<T> {
+        // Deliberately discards the `PyErr` without formatting it (see the
+        // trait doc comment above for why `.expect(msg)` is unsafe here).
+        #[allow(clippy::match_wild_err_arm)]
+        fn expect_ok(self, msg: &str) -> T {
+            match self {
+                Ok(v) => v,
+                Err(_) => panic!("{msg}"),
+            }
+        }
+    }
+
+    /// Regression test for the fabrication bug: an unsupported output
+    /// container must return a real `Err`, and must not create any
+    /// placeholder/marker file at `proxy_path`.
+    #[test]
+    fn test_generate_unsupported_container_returns_err_without_side_effects() {
+        let input = unique_tmp("unsupported-in.bin");
+        std::fs::write(&input, b"does not need to be real media, only to exist")
+            .expect("write test input");
+        let output = unique_tmp("unsupported-out.mp4");
+        let _ = std::fs::remove_file(&output);
+
+        let mut gen = PyProxyGenerator::new(None);
+        let result = gen.generate(
+            input.to_str().expect("valid utf8 path"),
+            output.to_str().expect("valid utf8 path"),
+        );
+
+        assert!(
+            result.is_err(),
+            "unsupported output container must return Err, not fabricate a proxy"
+        );
+        assert!(
+            !output.exists(),
+            "no marker/placeholder file should be written for an unsupported container"
+        );
+
+        let _ = std::fs::remove_file(&input);
+    }
+
+    /// Regression test for the fabrication bug: a real pipeline failure
+    /// (unrecognizable input container) must return a real `Err`, and must
+    /// not leave a marker file behind at `proxy_path`.
+    #[test]
+    fn test_generate_pipeline_failure_returns_err_without_marker_file() {
+        let input = unique_tmp("garbage-in.mkv");
+        // Non-empty bytes that do not match any known container magic, so
+        // the real pipeline's format probe fails for real.
+        std::fs::write(
+            &input,
+            b"this is definitely not a real matroska or ogg container",
+        )
+        .expect("write test input");
+        let output = unique_tmp("garbage-out.mkv");
+        let _ = std::fs::remove_file(&output);
+
+        let mut gen = PyProxyGenerator::new(None);
+        let result = gen.generate(
+            input.to_str().expect("valid utf8 path"),
+            output.to_str().expect("valid utf8 path"),
+        );
+
+        assert!(
+            result.is_err(),
+            "a real pipeline failure must return Err, not a fabricated proxy result"
+        );
+        assert!(
+            !output.exists(),
+            "no marker file should remain after a failed real pipeline attempt"
+        );
+
+        let _ = std::fs::remove_file(&input);
+    }
+
+    /// Positive control: a genuinely valid input through a supported
+    /// container produces a real, non-empty output file via the real
+    /// pipeline (proving the success path is real, not just the failure
+    /// path).
+    #[test]
+    fn test_generate_real_success_produces_real_nonempty_output() {
+        use oximedia_container::{
+            mux::{MatroskaMuxer, MuxerConfig},
+            Muxer, Packet, PacketFlags, StreamInfo,
+        };
+        use oximedia_core::{CodecId, Rational, Timestamp};
+        use oximedia_io::MemorySource;
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build test runtime");
+
+        let input = unique_tmp("real-in.mkv");
+        rt.block_on(async {
+            let in_buf = MemorySource::new_writable(64 * 1024);
+            let mut muxer = MatroskaMuxer::new(in_buf, MuxerConfig::new());
+            let mut video = StreamInfo::new(0, CodecId::Vp9, Rational::new(1, 1000));
+            video.codec_params.width = Some(320);
+            video.codec_params.height = Some(240);
+            muxer.add_stream(video).expect("add stream");
+            muxer.write_header().await.expect("write header");
+            for i in 0u64..10 {
+                let data = vec![0x42u8, 0x00, (i & 0xFF) as u8, 0x01];
+                let pkt = Packet::new(
+                    0,
+                    bytes::Bytes::from(data),
+                    Timestamp::new(i as i64 * 33, Rational::new(1, 1000)),
+                    PacketFlags::KEYFRAME,
+                );
+                muxer.write_packet(&pkt).await.expect("write packet");
+            }
+            muxer.write_trailer().await.expect("write trailer");
+            let sink = muxer.into_sink();
+            tokio::fs::write(&input, sink.written_data())
+                .await
+                .expect("write real input file");
+        });
+
+        let output = unique_tmp("real-out.webm");
+        let _ = std::fs::remove_file(&output);
+
+        let mut gen = PyProxyGenerator::new(None);
+        let result = gen.generate(
+            input.to_str().expect("valid utf8 path"),
+            output.to_str().expect("valid utf8 path"),
+        );
+
+        let proxy_file = result.expect_ok("a valid input with a supported container must succeed");
+        assert!(proxy_file.proxy_size > 0, "real output must be non-empty");
+        let real_len = std::fs::metadata(&output)
+            .expect("real output file must exist on disk")
+            .len();
+        assert!(real_len > 0);
+        assert_eq!(gen.proxy_count(), 1);
+
+        let _ = std::fs::remove_file(&input);
+        let _ = std::fs::remove_file(&output);
     }
 }

@@ -26,7 +26,7 @@ use std::sync::Arc;
 /// Implements the same interface as [`super::s3::S3CdnUploader`] so that call
 /// sites can be swapped without code changes.  Under the `cdn-gcs` feature
 /// every operation performs real network I/O through
-/// [`GcsStorage`](oximedia_storage::gcs::GcsStorage); otherwise the uploader
+/// `GcsStorage` (`oximedia_storage::gcs::GcsStorage`, requires the `gcs` feature on `oximedia-storage`); otherwise the uploader
 /// falls back to a pure-Rust log-only path.
 pub struct GcsCdnUploader {
     /// GCS bucket name.
@@ -44,7 +44,7 @@ impl GcsCdnUploader {
     /// Creates a new `GcsCdnUploader` from CDN configuration.
     ///
     /// Under the `cdn-gcs` feature this constructs a real
-    /// [`GcsStorage`](oximedia_storage::gcs::GcsStorage) client.  The GCS
+    /// `GcsStorage` (`oximedia_storage::gcs::GcsStorage`, requires the `gcs` feature on `oximedia-storage`) client.  The GCS
     /// backend requires a project ID; it is taken from
     /// [`CdnConfig::project_id`](crate::cdn::CdnConfig::project_id) and falls
     /// back to an empty string when unset (sufficient for object-level
@@ -142,7 +142,7 @@ impl GcsCdnUploader {
     /// Upload raw bytes to GCS.
     ///
     /// Under the `cdn-gcs` feature the bytes are streamed to the
-    /// [`GcsStorage`](oximedia_storage::gcs::GcsStorage) backend.
+    /// `GcsStorage` (`oximedia_storage::gcs::GcsStorage`, requires the `gcs` feature on `oximedia-storage`) backend.
     ///
     /// # Errors
     ///

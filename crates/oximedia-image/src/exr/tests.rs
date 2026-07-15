@@ -892,3 +892,28 @@ fn test_read_tiled_exr_zip_half() {
     // Same, through ZIP.
     decode_and_check_tiled(ExrCompression::Zip, &TILED_CODEC_VALUES);
 }
+
+#[test]
+fn read_exr_rejects_reversed_data_window() {
+    // Regression: an EXR dataWindow with x_max < x_min made
+    // `(x_max - x_min + 1) as u32` wrap to an enormous width, driving a huge
+    // allocation downstream. The header parser now rejects a reversed/empty
+    // data window at parse time.
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&20_000_630u32.to_le_bytes()); // EXR magic
+    buf.extend_from_slice(&2u32.to_le_bytes()); // version 2, flags 0
+                                                // dataWindow attribute with x_max < x_min.
+    buf.extend_from_slice(b"dataWindow\0");
+    buf.extend_from_slice(b"box2i\0");
+    buf.extend_from_slice(&16u32.to_le_bytes()); // attribute size
+    buf.extend_from_slice(&100i32.to_le_bytes()); // x_min
+    buf.extend_from_slice(&0i32.to_le_bytes()); // y_min
+    buf.extend_from_slice(&0i32.to_le_bytes()); // x_max (< x_min → reversed)
+    buf.extend_from_slice(&0i32.to_le_bytes()); // y_max
+
+    let path = std::env::temp_dir().join("oximedia_exr_reversed_window.exr");
+    std::fs::write(&path, &buf).expect("write temp exr");
+    let result = read_exr(&path, 0);
+    let _ = std::fs::remove_file(&path);
+    assert!(result.is_err(), "reversed EXR dataWindow must be rejected");
+}

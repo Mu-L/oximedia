@@ -19,11 +19,11 @@
 //!
 //! ## Feature Flags
 //!
-//! - `widevine` — enables [`widevine`] module and HTTP license transport (`HyperPlainLicenseClient`).
+//! - `widevine` — enables the `widevine` module and HTTP license transport (`HyperPlainLicenseClient`).
 //! - `widevine-network` — extends `widevine` with pure-Rust TLS (`HyperRustlsLicenseClient`).
-//! - `playready` — enables [`playready`] module and SOAP license transport (`HyperPlainPlayReadyClient`).
+//! - `playready` — enables the `playready` module and SOAP license transport (`HyperPlainPlayReadyClient`).
 //! - `playready-network` — extends `playready` with pure-Rust TLS (`HyperRustlsPlayReadyClient`).
-//! - `fairplay` — enables [`fairplay`] module and JSON/KSM transport (`HyperPlainFairPlayClient`).
+//! - `fairplay` — enables the `fairplay` module and JSON/KSM transport (`HyperPlainFairPlayClient`).
 //! - `fairplay-network` — extends `fairplay` with pure-Rust TLS (`HyperRustlsFairPlayClient`).
 //! - `clearkey` (default) — enables [`clearkey`] module with W3C ClearKey JSON format support.
 //! - `hardware-aes` — documents AES-NI runtime auto-detection (the `aes` crate handles dispatch transparently).

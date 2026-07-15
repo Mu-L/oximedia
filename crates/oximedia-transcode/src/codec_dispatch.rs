@@ -1,19 +1,25 @@
 // Copyright 2025 OxiMedia Contributors
 // Licensed under the Apache License, Version 2.0
 
-//! Codec encoder factory for MJPEG and APV intra-frame codecs.
+//! Codec encoder factory for the intra-frame video codecs with real
+//! implementations in `oximedia-codec`.
 //!
 //! This module provides [`make_video_encoder`], which constructs a boxed
-//! [`oximedia_codec::VideoEncoder`] for a given [`CodecId`].  Currently
-//! dispatched codecs are:
+//! [`oximedia_codec::VideoEncoder`] for a given [`CodecId`].  Dispatched
+//! codecs:
 //!
-//! | `CodecId`       | Encoder              | Feature gate |
-//! |-----------------|----------------------|--------------|
-//! | `CodecId::Mjpeg`| `MjpegEncoder`       | `mjpeg`      |
-//! | `CodecId::Apv`  | `ApvEncoder`         | `apv`        |
+//! | `CodecId`         | Encoder              | Feature gate | Input           |
+//! |-------------------|----------------------|--------------|-----------------|
+//! | `CodecId::Mjpeg`  | `MjpegEncoder`       | `mjpeg`      | 8-bit YUV/RGB   |
+//! | `CodecId::Apv`    | `ApvEncoder`         | `apv`        | 8-bit YUV/RGB   |
+//! | `CodecId::Mpeg2`  | `Mpeg2Encoder`       | `mpeg2`      | 8-bit YUV 4:2:0 |
+//! | `CodecId::Ffv1`   | `Ffv1Encoder`        | `ffv1`       | 8-bit YUV 4:2:0 |
+//! | `CodecId::ProRes` | `ProResEncoder`      | `prores`     | 10-bit 4:2:2 LE |
 //!
-//! Callers that need other codecs (AV1, VP9, …) use the existing
-//! stream-copy path in `frame_pipeline`.
+//! `quality` interpretation is codec-specific — see [`VideoEncoderParams`].
+//! AV1/VP9/VP8 are intentionally not dispatched: their encode paths do not
+//! produce real output yet, and callers get a descriptive `Unsupported`
+//! error instead of a fabricated file.
 
 use crate::{Result, TranscodeError};
 use oximedia_codec::traits::VideoEncoder;
@@ -58,7 +64,8 @@ impl VideoEncoderParams {
 ///
 /// # Errors
 ///
-/// - [`TranscodeError::Unsupported`] if `codec_id` is not MJPEG or APV.
+/// - [`TranscodeError::Unsupported`] if `codec_id` has no real encoder
+///   (AV1/VP9/VP8) or its feature is not compiled in.
 /// - [`TranscodeError::CodecError`] if the underlying encoder rejects the
 ///   parameters.
 pub fn make_video_encoder(
@@ -68,9 +75,12 @@ pub fn make_video_encoder(
     match codec_id {
         CodecId::Mjpeg => make_mjpeg_encoder(params),
         CodecId::Apv => make_apv_encoder(params),
+        CodecId::Mpeg2 => make_mpeg2_encoder(params),
+        CodecId::Ffv1 => make_ffv1_encoder(params),
+        CodecId::ProRes => make_prores_encoder(params),
         other => Err(TranscodeError::Unsupported(format!(
-            "codec {other:?} is not handled by codec_dispatch; \
-             use the stream-copy pipeline for this codec"
+            "codec {other:?} has no real encoder in this build; \
+             transcoding to it is not yet supported"
         ))),
     }
 }
@@ -117,6 +127,84 @@ fn make_apv_encoder(params: &VideoEncoderParams) -> Result<Box<dyn VideoEncoder>
 fn make_apv_encoder(_params: &VideoEncoderParams) -> Result<Box<dyn VideoEncoder>> {
     Err(TranscodeError::Unsupported(
         "APV support requires the `apv` feature of oximedia-codec".into(),
+    ))
+}
+
+// ─── MPEG-2 ──────────────────────────────────────────────────────────────────
+
+#[cfg(feature = "mpeg2")]
+fn make_mpeg2_encoder(params: &VideoEncoderParams) -> Result<Box<dyn VideoEncoder>> {
+    use oximedia_codec::mpeg2::{Mpeg2Encoder, Mpeg2EncoderConfig};
+
+    // MPEG-2 qscale range is 1..=31 (lower = better quality).
+    let qscale = params.quality.clamp(1, 31);
+    let config = Mpeg2EncoderConfig::yuv420p(params.width, params.height, qscale);
+    let encoder =
+        Mpeg2Encoder::new(config).map_err(|e| TranscodeError::CodecError(e.to_string()))?;
+    Ok(Box::new(encoder))
+}
+
+#[cfg(not(feature = "mpeg2"))]
+fn make_mpeg2_encoder(_params: &VideoEncoderParams) -> Result<Box<dyn VideoEncoder>> {
+    Err(TranscodeError::Unsupported(
+        "MPEG-2 support requires the `mpeg2` feature of oximedia-codec".into(),
+    ))
+}
+
+// ─── FFV1 ────────────────────────────────────────────────────────────────────
+
+#[cfg(feature = "ffv1")]
+fn make_ffv1_encoder(params: &VideoEncoderParams) -> Result<Box<dyn VideoEncoder>> {
+    use oximedia_codec::traits::EncoderConfig;
+    use oximedia_codec::Ffv1Encoder;
+    use oximedia_core::PixelFormat;
+
+    // FFV1 is lossless — `quality` has no effect. All-intra (keyint = 1)
+    // keeps every frame independently decodable.
+    let config = EncoderConfig {
+        codec: CodecId::Ffv1,
+        width: params.width,
+        height: params.height,
+        pixel_format: PixelFormat::Yuv420p,
+        keyint: 1,
+        ..EncoderConfig::default()
+    };
+    let encoder =
+        Ffv1Encoder::new(config).map_err(|e| TranscodeError::CodecError(e.to_string()))?;
+    Ok(Box::new(encoder))
+}
+
+#[cfg(not(feature = "ffv1"))]
+fn make_ffv1_encoder(_params: &VideoEncoderParams) -> Result<Box<dyn VideoEncoder>> {
+    Err(TranscodeError::Unsupported(
+        "FFV1 support requires the `ffv1` feature of oximedia-codec".into(),
+    ))
+}
+
+// ─── ProRes ──────────────────────────────────────────────────────────────────
+
+#[cfg(feature = "prores")]
+fn make_prores_encoder(params: &VideoEncoderParams) -> Result<Box<dyn VideoEncoder>> {
+    use oximedia_codec::{ProResEncoder, ProResEncoderConfig, ProResProfile};
+
+    // The real ProRes encoder requires 16-pixel-aligned dimensions and
+    // 10-bit 4:2:2 (`Yuv422p10le`) input frames.
+    if params.width % 16 != 0 || params.height % 16 != 0 {
+        return Err(TranscodeError::CodecError(format!(
+            "ProRes requires dimensions that are multiples of 16, got {}x{}",
+            params.width, params.height
+        )));
+    }
+    let config = ProResEncoderConfig::new(ProResProfile::Standard, params.width, params.height);
+    let encoder =
+        ProResEncoder::new(config).map_err(|e| TranscodeError::CodecError(e.to_string()))?;
+    Ok(Box::new(encoder))
+}
+
+#[cfg(not(feature = "prores"))]
+fn make_prores_encoder(_params: &VideoEncoderParams) -> Result<Box<dyn VideoEncoder>> {
+    Err(TranscodeError::Unsupported(
+        "ProRes support requires the `prores` feature of oximedia-codec".into(),
     ))
 }
 

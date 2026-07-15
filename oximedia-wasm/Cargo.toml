@@ -84,6 +84,13 @@ features = [
     "console",
 ]
 
+[dev-dependencies]
+# Not in [workspace.dependencies] (this crate owns its wasm-only tooling
+# deps directly -- see the `getrandom`/`getrandom_02` entries above for the
+# established precedent). Used by tests/wasm_smoke.rs; run with
+# `wasm-pack test --node oximedia-wasm` (see that file's module docs).
+wasm-bindgen-test = "0.3"
+
 [features]
 default = []
 audio-decode = []

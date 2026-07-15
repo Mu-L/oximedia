@@ -460,7 +460,12 @@ impl GifDecoderState {
         // Read image data sub-blocks
         let compressed_data = Self::read_data_sub_blocks(cursor)?;
 
-        // Decompress image data
+        // Decompress image data.
+        // Defend against an allocation / decompression bomb: the frame's
+        // width×height (u16 image-descriptor fields) bound the LZW output, so
+        // reject impossibly large frames before allocating the index buffer.
+        crate::limits::check_dimensions(width as usize, height as usize)
+            .map_err(CodecError::InvalidData)?;
         let mut decoder = LzwDecoder::new(lzw_min_code_size[0])?;
         let expected_size = (width as usize) * (height as usize);
         let mut indices = decoder.decompress(&compressed_data, expected_size)?;
@@ -523,8 +528,14 @@ impl GifDecoderState {
         let width = self.screen_descriptor.width as u32;
         let height = self.screen_descriptor.height as u32;
 
-        // Convert indexed colors to RGBA
-        let mut rgba_data = vec![0u8; (width * height * 4) as usize];
+        // Convert indexed colors to RGBA.
+        // Defend against a u32 multiply wrap: `(width * height * 4) as usize`
+        // computes the product in u32 and wraps for large screens, yielding an
+        // under-sized buffer that the fill loops below then index out of
+        // bounds. Compute the length with checked usize math + the ceiling.
+        let rgba_len = crate::limits::checked_dims(width as usize, height as usize, 4, 1)
+            .map_err(CodecError::InvalidData)?;
+        let mut rgba_data = vec![0u8; rgba_len];
 
         // Fill with background color initially
         for y in 0..height as usize {
@@ -613,6 +624,33 @@ enum Extension {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_rejects_oversized_frame_dimensions() {
+        // Regression: a GIF image descriptor declaring enormous dimensions
+        // drives the LZW output size and the RGBA allocation (`width*height*4`
+        // as u32 wraps). Dimensions above the ceiling must be rejected as a
+        // decompression / allocation bomb rather than panicking or OOM-ing.
+        let mut gif = Vec::new();
+        gif.extend_from_slice(b"GIF89a");
+        // Logical screen descriptor: 1x1, no global color table.
+        gif.extend_from_slice(&1u16.to_le_bytes()); // screen width
+        gif.extend_from_slice(&1u16.to_le_bytes()); // screen height
+        gif.push(0x00); // packed: no GCT
+        gif.push(0x00); // background color index
+        gif.push(0x00); // pixel aspect ratio
+                        // Image descriptor with an enormous frame.
+        gif.push(0x2C); // image separator
+        gif.extend_from_slice(&0u16.to_le_bytes()); // left
+        gif.extend_from_slice(&0u16.to_le_bytes()); // top
+        gif.extend_from_slice(&0xFFFFu16.to_le_bytes()); // width = 65535
+        gif.extend_from_slice(&0xFFFFu16.to_le_bytes()); // height = 65535
+        gif.push(0x00); // packed: no LCT, not interlaced
+        gif.push(0x02); // LZW minimum code size
+        gif.push(0x00); // empty image-data sub-block (terminator)
+        gif.push(0x3B); // trailer
+        assert!(GifDecoderState::decode(&gif).is_err());
+    }
 
     #[test]
     fn test_color_table_size() {

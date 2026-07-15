@@ -14,7 +14,7 @@
 //!
 //! This module exposes:
 //! - [`temporal_nr_cpu`] — scalar reference (always-on, deterministic).
-//! - [`TemporalNr`] — WebGPU dispatcher (feature `webgpu`) backed by a ring
+//! - `TemporalNr` — WebGPU dispatcher (feature `webgpu`) backed by a ring
 //!   buffer of `wgpu::Buffer`s holding the previous frames.  The ring uses a
 //!   `VecDeque` that pops the oldest buffer when capacity is exceeded — the
 //!   dropped `wgpu::Buffer` releases its GPU allocation immediately, giving

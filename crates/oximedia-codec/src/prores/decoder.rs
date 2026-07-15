@@ -236,6 +236,11 @@ impl ProResDecoder {
         let is_interlaced = !matches!(fhdr.interlace_mode, InterlaceMode::Progressive);
         let has_alpha = fhdr.alpha_channel_type != 0;
 
+        // Defend against an allocation bomb: ProRes width/height are 16-bit
+        // header fields (up to 0xFFFF each) that drive the Y/Cb/Cr plane
+        // allocations below; reject impossibly large frames before allocating.
+        crate::limits::checked_dims(width, height, 1, 2).map_err(CodecError::InvalidData)?;
+
         // Allocate full-frame 10-bit planes (u16 samples). Chroma planes are
         // sized per the chroma format (full-resolution for 4:4:4).
         let mut y_plane = vec![0u16; width * height];

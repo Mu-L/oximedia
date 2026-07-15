@@ -7,7 +7,7 @@
 //!
 //! # Overview
 //!
-//! [`FunDspAdapter`] wraps any `AudioEffect` as a FunDSP stereo `AudioNode`
+//! `FunDspAdapter` wraps any `AudioEffect` as a FunDSP stereo `AudioNode`
 //! (2-in / 2-out).  This lets `AudioEffect` implementations participate in
 //! FunDSP signal graphs without any manual FFI or intermediate conversion.
 //!
@@ -15,7 +15,7 @@
 //!
 //! FunDSP's `AudioNode::ID` must be a `const u64`.  Because `const` associated
 //! items cannot depend on a runtime generic type parameter, we set `ID = 0` in
-//! the trait impl and provide [`FunDspAdapter::effect_node_id`] as the correct
+//! the trait impl and provide `FunDspAdapter::effect_node_id` as the correct
 //! per-type identifier (an FNV-1a hash of `E::EFFECT_ID`).  Callers that
 //! construct FunDSP graphs programmatically should use `effect_node_id()` when
 //! they need a stable, non-zero node tag.

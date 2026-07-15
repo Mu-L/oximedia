@@ -1023,8 +1023,11 @@ fn parse_colr(data: &[u8], start: usize, end: usize) -> Option<(u8, u8)> {
     let ipco = find_box_in(data, iprp + 8, iprp_end, b"ipco")?;
     let ipco_end = ipco + u32::from_be_bytes(data[ipco..ipco + 4].try_into().ok()?) as usize;
     let pos = find_box_in(data, ipco + 8, ipco_end, b"colr")?;
-    // colr: box(8) + colour_type(4) + ...
-    if pos + 15 > data.len() {
+    // colr: box(8) + colour_type(4) + nclx primaries(2) + transfer(2) + ...
+    // The reads below touch bytes up to `pos+16`, so the guard must cover them;
+    // a `pos+15` guard left `data[pos+14..pos+16]` able to panic on a truncated
+    // box.
+    if pos + 16 > data.len() {
         return None;
     }
     if &data[pos + 8..pos + 12] != b"nclx" {
@@ -1095,6 +1098,12 @@ fn locate_mdat_items(
     // iloc box layout:
     //   size(4) + 'iloc'(4) + version(1) + flags(3) = 12 bytes header
     //   offset_size|length_size(1) + base_offset_size|index_size(1) + item_count(2)
+    // Defend against a truncated iloc box: we read the version at `+8` and the
+    // item_count at `+14..16`, so those first 16 bytes must be present before
+    // any indexing.
+    if iloc_pos + 16 > data.len() {
+        return Err(CodecError::InvalidBitstream("iloc box truncated".into()));
+    }
     let version = data[iloc_pos + 8];
     if version != 1 {
         return Err(CodecError::UnsupportedFeature(format!(
@@ -1119,6 +1128,13 @@ fn locate_mdat_items(
     let item0 = iloc_pos + 16;
     // item entry (version=1, offset_size=4, length_size=4):
     //   ID(2) + method(2) + ref(2) + count(2) + offset(4) + length(4) = 16
+    // The color extent reads below span item0+8..item0+16; bound them so a
+    // truncated iloc cannot read out of bounds.
+    if item0 + 16 > data.len() {
+        return Err(CodecError::InvalidBitstream(
+            "iloc item entry truncated".into(),
+        ));
+    }
     let color_offset = u32::from_be_bytes(
         data[item0 + 8..item0 + 12]
             .try_into()
@@ -1132,6 +1148,12 @@ fn locate_mdat_items(
 
     let (alpha_offset, alpha_len) = if has_alpha && item_count >= 2 {
         let item1 = item0 + 16;
+        // The alpha extent reads below span item1+8..item1+16; bound them.
+        if item1 + 16 > data.len() {
+            return Err(CodecError::InvalidBitstream(
+                "iloc alpha item entry truncated".into(),
+            ));
+        }
         let ao = u32::from_be_bytes(
             data[item1 + 8..item1 + 12]
                 .try_into()
@@ -1572,5 +1594,25 @@ mod tests {
         let probe = AvifDecoder::probe(&bytes).expect("4K probe failed");
         assert_eq!(probe.width, 3840);
         assert_eq!(probe.height, 2160);
+    }
+
+    #[test]
+    fn truncated_avif_never_panics_probe_or_decode() {
+        // Regression for the truncated `colr`/`iloc` box out-of-bounds reads:
+        // probing or decoding *any* prefix of a valid AVIF must return a
+        // Result, never panic. The colr guard reads up to pos+16 and the iloc
+        // guards up to iloc_pos+48, so some truncation length previously read
+        // past the buffer end.
+        let image = make_test_image(64, 64, 8, YuvFormat::Yuv420);
+        let bytes = AvifEncoder::new(AvifConfig::default())
+            .encode(&image)
+            .expect("encode failed");
+        for len in 0..bytes.len() {
+            let prefix = &bytes[..len];
+            let _ = AvifDecoder::probe(prefix);
+            let _ = AvifDecoder::decode(prefix);
+        }
+        // The full buffer still probes correctly (no false rejection).
+        assert!(AvifDecoder::probe(&bytes).is_ok());
     }
 }

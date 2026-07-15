@@ -360,7 +360,7 @@ mod tests {
     #[test]
     fn test_media_operation_executor_creation() {
         let executor = MediaOperationExecutor::new();
-        assert!(std::mem::size_of_val(&executor) == 0);
+        assert_eq!(std::mem::size_of_val(&executor), 0);
     }
 
     #[test]

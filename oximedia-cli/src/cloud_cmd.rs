@@ -467,16 +467,30 @@ fn build_unified_config(
 // Upload
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn run_upload(
     input: &PathBuf,
     provider: &str,
     bucket: &str,
     key: &Option<String>,
     region: &Option<String>,
-    _multipart: bool,
+    multipart: bool,
     bandwidth_limit: Option<u32>,
     json_output: bool,
 ) -> Result<()> {
+    // The storage backends choose multipart automatically by file size
+    // (e.g. the S3 backend switches above its 10 MB threshold); no
+    // force-multipart knob is exposed, so the flag cannot change behaviour.
+    // Warn instead of silently dropping it.
+    // TODO(0.2.x): expose a force-multipart option on the oximedia-storage
+    // upload API and thread this flag through.
+    if multipart {
+        eprintln!(
+            "warning: --multipart has no effect; multipart uploads are selected automatically \
+             by file size for backends that support them"
+        );
+    }
+
     validate_provider(provider)?;
 
     if !input.exists() {

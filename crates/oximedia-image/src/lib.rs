@@ -88,6 +88,9 @@ pub mod inpaint;
 pub mod inpainting;
 pub mod jpeg;
 pub mod lens_correct;
+/// Shared decode-safety limits (allocation / dimension ceilings) used to reject
+/// decompression / allocation bombs built from a few malformed header bytes.
+pub(crate) mod limits;
 pub mod metadata_xmp;
 pub mod mmap_reader;
 pub mod morphology;

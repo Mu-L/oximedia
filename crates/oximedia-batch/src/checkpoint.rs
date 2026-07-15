@@ -1,6 +1,6 @@
 //! Periodic state checkpointing for crash recovery.
 //!
-//! [`CheckpointManager`] takes periodic snapshots of queue state, in-progress
+//! [`CheckpointManager`](crate::checkpoint::CheckpointManager) takes periodic snapshots of queue state, in-progress
 //! jobs, and worker assignments.  Snapshots are stored as JSON files with
 //! rotation (keep last N) and corrupted-checkpoint detection via SHA-256
 //! integrity hashes.

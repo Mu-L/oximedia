@@ -231,7 +231,12 @@ impl TiffParser {
             entry.value_offset as usize
         };
 
-        let mut values = Vec::with_capacity(count);
+        // Defend against a `with_capacity` allocation bomb: a malformed IFD
+        // entry can declare a huge `count` (u32). Bound the reservation to what
+        // the remaining input can back; the read loop below still stops early
+        // on truncated input via its own per-element checks.
+        let cap = crate::limits::safe_capacity(count, type_size, data.len().saturating_sub(offset));
+        let mut values = Vec::with_capacity(cap);
         match entry.data_type {
             5 => {
                 // RATIONAL (unsigned)
@@ -296,7 +301,10 @@ impl TiffParser {
         }
 
         let offset = entry.value_offset as usize;
-        let mut values = Vec::with_capacity(count);
+        // Defend against a `with_capacity` allocation bomb (see the RATIONAL
+        // path above): bound the reservation to what the remaining input backs.
+        let cap = crate::limits::safe_capacity(count, type_size, data.len().saturating_sub(offset));
+        let mut values = Vec::with_capacity(cap);
 
         match entry.data_type {
             3 => {

@@ -1,4 +1,4 @@
-# oximedia-compat-cv2 TODO — version 0.1.9
+# oximedia-compat-cv2 TODO — version 0.2.0
 
 ## Milestone: v0.1.8 — Initial release [COMPLETE]
 

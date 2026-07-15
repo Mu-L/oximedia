@@ -126,6 +126,9 @@
 
 mod abr;
 pub mod adaptive_bitrate;
+pub mod alac_bitstream;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod audio_adapters;
 pub mod audio_transcode;
 pub mod bitrate_estimator;
 mod builder;
@@ -134,6 +137,12 @@ pub mod codec_dispatch;
 pub mod codec_mapping;
 pub mod crf_optimizer;
 mod filters;
+pub mod flac_bitstream;
+pub mod flac_decode;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod frame_adapters;
+#[cfg(not(target_arch = "wasm32"))]
+mod frame_level;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod frame_pipeline;
 mod hw_accel;
@@ -148,6 +157,8 @@ mod pipeline;
 pub mod pipeline_context;
 mod progress;
 mod quality;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod raw_sinks;
 pub mod segment_encoder;
 pub mod segment_transcoder;
 pub mod thumbnail;
@@ -185,6 +196,7 @@ pub mod scene_cut;
 pub mod stage_graph;
 /// Watermark and graphic overlay embedding during transcoding.
 pub mod stream_copy;
+pub mod stream_map;
 pub mod transcode_metrics;
 pub mod transcode_preset;
 pub mod transcode_profile;
@@ -258,6 +270,9 @@ pub use hw_accel::{
 pub use stream_copy::{
     CopyDecision, StreamCopyConfig, StreamCopyDetector, StreamCopyMode, StreamInfo, StreamType,
 };
+pub use stream_map::{
+    build_index_remap, resolve_stream_selection, StreamKind, StreamMap, StreamMapSelector,
+};
 
 pub use abr::{AbrLadder, AbrLadderBuilder, AbrRung, AbrStrategy};
 pub use builder::TranscodeBuilder;
@@ -278,7 +293,9 @@ pub use parallel::{
     ParallelConfig, ParallelEncodeBuilder, ParallelEncoder,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use pipeline::{Pipeline, PipelineStage, TranscodePipeline};
+pub use pipeline::{
+    Pipeline, PipelineConfig, PipelineStage, ScaleSpec, TranscodePipeline, TranscodePipelineBuilder,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use pipeline_context::{
     FilterGraph, Frame, FrameDecoder, FrameEncoder, HdrPassthroughConfig, HdrSeiInjector,

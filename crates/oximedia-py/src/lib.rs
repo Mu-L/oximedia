@@ -58,6 +58,9 @@ pub mod aaf_py;
 pub mod access_py;
 /// Media alignment and registration bindings.
 pub mod align_py;
+/// `oximedia.analytics` submodule — viewer session tracking, engagement
+/// scoring, and attention heatmaps (real delegation to `oximedia-analytics`).
+pub mod analytics_py;
 /// Professional archive and digital preservation bindings.
 pub mod archivepro_py;
 /// Async pipeline via tokio + PyO3 (AsyncPipeline, PipelineResult, FilterSpec).
@@ -84,6 +87,9 @@ pub mod benchmark_py;
 pub mod broadcast;
 /// Numpy-compatible buffer protocol support for zero-copy frame access.
 pub mod buffer_protocol;
+/// `oximedia.cache` submodule — LRU cache with TTL + pinning + stats (real
+/// delegation to `oximedia-cache`).
+pub mod cache_py;
 /// Color calibration and matching bindings.
 pub mod calibrate_py;
 /// Caption processing bindings (parse, convert, validate).
@@ -181,6 +187,10 @@ pub mod mp4;
 pub mod multicam_py;
 /// NDI source discovery and streaming bindings.
 pub mod ndi_py;
+/// `oximedia.neural` submodule — Tensor + media-model inference (scene
+/// classifier, thumbnail ranker, super-resolution upscaler, feature
+/// extractor; real delegation to `oximedia-neural`).
+pub mod neural_py;
 /// Codec optimization bindings (complexity analysis, CRF sweep, quality ladder).
 pub mod optimize_py;
 /// `oximedia.io` submodule — file open, probe, transcode operations.
@@ -610,6 +620,15 @@ fn oximedia_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // oximedia.ml submodule (feature-gated)
     #[cfg(feature = "ml")]
     ml_py::register_submodule(m)?;
+
+    // oximedia.neural submodule (Tensor + media-model inference)
+    neural_py::register_submodule(m)?;
+
+    // oximedia.analytics submodule (viewer sessions, engagement, heatmaps)
+    analytics_py::register_submodule(m)?;
+
+    // oximedia.cache submodule (LRU cache with TTL + pinning + stats)
+    cache_py::register_submodule(m)?;
 
     Ok(())
 }
